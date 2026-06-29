@@ -1,0 +1,51 @@
+I used to manage only 2 or 3 Claude Code sessions at the same time.
+
+Since April this year that number went up fast, especially after we set up loops. At any given time now, I have at least 5 to 10 sessions running in parallel. Most of them I never prompted directly: they come from loops that find issues, pick up work, verify changes, and open PRs on their own.
+
+That produces a volume of PRs that was not possible before. But it also creates a new problem. Every one of those PRs has to be reviewed and shipped to real customers, and each one carries the risk of breaking something.
+
+So the bottleneck has moved.
+
+> It is no longer writing the code. It is getting code merged into the codebase.
+
+This post is about the part of the harness that fixes that, and an introduction to Peter's new side project Crabbox and how it resolves this.
+
+## Agent needs its own box to verify work
+
+It is common practice now to have an agent spawn a sub-agent that tests the work with Playwright CLI and records evidence: a screenshot, or a video of the whole flow, attached to the PR. That is what makes an agent's work easy to trust and merge. Instead of taking its word for it, I can see it working.
+
+This was fine when I ran 3 or 4 agents. It breaks quickly once you have many parallel sessions, because they end up testing against the same environment and conflicting with each other.
+
+To verify, each agent needs the dev server actually running on its own code. Even if you give each ticket its own git worktree, that only isolates writing code. Running the app many times over, locally, does not scale:
+
+- Ports are often hard-coded, for good reasons. The second instance cannot start.
+- One laptop has one Docker daemon, one database, one OS. Every "isolated" session is secretly sharing them. One agent trying a new schema can break every other session at once.
+- A real production stack also eats RAM and CPU. Five of them will not fit.
+
+The only thing that scales is to stop running everything on one laptop.
+
+> Each agent should get its own isolated environment in the cloud: its own machine, its own database, its own dev server. The sandboxes do not touch each other.
+
+@SToneoneX actually hand-rolled a version of this for our platform @SuperDesignDev which worked like magic. We ran it on Fly.io: a Firecracker VM with the full stack inside (local Supabase via docker-in-docker, Redis, and the dev servers), booted from a base image with a persistent volume. We added an on-box orchestrator to bring it all up, a CDP browser to drive it, suspend and resume so a box came back hot in about 3 seconds, and an idle watchdog that powered it off after 45 minutes so we never paid for a box someone forgot to stop. It unlocked a lot.
+
+But it still had a sharp edge. To get code onto the box, it pulled the branch from GitHub with git fetch. You had to push first. Uncommitted working-tree changes could not be verified at all.
+
+So the moment an agent tested on the box, found a bug, and fixed it on your local machine, you were stuck. You had a dirty file locally, and a box that only knew about what was already pushed.
+
+The normal commit, push, CI flow does not work well here. Your repo fills up with junk commits. And you do not want to rebuild the box from scratch every time either.
+
+What you actually want is simple.
+
+> Make a change, and re-test in seconds.
+
+That is where we saw Peter's new side project, Crabbox.: https://github.com/openclaw/crabbox
+
+## How Crabbox works
+
+Crabbox lets an agent warm up a box in the cloud, sync the dirty diff from your local worktree, and run the test in real time. Three commands:
+
+1. crabbox warmup spins up a box.
+2. crabbox run -- <command> runs any command, as if it were local, but on the cloud box. Every run first syncs the diff from your machine. You do not even have to commit. As long as the folder is git-initialized, it syncs all your uncommitted changes, then runs.
+3. crabbox stop turns the box off and deletes it.
+
+That is the whole loop.

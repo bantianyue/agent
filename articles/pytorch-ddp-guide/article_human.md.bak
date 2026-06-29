@@ -1,0 +1,205 @@
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+- <strong>DDP vs DP</strong>：DDP 每 GPU 一个独立进程，梯度在 backward 中通过 All-Reduce 同步，与计算完全重叠；DP 单进程主卡瓶颈，只适合单机实验。<br><br>
+- <strong>All-Reduce 与 Ring All-Reduce</strong>：朴素 All-Reduce 有 O(N²) 通信量，Ring All-Reduce 将 GPU 排成逻辑环，每张只与邻居通信，O(N) 量级。<br><br>
+- <strong>四行代码启动分布式训练</strong>：`init_process_group` → `set_device` → `DDP(model)` → `torchrun`，新手也能立刻上手。
+</div>
+</div>
+
+**模型太大，单卡装不下。数据太多，单卡跑到天荒地老。分布式训练不是可选项，是必经之路。** 而 PyTorch DDP（Distributed Data Parallel）是最简单、最可靠的入门方案。
+
+但很多人第一次接触 DDP 时，被 rank、world size、NCCL 这些术语直接劝退。**本文用最直白的语言，把 DDP 从原理到代码讲清楚：你不需要懂分布式系统，只需要会写 PyTorch。**
+
+## 单卡不够了，怎么办？
+
+你有一个模型，效果还不错。但你想让它更好：更多数据，更大 batch，更长时间的训练。单张 GPU 的显存和算力就那么大，迟早不够。
+
+**直觉上的第一反应：把数据分到 N 张 GPU 上，每张跑一部分，不就好了？**
+
+但问题来了：如果每张 GPU 独立训练自己的数据，你会得到 N 个不同的模型，而不是一个更强的模型。**我们需要的是一个统一的模型，能汇集所有 GPU 的知识。**
+
+DDP 的解决方式很优雅：每张 GPU 上放一个模型副本，每个副本喂不同的数据切片，但在每次权重更新之前，**把梯度同步**一下。所有副本拿到相同的平均梯度后，各自执行 `optimizer.step()`，模型参数就保持一致了。
+
+## 训练一个模型的 5 个步骤
+
+![训练流程图](img1.png)
+<span style="font-size:12px;color:rgb(153,153,153);">训练的核心流程：数据 → 模型 forward → loss → backward → 权重更新</span>
+
+简单回顾一下模型训练的标准流程：
+
+1. 创建数据批次
+2. forward：将一批数据喂入模型，拿到 logits，计算 loss
+3. backward：调用 `loss.backward()` 计算梯度
+4. 权重更新：调用 `optimizer.step()` 更新参数
+
+**这 5 步中，最关键的是哪一步？权重更新。** 因为权重决定了模型是什么。所以只要保证在权重更新之前，所有 GPU 上的梯度是一致的，那其他步骤（forward、backward）各自独立运行是完全 OK 的。
+
+DDP 做的就是这件事：**在 backward 过程中自动同步梯度，完全透明，你几乎感觉不到它的存在。**
+
+## DP vs DDP：原理差别很大
+
+你可能听说过 PyTorch 老版本的 `DataParallel`（DP）。概念上它俩做的是同一件事：拆分 batch 到多 GPU，但底层实现天差地别。
+
+**DataParallel（DP）：**一个进程管所有 GPU。主卡（rank 0）负责切分输入、分散到各卡、收集梯度、广播回去。**主卡成了通信瓶颈**，而且由于 Python GIL 的限制，多线程并没有真正并行。只适合单机小实验。
+
+**DistributedDataParallel（DDP）：**每张 GPU 一个独立进程。每个进程有自己的 Python 解释器、自己的优化器、自己的模型副本。**没有中央协调器。** 梯度在 backward 过程中通过 All-Reduce 自动同步，并且这个通信与计算**完全重叠**：你的模型在算梯度的时候，通信也在背后悄悄进行，几乎不额外耗时。
+
+## 梯度同步的核心：All-Reduce
+
+DDP 背后的核心算法是 **All-Reduce**。
+
+假设你有 N 张 GPU。Forward 和 backward 之后，每张 GPU 上都有自己的本地梯度。All-Reduce 做的就是：**接收 N 个同样的梯度张量，输出 N 个相同的平均值，每张 GPU 各拿一份。**
+
+![All-Reduce 示意图](img2.png)
+<span style="font-size:12px;color:rgb(153,153,153);">All-Reduce：N 张 GPU 各算各的梯度，最终每张拿到完全相同的平均梯度</span>
+
+这样每张 GPU 做同样的 `optimizer.step()`，参数就始终同步。
+
+### Ring All-Reduce：更聪明的做法
+
+朴素的 All-Reduce 有一个大问题：**通信量是 O(N²) 的。** 每张 GPU 要和所有其他 GPU 交换数据，N 越大，通信开销膨胀得越厉害。
+
+**Ring All-Reduce** 的解法很巧妙：把 N 张 GPU 排成一个**逻辑环**，每张 GPU 只跟自己的左邻右舍通信。
+
+![Ring All-Reduce 示意图](img3.png)
+<span style="font-size:12px;color:rgb(153,153,153);">Ring All-Reduce：GPU 排成环，每张只与邻居通信，经过 N 轮后所有 GPU 都拿到了全部梯度</span>
+
+算法分两个阶段：
+
+1. 每个进程独立计算梯度
+2. 每个进程把梯度传给环上的下一个进程，同时把从上家收到的梯度继续传下去。**循环 N 次后，所有进程都拿到了全部梯度。**
+
+**通信量从 O(N²) 降到 O(N)，这是 DDP 能在大规模集群上 work 的关键。**
+
+## 必须掌握的 5 个术语
+
+在写代码之前，先搞懂这几个概念：每个 DDP 脚本里都会见到它们。
+
+**World Size：** 参与分布式任务的进程总数。2 台机器，每台 8 张 GPU，world size = 16。`torch.distributed.get_world_size()`
+
+**Rank：** 每个进程的唯一 ID（0 到 world_size - 1）。**Rank 0 是 master 进程，负责日志记录和 checkpoint 保存。** `torch.distributed.get_rank()`
+
+**Local Rank：** 单台机器内部的进程编号。8 卡机器上 local rank 是 0-7，每台机器都从 0 开始。用于把进程绑定到正确的 GPU 设备。`int(os.environ['LOCAL_RANK'])`
+
+**Master Address & Port：** 所有进程需要知道 master（rank 0）的地址才能初始化进程组。通过环境变量 `MASTER_ADDR` 和 `MASTER_PORT` 传递。
+
+**Backend：** 通信库。**NVIDIA GPU 用 NCCL**（NVIDIA Collective Communications Library），CPU 用 GLOO 或 MPI。
+
+## 一个完整的 DDP 训练脚本
+
+概念讲完了，来看代码。**真的只有几行核心代码。**
+
+```python
+import os
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+import torch.optim as optim
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+def setup():
+    dist.init_process_group("nccl")
+    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+
+def cleanup():
+    dist.destroy_process_group()
+
+class ToyModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(1024, 4096),
+            nn.ReLU(),
+            nn.Linear(4096, 1024),
+        )
+    def forward(self, x):
+        return self.net(x)
+
+def train():
+    setup()
+    rank = dist.get_rank()
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = dist.get_world_size()
+
+    model = ToyModel().cuda(local_rank)
+    ddp_model = DDP(model, device_ids=[local_rank])
+
+    optimizer = optim.AdamW(ddp_model.parameters(), lr=3e-4)
+    loss_fn = nn.CrossEntropyLoss()
+
+    dataset_size = 10000
+    microbatch = 32
+    loader = torch.utils.data.DataLoader(
+        torch.randn(dataset_size, 1024),
+        batch_size=microbatch,
+        shuffle=True,
+    )
+
+    for epoch in range(10):
+        for batch_idx, (x,) in enumerate(loader):
+            x = x.cuda(local_rank)
+
+            logits = ddp_model(x)
+            loss = loss_fn(logits, torch.randn_like(logits))
+
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+            if rank == 0 and batch_idx % 50 == 0:
+                print(f"Epoch {epoch}, batch {batch_idx}, loss {loss.item():.4f}")
+
+    cleanup()
+
+if __name__ == "__main__":
+    train()
+```
+
+**这段代码的关键点：**
+
+- **`dist.init_process_group(\"nccl\")`** 初始化 NCCL backend，自动从环境变量读取 `MASTER_ADDR`、`MASTER_PORT`、`WORLD_SIZE`、`RANK`
+- **模型在包装进 DDP 之前就要移到正确的 GPU**：先 `.cuda(local_rank)`，再 `DDP(model, device_ids=[local_rank])`
+- **只有 rank 0 打日志**，其他 rank 只参与计算和通信
+**不用自己写梯度同步：**DDP 在 backward 时自动完成
+
+## 启动：用 torchrun，不是 python train.py
+
+**不要用 `python train.py` 启动 DDP 脚本。** 你需要 **torchrun**：
+
+```bash
+torchrun --nproc_per_node=8 train.py
+```
+
+这行命令会生成 8 个进程，每个进程自动拿到自己的 `RANK`、`LOCAL_RANK`、`WORLD_SIZE`。你不需要手动分配 GPU 或设置环境变量：**torchrun 全包了。**
+
+如果你想跑多机分布式：
+
+```bash
+# 每台机器都要跑
+torchrun --nnodes=2 --nproc_per_node=8 --rdzv_endpoint=MASTER_IP:29500 train.py
+```
+
+## 总结
+
+**DDP 是 PyTorch 分布式训练的起点，也是最不容易出错的方案。** 核心逻辑只有四行：初始化进程组 → 绑定 GPU → 用 DDP 包装模型 → 用 torchrun 启动。背后复杂的 All-Reduce 和梯度同步，框架都帮你搞定了。
+
+但理解 DDP 只是第一步。**真实的大模型训练远不止数据并行：流水线并行、张量并行、序列并行、Zero 优化……这些才是把 100B+ 模型塞进 GPU 的真正手段。** 作者在后续博客中会深入 megatron 等生产级训练框架，感兴趣可以关注。
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+DDP 的优雅之处在于：它把一个分布式系统问题，抽象成了一个你几乎感知不到它的存在的 PyTorch 模块。但如果你只学会了 DDP，对更大规模的训练就还差得远。模型并行、流水线并行、ZeRO 才是当前 70B+ 模型训练的真正战场。<br><br>
+另外，Ring All-Reduce 的设计思路非常值得学习：把 O(N²) 的全局通信降解为 O(N) 的邻居通信，这种「化全局为局部」的思想，在分布式系统里无处不在。
+</div>
+</div>
+
+---
+<span style="font-size:12px;color:#888888;">参考：
+https://jino-rohit.github.io/blogs/10_ddp.html
+
+https://pytorch.org/tutorials/intermediate/ddp_tutorial.html</span>
