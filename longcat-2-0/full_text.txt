@@ -1,0 +1,189 @@
+Title: Introducing LongCat-2.0
+
+URL Source: https://longcat.chat/blog/longcat-2.0/
+
+Markdown Content:
+[![Image 1: LongCat](https://s3.meituan.net/static-prod01/com.sankuai.friday.longcat.next2/assets/longcat_logo-X5K_hpNA.svg)](https://longcat.chat/)
+
+2026-06-30
+
+[GitHub](https://github.com/meituan-longcat/LongCat-2.0)[HuggingFace](https://huggingface.co/meituan-longcat/LongCat-2.0)[Try it](https://longcat.chat/)[API Access](https://longcat.chat/platform/docs/)
+
+We are introducing and open sourcing LongCat-2.0, a large-scale MoE language model with **1.6 trillion total parameters** and ~48 billion activated per token — a substantial step up from previous LongCat models, accompanied by several architectural improvements.
+
+Both the full training run and the large-scale deployment are built entirely on **AI ASIC superpods**. Pretraining spans millions of accelerator-hours across more than 35 trillion tokens, with no rollbacks or irrecoverable loss spikes — demonstrating that we have the capability to conduct frontier-scale training on alternative hardware platforms.
+
+To strengthen the model on long-horizon tasks, we introduce LongCat Sparse Attention and train LongCat-2.0 on hundreds of billions of tokens of **1M-context** data. Together with dedicated post-training, this gives LongCat-2.0 strong performance on coding and agentic tasks.
+
+LongCat-2.0 is deeply integrated with mainstream harnesses such as Claude Code, OpenClaw, and Hermes, delivering strong performance across code understanding, repository-level edits, automated task execution, and agentic workflows — providing developers with a more stable and efficient collaborative experience.
+
+Terminal-Bench 2.1
+
+SWE-bench Pro
+
+SWE-bench Multilingual
+
+FORTE
+
+RWSearch
+
+BrowseComp
+
+![Image 2: LongCat-2.0](blob:http://localhost/20e4750f3124d11da5ee988c8054f6ff)LongCat-2.0
+
+![Image 3: Gemini 3.1 Pro](blob:http://localhost/a1d9e8b9cec6dbc24903e51e6fb902b0)Gemini 3.1 Pro
+
+![Image 4: GPT-5.5](https://s3.meituan.net/static-prod01/com.sankuai.friday.longcat.next2/assets/openai-D47DLl8Z.png)GPT-5.5
+
+![Image 5: Opus 4.8](https://s3.meituan.net/static-prod01/com.sankuai.friday.longcat.next2/assets/claude-DCCvR6e9.png)Opus 4.6
+
+![Image 6: Opus 4.8](https://s3.meituan.net/static-prod01/com.sankuai.friday.longcat.next2/assets/claude-DCCvR6e9.png)Opus 4.7
+
+![Image 7: Opus 4.8](https://s3.meituan.net/static-prod01/com.sankuai.friday.longcat.next2/assets/claude-DCCvR6e9.png)Opus 4.8
+
+## Architecture
+
+Our architecture design builds on [LongCat-Flash](https://arxiv.org/abs/2509.01322), pushing further on parameter efficiency and improving the speed of long-context training and inference. For attention, we introduce LongCat Sparse Attention (LSA) — an evolution of DeepSeek Sparse Attention with a lighter indexer that accelerates long-context processing without sacrificing model quality. To get more out of every parameter, we add an N-gram Embedding module that expands the embedding space by roughly 100× through N-gram token combinations, capturing richer local context and strengthening token-level representations.
+
+## LongCat Sparse Attention
+
+The rise of agentic applications is pushing LLMs toward efficient long-input processing. [DSA](https://huggingface.co/deepseek-ai/DeepSeek-V3.2-Exp) addresses this with fine-grained sparse attention. However, our profiling shows that the Lightning Indexer in DSA remains a key bottleneck due to output discontinuity and quadratic scoring cost. To address this, LongCat Sparse Attention (LSA) introduces three orthogonal efficiency improvements to the indexer.
+
+*   **Streaming-aware Indexing (SI)** reshapes the token selection budget to combine hardware-aligned contiguous access with dynamic random selection. This turns fragmented memory access into predictable sequential reads, achieving coalesced HBM access and high effective bandwidth.
+*   **Cross-Layer Indexing (CLI)** leverages the empirical stability of attention saliency across adjacent layers to amortize indexing cost: a single indexing pass serves several consecutive layers at inference time, made possible by cross-layer distillation during training.
+*   **Hierarchical Indexing (HI)** uses a coarse-to-fine, two-stage scoring scheme — first a coarse recall via block-level approximate scoring, then fine-grained token selection within the recalled candidates — shrinking the candidate space the indexer must process per query. In LongCat-2.0, HI is applied in a training-free manner and enabled for selected ultra-long-context tasks.
+
+The three components are orthogonal by design, allowing each to be independently enabled or disabled. The integrated architecture is illustrated in the overview figure below.
+
+![Image 8](https://s3.meituan.net/static-prod01/com.sankuai.friday.longcat.next2/assets/lsaimage-CCkXmBaN.svg)
+Overview of the LongCat Sparse Attention design. (Sink tokens are omitted for clarity.)
+
+We extend these three strategies to the 3-step Multi-Token Prediction (MTP) module for accelerating speculative decoding. Cross-Layer Indexing is applied differently in the draft and target models: in the target model, every two consecutive layers share a single indexing pass, while in the multi-step MTP, all three draft steps share one pass, with steps 2 and 3 reusing the index set generated in step 1.
+
+## N-gram Embedding
+
+LongCat-2.0 inherits N-gram Embedding from [LongCat-Flash-Lite](https://arxiv.org/abs/2601.21204), improving parameter utilization efficiency by expanding parameters in sparse dimensions orthogonal to MoE. To accommodate the massive scale of LongCat-2.0, the n-gram size is configured to 5, and 135B N-gram Embedding parameters are included in the model, which adheres to the following scaling principles:
+
+*   **The sparsity of MoE has crossed the sweet spot.** Given that the model's sparsity has already reached approximately 97% even without considering the N-gram Embedding, the performance gain from scaling up experts by 135B parameters is negligible. In contrast, an N-gram Embedding of the equivalent parameter scale yields benefits far exceeding those of standard experts.
+*   **The proportion of N-gram Embedding is constrained within an optimal range.** Scaling experiments reveal that when n-gram embedding parameters consume an excessive share of the total parameter budget (over 50%), their advantage over scaling up experts diminishes. In LongCat-2.0, this proportion is strictly kept under 10%, operating well within a safe margin.
+
+These two principles guarantee the robust superiority of N-gram Embedding compared to equivalent-sized pure MoE models. For inference, shifting parameters from experts to N-gram Embedding reduces large-batch decoding memory I/O, accelerating generation.
+
+![Image 9](https://s3.meituan.net/static-prod01/com.sankuai.friday.longcat.next2/assets/ngram-emb-new.drawio-DtU8Umnl.svg)
+Overview of the N-gram Embedding.
+
+## Scalable Infrastructure on AI ASIC Superpods
+
+The training and deployment of LongCat-2.0 are built on large-scale clusters of tens of thousands of AI ASIC superpods. Compared to the mature Nvidia GPU ecosystem, the supporting software community is still less developed. We have therefore put significant effort into building a stable, secure, and scalable infrastructure.
+
+## Training
+
+LongCat-2.0 is pre-trained on over 50K AI ASICs, introducing significant system-level challenges due to both model and cluster scale. We address these challenges through systematic optimizations, achieving over 35% training throughput improvement while also enhancing reliability compared to a naive implementation.
+
+### Determinism & Reliability
+
+To ensure reproducibility in production, we enforce determinism across both communication and computation paths, with a suite of in-house deterministic operators and modules covering Embedding, FA, LSA, and MoE layers.
+
+For numerical reliability, we rework a range of foundational operators to improve precision — for example, all reduction-type operators adopt a binary-tree segmented accumulation strategy to reduce floating-point error accumulation. We further validate the accelerator's compute precision under real-world LLM workloads against a strict high-precision baseline, confirming its arithmetic integrity and production readiness, and introduce bit-flip detection in selected compute-intensive operators to promptly catch anomalies caused by hardware bit flips.
+
+For fault recovery, end-to-end monitoring drives fault identification, traffic switch-over, and recovery without manual intervention; isolating a faulty link causes no perceptible impact on training, and a repaired link rejoins only after passing stress tests.
+
+### Training at Scale
+
+Our accelerators have significantly less per-device memory than an H800 (80 GB), making memory the primary bottleneck at scale. We address this challenge along two dimensions: parallelism strategy and memory management.
+
+*   **6D parallelism:** Beyond standard TP/CP/EP/DP/PP, we introduce EMBP to parallelize and accelerate N-gram Embeddings.
+*   **Superpods:** Training runs on physical Superpods — up to 48 machines each, with all-to-all high bandwidth inside and a RoCE fabric between them — widening the high-bandwidth communication domain to hundreds of devices for bandwidth-hungry parallelism (TP/CP/EP). At the same scale and environment, this delivers roughly 30% additional pretraining-throughput gain. The logical Superpod is also the unit of affinity scheduling, balancing communication locality against schedulability.
+*   **Memory optimization:** We apply ZeRO-1, selective recomputation, OOM-aware offloading at the allocator level, and routing padding tokens to a zero-expert.
+*   **Muon optimizer:** We deploy the Muon optimizer at large scale on our accelerators, with targeted optimizations across TP parallelism, DP state redundancy removal, and an efficient symmetric matrix multiplication kernel.
+
+### Long Context Training
+
+We address the challenges of large-scale long-context training from three angles:
+
+*   **LSA operators & forward optimization:** We implement in-house deterministic attention operators for both the dense-warmup and sparse stages, as well as the KL-loss operator. We adopt a forward-only dense-warmup strategy to compute both KL loss and gradients in a single forward pass, improving efficiency.
+*   **1M context scaling:** We adopt an all-gather-based CP parallelism scheme that can scale CP to over 512, enabling native 1M-length training. Training data is reshuffled at the get-batch stage and partitioned using a balanced CP strategy to maintain workload balance.
+*   **Compute-communication overlap:** We carefully design the overlap between computation and communication. For example, the shortcut-layer architecture allows MoE communication to overlap with parallel-branch computation, while LSA top-k index computation overlaps with KV all-gather, reducing synchronization overhead.
+
+## Inference
+
+Serving a 1.6T-parameter model over a 1M-token context presents a significant challenge, particularly under tight constraints on HBM capacity, HBM I/O bandwidth, and inter-node interconnect bandwidth. We address this challenge through a stack of optimizations at the model, device, and deployment levels.
+
+### Model-Specific Optimization
+
+*   **Attention:** To efficiently handle the I/O, computation, and memory bottlenecks of ultra-long contexts, we optimize the system from three perspectives. (1) adopting the absorb computation mode in both prefill and decode stages; (2) pipelining the indexer with the MLA prolog across concurrent streams to hide indexer overhead; and (3) sharding the KV-cache across devices utilizing KV-cache parallelism (KVP).
+*   **ScMoE:** Building upon the compute-communication overlap in [LongCat-Flash](https://arxiv.org/abs/2509.01322), LongCat-2.0 further advances the schedule. By leveraging explicit per-core control on the accelerator, we enable full parallel execution of the dense and MoE branches, moving beyond mere overlap.
+
+### Accelerator-Oriented Optimization
+
+*   **Super Kernel:** With graph mode enabled, the gaps between kernels are eliminated, yet the launch overhead within each kernel remains. We therefore adopt super kernels, which reduce this intra-kernel launch cost.
+*   **Weight Prefetch:** The device offers limited HBM bandwidth but a relatively large L2 cache. We exploit this larger L2 cache to prefetch weights, hiding the I/O latency within the computation of the preceding operator.
+*   **Scale Up and Scale Out:** KV-cache transfer between P and D nodes utilizes the built-in 200 Gbps network adapter within the accelerator. KV-cache is transferred in a layer-wise manner. The KV-cache store is constructed using the host RDMA network adapter. TP/SP/KVP occurs within the scale-up interconnection domain.
+
+### Deployment & Serving
+
+*   **Optimal Parallelism:** LongCat-2.0 adopts a prefill–decode (PD) disaggregated deployment to balance TTFT and TPOT.
+
+    *   **Prefill nodes:** Processing long sequences is bound by inter-node communication bandwidth, and the MoE dispatch/combine traffic dominates the runtime. We therefore use multi-node chunked pipeline parallelism (CPP) to shrink the expert-parallel (EP) domain. Within each pipeline stage, Attention Sequence Parallelism (SP) relieves the compute pressure of long sequences.
+    *   **Decode nodes:** The dominant constraints are device memory and KV-cache I/O. We apply KVP to shard the KV-cache and reduce its per-device memory footprint, and a large EP degree (EP128) to lower both the per-device weight memory and the per-device expert I/O.
+
+Across both stages, our parallelism schemes (CPP/SP and KVP) are made to compose cleanly with inference-time optimizations such as constrained decoding, multi-step scheduling, and MTP, ensuring optimal serving performance.
+
+*   **Expert-Parallel Load Balancing:** The large EP degree on decode nodes makes load imbalance across experts more likely, which we address with Expert-Parallel Load Balancing (EPLB). To minimize its overhead on serving, we run the statistics collection and placement computation asynchronously off the forward critical path.
+
+## Learning from Multiple Teachers
+
+To enhance overall model performance and expand its capability boundaries, we introduce a specialized expert-group design in the post-training pipeline, organized into three categories: Agent Experts, Reasoning Experts, and Interaction Experts.
+
+*   Agent Experts focus on improving autonomous task execution in complex real-world scenarios. They achieve SOTA-level performance in fine-grained vertical domains such as code, work, and search. During training, we optimize not only end-to-end task success rates, but also the atomic capabilities that underpin agent robustness, including precise tool invocation, reliable parameter parsing in multi-turn API interactions, and self-correction mechanisms that mitigate infinite loops and repetitive calls.
+
+*   Reasoning Experts extend the model’s depth of logical reasoning and enable adaptive computation based on problem difficulty. These experts deliver strong performance on mathematics, STEM problem solving, and multi-hop reasoning tasks, improving the model’s ability to handle complex analytical scenarios.
+
+*   Interaction Experts focus on human alignment and user experience optimization. They improve fine-grained instruction following across diverse applications, suppress factual hallucination through advanced alignment techniques, and establish well-bounded safety mechanisms without compromising usefulness.
+
+Finally, we adopt the MOPD architecture to integrate the strongest capabilities from these three expert groups. This fusion enables the final model to combine strong agentic execution, deep reasoning, and high-quality interaction, allowing it to accurately understand complex user needs and reliably complete challenging real-world tasks.
+
+![Image 10: MOPD architecture overview](https://s3.meituan.net/static-prod01/com.sankuai.friday.longcat.next2/assets/mopd-3B2t8Dva.svg)
+Overview of the MOPD-based multi-expert post-training architecture.
+
+## Model Capability Demonstration
+
+The architectural and infrastructure advances above translate into capable behavior. With its long-context reasoning and dedicated post-training, LongCat-2.0 excels at completing real-world tasks. The demos below walk through this across varying scenarios. Select a tab to see each in action.
+
+Coding & Engineering
+
+Agentic & Research
+
+Content Generation
+
+### Codebase Migration
+
+LongCat-2.0 reads your full codebase and migration docs together, maps the architecture, and rewrites the entire plugin to the new SDK — preserving all existing functionality, catching latent bugs, and compiling clean on the first build.
+
+## Evaluations
+
+We evaluate LongCat-2.0 against leading proprietary models across code, general agent and foundational capabilities. Unless noted with *, all scores are measured in-house under a unified harness.
+
+|  | LongCat-2.0 | Gemini 3.1 Pro | GPT-5.5 | Claude Opus 4.6 | Claude Opus 4.7 | Claude Opus 4.8 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Code Agent |
+| Terminal-Bench 2.1 | 70.8 | 70.7* | 73.8* | - | 71.7* | 78.9* |
+| SWE-bench Pro | 59.5 | 54.2* | 58.6* | 57.3* | 64.3* | 69.2* |
+| SWE-bench Multilingual | 77.3 | 76.9* | - | 77.8* | 80.5* | 84.8* |
+| General Agent |
+| FORTE † | 73.2 | 70.3 | 77.8 | 73.2 | 77.6 | 77.2 |
+| BrowseComp | 79.9 | 85.9* | 84.4* | 84.0* | 79.3* | 84.3* |
+| RWSearch | 78.8 | 76.3 | 85.3 | 81.3 | 79.3 | 77.3 |
+| Foundational |
+| IFEval | 90.0 | 96.1 | 95.0 | 92.2 | 88.7 | 86.0 |
+| Writing Bench | 83.8 | 83.7 | 84.7 | - | 85.3 | 85.2 |
+| IMO-AnswerBench | 81.8 | 90.0 | 79.5 | 75.3* | 81.8 | 75.3 |
+| GPQA-diamond | 88.9 | 94.3* | 93.6* | 91.3* | 94.2* | 92.4 |
+
+Values marked with * are external (reported) metrics; all others are measured in-house. "-" indicates results not available. Scores are normalized to a 0–100 scale.
+
+*    - Terminal-Bench 2.1 : Evaluated via Claude Code; per sandbox instance 8c16g; inference params temperature=1.0, top_k=-1, top_p=0.95; agent timeout 6 hours.
+*    - SWE-Bench Series : Evaluated via Claude Code; per sandbox instance 4c8g; inference params temperature=1.0, top_k=-1, top_p=1; problematic tasks corrected.
+*    - [FORTE](https://github.com/AGI-Eval-Official/FORTE) : FORTE (Full-cycle Office Real-world Task Evaluation) is a general agent benchmark for evaluating AI agents on daily office productivity across 15 corporate professions, supporting evaluation in frameworks such as OpenClaw / Hermes / Claude Code. All tasks are limited to a 45-minute timeout; 2 CPU / 4GB RAM; single-round API call timeout is 500s, with a maximum of 10 retries. Marked with †.
+*    - [RW-Search](https://github.com/AGI-Eval-Official/RW-Search) : An in-house objective benchmark for search agents. RW-Search uses bare-model evaluation (configured with basic Search and Browse tools) without any context-management strategy.
+*    - Foundational : For math reasoning like IMO-AnswerBench, inference params temperature=1.0, top_k=-1, top_p=0.95; for the others, temperature=0.7, top_k=-1, top_p=0.95.
