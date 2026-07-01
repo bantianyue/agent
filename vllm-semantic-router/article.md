@@ -106,7 +106,7 @@ HaluGate是三阶段**门控**流水线：
 | ONNX Runtime | Embedding 计算，2D Matryoshka 支持层级提前退出和维度裁剪 |
 | NLP Binding (Rust) | BM25 + N-gram 模糊匹配，无模型权重 |
 
-论文中使用四条推理路径，全部编译为 Rust 共享库通过 CGo 链接到 Go 路由进程，消除 Python 运行时开销。
+论文中使用四条推理路径，全部编译为Rust共享库通过CGo链接到Go路由进程，消除Python运行时开销。
 
 **LoRA多任务分类**对n个分类任务（domain, jailbreak, PII, fact-check等）只用**一个基座模型 + n个小适配器**。n=6时：LoRA方案575MB，独立模型方案3,438MB，省6× 内存。
 
@@ -142,7 +142,7 @@ ROUTE urgent_ai {
 
 这就是论文标题中 "Signal Driven" + "Mixture-of-Modality" 的深层含义：未来你直接说"把数学题路由到推理模型、紧急问题用大模型、PII过滤只在医疗场景开"，**LLM Agent自动生成DSL配置**，用路由质量反馈做RL优化。
 
-论文正式论证了 DSL 作为神经符号推理引擎的指令集，功能完备性保证任何路由策略都可表达。
+论文正式论证了DSL作为神经符号推理引擎的指令集，功能完备性保证任何路由策略都可表达。
 
 编译流水线支持三个目标：flat YAML（本地开发）、Kubernetes CRD（云原生部署）、Helm values（chart部署）。三级别验证（Syntax/Reference/Constraint）提供IDE级渐进式反馈。
 
