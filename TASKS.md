@@ -56,6 +56,7 @@
 | 44 | 2026-07-01 | https://research.nvidia.com/labs/eai/blogs/pushing-intelligence-to-4-bit/ | Pushing Intelligence to 4-bit | pushing-intelligence-to-4-bit | 把智能压进4比特：NVIDIA NVFP4全栈精度革命 | cover | ✅ 已推送 |
 | 45 | 2026-07-01 | https://x.com/mem0ai/status/2071990201531118063 | ChatGPT 记忆的真相：无 RAG、无检索、只有一份预加载的 Profile | chatgpt-memory-works | ChatGPT 记忆的真相：无 RAG、无检索、只有一份预加载的 Profile | cover.png | ✅ 已推送 |
 | 46 | 2026-07-01 | https://claude.com/blog/getting-started-with-loops | getting-started-with-loops | getting-started-with-loops | Claude 入门 Loops：让 Agent 自己循环工作，直到完成为止 | cover.png | ✅ 已推送 |
+| 47 | 2026-07-01 | https://arxiv.org/html/2606.30406v1 | 2606-30406 | mopd | TBD | TBD | 📥 进行中 |
 || 33 | 2026-06-27 | https://www.langchain.com/blog/deep-agents-prompt-caching | Prompt Caching with Deep Agents | deep-agents-prompt-caching | 推理成本省80%：Deep Agents缓存实测 | cover | ✅ 已推送 |
 ## 状态历史
 
@@ -593,3 +594,10 @@
 | 2026-07-01 15:41 | 📝 | 写作中 |
 | 2026-07-01 15:43 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0ULW-_wFUlk2CGT5GvagsrUw9uMOCjEfMajBhks6FTB- |
 | 2026-07-01 16:31 | ✅ | 已推送（覆盖更新） |
+
+### #47 - mopd
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-01 17:08 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-01 17:09 | 📝 | 翻译写作中 |
