@@ -71,4 +71,8 @@ Claude Managed Agents的出现说明Agent基础设施正在从"自建"走向"托
 
 <span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：
 
-https://claude.com/blog/claude-managed-agents</span>
+https://claude.com/blog/claude-managed-agents
+https://claude.com/blog/amazon-bedrock-google-cloud-gateway
+https://claude.com/blog/microsoft-foundry-ga
+https://claude.com/blog/workload-identity-federation
+https://platform.claude.com/docs/en/managed-agents/overview</span>
