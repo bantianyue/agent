@@ -69,20 +69,11 @@ Claude Managed Agents的出现说明Agent基础设施正在从"自建"走向"托
 
 ---
 
-<div style="background:#2c3e50;padding:16px 18px;border-radius:8px;margin-bottom:16px;">
-<div style="margin-bottom:16px;">
-<a href="https://claude.com/blog/amazon-bedrock-google-cloud-gateway" style="color:#ffffff;text-decoration:none;font-size:15px;font-weight:bold;display:block;margin-bottom:10px;">🔗 Claude apps gateway for Amazon Bedrock and Google Cloud 正式上线</a>
-</div>
-<div style="margin-bottom:16px;">
-<a href="https://claude.com/blog/microsoft-foundry-ga" style="color:#ffffff;text-decoration:none;font-size:15px;font-weight:bold;display:block;margin-bottom:10px;">🔗 Claude in Microsoft Foundry 正式可用</a>
-</div>
-<div style="margin-bottom:16px;">
-<a href="https://claude.com/blog/workload-identity-federation" style="color:#ffffff;text-decoration:none;font-size:15px;font-weight:bold;display:block;margin-bottom:10px;">🔗 Claude Platform 安全接入：Workload Identity Federation</a>
-</div>
-<div>
-<a href="https://platform.claude.com/docs/en/managed-agents/overview" style="color:#ffffff;text-decoration:none;font-size:15px;font-weight:bold;display:block;">📖 Managed Agents 官方文档</a>
-</div>
-</div>
+<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kmOTUebNJRWDuDvnCvJOMA" target="_blank" data-linktype="2">Anthropic Claude Tag 的 Agent 身份革命：当 AI 不再代表你，而是代表自己</a><br><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/aiJs5CC8Gb6qa_xDRNEjTA" target="_blank" data-linktype="2">Dynamic Subagents：用代码编排Agents，告别逐轮工具调用</a><br><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2kSChMJR6gYdGxXIlCgmhw" target="_blank" data-linktype="2">GitHub Copilot突破Agent不确定性验证难题：基于编译理论的PTA完胜LLM-as-a-Judge</a><br><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/n2y9guZa1CdjSbCsebvpWA" target="_blank" data-linktype="2">多模型路由Sakana Fugu：多模型协作打败Claude Opus4.8和OpenAI GPT5.5</a></span>
 
 <span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：
 
