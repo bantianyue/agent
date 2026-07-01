@@ -12,3 +12,4 @@
 | Step 4g: 格式修复 | completed |
 | Step 5: 预发布检查清单 | completed |
 | Step 6: 推送草稿 | completed |
+| Resync: 从服务端同步编辑 | completed |
