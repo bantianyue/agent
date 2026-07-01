@@ -1,0 +1,1594 @@
+vLLM Semantic Router:Signal Driven Decision Routing for Mixture-of-Modality Models
+Xunzhuo Liu, Huamin Chen, Samzong Lu, Yossi Ovadia, Guohong Wen, Hao Wu,
+Zhengda Tan, Jintao Zhang, Senan Zedan, Yehudit Kerido, Liav Weiss,
+Haichen Zhang, Bishen Yu, Asaad Balum, Noa Limoy,
+Abdallah Samara, Baofa Fan, Brent Salisbury, Ryan Cook, Zhijie Wang,
+Qiping Pan, Rehan Khan, Avishek Goswami, Houston H. Zhang, Shuyi Wang,
+Ziang Tang, Fang Han, Zohaib Hassan, Jianqiao Zheng, Avinash Changrani, Xue (Steve) Liu, Bowei He†.†Corresponding author:Bowei.He@mbzuai.ac.ae
+(June 2026)
+AbstractAs large language models (LLMs) diversify across modalities, capabilities, and cost profiles, the problem ofintelligent request routing: selecting the right model for each query at inference time, has become a critical systems challenge. We presentvLLM Semantic Router, a signal-driven decision routing framework for Mixture-of-Modality (MoM) model deployments. The architecture follows two complementary Shannon-inspired views.
+In the information-theoretic regime, signal extraction reduces the entropy of “which model?” by distilling routing-relevant information from raw queries. In the Boolean-algebraic regime, the decision engine composes functionally complete routing policies from signal conditions. The central innovation iscomposable signal orchestration: thirteen heterogeneous signal types, spanning sub-millisecond heuristics and neural classifiers for semantics, safety, and modality, are composed through configurable Boolean decision rules into deployment-specific routing policies, so that fundamentally different scenarios (multi-cloud enterprise, privacy-regulated, cost-optimized) are expressed as different configurations over the same architecture. Matched decisions drivesemantic model routingvia thirteen selection algorithms, while per-decision plugin chains enforce safety constraints including a three-stageHaluGatehallucination detection pipeline and a lightweight episodic memory system withReflectionGatefor personalized multi-turn context.
+A typed neural-symbolic DSL specifies these routing policies and compiles them to multiple deployment targets, enabling configuration-first adaptation without code changes. Together, these components show that composable signal orchestration enables a single framework to serve diverse deployment scenarios with differentiated cost, privacy, and safety policies.
+
+††footnotetext:Github code repository:https://github.com/vllm-project/semantic-router††footnotetext:Huggingface model repository:https://huggingface.co/llm-semantic-router1Introduction
+The landscape of large language models has fragmented along multiple axes: modality (text, code, vision, diffusion), scale (1B to 1T+ parameters), cost (10×\timesvariation in per-token pricing), and specialization (general-purpose vs. domain-specific fine-tuning).
+Organizations increasingly operateheterogeneous model fleets—local vLLM instances alongside cloud endpoints from OpenAI, Anthropic, Azure, Bedrock, Gemini, and Vertex AI—each with different capabilities, pricing, and compliance characteristics.
+This heterogeneity creates a fundamental inference-time optimization problem:given a user query, a fleet of diverse models, and deployment-specific constraints, which model should serve it, and what safety and privacy policies should apply?
+
+Viewed through the lens of information theory[35], routing is anuncertainty-reductionproblem.
+Before any analysis, routing entropy is maximal:H​(M∣rraw)≈log2⁡KH(M\mid r_{\text{raw}})\approx\log_{2}Kbits forKKcandidate models—every model is equally plausible.
+Each signal extracted from the request reduces this uncertainty.
+
+This viewpoint suggests a natural two-layer decomposition (Figure˜1).
+Under this decomposition, the objective is to collapseH​(M∣S​(r))H(M\mid S(r))to near zero so the decision engine can make a deterministic, high-confidence routing choice (Figure˜2).
+
+Figure 1:Structural correspondence between Shannon’s communication system[35]and VSR’s routing pipeline.
+The dotted line marks the boundary between the information-theoretic regime (signal extraction maximizes mutual information with the routing outcome) and the Boolean-algebraic regime (the decision engine synthesizes routing policies from signal conditions via{∧,∨,¬}\{\wedge,\vee,\neg\}[34]).In the first layer, signal extraction operates in the probabilistic regime of Shannon’sMathematical Theory of Communication; in the second, decision evaluation operates in the algebraic regime of Shannon’sswitching-circuit algebra[34].
+The signal vector𝐬\mathbf{s}is the interface between these regimes: continuous probabilistic inference below, discrete symbolic logic above.
+In modern ML terms, the extraction layer behaves like ahybrid embedding stage(Section˜3.8), while the priority-ordered decision engine behaves like asymbolic Mixture-of-Experts gatewith deterministic early exit (Section˜4.8).
+We also interpret priority blocks aslayered entropy folding(Section˜4.9).
+Together these components form a programmable neural-symbolic inference engine (Transformer-like control structure, but not equivalent hidden-state dynamics), which we connect to agent-based policy synthesis (Section˜6.8).
+
+Figure 2:Entropy collapse during signal extraction (illustrative). Each additional signal reduces the routing uncertaintyH​(M∣⋅)H(M\mid\cdot\,)from the uniform priorlog2⁡K\log_{2}Kbits until the decision formulaϕ​(𝐬)\phi(\mathbf{s})yields a near-deterministic model selection. Bar heights are schematic rather than empirical measurements.This problem is more nuanced than binary difficulty routing.
+A production routing system must simultaneously consider:
+•Multi-dimensional signals: Query domain, modality, complexity, language, user identity, and real-time performance metrics all inform the optimal routing decision.
+
+•Privacy and safety: Prompt injection, PII leakage, and hallucinated responses must be detected and mitigated—often withdifferent policies for different query types and user roles.
+
+•Cost-effective model selection: Algorithms must balance response quality against inference cost and latency, selecting from a heterogeneous pool of local and cloud-hosted models.
+
+•Deployment diversity: The same routing framework must serve a privacy-regulated healthcare deployment (strict PII filtering, on-premise models only), a cost-optimized developer tool (aggressive caching, cheapest model first), and a multi-cloud enterprise (failover across providers)—through configuration, not code changes.
+
+•Multi-turn statefulness: Routing decisions must be consistent across conversation turns, requiring stateful session management and context preservation.
+
+Prior work on LLM routing has made significant progress on individual aspects.
+RouteLLM[27]trains classifiers to route between two models based on query difficulty.
+RouterDC[5]learns query-model embeddings via dual contrastive learning.
+AutoMix[2]formulates cascading as a POMDP.
+However, these approaches address model selection in isolation, without integrating signal extraction, safety enforcement, multi-provider backend management, or plugin extensibility into a unified framework.
+
+1.1Contributions
+We present vLLM Semantic Router, a signal-driven decision routing system whose central innovation iscomposable signal orchestration: heterogeneous signals are extracted, composed through Boolean rules into deployment-specific decisions, and executed through per-decision plugin chains—enabling a single architecture to serve diverse deployment scenarios.
+
+Our contributions are:
+
+1.Composable Signal-Decision-Plugin Architecture(Sections˜2,3,4and5):
+A three-layer architecture where thirteen signal types are composed through Boolean decision rules into deployment-specific routing policies, with per-decision plugin chains for safety, caching, and augmentation. Different deployment scenarios (privacy-regulated, cost-optimized, multi-cloud) are expressed as different configurations over the same architecture.
+
+2.Semantic Model Routing with Cost-Aware Selection(Section˜10):
+A unified framework integrating thirteen model selection algorithms—rating-based, contrastive, cascading, classical ML, reinforcement learning, and latency-aware—that analyze request semantics to select the most cost-effective model while respecting per-decision privacy and safety constraints.
+
+3.HaluGate: Gated Hallucination Detection(Section˜8):
+A three-stage pipeline—sentinel gating, token-level detection, NLI-based explanation—that avoids unnecessary verification on non-factual queries while providing span-level diagnostics when hallucination is detected.
+
+4.Multi-Provider and Multi-Endpoint Routing(Section˜12):
+Native support for routing across heterogeneous backends (vLLM, OpenAI, Anthropic, Azure, Bedrock, Gemini, Vertex AI) with provider-specific protocol translation, a pluggable authorization factory for diverse auth mechanisms, weighted multi-endpoint load distribution, and full OpenAI Responses API support for stateful multi-turn conversations.
+
+5.LoRA-Based Multi-Task Classification(Sections˜9and11):
+A memory-efficient architecture using Low-Rank Adaptation that servesnnclassification tasks from a single base model with lightweight adapter heads, reducing aggregate model memory fromnnfull copies to one base plus negligible adapter overhead.
+
+6.Episodic Conversation Memory with ReflectionGate(Section˜13):
+A lightweight memory system that stores raw conversational turns as episodic chunks (filtered by an entropy gate and capped at 16 KB) rather than relying on LLM-based fact extraction, eliminating inference overhead at write time.
+At retrieval time, a multi-stageReflectionGatepipeline—safety block-pattern filtering, recency decay, Jaccard deduplication, and budget capping—refines retrieved chunks before injection as a separate context message, enabling personalized multi-turn routing without coupling memory quality to an external model.
+
+7.Programmable Neural-Symbolic Configuration Language(Section˜6):
+A typed configuration language that serves as the instruction set of the routing inference engine, with a formal grammar parsed into a Boolean expression AST, three-level validation (syntax, reference, constraint), multi-target compilation (flat YAML, Kubernetes CRDs, Helm charts), and round-trip decompilation.
+We formalize the system as aprogrammable neural-symbolic inference engine—neural signal extraction as a hybrid embedding layer, symbolic decision evaluation as Mixture-of-Experts gating—and show that the language’s functional completeness enables LLM-based coding agents to synthesize routing policies from natural-language specifications.
+
+1.2Paper Organization
+Section˜2presents the system architecture and composable orchestration model.Sections˜3and4formalize the signal extraction and decision evaluation layers.Sections˜5,7and8describe the plugin framework and safety subsystems.Sections˜9and11detail the LoRA-based classification architecture and multi-runtime inference design.Section˜10surveys the semantic model selection algorithms.Section˜12describes the multi-provider request processing pipeline.Sections˜13,14and15cover memory, observability, and deployment.Section˜16presents evaluation results.Section˜6specifies the programmable configuration language and develops the neural-symbolic inference engine perspective.Section˜17discusses related work, andSection˜18concludes.
+
+2System Architecture
+We formalize the routing problem and present the three-layer architecture that decomposes it into composable signal extraction, decision evaluation, and plugin execution—enabling a single framework to serve diverse deployment scenarios through configuration.
+
+2.1Problem Formulation
+Letℳ={m1,…,mK}\mathcal{M}=\{m_{1},\ldots,m_{K}\}denote a set ofKKavailable model backends, each characterized by capability profile, cost, and latency.
+Each backend may be served by a different providerpk∈𝒫p_{k}\in\mathcal{P}(e.g., local vLLM, OpenAI, Anthropic, Azure, Bedrock, Gemini), with provider-specific API protocols and authentication mechanisms.
+A deployment may expose multiple endpointsℰ={e1,…,eL}\mathcal{E}=\{e_{1},\ldots,e_{L}\}with weighted load distribution across backends.
+
+Given an incoming requestrr(consisting of a message sequence, metadata, user identity, and headers), the routing problem is to:
+1.Select a modelm∗∈ℳm^{*}\in\mathcal{M}that maximizes response quality while respecting cost and latency constraints;
+
+2.Apply deployment-specific safety and privacy transformations𝒯​(r)\mathcal{T}(r)before and after model invocation;
+
+3.Route through the correct provider endpoint with appropriate authentication.
+
+Naïve approaches either fixm∗m^{*}statically or route based on a single dimension (e.g., estimated difficulty).
+We argue that production routing requires reasoning overmultiple orthogonal signal dimensions simultaneously, with differentpolicies(safety thresholds, caching strategies, prompt augmentation, model pools) for different routing outcomes—and that these policies must becomposableto support diverse deployment scenarios without architectural changes.
+
+2.2Composable Signal Orchestration
+The key architectural innovation is that the same signal extraction, decision evaluation, and plugin execution machinery can becomposed differentlyfor different deployment scenarios:
+
+Definition 1(Programmable Neural-Symbolic Configuration Language).A deployment configurationΓ=(𝒮Γ,𝒟Γ,ΠΓ,ℰΓ)\Gamma=(\mathcal{S}_{\Gamma},\mathcal{D}_{\Gamma},\Pi_{\Gamma},\mathcal{E}_{\Gamma})specifies which signal types𝒮Γ⊆𝒮\mathcal{S}_{\Gamma}\subseteq\mathcal{S}are active, what decisions𝒟Γ\mathcal{D}_{\Gamma}are evaluated, which plugin chainsΠΓ\Pi_{\Gamma}are attached, and which endpointsℰΓ\mathcal{E}_{\Gamma}are available.
+
+Example configurations:
+•Privacy-regulated (healthcare): Active signals include domain, authz, and language. Decisions route sensitive queries to on-premise models only. Plugins enforce strict PII redaction with no caching.
+
+•Cost-optimized (developer tool): Active signals include complexity, embedding, and keyword. Decisions cascade from cheap to expensive models. Plugins enable aggressive semantic caching.
+
+•Multi-cloud enterprise: Active signals include domain, modality, and authz. Decisions distribute across multiple provider endpoints using latency-aware model selection with weighted failover. Plugins inject provider-specific auth headers.
+
+All three scenarios use the same architecture; onlyΓ\Gammadiffers. This composability is the central design contribution.
+
+2.3Three-Layer Architecture
+The architecture decomposes routing into three layers, each with a well-defined interface (Figure˜3):
+
+Figure 3:Three-layer architecture with closed-loop feedback. A deployment configurationΓ\Gammaselects which signals, decisions, and plugins are active. Layer 1 extracts a signal vector𝐬\mathbf{s}from the request. Layer 2 evaluates Boolean decision formulas to selectd∗d^{*}. Layer 3 executes the per-decision plugin chain, selects a model fromd∗d^{*}’s candidate set, and routes to the provider endpoint. Response-side signals feed back to enable adaptive routing.Input Layer: Signal Extraction.The signal layer maps a requestrrto a structured signal result𝐬\mathbf{s}, consisting of binary match indicators and real-valued confidences for each configured rule across thirteen signal types.
+Heuristic signals (keyword, language, context length, authorization) complete in sub-millisecond time.
+ML-based signals (embedding similarity, domain classification, factual grounding, modality detection, complexity, preference, user feedback, jailbreak detection, PII detection) require neural inference at 10–120 ms.
+Signals are evaluated in parallel, and only signal types referenced by at least one active decision are computed—a critical optimization for deployment configurations that use a subset of available signals.
+
+Hidden Layers: Decision Blocks.The decision layer takes the signal result𝐬\mathbf{s}and evaluates a set of decisions𝒟={d1,…,dM}\mathcal{D}=\{d_{1},\ldots,d_{M}\}, each defined as a Boolean formula over signal conditions.
+The engine selects the best-matching decisiond∗d^{*}using either priority-based or confidence-weighted ranking.
+Each decision carries its own model candidate setℳd∗⊆ℳ\mathcal{M}_{d^{*}}\subseteq\mathcal{M}, enabling deployment-specific model pools (e.g., a privacy decision restricts candidates to on-premise models).
+
+Projection Layer: Plugin Chain.Each decisiond∗d^{*}carries a per-decision plugin configuration that defines:
+(a)pre-routing plugins(fast response for safety enforcement, semantic caching, RAG context injection, modality routing, memory retrieval, system prompt augmentation, header mutation for provider auth), executed before model invocation;
+(b) asemantic model selection algorithmapplied tod∗d^{*}’s candidate model setℳd∗\mathcal{M}_{d^{*}}to find the best model cost-effectively;
+(c)post-routing plugins(hallucination detection, cache updates), executed on the model response.
+
+2.4Design Principles
+Four principles guide the architecture:
+
+Composability.Complex routing policies are expressed as compositions of simple primitives: Boolean combinations of signal conditions form decisions; sequences of typed plugins form execution chains; deployment scenarios are expressed as configuration profiles.
+This avoids monolithic routing logic and enables the same system to serve fundamentally different deployment requirements.
+
+Orthogonality.Signals, decisions, and plugins are independent modules with a uniform interface boundary.
+New signal types can be added by implementing a single evaluation function—the decision engine references signals solely by type and rule name, requiring no modification.
+Likewise, new plugins and providers are registered independently.
+The current thirteen signal types are the built-in set; the framework is designed to be extended with domain-specific signals as deployment requirements evolve.
+This strict decoupling has a theoretical antecedent in Shannon’ssource-channel separation theorem[35]: just as a communication system can be decomposed into a source encoder (which compresses the message to its informational essence) and a channel encoder (which adds structure for reliable transmission)—each optimized independently without loss of optimality—the routing system decomposes into asignal extraction layer(which distills routing-relevant information from the raw request) and adecision layer(which synthesizes a routing policy from the extracted signals).
+The signal vector𝐬\mathbf{s}is the interface between these independently optimizable stages, analogous to the compressed source representation at the encoder–channel boundary.
+This separation also mirrors the architecture of Mixture-of-Experts models[36], where the gating network (signal extraction) and expert modules (model backends) are designed independently—though our gating is symbolic rather than neural, enabling formal verification and compositional editing (Section˜4.8).
+
+Closed-loop adaptivity.The bidirectional signal flow described inSection˜3enables the architecture to operate as aclosed-loop control system[1].
+In control-theoretic terms, the signal–decision–plugin pipeline is theplant, response-side signals (hallucination detection, user feedback, latency measurements) are thesensors, and a policy adjustment mechanism is thecontrollerthat updates decision parametersθ(t)\theta^{(t)}(priorities, model weights) based on observed response quality:
+θ(t+1)=θ(t)+η​∇θ𝔼​[Q​(r,m∗​(r;θ(t)))]\theta^{(t+1)}=\theta^{(t)}+\eta\,\nabla_{\theta}\,\mathbb{E}\bigl[Q\bigl(r,\,m^{*}(r;\theta^{(t)})\bigr)\bigr](1)whereQ​(r,m∗)Q(r,m^{*})is a response quality metric andη\etais a learning rate.
+This formulation connects to thecontextual banditframework[20]: the signal vectorS​(r)S(r)serves as the context, model selection is the action, and response quality is the reward.
+Standard regret bounds from online learning theory[33]guarantee that the cumulative routing quality of such an adaptive policy converges to that of the best fixed policy in hindsight at a rate ofO​(T)O(\sqrt{T}), providing formal performance guarantees for self-improving routing.
+
+Per-decision scoping.Safety thresholds, caching policies, model candidates, and auth mechanisms are scoped to individual decisions rather than applied globally.
+A coding-focused decision can omit PII signal conditions while a customer-support decision enforces strict PII filtering via signal-matched fast response—using the same system configuration.
+
+Provider abstraction.The architecture abstracts over provider-specific protocols, authentication, and endpoint topologies.
+Multi-endpoint routing with weighted distribution and failover is handled at the infrastructure layer, enabling decisions to reference models by capability rather than by provider-specific endpoint.
+
+3Signal Extraction Layer
+The signal extraction layer maps an incoming requestrrto a structured signal result that characterizes the request along thirteen orthogonal dimensions.Figure˜4provides an overview of the signal taxonomy and evaluation flow.
+We formalize the signal model and describe the extraction algorithms.
+
+3.1Signal Model
+Definition 2(Signal Rule).Asignal ruleρ=(τ,n,f)\rho=(\tau,n,f)consists of a signal typeτ∈𝒯\tau\in\mathcal{T}, a rule namenn, and an evaluation functionf:ℛ→{0,1}×[0,1]f:\mathcal{R}\to\{0,1\}\times[0,1]that maps a request to a binary match indicator and a confidence score.
+
+Definition 3(Signal Result).Given a rule setℛ={ρ1,…,ρN}\mathcal{R}=\{\rho_{1},\ldots,\rho_{N}\}, the signal result for requestrris:
+S​(r)={(ρi,1​[fi​(r)],ci​(r))∣ρi∈ℛ}S(r)=\bigl\{\bigl(\rho_{i},\;\mathbf{1}[f_{i}(r)],\;c_{i}(r)\bigr)\mid\rho_{i}\in\mathcal{R}\bigr\}(2)where𝟏​[fi​(r)]\mathbf{1}[f_{i}(r)]is the match indicator andci​(r)∈[0,1]c_{i}(r)\in[0,1]is the confidence.
+
+The thirteen signal types partition intoheuristicandlearnedcategories based on whether they require neural inference.
+
+Figure 4:Signal extraction taxonomy and evaluation flow. An incoming request is evaluated in parallel against heuristic signals (sub-millisecond, deterministic) and learned signals (neural inference via LoRA classifiers). Only signal types referenced by configured decisions are computed (demand-driven evaluation). Results merge into the structured signal resultS​(r)S(r).
+3.2Heuristic Signals
+Heuristic signals use deterministic or statistical algorithms with sub-millisecond latency:
+
+Keyword(τkw\tau_{\text{kw}}).
+Rules are defined as pattern sets with Boolean combinators.
+Each rule specifies a set of patternsP={p1,…,pk}P=\{p_{1},\ldots,p_{k}\}with a combinator∈{and,or,nor}\in\{\textsc{and},\textsc{or},\textsc{nor}\}and one of three matching methods:
+•Regex(default): compiled regular expressions with word boundaries; confidence is 1.0 on match.
+
+•BM25: BM25 scoring dispatched to a Rust-backed classifier via FFI. Each keyword is scored against the request using TF-IDF term weighting, and the rule matches when the score exceeds a configurable threshold (default 0.1). Confidence is derived from the BM25 score, providing a graded relevance signal rather than a binary match.
+
+•N-gram: characternn-gram similarity (default trigram) dispatched to the same Rust binding. The rule matches when the Jaccard similarity between the keyword and requestnn-gram sets exceeds a threshold (default 0.4), providing inherent tolerance to typos and morphological variation without a dedicated fuzzy-matching pass.
+
+Forand:f​(r)=⋀imatch​(pi,r)f(r)=\bigwedge_{i}\text{match}(p_{i},r); foror:f​(r)=⋁imatch​(pi,r)f(r)=\bigvee_{i}\text{match}(p_{i},r).
+The combinators apply uniformly across all three methods.
+
+Context Length(τctx\tau_{\text{ctx}}).
+Rules define token-count intervals[l,u][l,u].
+Given estimated token countt​(r)t(r), the rule matches iffl≤t​(r)≤ul\leq t(r)\leq u.
+This enables complexity-aware routing (e.g., short queries to fast models, long contexts to extended-context models).
+
+Language(τlang\tau_{\text{lang}}).
+Rules bind detected language codes to named signals using statistical n-gram detection over 100+ languages.
+Enables language-specific routing (e.g., CJK queries to multilingual-specialized models).
+
+Authorization(τauthz\tau_{\text{authz}}).
+Role-based access control signals extracted from request headers, supporting a pluggable authentication factory.
+The authz signal layer abstracts over multiple identity providers (API key, OAuth2/OIDC, cloud IAM, custom JWT, LDAP) through provider-specific extractors that resolve user identities and group memberships from credentials.
+Role bindings then map resolved identities to named signals, enabling per-role routing policies (e.g., premium users routed to higher-quality models, free-tier users restricted to cost-effective models).
+Thisinboundauthorization (who is the user and what can they access?) is complementary to theoutboundauthorization factory (Section˜12.5) that injects provider-specific credentials when forwarding to backends.
+
+3.3Learned Signals
+Learned signals require neural inference, typically 10–100 ms, using the LoRA-based classifiers described inSection˜9.
+
+Why encoder-based models.The choice of bidirectional encoders (ModernBERT[42], mmBERT-32K for long-context tasks) rather than unidirectional decoders for signal extraction is not merely an efficiency decision—it reflects a fundamental information-theoretic principle.
+Routing requiresunderstandingthe query: determining its domain, complexity, intent, modality, and the precise location of sensitive content.
+Understanding, in Shannon’s framework[35], corresponds to building representations that maximize the mutual informationI​(𝐇;Y)I(\mathbf{H};\,Y)between the hidden states𝐇\mathbf{H}and the task labelYY.
+A bidirectional encoder conditions every token on the full context in both directions, producing hidden states that capture the complete information structure of the input; a causal decoder, by contrast, conditions each token only on its left context—its representations are optimized for next-token predictionI​(𝐡t;xt+1)I(\mathbf{h}_{t};\,x_{t+1}), which capturesgenerativecontinuation rather thandiscriminativeunderstanding.
+
+This bidirectional “understanding” is exploited at three distinct granularities across the signal types:
+•Sequence-level(CLS pooling): For domain classification, jailbreak detection, fact-check gating, modality classification, and user feedback, the pooled CLS representation acts as an approximatesufficient statistic—a fixed-dimensional vector that compresses the query’s global semantics while discarding positional detail irrelevant to the label.
+
+•Token-level(per-token hidden states): For PII detection and hallucination span identification, thepositionof information matters—which tokens are names, which spans are unsupported claims. Here the full sequence of hidden states(𝐡1,…,𝐡T)(\mathbf{h}_{1},\ldots,\mathbf{h}_{T})is retained, preserving the positional mutual informationI​(𝐡t;yt)I(\mathbf{h}_{t};\,y_{t})that CLS pooling would discard.
+
+•Cross-sequence(cross-encoder): For NLI-based hallucination explanation (Section˜8), the encoder jointly attends over a (claim, evidence) pair, maximizing theinter-sequencemutual informationI​(claim;evidence)I(\text{claim};\,\text{evidence})through full cross-attention—a capacity unavailable to architectures that encode each sequence independently.
+
+In each case, the encoder’s unrestricted attention pattern—the absence of a causal mask—is what enables maximal information extraction at the granularity the task demands.
+
+Embedding Similarity(τemb\tau_{\text{emb}}).
+Each rule defines reference texts{t1,…,tk}\{t_{1},\ldots,t_{k}\}and a similarity thresholdθ\theta.
+The request embedding𝐞r\mathbf{e}_{r}is computed via a shared embedding model, and the rule matches iff:
+maxi⁡cos⁡(𝐞r,𝐞ti)≥θ\max_{i}\cos(\mathbf{e}_{r},\mathbf{e}_{t_{i}})\geq\theta(3)The confidence equals the maximum cosine similarity.
+This provides scalable semantic matching without per-rule model training.
+
+Domain Classification(τdom\tau_{\text{dom}}).
+A LoRA-adapted classifier trained on MMLU categories maps requests to domain labels (STEM, humanities, code, creative writing, etc.).
+The classification confidence serves as the signal confidence.
+
+Factual Grounding(τfact\tau_{\text{fact}}).
+A binary classifier (the HaluGate Sentinel,Section˜8) determines whether the query requires factual verification, distinguishing factual questions from creative or code-generation tasks.
+
+User Feedback(τfb\tau_{\text{fb}}).
+A multi-class classifier detects satisfaction, dissatisfaction, clarification requests, and preference for alternatives, enabling feedback-driven routing adjustments.
+
+Modality(τmod\tau_{\text{mod}}).
+A three-class classifier (autoregressive, diffusion, both) determines the appropriate model modality for the request, trained on mixed text-generation and image-generation datasets.
+
+Complexity(τcpx\tau_{\text{cpx}}).
+A contrastive embedding classifier estimates query difficulty.
+Each complexity rule defines two sets of candidate exemplars—hard(e.g., multi-step reasoning problems) andeasy(e.g., simple factual lookups)—whose embeddings are precomputed at initialization.
+At query time, the query embedding is compared against both sets via cosine similarity:
+δ=maxh∈ℋ⁡sim​(𝐪,𝐡)−maxe∈ℰ⁡sim​(𝐪,𝐞)\delta=\max_{h\in\mathcal{H}}\text{sim}(\mathbf{q},\mathbf{h})-\max_{e\in\mathcal{E}}\text{sim}(\mathbf{q},\mathbf{e})(4)whereℋ\mathcal{H}andℰ\mathcal{E}are the hard and easy candidate sets.
+The difficulty level is thenhardifδ>θ\delta>\theta,easyifδ<−θ\delta<-\theta, andmediumotherwise, for a per-rule thresholdθ\theta.
+Multiple complexity rules can coexist (e.g.,code_complexity,math_complexity), each with its own candidate sets and threshold.
+Composer conditions can restrict when a rule fires—for instance, evaluatingcode_complexityonly when the domain signal indicates computer science.
+
+Jailbreak Detection(τjb\tau_{\text{jb}}).
+Each jailbreak rule selects one of two detection methods via amethodfield (default:classifier).
+
+BERT classifier method.A binary/ternary classifier detects adversarial prompt injection and jailbreak attempts.
+Each rule defines a confidence thresholdθ\theta; the signal fires when jailbreak confidencec≥θc\geq\theta.
+An optionalinclude_historyflag controls whether only the latest user message or the full conversation history is analyzed, trading latency for recall against multi-turn attacks.
+Multiple rules at different thresholds enable per-decision sensitivity—a public chatbot may useθ=0.65\theta=0.65, while an internal tool usesθ=0.9\theta=0.9to minimize false positives.
+
+Contrastive embedding method.Analogous to the complexity signal, each rule defines two sets of exemplar patterns—jailbreak(𝒦jb\mathcal{K}_{\text{jb}}, e.g., “Ignore all previous instructions”) andbenign(𝒦ben\mathcal{K}_{\text{ben}}, e.g., “What is the weather today”)—whose embeddings are precomputed at initialization.
+At request time the contrastive score for a messagemmis:
+δ​(m)=maxj∈𝒦jb⁡sim​(𝐦,𝐣)−maxb∈𝒦ben⁡sim​(𝐦,𝐛)\delta(m)=\max_{j\in\mathcal{K}_{\text{jb}}}\text{sim}(\mathbf{m},\mathbf{j})-\max_{b\in\mathcal{K}_{\text{ben}}}\text{sim}(\mathbf{m},\mathbf{b})(5)Wheninclude_historyis enabled, the system evaluates every user message in the conversation and takes the maximum score across all turns:Δ=maxm∈ℳuser⁡δ​(m)\Delta=\max_{m\in\mathcal{M}_{\text{user}}}\delta(m).
+The rule fires whenΔ≥θ\Delta\geq\theta(defaultθ=0.10\theta=0.10).
+Thismax-contrastive-chainaggregation is specifically designed to catch “boiling frog” multi-turn attacks where each individual message may score below threshold but the conversation contains at least one escalation turn.
+
+Both methods coexist within the same signal type; a single deployment can define BERT and contrastive rules simultaneously and combine them in decision logic using OR (fire if either detects) or use them at different priority levels for graduated response.
+Classifier details are described inSection˜7.
+
+PII Detection(τpii\tau_{\text{pii}}).
+A token-level NER classifier identifies personally identifiable information (person names, emails, phone numbers, SSNs, credit cards, etc.).
+Each rule specifies a confidence threshold and an optional allow-list of PII entity types.
+The signal fires when any PII typenotin the allow-list is detected above threshold.
+This per-rule policy model enables differentiated enforcement: a medical application may allowpersonwhile blockingssn, whereas a public chatbot blocks all PII types.
+Classifier details are described inSection˜7.
+
+Preference(τpref\tau_{\text{pref}}).
+Personalized routing based on user interaction history.
+
+3.4Parallel Evaluation with Lazy Computation
+A key optimization isdemand-driven evaluation: the engine computes only signal types referenced by at least one configured decision.
+Let𝒯used=⋃d∈𝒟{τ∣∃condition in​d​of type​τ}\mathcal{T}_{\text{used}}=\bigcup_{d\in\mathcal{D}}\{\tau\mid\exists\,\text{condition in }d\text{ of type }\tau\}.
+Signal evaluators for types in𝒯used\mathcal{T}_{\text{used}}are launched as concurrent coroutines, with heuristic signals completing before learned signals due to their sub-millisecond latency.
+
+This demand-driven approach avoids the cost of unused signal types.
+In typical configurations with 3–5 active signal types out of thirteen, this reduces total signal extraction latency by 50–70% compared to exhaustive evaluation.
+The strategy has a natural information-theoretic interpretation.
+Shannon’s source coding theorem[35]establishes that optimal codes assign shorter codewords to more probable symbols; analogously, demand-driven evaluation assignszero computational costto signals that carry no routing information in the current configuration, and full cost only to those that do.
+If we view each signal type’s evaluation costcic_{i}as a “codeword length” and its relevance indicator𝟏​[τi∈𝒯used]\mathbf{1}[\tau_{i}\in\mathcal{T}_{\text{used}}]as the probability of being needed, then demand-driven evaluation minimizes the expected evaluation cost∑ici⋅𝟏​[τi∈𝒯used]\sum_{i}c_{i}\cdot\mathbf{1}[\tau_{i}\in\mathcal{T}_{\text{used}}]—the computational analogue of minimizing expected code length.
+
+3.5Extensibility
+The thirteen signal types described above represent the current built-in set; the framework is not limited to these.
+The signal extraction layer defines a uniform interface—each signal type implements an evaluation functionf:ℛ→{0,1}×[0,1]f:\mathcal{R}\to\{0,1\}\times[0,1]—and the decision engine references signals solely by type and rule name.
+Adding a new signal type requires only implementing this interface and registering the type; no changes to the decision engine, plugin chain, or deployment infrastructure are needed.
+This open architecture allows operators to introduce domain-specific signals (e.g., regulatory compliance classifiers, custom toxicity detectors) alongside the built-in types.
+
+3.6Bidirectional Signal Flow
+Signals are not limited to the inbound request path.
+The system also extracts signals from modelresponses, enabling closed-loop routing policies that adapt based on output characteristics.
+The primary example is HaluGate (Section˜8): the Sentinel classifier on the request path determines whether a query requires factual verification (theτfact\tau_{\text{fact}}signal), and if so, the Detector and Explainer stages analyze the model’s response for unsupported claims—producing response-side detection results (confidence scores, hallucinated spans, NLI explanations) that are propagated via HTTP headers or body annotations.
+This bidirectional flow—request signals gating which response analyses to perform, and response signals feeding back into observability and policy enforcement—enables adaptive quality assurance without imposing uniform overhead on all requests.
+
+3.7Information-Theoretic Signal Analysis
+WithNNsignal types evaluated per request, a natural question is whether all signals contribute independently to routing quality or whether some carry redundant information.
+Information theory provides the formal framework for this analysis.
+
+For a signal typeτi\tau_{i}and the routing outcome variableYY(the selected model), themutual informationI​(τi;Y)I(\tau_{i};Y)quantifies the reduction in uncertainty about the routing decision provided by observing signalτi\tau_{i}.
+Theconditional mutual informationI​(τi;Y∣τj)I(\tau_{i};Y\mid\tau_{j})measures the additional information fromτi\tau_{i}given thatτj\tau_{j}is already observed.
+WhenI​(τi;Y∣τj)≈0I(\tau_{i};Y\mid\tau_{j})\approx 0, signalsτi\tau_{i}andτj\tau_{j}are redundant with respect to routing—observing both provides no more discriminative power than observing one.
+
+This analysis enables two optimizations.
+First,adaptive signal pruning: in a given deployment configuration, signals with near-zero mutual information with the routing outcome can be disabled without affecting routing quality, reducing extraction latency beyond the demand-driven approach ofSection˜3.
+Second,information-ordered evaluation: evaluating high-I​(τi;Y)I(\tau_{i};Y)signals first and short-circuiting when the decision outcome is already determined—analogous to early termination in decision trees—can reduce average per-request evaluation cost.
+The minimum description length (MDL) principle[31]provides a complementary perspective: the optimal signal subset is the one that describes the routing policy with minimum total code length, balancing signal extraction cost against routing precision.
+
+3.8Interpretation as Hybrid Embedding
+The signal extraction layer maps a raw requestrrto a structured signal vector𝐬=S​(r)∈{0,1}N×[0,1]N\mathbf{s}=S(r)\in\{0,1\}^{N}\times[0,1]^{N}, where each dimension corresponds to a named signal condition and its associated confidence.
+This operation is functionally analogous to theembedding layerof a Transformer[40]: both convert unstructured input (token sequences or natural-language queries) into a high-dimensional representation suitable for downstream computation.
+
+However, the analogy is not merely structural—it reveals a key design distinction.
+Transformer embeddings produce dense, opaque vectors optimized end-to-end for a downstream task.
+The signal vector𝐬\mathbf{s}, by contrast, isinterpretable by construction: each dimension has a human-readable name (e.g.,domain:mathematics,complexity:high), a defined semantic type, and an independently auditable extraction pipeline.
+This interpretability is not incidental but architecturally enforced: the decision engine references signals by type and name, so the signal vector must be astructured, symbolic representationrather than a latent embedding.
+
+We characterize this as ahybrid embedding: the extraction methods span a spectrum from sub-millisecond heuristics (keyword matching, regex patterns) to learned neural classifiers (LoRA-based domain and complexity models, embedding similarity), yet all project onto the same interpretable coordinate system.Figure˜5illustrates this comparison.
+
+Figure 5:Comparison of embedding strategies.Top: A Transformer embedding layer produces dense, opaque vectors optimized end-to-end.Bottom: The VSR signal extraction layer produces structured, interpretable signal vectors from heterogeneous extractors (heuristic, learned, LoRA-based), where each dimension has a human-readable semantic name. The dashed arrow marks the functional correspondence: both convert unstructured input into a representation for downstream computation, but the signal vector is interpretable by construction.
+
+4Decision Engine
+The decision engine evaluates a set of routing decisions against the signal result and selects the best match.
+In Shannon’s 1938 master’s thesis[34], arbitrary switching-circuit behavior was shown to be representable and minimizable through Boolean algebra—any desired input–output relation over binary signals could be systematically synthesized from{∧,∨,¬}\{\wedge,\vee,\neg\}.
+The decision engine applies this same principle to routing: each routing policy is expressed as a Boolean formula over binary signal conditions, and the functionally complete operator set guarantees thatanyrouting policy expressible as a function of the extracted signals can be realized—without modifying the signal layer or the execution layer.
+We formalize the decision model, present the evaluation algorithm, and analyze the selection strategies.
+
+4.1Decision Model
+Definition 4(Decision).Adecisiond=(n,ϕ,ℳd,Πd,p)d=(n,\phi,\mathcal{M}_{d},\Pi_{d},p)consists of a namenn, a Boolean formulaϕ\phiover signal conditions, a candidate model setℳd⊆ℳ\mathcal{M}_{d}\subseteq\mathcal{M}, a plugin configurationΠd\Pi_{d}, and a priorityp∈ℤp\in\mathbb{Z}.
+
+Definition 5(Rule Node — Boolean Expression Tree).Arule nodeϕ\phiis defined recursively as one of two forms (Figure˜6illustrates example expression trees):
+•Leaf(signal reference):ϕ=leaf⁡(τ,n)\phi=\operatorname{leaf}(\tau,n), referencing a signal typeτ\tauand rule namenn.
+
+•Composite(Boolean operator):ϕ=(𝗈𝗉,[ϕ1,…,ϕk])\phi=(\mathsf{op},[\phi_{1},\ldots,\phi_{k}]), where𝗈𝗉∈{and,or,not}\mathsf{op}\in\{\operatorname{and},\operatorname{or},\operatorname{not}\}andϕ1,…,ϕk\phi_{1},\ldots,\phi_{k}are child rule nodes.not\operatorname{not}is strictly unary (k=1k=1).
+
+Evaluation proceeds by structural recursion:
+eval​(ϕ,S​(r))={𝟏[∃(ρ,1,c)∈S(r):ρ.τ=τ∧ρ.n=n]if​ϕ=leaf⁡(τ,n)⋀i=1keval​(ϕi,S​(r))if​𝗈𝗉=and⋁i=1keval​(ϕi,S​(r))if​𝗈𝗉=or¬eval​(ϕ1,S​(r))if​𝗈𝗉=not\text{eval}(\phi,S(r))=\begin{cases}\mathbf{1}\bigl[\exists\,(\rho,1,c)\in S(r):\rho.\tau=\tau\wedge\rho.n=n\bigr]&\text{if }\phi=\operatorname{leaf}(\tau,n)\\[4.0pt]
+\bigwedge_{i=1}^{k}\text{eval}(\phi_{i},S(r))&\text{if }\mathsf{op}=\operatorname{and}\\[4.0pt]
+\bigvee_{i=1}^{k}\text{eval}(\phi_{i},S(r))&\text{if }\mathsf{op}=\operatorname{or}\\[4.0pt]
+\neg\,\text{eval}(\phi_{1},S(r))&\text{if }\mathsf{op}=\operatorname{not}\end{cases}(6)
+
+The recursive structure enables arbitrarily nested Boolean expressions.
+Classical flat formulas—a single AND or OR over leaf conditions—are the depth-1 special case and remain the recommended form for simple routing policies.
+When richer logic is needed, nesting expresses compound operators directly within a single decision:nor⁡(A,B)=not⁡(or⁡(A,B))\operatorname{nor}(A,B)=\operatorname{not}(\operatorname{or}(A,B));nand⁡(A,B)=not⁡(and⁡(A,B))\operatorname{nand}(A,B)=\operatorname{not}(\operatorname{and}(A,B));xor⁡(A,B)=or⁡(and⁡(A,not⁡(B)),and⁡(not⁡(A),B))\operatorname{xor}(A,B)=\operatorname{or}(\operatorname{and}(A,\operatorname{not}(B)),\;\operatorname{and}(\operatorname{not}(A),B)).
+YAML’s natural indentation mirrors the logical nesting, preserving readability and auditability even for complex formulas.
+Priority-ordered decisions compose multiple such formulas into an ordered evaluation, providing conflict resolution and organizational structure for deployment-scale routing policies.
+
+Figure 6:Rule-node expression trees at increasing depth. (a) A flat depth-1 tree: AND over three leaf conditions. (b) A NOR expression:not​(or​(cs,math))\textsc{not}(\textsc{or}(\text{cs},\text{math})), matching all non-STEM queries. (c) An XOR expression composed from AND, OR, and NOT primitives, routing requests that match exactly one of two signals. Leaf nodes (gray) reference signal conditions; composite nodes use AND (blue), OR (green), and NOT (orange).
+4.2Confidence Computation
+When a decision matches, we compute a confidence score as the mean confidence over satisfied conditions:
+
+conf​(d,S​(r))=1|Γsat|​∑γj∈Γsatcj​(r)\text{conf}(d,S(r))=\frac{1}{|\Gamma_{\text{sat}}|}\sum_{\gamma_{j}\in\Gamma_{\text{sat}}}c_{j}(r)(7)
+whereΓsat={γj∈Γ∣sat​(γj,S​(r))=1}\Gamma_{\text{sat}}=\{\gamma_{j}\in\Gamma\mid\text{sat}(\gamma_{j},S(r))=1\}andcj​(r)c_{j}(r)is the signal confidence for conditionγj\gamma_{j}.
+For embedding signals,cjc_{j}is the cosine similarity; for heuristic and binary ML signals,cj=1.0c_{j}=1.0.
+
+4.3Selection Strategies
+Given the set of matched decisions𝒟match={d∈𝒟∣eval​(ϕd,S​(r))=1}\mathcal{D}_{\text{match}}=\{d\in\mathcal{D}\mid\text{eval}(\phi_{d},S(r))=1\}, two strategies selectd∗d^{*}:
+
+Priority Strategy.
+d∗=arg⁡maxd∈𝒟match⁡pdd^{*}=\arg\max_{d\in\mathcal{D}_{\text{match}}}p_{d}(8)This provides deterministic, administrator-controlled routing.
+Ties are broken by insertion order.
+
+Confidence Strategy.
+d∗=arg⁡maxd∈𝒟match⁡conf​(d,S​(r))d^{*}=\arg\max_{d\in\mathcal{D}_{\text{match}}}\text{conf}(d,S(r))(9)This enables data-driven routing where embedding similarity and classifier confidence drive selection.
+
+The priority strategy is the default for production deployments where predictability is paramount.
+The confidence strategy is preferred for experimental settings where the system should adapt to query characteristics.
+
+4.4Evaluation Algorithm
+Algorithm 1Decision Evaluation0:Signal resultS​(r)S(r), decisions𝒟\mathcal{D}, strategyσ∈{priority,confidence}\sigma\in\{\text{priority},\text{confidence}\}
+0:Selected decisiond∗d^{*}, confidencec∗c^{*}
+1:𝒟match←∅\mathcal{D}_{\text{match}}\leftarrow\emptyset
+2:ford∈𝒟d\in\mathcal{D}do
+3:ifeval​(ϕd,S​(r))\text{eval}(\phi_{d},S(r))then
+4:cd←conf​(d,S​(r))c_{d}\leftarrow\text{conf}(d,S(r))
+5:𝒟match←𝒟match∪{(d,cd)}\mathcal{D}_{\text{match}}\leftarrow\mathcal{D}_{\text{match}}\cup\{(d,c_{d})\}
+6:endif
+7:endfor
+8:ifσ=priority\sigma=\text{priority}then
+9:(d∗,c∗)←arg⁡max(d,c)∈𝒟match⁡pd(d^{*},c^{*})\leftarrow\arg\max_{(d,c)\in\mathcal{D}_{\text{match}}}p_{d}
+10:else
+11:(d∗,c∗)←arg⁡max(d,c)∈𝒟match⁡c(d^{*},c^{*})\leftarrow\arg\max_{(d,c)\in\mathcal{D}_{\text{match}}}c
+12:endif
+13:return(d∗,c∗)(d^{*},c^{*})
+
+The algorithm runs inO​(M⋅Lmax)O(M\cdot L_{\max})whereM=|𝒟|M=|\mathcal{D}|is the number of decisions andLmaxL_{\max}is the maximum number of conditions per decision.
+In practice,M≤50M\leq 50andLmax≤10L_{\max}\leq 10, making decision evaluation negligible (<0.1<0.1ms) relative to signal extraction.
+
+4.5Expressiveness Analysis
+The recursive rule-node model can express common routing patterns with depth-1 trees (flat formulas) and richer patterns through nesting:
+
+•Domain routing: A single leaf condition routes by classified domain.
+
+•Guarded routing: AND of a domain condition and a complexity condition routes complex queries within a domain to a capable model.
+
+•Exclusion routing:and​(domain,not​(complexity))\textsc{and}(\text{domain},\textsc{not}(\text{complexity}))routes simple queries within a domain to a lightweight model, avoiding the cost of a full-capability model for straightforward requests.
+
+•Multi-signal routing: AND of keyword, embedding, and language conditions provides precise routing for specific query patterns.
+
+•Fallback chains: Multiple decisions with decreasing priority and progressively broader conditions implement fallback routing.
+
+•NOR routing(blanket exclusion):not​(or​(cs,math,physics))\textsc{not}(\textsc{or}(\text{cs},\text{math},\text{physics}))routes all non-STEM queries to a general-purpose model without enumerating every non-STEM domain.
+
+•NAND routing(conditional exemption):not​(and​(zh,code))\textsc{not}(\textsc{and}(\text{zh},\text{code}))matches all requestsexceptChinese-language code queries, useful for compliance-based routing.
+
+•XOR routing(mutual exclusion):or​(and​(A,not​(B)),and​(not​(A),B))\textsc{or}(\textsc{and}(A,\textsc{not}(B)),\;\textsc{and}(\textsc{not}(A),B))routes requests matching exactly one of two signals, enabling exclusive specialization.
+
+•Nested multi-signal:and​(or​(cs,math_kw),en,not​(long_ctx))\textsc{and}(\textsc{or}(\text{cs},\text{math\_kw}),\;\text{en},\;\textsc{not}(\text{long\_ctx}))combines disjunctive, conjunctive, and negated sub-trees in a single decision for fine-grained routing.
+
+Functional completeness.The expressiveness of the recursive rule-node model rests on a classical result from Boolean algebra[13]: the operator set{∧,∨,¬}\{\wedge,\vee,\neg\}isfunctionally complete—any Boolean functionf:{0,1}N→{0,1}f:\{0,1\}^{N}\to\{0,1\}can be expressed as a formula over these operators.
+Because each rule node may nest AND, OR, and NOT to arbitrary depth, asingledecision formulaϕ\phican already represent any Boolean function over theNNsignal match indicators—no multi-decision composition is required for completeness.
+
+Proposition 1(Single-decision completeness).For any Boolean functionf:{0,1}N→{0,1}f:\{0,1\}^{N}\to\{0,1\}over signal match indicators, there exists a rule nodeϕ\phiusing AND, OR, and NOT such thateval​(ϕ,S​(r))=f​(S​(r))\text{eval}(\phi,S(r))=f(S(r))for all signal resultsS​(r)S(r).
+
+Proof sketch.Constructϕ\phidirectly from the truth table offf.
+For each minterm (input assignment wheref=1f=1), form an AND-node over the corresponding literals (a leafleaf​(τi,ni)\textsc{leaf}(\tau_{i},n_{i})when theii-th signal is 1, ornot​(leaf​(τi,ni))\textsc{not}(\textsc{leaf}(\tau_{i},n_{i}))when it is 0).
+Collect all such AND-nodes under a single OR-node.
+Since{∧,∨,¬}\{\wedge,\vee,\neg\}is functionally complete, the resulting tree evaluates toff.
+∎
+
+Proposition 2(Routing policy completeness).For any routing policyπ:{0,1}N→ℳ∪{⊥}\pi:\{0,1\}^{N}\to\mathcal{M}\cup\{\bot\}mapping signal vectors to model selections, there exists a decision set𝒟\mathcal{D}with recursive AND/OR/NOT formulas and priority ordering such thatπ\piis realized by the evaluation algorithm (Algorithm˜1).
+
+Proof sketch.For each modelmkm_{k}in the range ofπ\pi, construct a single decisiondkd_{k}whose rule node encodes the Boolean functionfk​(𝐬)=𝟏​[π​(𝐬)=mk]f_{k}(\mathbf{s})=\mathbf{1}[\pi(\mathbf{s})=m_{k}]using the single-decision completeness result above.
+Assign priorities to resolve overlaps deterministically.
+∎
+
+This two-level universality guarantee—completeness within a single decisionandacross a decision set—means the decision engine imposesno inherent limitationon what routing policies can be configured.
+Priority ordering across decisions is no longer required for expressiveness; it serves as an organizational and conflict-resolution mechanism, equivalent to a decision list[32]over Boolean features.
+
+Structural analogy to combinational logic circuits.The recursive rule-node model maps naturally onto the hierarchy of combinational logic circuits studied in digital design[4].
+The following table summarizes the correspondence at three levels of generality:
+
+Circuit ModelRouting SystemExpressivenessPLA (two-level)[9]Flat decision (depth-1 tree)Any two-level Boolean functionGeneral combinational circuitRecursive rule-node treeAny Boolean functionCircuit array + priority encoderDecision set + priority orderingAny routing policyπ:{0,1}N→ℳ\pi:\{0,1\}^{N}\!\to\!\mathcal{M}
+At the first level, a depth-1 rule node—a single AND or OR over leaf conditions—is structurally isomorphic to aProgrammable Logic Array(PLA)[9]: signal extractors correspond to input lines, leaf conditions to the AND-plane, and the top-level operator to the OR-plane.
+At the second level, a recursive rule-node tree corresponds to a general combinational logic circuit—a directed acyclic graph of AND, OR, and NOT gates—where each decision is a complete circuit computing an arbitrary Boolean function.
+At the third level, the priority-ordered decision set acts as an array of such circuits with a priority encoder selecting the output, realizing any routing policy.Figure˜7illustrates this three-level correspondence.
+
+Figure 7:Three-level correspondence between combinational logic circuits and the decision engine.Level 1: A PLA with AND-plane and OR-plane corresponds to a flat (depth-1) decision formula.Level 2: A general combinational circuit with arbitrarily nested AND, OR, and NOT gates corresponds to a recursive rule-node tree within a single decision.Level 3: An array of circuits with a priority encoder corresponds to the full decision set with priority-ordered evaluation, realizing any routing policy.In a PLA, logic is “programmed” by setting fuse connections; in a general circuit, by wiring gates; in our system, by YAML configuration whose indentation directly mirrors the gate-level nesting.
+This correspondence provides a well-understood theoretical foundation: decades of results on logic minimization, hazard-free design, and testability[4]apply directly to reasoning about decision optimization and coverage analysis.
+
+Decision set verification and minimization.The combinational-logic correspondence makes formal analysis tools from logic synthesis directly applicable to routing configurations.Coverage analysischecks whether every reachable point in the signal space{0,1}N\{0,1\}^{N}is matched by at least one decision, identifying dead zones where requests would receive no routing directive.Conflict detectionidentifies signal combinations where multiple decisions match but route to incompatible model pools, flagging ambiguities that priority ordering must resolve.Decision minimization, analogous to the Espresso heuristic for two-level logic optimization[4]and multi-level logic restructuring[4], can reduce a decision set to a minimal equivalent form by merging decisions with compatible conditions and eliminating subsumed rules.
+These standard logic-verification techniques become applicable to routing policy validation without adaptation, a direct consequence of the structural isomorphism.
+
+4.6Generalization to Fuzzy Evaluation
+The Boolean decision model admits a natural generalization when signal confidence scores are continuous.
+Rather than binarizing each signal’s output before Boolean combination, we evaluate rule-node trees over the continuous confidence values directly, using fuzzy logic operators[45].
+
+Definition 6(Fuzzy Rule-Node Evaluation).Given continuous signal confidencesc​(r)∈[0,1]c(r)\in[0,1]for each leaf condition, the fuzzy evaluation of a rule nodeϕ\phiis defined by structural recursion:
+eval~​(ϕ,S​(r))={cϕ​(r)if​ϕ=leaf⁡(τ,n)mini=1k⁡eval~​(ϕi,S​(r))if​𝗈𝗉=andmaxi=1k⁡eval~​(ϕi,S​(r))if​𝗈𝗉=or1−eval~​(ϕ1,S​(r))if​𝗈𝗉=not\widetilde{\text{eval}}(\phi,S(r))=\begin{cases}c_{\phi}(r)&\text{if }\phi=\operatorname{leaf}(\tau,n)\\[6.0pt]
+\displaystyle\min_{i=1}^{k}\,\widetilde{\text{eval}}(\phi_{i},S(r))&\text{if }\mathsf{op}=\operatorname{and}\\[6.0pt]
+\displaystyle\max_{i=1}^{k}\,\widetilde{\text{eval}}(\phi_{i},S(r))&\text{if }\mathsf{op}=\operatorname{or}\\[6.0pt]
+1-\widetilde{\text{eval}}(\phi_{1},S(r))&\text{if }\mathsf{op}=\operatorname{not}\end{cases}(10)wherecϕ​(r)c_{\phi}(r)is the confidence score of the signal matching leafϕ\phi.
+
+The operators(min,max,1−x)(\min,\max,1{-}x)form the standard fuzzy complement triple and satisfy De Morgan’s laws at every level of the tree, preserving the algebraic properties of the crisp model[3].
+This fuzzy evaluation is astrict generalization: when all confidences are binary (c∈{0,1}c\in\{0,1\}),min\minreduces to∧\wedge,max\maxreduces to∨\vee, and1−x1{-}xreduces to¬\neg, so the evaluation coincides exactly with the crisp Boolean model.
+
+The practical consequence is significant.
+The current confidence strategy (Equation˜7) uses mean confidence as a tiebreakerafterbinary matching.
+Fuzzy evaluation incorporates confidenceduringformula evaluation: a decision with three conditions matched at confidences(0.95,0.88,0.72)(0.95,0.88,0.72)yields a fuzzy AND score of0.720.72, while a decision with two conditions at(0.99,0.98)(0.99,0.98)scores0.980.98—correctly preferring the more confident partial match even when both decisions pass binary evaluation.
+The functional completeness result of the previous section extends directly: the fuzzy operator triple(min,max,1−x)(\min,\max,1{-}x)is functionally complete over the continuous lattice[0,1][0,1], so any monotone routing policy over continuous signal scores is realizable.
+
+4.7Composable Decision Profiles
+The decision model directly enablescomposable signal orchestration: different deployment scenarios are expressed as different decision sets𝒟\mathcal{D}over the same signal infrastructure.
+A healthcare deployment defines decisions with authz and domain conditions routing to compliant model pools; a developer-tool deployment defines decisions with complexity and keyword conditions routing to cost-optimized cascades; a multi-cloud deployment defines decisions with domain and modality conditions, using latency-aware model selection across provider endpoints.
+
+Formally, switching deployment scenarios corresponds to loading a different decision profile𝒟Γ\mathcal{D}_{\Gamma}, while the signal extraction layer𝒮\mathcal{S}and plugin implementationsΠ\Piremain unchanged.
+This separation ofpolicy(what decisions to evaluate) frommechanism(how signals are computed and plugins execute) is the architectural basis for the composability claimed inSection˜2.
+
+4.8Interpretation as Mixture-of-Experts Gating
+The priority-ordered decision evaluation admits a precise structural analogy to theMixture-of-Experts(MoE) gating mechanism[36].
+In a standard MoE layer, a gating networkG​(𝐱)G(\mathbf{x})computes a sparse distribution overKKexpert sub-networks, and the output is a weighted combination of the selected experts’ outputs.
+In our system:
+
+•Thesignal vector𝐬\mathbf{s}plays the role of the shared representation that the gating network operates on.
+
+•Eachdecision blockdid_{i}with its Boolean formulaϕi​(𝐬)\phi_{i}(\mathbf{s})acts as anexpert gate—a binary function that determines whether expertii(a model pool with associated plugins) is activated.
+
+•Priority orderingimplementshard routing with early exit: the first decision whose gate evaluates to true captures the request, analogous to top-1 expert selection in sparse MoE but with a deterministic, priority-based selection rule rather than a learned softmax.
+
+Figure˜8formalizes this correspondence.
+Unlike standard MoE, the gates here are symbolic (Boolean formulas over interpretable signals) rather than learned softmax projections, which enables formal verifiability and compositional editability.
+
+Figure 8:Structural analogy between Mixture-of-Experts gating and the VSR decision engine.Left: In a sparse MoE layer, a learned gating network selects top-kkexperts via softmax.Right: In VSR, Boolean formulas over the signal vector act as symbolic expert gates, with priority ordering implementing deterministic early-exit selection. Dashed arrows mark the structural correspondence.
+4.9Layered Entropy-Folding Interpretation
+The priority-ordered gate stack also admits an information-theoretic interpretation as a layered uncertainty-collapse process.
+Letgℓ​(𝐬)∈{0,1}g_{\ell}(\mathbf{s})\in\{0,1\}denote the match outcome of theℓ\ell-th gate under priority order, and letZℓ=gℓ​(𝐬)Z_{\ell}=g_{\ell}(\mathbf{s}).
+Define routing uncertainty afterℓ\ellevaluated gates as:
+Uℓ=H​(M∣𝐬,Z1:ℓ)U_{\ell}=H(M\mid\mathbf{s},Z_{1:\ell})(11)whereMMis the final selected model random variable.
+By the chain rule of mutual information:
+Uℓ+1=Uℓ−I​(M;Zℓ+1∣𝐬,Z1:ℓ)≤UℓU_{\ell+1}=U_{\ell}-I\!\left(M;\,Z_{\ell+1}\mid\mathbf{s},Z_{1:\ell}\right)\leq U_{\ell}(12)so each additional gate can only maintain or reduce uncertainty.
+In this sense, priority depth iscontrol depth: a sequence of policy constraints that folds entropy toward a deterministic choice.
+
+Figure 9:Transformer-style visualization of layered control depth in VSR.
+Signal extraction constructs a shared embedding𝐬\mathbf{s}; stacked decision layers apply Boolean gatesϕℓ​(𝐬)\phi_{\ell}(\mathbf{s})that progressively reduce routing uncertaintyUℓU_{\ell}; selection resolves(d∗,m∗)(d^{*},m^{*})via priority early-exit; plugin compositionΨd∗\Psi_{d^{*}}acts as an output-side projection head over request/response behavior.The MoE analogy also clarifies what the system isnot: it is not a Transformer in the sequential sense.
+Transformer blocks transform the representation layer by layer—each block’s output is the next block’s input.
+In our architecture, all decision blocks operate on thesameshared signal vector𝐬\mathbf{s}; there is no inter-decision information flow.
+The priority ordering is anearly-exit mechanismover parallel evaluations, not a sequential transformation pipeline.
+This distinction is important: it means that adding or removing decisions does not affect the behavior of other decisions (modulo priority reordering), a composability property that sequential architectures lack.
+
+5Plugin Framework
+The plugin layer provides a composable middleware architecture where each matched decision activates an independent chain of typed transformations.
+We describe the plugin model and four core infrastructure plugins; safety signal classifiers are covered inSection˜7, hallucination detection inSection˜8, and memory retrieval and RAG injection inSection˜13.
+
+5.1Plugin Execution Model
+Formally, a pluginπ\piis a typed transformation on the request-response pair:
+π:(Request,Context,Configπ)→(Request′,Response′)∪{⊥}\pi:(\text{Request},\text{Context},\text{Config}_{\pi})\to(\text{Request}^{\prime},\text{Response}^{\prime})\cup\{\bot\}(13)where⊥\botdenotes early termination (e.g., a cache hit returning immediately or a fast response short-circuiting the pipeline).
+
+Plugins execute in a fixed pipeline order within each decision’s chain.
+On therequest path: fast response→\tocache→\toRAG→\tomodality→\tomemory→\tosystem prompt→\toheader mutation.
+On theresponse path: hallucination detection→\tocache write.
+Each plugin is independently enabled per decision, and its configuration (thresholds, modes, policies) is scoped to that decision.
+
+Jailbreak and PII detection are first-classsignals(Sections˜3and7) evaluated in parallel with all other signal types, not serial plugins in the request path.
+Decisions that match safety signals activate thefast_responseplugin to return an immediate rejection.
+
+This per-decision scoping is a key architectural distinction from systems that apply safety and caching globally: it allows differentiated policies for different routing outcomes within the same deployment.
+
+5.2Output-Space Projection Perspective
+For a matched decisiond∗d^{*}, the plugin chain can be interpreted as a policy-scoped projection from routing state to deployment-compliant output behavior:
+Ψd∗=πn∘πn−1∘⋯∘π1\Psi_{d^{*}}=\pi_{n}\circ\pi_{n-1}\circ\cdots\circ\pi_{1}(14)where eachπi\pi_{i}is a typed transformation in the configured chain.
+Functionally, this is analogous to an output projection stage after gating: once the decision fixes the active policy path, plugins realize that policy as concrete transformations on request/response state (e.g., context injection, auth header mutation, hallucination annotation, cache write-through).
+This analogy is operational rather than architectural: unlike a Transformer projection head,Ψd∗\Psi_{d^{*}}is a configurable symbolic composition, not a learned linear map.
+
+5.3Semantic Cache
+The semantic cache exploits the observation that semantically similar queries often produce equivalent responses, avoiding redundant model invocations.
+
+Similarity model.Given a queryqqextracted from requestrr, the cache searches for an entryeesuch that:
+cos⁡(𝐞q,𝐞e)≥θd\cos(\mathbf{e}_{q},\mathbf{e}_{e})\geq\theta_{d}(15)where𝐞q,𝐞e\mathbf{e}_{q},\mathbf{e}_{e}are embeddings computed by the shared embedding model andθd\theta_{d}is the per-decision similarity threshold.
+On hit, the cached response is returned immediately, bypassing model invocation entirely.
+
+Write-through protocol.On cache miss, a pending entry is registered before forwarding to the model.
+Upon receiving the response, the entry is completed with the response content.
+This ensures that concurrent identical queries observe the pending state rather than triggering redundant model calls.
+
+Backend abstraction.Four backends provide different latency-persistence tradeoffs:
+(1) in-memory HNSW for single-node low-latency deployments;
+(2) Redis for distributed persistent caching;
+(3) Milvus for large-scale approximate nearest neighbor search;
+(4) a hybrid two-tier design combining in-memory HNSW (fast path) with Milvus (persistent store).
+
+5.4System Prompt Injection
+Per-decision system prompt injection enables different routing paths to carry different instructions.
+Two composition modes are defined:
+•Replace: Substitutes the entire system message, providing complete control over the model’s behavioral context.
+
+•Insert: Prepends the decision’s prompt to the existing system message, augmenting without overriding user-provided instructions.
+
+This enables patterns such as injecting domain-specific instructions for expert routing or safety preambles for sensitive query categories.
+
+5.5Header Mutation
+Header mutation enables metadata propagation to downstream model backends via HTTP header modifications (add, update, delete).
+This supports use cases including:
+backend-specific authentication injection,
+routing decision metadata propagation for downstream observability,
+and custom signaling to model-serving frameworks (e.g., LoRA adapter selection via headers).
+
+5.6Fast Response
+The fast response plugin enables a decision to short-circuit the entire pipeline and return an immediate OpenAI-compatible response without forwarding the request to any upstream model.
+This is the primary mechanism for acting on safety signals.
+
+Execution model.When a decision’sfast_responseplugin is configured, the pipeline checks for it before any other plugin in the chain.
+If present, the configured message is returned as a standardchat.completionresponse withfinish_reason: "stop", and no further processing occurs.
+
+Streaming compatibility.The plugin inspects the original request’sstreamparameter.
+For non-streaming requests, it returns a single JSON object.
+For streaming requests (stream: true), it generates a Server-Sent Events (SSE) sequence: an initial chunk with the assistant role, word-by-word content chunks, a final chunk withfinish_reason: "stop", and the[DONE]sentinel—matching the exact format that OpenAI-compatible clients expect.
+
+Use cases.The canonical use case is safety enforcement: a decision matching a jailbreak or PII signal activatesfast_responseto return a policy-compliant refusal message.
+However, the plugin is general-purpose—it can also serve canned responses for FAQ-like queries, maintenance windows, or rate-limited fallback messages without consuming model compute.
+
+6Programmable Neural-Symbolic Configuration Language
+While the YAML configuration format described in preceding sections is sufficient for direct human authorship, it conflates two concerns: thelogical specificationof routing policy (signals, decisions, plugins) and thedeployment target(flat YAML, Kubernetes CRDs, Helm charts).
+We introduce a programmable configuration language—the instruction set of the neural-symbolic inference engine (formalized inSection˜6.8)—that separates these concerns, providing a concise, human-readable, and machine-parseable surface syntax for routing policies that compiles to multiple deployment targets through a shared internal representation.
+
+6.1Design Goals
+The DSL is designed around four principles:
+
+1.Conciseness: Routing policies should read as close to natural language as possible, minimizing syntactic noise relative to YAML.
+
+2.Type safety: Signal references in Boolean expressions are resolved at compile time; undefined or misspelled signal names produce diagnostics before deployment.
+
+3.Multi-target emission: A single DSL source compiles to flat YAML (for local development), KubernetesSemanticRouterCRDs (for operator-based deployment), or Helmvalues.yaml(for chart-based deployment).
+
+4.Round-trip fidelity: An existingRouterConfigcan bedecompiledback to DSL source, enabling migration from YAML to DSL and “round-trip” editing workflows.
+
+6.2Concrete Syntax
+The DSL defines five top-level block types:SIGNAL,ROUTE,PLUGIN,BACKEND, andGLOBAL.Figure˜10shows a representative configuration.
+
+SIGNAL domain math { mmlu_categories: ["math"] }
+SIGNAL keyword urgent { operator: "any", keywords: ["urgent","asap"] }
+
+PLUGIN safe_pii pii { enabled: true, pii_types_allowed: [] }
+
+ROUTE math_route (description = "Math") {
+  PRIORITY 100
+  WHEN domain("math")
+  MODEL "qwen2.5:3b" (reasoning = true, effort = "high")
+  PLUGIN safe_pii
+}
+ROUTE urgent_ai {
+  PRIORITY 200
+  WHEN keyword("urgent") AND NOT domain("math")
+  MODEL "qwen3:70b" (reasoning = true),
+        "qwen2.5:3b" (reasoning = false)
+  ALGORITHM confidence { threshold: 0.5 }
+}
+
+BACKEND vllm_endpoint ollama { address: "127.0.0.1", port: 11434 }
+GLOBAL { default_model: "qwen2.5:3b", strategy: "priority" }Figure 10:A representative DSL configuration defining two signals, a reusable plugin template, two routes with Boolean decision logic, a backend endpoint, and global settings.EachSIGNALblock declares a named signal of a specific type (one of 12 supported types:keyword,embedding,domain,fact_check,user_feedback,preference,language,context,complexity,modality,authz,jailbreak,pii).
+EachROUTEblock defines a decision with a priority, a BooleanWHENclause over signal references, one or more model references with optional per-model parameters (reasoning mode, effort level, LoRA adapter, weight), an optional selection algorithm, and zero or more plugin attachments.PLUGINblocks at the top level define reusable templates that routes reference by name; inline plugin blocks within routes define route-specific configurations.
+
+6.3Grammar and Parsing
+The lexer and parser are implemented using theparticipleparser-generator library[38].
+The lexer defines 12 token classes (identifiers, integers, floats, strings, booleans, braces, parentheses, brackets, colon, comma, equals, comments) via regular expressions.
+The parser uses a PEG-style grammar with lookahead 3 to resolve ambiguities between signal references and other identifier uses.
+
+The Boolean expression grammar forWHENclauses follows standard precedence:
+
+BoolExpr::=AndTerm(ORAndTerm)∗\displaystyle::=\textit{AndTerm}\;(\texttt{OR}\;\textit{AndTerm})^{*}(16)AndTerm::=Factor(ANDFactor)∗\displaystyle::=\textit{Factor}\;(\texttt{AND}\;\textit{Factor})^{*}(17)Factor::=NOTFactor∣(BoolExpr)∣SignalRef\displaystyle::=\texttt{NOT}\;\textit{Factor}\mid\texttt{(}\;\textit{BoolExpr}\;\texttt{)}\mid\textit{SignalRef}(18)SignalRef::=type(“name”)\displaystyle::=\textit{type}\;\texttt{(}\;\textit{``name''}\;\texttt{)}(19)
+This grammar is parsed into a recursive AST (BoolAnd,BoolOr,BoolNot,SignalRefExprnodes) that the compiler flattens into theRuleCombinationtree consumed by the decision engine (Section˜4).Figure˜11illustrates the AST for a representative Boolean expression.
+
+ANDBoolAndkeyword("urgent")SignalRefNOTBoolNotdomain("math")SignalRef
+Figure 11:Boolean expression AST forWHEN keyword("urgent") AND NOT domain("math"). Each leaf is aSignalRefExprreferencing a named signal; internal nodes are Boolean operators (BoolAnd,BoolNot). The compiler flattens this tree into aRuleCombinationstructure for the decision engine.Error recovery is block-granular: if parsing a top-level block fails, the parser splits the input at block boundaries and attempts to parse remaining blocks independently, accumulating partial results alongside error diagnostics.
+This enables IDE-like incremental feedback during authoring.
+
+6.4Compilation Pipeline
+The compilation pipeline (Figure˜12) transforms DSL source through four stages:
+
+1.Lexing: The source is tokenized into a stream of typed tokens with position tracking for diagnostic reporting.
+
+2.Parsing: The token stream is parsed into araw parse tree(participle-generated structs), then lowered to aresolved AST(Program→\toSignalDecl,RouteDecl,PluginDecl,BackendDecl,GlobalDecl) with desugared values and resolved positions.
+
+3.Compilation: The AST is compiled to the internalRouterConfigstructure. This involves: (a) mapping eachSIGNALblock to the appropriate signal configuration (keyword rules, embedding rules, domain categories, etc.); (b) flattening the Boolean expression tree in eachWHENclause into aRuleCombinationtree withAND/OR/NOToperators; (c) resolving plugin references against top-level templates with field-level merge semantics (route-local fields override template defaults); and (d) mappingBACKENDblocks to endpoint, provider profile, embedding model, or semantic cache configurations based on the backend type keyword.
+
+4.Emission: TheRouterConfigis serialized to one of three target formats.
+
+Figure 12:The DSL compilation pipeline. Source text is lexed, parsed into a resolved AST, and compiled to the internalRouterConfig. From this representation, three emitters produce deployment-specific formats (flat YAML, Kubernetes CRD, Helm values). The decompiler reverses the pipeline, reconstructing DSL source from an existingRouterConfig, enabling round-trip editing. The validator operates on the AST directly, producing three-level diagnostics.
+6.5Multi-Target Emission
+The sharedRouterConfigrepresentation enables three emission targets from a single DSL source:
+
+•Flat YAML(EmitYAML): Direct marshaling ofRouterConfigfor local development and testing. An alternativeEmitUserYAMLvariant restructures the output into the nestedsignals/providersformat expected by the CLI tooling.
+
+•Kubernetes CRD(EmitCRD): Wraps the routing logic in aSemanticRoutercustom resource (vllm.ai/v1alpha1), mapping backend definitions tospec.vllmEndpointsand routing configuration tospec.config. Signal rules that the CRD schema does not model are preserved as extra fields for ConfigMap-based deployment compatibility.
+
+•Helm values(EmitHelm): Nests theRouterConfigunder aconfig:key compatible with the Helm chart’s ConfigMap template, pruning zero-value infrastructure sections for clean output.
+
+This separation means that infrastructure teams can change deployment targets without modifying the routing policy, and routing engineers can evolve policies without understanding Kubernetes manifests.
+
+6.6Decompilation and Round-Trip Editing
+The decompiler reconstructs DSL source text from an existingRouterConfig:
+
+1.Plugin template extraction: Plugins used by multiple routes are automatically factored into top-levelPLUGINtemplates; route-local plugins remain inline.
+
+2.Rule tree reconstruction: TheRuleCombinationtree in each decision is walked recursively to reconstruct the Boolean expression with properAND/OR/NOToperators and parenthesization.
+
+3.Signal type inference: Signal references in rule nodes are matched against the configuration’s signal lists to recover the original signal type keywords.
+
+This enables a migration path: existing YAML configurations can be decompiled to DSL, edited in the more concise syntax, and recompiled to any target format.
+The round-trip property (DSL→compileRouterConfig→decompileDSL→compileRouterConfig′≡RouterConfig\text{DSL}\xrightarrow{\text{compile}}\texttt{RouterConfig}\xrightarrow{\text{decompile}}\text{DSL}\xrightarrow{\text{compile}}\texttt{RouterConfig}^{\prime}\equiv\texttt{RouterConfig}) is validated by extensive test suites including idempotency and double-round-trip tests.
+
+6.7Three-Level Validation
+The validator operates on the resolved AST (before compilation) and produces diagnostics at three severity levels:
+
+1.Error(Level 1): Syntax errors detected during parsing—malformed blocks, unexpected tokens, missing delimiters. The block-granular error recovery ensures that errors in one block do not prevent analysis of subsequent blocks.
+
+2.Warning(Level 2): Reference resolution issues—aWHENclause references a signal name not defined in anySIGNALblock, or aPLUGINreference has no matching template. The validator performs fuzzy matching on undefined signal names and suggests corrections viaQuickFixannotations (e.g., “did you meanmath?” for a reference tomth).
+
+3.Constraint(Level 3): Semantic constraint violations—embedding thresholds outside[0,1][0,1], port numbers outside valid ranges, negative route priorities, unknown algorithm or signal types. These catch logical errors that are syntactically valid but semantically incorrect.
+
+Figure˜13illustrates the three-level diagnostic architecture.
+This scheme provides IDE-like progressive feedback, enabling both batch validation (CLIvalidatecommand) and interactive authoring with incremental diagnostics.
+
+Resolved ASTLevel 1 — Error:Syntax errors, malformed blocks, unexpected tokensLevel 2 — Warning:Undefined signal refs, missing plugins (+ fuzzy QuickFix)Level 3 — Constraint:Thresholds∉[0,1]\notin[0,1], invalid ports, unknown typesDiagnostic Report
+Figure 13:Three-level validation architecture. The validator processes the resolved AST through progressively deeper analysis: syntactic errors (Level 1), reference resolution with fuzzy-matched QuickFix suggestions (Level 2), and semantic constraint checking (Level 3). Diagnostics at all levels are accumulated into a unified report.
+6.8DSL as Instruction Set and Agent-Based Policy Synthesis
+The configuration language can be understood as theinstruction setof the neural-symbolic inference engine.
+Just as a CPU’s instruction set defines the space of programs that can execute on the hardware, the DSL defines the space of routing policies that can be instantiated on the signal-decision-plugin architecture.
+The functional completeness result ofSection˜4guarantees that this instruction set isuniversal: any routing policyπ:{0,1}N→ℳ\pi:\{0,1\}^{N}\to\mathcal{M}is expressible.
+
+This framing transforms the problem ofconfiguringthe router into aprogram synthesisproblem (Figure˜14): given a natural-language specification of routing requirements (“route math queries to the math model, enforce PII filtering for healthcare queries”), synthesize a valid DSL configuration that implements the specification.
+This is precisely the class of problems that code-generation agents—LLMs fine-tuned or prompted for program synthesis—are designed to solve.
+
+The DSL’s formal grammar and type-safe compilation make it particularly suitable as the target language: the structured syntax—with explicit keywords, typed blocks, and a finite set of signal types—constrains the generation space far more tightly than free-form YAML, reducing the probability of syntactically valid but semantically incorrect configurations.
+The three-level validator provides immediate, machine-readable feedback that a coding agent can use to iteratively refine generated configurations.
+
+Natural LanguageRouting SpecCoding Agent(LLM)DSL Config(YAML)InferenceEngineRouting QualityFeedbackQ​(r,m∗)Q(r,m^{*})synthesisgenerateinstantiateoptimize“Route math tospecialized model”program synthesissignal-decision-plugin
+Figure 14:Agent-based policy synthesis pipeline. A coding agent (LLM) translates natural-language routing specifications into DSL configurations, which are instantiated on the inference engine. Routing quality feedback closes the loop, enabling iterative policy refinement. The DSL’s functional completeness guarantees that any expressible routing policy is reachable by the synthesis process.The connection to reinforcement learning is direct: the coding agent’s policyπθ​(config∣spec)\pi_{\theta}(\text{config}\mid\text{spec})can be optimized via RLHF or rule-based reward[46], where the reward signal is the downstream routing qualityQ​(r,m∗)Q(r,m^{*})aggregated over a traffic distribution.
+This operates at ameta-levelcompared to prior work on RL-based routing[46]: rather than learning to route individual requests, the agent learns towrite routing policiesthat generalize across request distributions.
+The DSL provides the structured action space that makes this meta-learning tractable—the agent generates a finite, syntactically constrained configuration rather than an arbitrary neural network.
+
+6.9Synthesis: A Programmable Neural-Symbolic Inference Engine
+Taken together, the signal extraction layer (Section˜3), decision engine (Section˜4), and configuration language characterize the system as aprogrammable neural-symbolic inference engine:
+
+1.Neural front-end: The signal extraction layer uses both heuristic and learned (neural) methods to produce a structured representation—analogous to a hybrid embedding layer (Section˜3.8).
+
+2.Symbolic back-end: The decision engine applies Boolean logic over the structured representation—analogous to symbolic expert gating with formal verifiability (Section˜4.8).
+
+3.Programmable interface: The DSL configuration is the “program” that specifies the inference behavior, and the functional completeness of the Boolean decision model guarantees universality of the program space.
+
+4.Agent-compilable: The structured DSL enables LLM-based coding agents to serve as “compilers” from natural-language specifications to executable routing policies, with RL-based optimization closing the loop.
+
+This perspective unifies the Shannon-theoretic foundation (information reduction + Boolean synthesis) with the modern ML landscape (embeddings + MoE gating + agent-based program synthesis), and suggests that the architecture occupies a principled point in the design space between fully neural routing systems (which sacrifice interpretability and editability) and fully manual rule systems (which sacrifice adaptivity and scalability).
+
+7Request-Time Safety: Jailbreak and PII Signals
+Request-time safety in our architecture is implemented asfirst-class signals, not as serial plugins.
+Jailbreak and PII detection run in the signal extraction layer (Section˜3), evaluated in parallel alongside all other signal types (keyword, embedding, domain, etc.).Figure˜15illustrates how safety signals integrate with domain signals and decision rules.
+When a safety signal fires, the decision engine matches it to a decision that activates thefast_responseplugin (Section˜5), returning an immediate OpenAI-compatible response without contacting any upstream LLM.
+
+This signal-driven design has three key advantages:
+1.Zero added latency: safety classifiers run concurrently with intent signals, so the wall-clock cost is max(safety, intent) rather than safety + intent.
+
+2.Composability: safety signals can be combined with domain, keyword, or embedding signals in decision rules using AND/OR logic—e.g., strict jailbreak detection only for financial queries.
+
+3.Uniform observability: safety results appear as standard signal matches in headers (x-vsr-matched-jailbreak,x-vsr-matched-pii), traces, and the dashboard topology view.
+
+7.1Jailbreak Detection
+Jailbreak attacks attempt to override model safety instructions through adversarial prompt construction.
+Our detection pipeline addresses this as a classification problem with per-rule sensitivity control.
+
+Formulation.Given a text inputxx(the user’s latest message, or the full conversation history wheninclude_historyis enabled), a classifiergjbg_{\text{jb}}produces:
+gjb​(x)=(y,c)∈{benign,injection,jailbreak}×[0,1]g_{\text{jb}}(x)=(y,c)\in\{\textsc{benign},\textsc{injection},\textsc{jailbreak}\}\times[0,1](20)A jailbreak signal rule with thresholdθ\thetafires iffy≠benigny\neq\textsc{benign}andc≥θc\geq\theta.
+Multiple rules at different thresholds can coexist, enabling decisions to reference different sensitivity levels.
+
+Classifier architecture.We support four inference backends with varying context-length and deployment characteristics:
+(1) BERT with LoRA adapters (standard context);
+(2) ModernBERT[42]with Flash Attention;
+(3) mmBERT-32K with YaRN RoPE for 32K-token contexts;
+(4) external vLLM-served guardrail models for decoupled scaling.
+All local backends use the LoRA adapter architecture (Section˜9), reducing model memory footprint.
+
+Per-rule sensitivity.Different signal rules configure different thresholds: ajailbreak_strictrule might useθ=0.4\theta=0.4with full history analysis for financial endpoints, while ajailbreak_standardrule usesθ=0.65\theta=0.65on the latest message only.
+Decisions then reference the appropriate rule by name, enabling context-aware security policies (e.g., strict detection only when the domain signal also matches “economics”).
+
+7.2Contrastive Jailbreak Detection
+While the BERT classifier excels at detecting single-turn jailbreak attempts, it can be evaded bymulti-turn escalation(“boiling frog”) attacks in which each individual message appears benign but the conversation progressively steers the model toward unsafe behavior.
+We introduce a contrastive embedding method that operates alongside the BERT classifier within the same jailbreak signal type.
+
+Knowledge base construction.Each contrastive rule defines two exemplar sets: ajailbreak knowledge base𝒦jb\mathcal{K}_{\text{jb}}containing known adversarial patterns (e.g., “Ignore all previous instructions”, “You are now DAN”) and abenign knowledge base𝒦ben\mathcal{K}_{\text{ben}}containing representative normal queries (e.g., “What is the weather today”, “Help me write an email”).
+All KB embeddings are precomputed at initialization using a concurrent worker pool (identical to the complexity signal’s preloading strategy), so runtime cost is limited to embedding the incoming message and computing cosine similarities.
+
+Contrastive scoring.For each user messagemm, the contrastive score measures relative proximity to the jailbreak vs. benign exemplars:
+δ​(m)=maxj∈𝒦jb⁡cos⁡(𝐦,𝐣)−maxb∈𝒦ben⁡cos⁡(𝐦,𝐛)\delta(m)=\max_{j\in\mathcal{K}_{\text{jb}}}\cos(\mathbf{m},\mathbf{j})\;-\;\max_{b\in\mathcal{K}_{\text{ben}}}\cos(\mathbf{m},\mathbf{b})(21)A positiveδ\deltaindicates the message is semantically closer to jailbreak patterns; a negativeδ\deltaindicates it is closer to benign patterns.
+The subtraction normalizes for the overall embedding similarity scale, making the threshold robust across different embedding models.
+
+Max-contrastive chain (multi-turn detection).Wheninclude_historyis enabled, the system exploits the stateless nature of the OpenAI chat API—each request carries the full conversation history in themessagesarray—to evaluate every user message:
+Δ=maxm∈ℳuser⁡δ​(m)\Delta=\max_{m\in\mathcal{M}_{\text{user}}}\delta(m)(22)The rule fires whenΔ≥θ\Delta\geq\theta(defaultθ=0.10\theta=0.10).
+This max-pooling aggregation ensures that even if the current message is innocuous, the presence of any high-scoring turn in the history triggers detection.
+The approach is effective against gradual escalation because the attacker must include at least one semantically adversarial turn to steer the model, and that turn will produce a high contrastive score regardless of its position in the conversation.
+
+Integration with signal architecture.The contrastive method is selected via themethod: contrastivefield on a jailbreak rule, keeping the same signal typeτjb\tau_{\text{jb}}and rule-name addressing used by the BERT classifier.
+This means contrastive rules participate fully in the decision engine’s Boolean logic.
+A typical deployment combines both methods:
+•A BERT rule (jailbreak_standard,θ=0.65\theta=0.65) for fast, high-precision single-turn detection.
+
+•A contrastive rule (jailbreak_multiturn,θ=0.10\theta=0.10,include_history: true) for multi-turn chain detection.
+
+•A decision with OR logic fires ifeithermethod detects an attack, providing defense in depth.
+
+The embedding model is inherited from the globalembedding_modelsconfiguration (consistent with the complexity signal), avoiding per-rule model specification.
+
+7.3PII Detection
+PII detection identifies personally identifiable information at the token level and enforces configurable allow/deny policies.
+
+Formulation.A token classifiergpiig_{\text{pii}}operates on the input sequencex=(x1,…,xT)x=(x_{1},\ldots,x_{T})and produces BIO-tagged predictions:
+gpii​(x)={(i,j,ℓ,c)∣span​xi​…​xj​is PII type​ℓ​with confidence​c}g_{\text{pii}}(x)=\bigl\{(i,j,\ell,c)\mid\text{span }x_{i}\ldots x_{j}\text{ is PII type }\ell\text{ with confidence }c\bigr\}(23)whereℓ∈{person,email,phone,ssn,credit_card,…}\ell\in\{\textsc{person},\textsc{email},\textsc{phone},\textsc{ssn},\textsc{credit\_card},\ldots\}.
+
+Policy model.Each PII signal rule specifies a thresholdθ\thetaand an optional allow-listℒallow\mathcal{L}_{\text{allow}}.
+The rule fires when any detected entity(⋅,⋅,ℓ,c)(\cdot,\cdot,\ell,c)satisfiesc≥θc\geq\thetaandℓ∉ℒallow\ell\notin\mathcal{L}_{\text{allow}}.
+This per-rule policy enables differentiated enforcement: apii_deny_allrule blocks all entity types, while apii_allow_emailrule permits email addresses for appointment booking in medical contexts.
+
+7.4Parallel Safety Evaluation
+Both jailbreak and PII classifiers launch as concurrent goroutines within the signal extraction layer, alongside all other signal evaluators.
+The wall-clock time is dominated by the slowest signal evaluator rather than the sum of safety and intent classifiers.
+Both use the LoRA adapter architecture (Section˜9), and their results merge into the standard signal resultS​(r)S(r)consumed by the decision engine.
+
+When a safety signal fires, the matched decision activates itsfast_responseplugin, which short-circuits the pipeline and returns an OpenAI-compatible 200 OK response (supporting both streaming SSE and non-streaming JSON) without forwarding to any upstream model.
+
+Figure 15:Signal-driven safety architecture. Safety classifiers (τjb,τpii\tau_{\text{jb}},\tau_{\text{pii}}) run in the signal layer in parallel with intent signals, adding zero marginal latency. Decision rules compose safety signals with domain signals using AND/OR logic, enabling context-aware policies (e.g., strict jailbreak detection only for finance, relaxed PII policy for healthcare). High-priority safety decisions activate thefast_responseplugin to return an immediate 200 OK without contacting any upstream model.
+7.5Composable Safety Design
+Placing safety detection in the signal layer enables a class of flexible security policies that are difficult to express in a serial plugin architecture.
+We highlight three patterns enabled by this design:
+
+Context-aware thresholds.A single deployment can define multiple jailbreak rules at different sensitivity levels (e.g.,θ=0.4\theta=0.4for strict,θ=0.65\theta=0.65for standard).
+Decisions compose these with domain signals: ablock_jb_financedecision uses the strict rule AND the “economics” domain signal, while ablock_jb_generaldecision uses the standard rule alone.
+This provides differentiated security posture without separate deployments.
+
+Per-domain PII policies.Different domains require different PII handling: a healthcare endpoint may allow email and phone number for appointment booking while blocking SSN, whereas a public chatbot blocks all PII types.
+Each PII signal rule carries its own allow-list, and decisions combine the appropriate rule with the relevant domain signal.
+This replaces a monolithic PII policy with a set of composable, domain-scoped rules.
+
+Graduated response.By defining multiple safety decisions at different priorities, the system can implement graduated responses: a high-confidence jailbreak (c≥0.9c\geq 0.9) triggers an immediate block (priority 1001), while a moderate-confidence detection (0.4≤c<0.90.4\leq c<0.9) triggers a warning header without blocking (priority 500).
+Thefast_responseplugin handles blocking; a header-only decision allows the request to proceed with an observability annotation.
+This graduated model reduces false-positive impact while maintaining security coverage.
+
+8HaluGate: Gated Hallucination Detection
+Hallucination—generating plausible but unsupported content—is a fundamental limitation of autoregressive language models[23,26].
+We introduce HaluGate, a three-stage pipeline (Figure˜16) that addresses a key efficiency challenge: most queries (creative writing, code generation, brainstorming) do not require factual verification, yet naïve hallucination detection incurs overhead on every response.
+
+8.1Design Rationale
+Existing approaches apply hallucination detection uniformly to all responses[23]or require multiple response samples[26].
+HaluGate introduces two innovations:
+(1) agating stagethat skips verification for non-factual queries, amortizing detection cost over the query distribution; and
+(2) aspan-leveldetection and explanation pipeline that identifieswhichtokens are hallucinated andwhy, rather than providing only a binary judgment.
+
+8.2Three-Stage Pipeline
+QueryqqSentinelgsentg_{\text{sent}}factual?skipnoResponseaaDetectorgdetg_{\text{det}}Explainergnlig_{\text{nli}}Resultsyesspansrequest pathresponse path
+Figure 16:HaluGate three-stage gated pipeline. The Sentinel classifies queries on the request path; non-factual queries (40–60%) skip verification entirely (dashed). For factual queries, the Detector identifies hallucinated spans in the model response, and the Explainer provides NLI-based diagnostics per span.Stage 1: Sentinel (Gating).A lightweight binary classifiergsentg_{\text{sent}}determines whether the query warrants factual verification:
+gsent​(q)∈{needs_fact_check,no_fact_check}g_{\text{sent}}(q)\in\{\textsc{needs\_fact\_check},\textsc{no\_fact\_check}\}(24)Ifgsent​(q)=no_fact_checkg_{\text{sent}}(q)=\textsc{no\_fact\_check}, Stages 2–3 are skipped entirely.
+The Sentinel operates on the request text and is implemented as a LoRA-adapted classifier sharing the base model with other signal extractors.
+In practice, 40–60% of queries are classified as non-factual, proportionally reducing the average detection cost.
+
+The Sentinel also serves dual duty as thefact_checksignal in the signal extraction layer (Section˜3), enabling decisions to incorporate factual grounding into routing logic.
+
+Stage 2: Detector (Span Identification).A token-level classifiergdetg_{\text{det}}identifies hallucinated spans in the model response:
+gdet​(q,𝐜,a)={(i,j,ci​j)∣ai​…​aj​is unsupported by context​𝐜}g_{\text{det}}(q,\mathbf{c},a)=\bigl\{(i,j,c_{ij})\mid a_{i}\ldots a_{j}\text{ is unsupported by context }\mathbf{c}\bigr\}(25)whereqqis the user query,𝐜\mathbf{c}is the grounding context (user-provided context and tool-call results),aais the assistant’s response, and(i,j,ci​j)(i,j,c_{ij})denotes a flagged span with confidence.
+
+When tool-calling is present, tool execution results provide high-quality ground truth: database query results, API responses, and calculations serve as authoritative context𝐜\mathbf{c}, substantially improving detection precision.
+
+Stage 3: Explainer (NLI Classification).For each flagged span(i,j)(i,j), a Natural Language Inference (NLI) model[43]classifies the relationship between the span and the grounding context:
+gnli​(ai:j,𝐜)∈{entailment,contradiction,neutral}g_{\text{nli}}(a_{i:j},\mathbf{c})\in\{\textsc{entailment},\textsc{contradiction},\textsc{neutral}\}(26)This distinguishes between content thatcontradictsthe context (definitive hallucination) and content that is merelyunsupported(potential hallucination), providing actionable diagnostics.
+
+8.3Cost Analysis
+Letpfactualp_{\text{factual}}be the fraction of queries requiring factual verification,CsentC_{\text{sent}},CdetC_{\text{det}},CnliC_{\text{nli}}be the costs of each stage, andk¯\bar{k}be the average number of flagged spans.
+The expected cost per query is:
+𝔼​[Cost]=Csent+pfactual⋅(Cdet+k¯⋅Cnli)\mathbb{E}[\text{Cost}]=C_{\text{sent}}+p_{\text{factual}}\cdot\bigl(C_{\text{det}}+\bar{k}\cdot C_{\text{nli}}\bigr)(27)
+Since the Sentinel is a lightweight LoRA-adapted classifier (Section˜9) that runs concurrently with other signal extractors, its wall-clock cost is largely hidden behind other ML signals.
+For a workload withpfactual=0.5p_{\text{factual}}=0.5, the gating stage reduces the expected Detector and Explainer cost by approximately 50% compared to applying full detection to all responses.
+
+8.4Action Policies
+HaluGate supports four configurable response actions:
+
+Table 1:HaluGate action policies upon hallucination detectionActionSemanticsblockReject the response; return an error to the client. Appropriate for high-stakes factual applications.headerPropagate detection metadata via HTTP headers, enabling downstream policy enforcement by the client or API gateway.bodyPrepend a warning to the response body, alerting users to potential inaccuracies.noneLog detection results without modifying the response. Useful for monitoring and threshold calibration.The progressive architecture enables incremental deployment: organizations begin with Sentinel-only gating (signal-layer integration at minimal cost), add the Detector for span-level monitoring, and enable the Explainer for full diagnostic output.
+
+9LoRA-Based MoM Model Family
+Signal-driven routing requires multiple classification tasks on the critical path of every request.
+Naïvely, each task requires a separate fine-tuned model, creating a memory scaling problem.
+We describe the LoRA-based architecture that addresses this and the purpose-built model family trained for semantic routing.
+
+9.1Problem: Linear Memory Scaling
+Letnndenote the number of active classification tasks (domain, jailbreak, PII, fact-check, feedback, modality).
+With independently fine-tuned models, the total model memory is:
+Mindep=n⋅|θbase|M_{\text{indep}}=n\cdot|\theta_{\text{base}}|(28)where|θbase||\theta_{\text{base}}|is the parameter count of a single base model.
+Forn=6n=6tasks with a 150M-parameter base model, this requires storing and loading six full model copies (∼\sim900M parameters total)—a significant memory burden, especially in GPU-constrained environments.
+
+Additionally, managingnnindependent model checkpoints complicates deployment, versioning, and updates.
+
+9.2Solution: Single Base Model with LoRA Adapters
+Low-Rank Adaptation (LoRA)[10]represents task-specific weight modifications as low-rank decompositions:
+Wi′=W+Δ​Wi=W+Bi​Ai,Bi∈ℝd×r,Ai∈ℝr×dW^{\prime}_{i}=W+\Delta W_{i}=W+B_{i}A_{i},\quad B_{i}\in\mathbb{R}^{d\times r},\;A_{i}\in\mathbb{R}^{r\times d}(29)whereWWis the shared base weight,r≪dr\ll dis the adapter rank, andBi​AiB_{i}A_{i}is the task-specific perturbation.
+
+The aggregate model memory becomes:
+MLoRA=|θbase|+∑i=1n2​r​d=|θbase|+n⋅2​r​dM_{\text{LoRA}}=|\theta_{\text{base}}|+\sum_{i=1}^{n}2rd=|\theta_{\text{base}}|+n\cdot 2rd(30)
+With rankr=32r=32and hidden dimensiond=768d=768, each adapter adds2×32×768=49,1522\times 32\times 768=49{,}152parameters (∼\sim0.02% of the base model).
+Forn=6n=6, total adapter overhead is∼\sim295K parameters—negligible compared to the 150M-parameter base.
+
+Memory reduction.
+MLoRAMindep=|θbase|+n⋅2​r​dn⋅|θbase|≈1nfor​2​n​r​d≪|θbase|\frac{M_{\text{LoRA}}}{M_{\text{indep}}}=\frac{|\theta_{\text{base}}|+n\cdot 2rd}{n\cdot|\theta_{\text{base}}|}\approx\frac{1}{n}\quad\text{for }2nrd\ll|\theta_{\text{base}}|(31)Atn=6n=6, this yields∼\sim6×\timesmemory reduction: one 150M-parameter model plus six tiny adapters instead of six full copies.
+
+9.3Inference Architecture
+Each classification task proceeds as a full forward pass through the base model with the task-specific LoRA perturbation applied (Figure˜17):
+
+1.Load: A single base model is loaded into GPU/CPU memory at startup. Each LoRA adapter (a pair of small matrices per adapted layer) is loaded alongside it.
+
+2.Inference: For each classification taskii, the base model runs a forward pass with adapterii’s weights merged:Wi′=W+Bi​AiW^{\prime}_{i}=W+B_{i}A_{i}. Each task still requires its own forward pass.
+
+3.Parallelism: Multiple classification tasks execute concurrently via parallel threads/goroutines. Wall-clock time is determined by the slowest classifier, not the sum.
+
+Figure 17:LoRA-based MoM inference architecture. The input query𝐱\mathbf{x}is processed by a single frozen base model (WW). Each task-specific LoRA adapter pair (AiA_{i},BiB_{i}) computes a low-rank perturbationBi​Ai​𝐱B_{i}A_{i}\mathbf{x}. The base output and adapter perturbation are summed to produce task-specific classifications, enabling multi-task support with minimal memory overhead.Note that LoRA doesnoteliminate the per-task forward pass—each adapter requires a full inference through the modified model.
+The primary benefit ismemory efficiency: deploying six classifiers requires the memory footprint of approximately one model rather than six, and all adapters can be updated independently without reloading the base model.
+
+9.4MoM Model Family
+We train a family of purpose-built models (MoM: Mixture-of-Models) optimized for routing classification tasks:
+
+Table 2:MoM model family.
+All models share a common base (ModernBERT[42]or mmBERT-32K) and are distributed as LoRA adapters.ModelTaskTraining Datamom-domainDomain classificationMMLU categoriesmom-piiPII token classificationPresidio-annotated corporamom-jailbreakPrompt injection detectionAdversarial prompt datasetsmom-sentinelFact-check gatingFactual vs. creative queriesmom-detectorHallucination detectionAnnotated LLM outputsmom-explainerNLI explanationNLI benchmarksmom-feedbackUser feedback analysisConversation annotationsmom-modalityModality classificationDiffusionDB + text corporamom-embeddingSemantic embeddingsContrastive pre-trainingmom-toolcallTool selectionFunction-calling datasetsmom-intentUser intent classificationCustomer support dialoguesThe key benefit of distributing these as LoRA adapters rather than independent models isoperational simplicity: a single base model binary serves all ten tasks, adapters can be hot-swapped without reloading the base, and new tasks can be added by training a new adapter without retraining or redistributing the base model.
+
+9.5Training Methodology
+All LoRA adapters are trained using PEFT[24]with the following protocol:
+•Base model: ModernBERT or mmBERT-32K (for long-context tasks).
+
+•Adapter configuration: Rankr∈{16,32,64}r\in\{16,32,64\}, applied to query and value projection matrices.
+
+•Training: Task-specific datasets with standard cross-entropy loss.
+
+•Export: Both LoRA-only (separate adapter files for hot-swapping) and merged (single model file for simplified deployment) formats.
+
+The modality classifier, for instance, is trained on a balanced mixture of DiffusionDB (image generation prompts), OASST2, Alpaca, and Dolly (text generation), achieving three-class classification (autoregressive, diffusion, both) with∼\sim0.02% trainable parameters relative to the base model.
+
+10Semantic Model Selection
+The core routing innovation issemantic model selection: once the decision engine matches a routing decisiond∗d^{*}, the system analyzes the request’s semantic content—its embedding, domain, complexity, and interaction history—to select the most cost-effective model from the decision’s candidate set.
+Unlike static routing or single-criterion difficulty classifiers, semantic selection operates over the full signal context produced by the signal engine, enabling cost-quality optimization that respects per-decision privacy and safety constraints.
+
+We integrate thirteen algorithms within a unified interface, enabling systematic comparison and hybrid combinations across deployment scenarios.
+
+10.1Problem Setting
+Given query embedding𝐞q∈ℝd\mathbf{e}_{q}\in\mathbb{R}^{d}, domain categoryz∈{1,…,C}z\in\{1,\ldots,C\}, candidate modelsℳd∗={m1,…,mK}\mathcal{M}_{d^{*}}=\{m_{1},\ldots,m_{K}\}with associated costs{c1,…,cK}\{c_{1},\ldots,c_{K}\}, and quality estimators, the semantic selection problem is:
+m∗=arg⁡maxmk∈ℳd∗⁡Quality​(𝐞q,z,mk;Θ)−λ⋅Cost​(mk)m^{*}=\arg\max_{m_{k}\in\mathcal{M}_{d^{*}}}\;\text{Quality}(\mathbf{e}_{q},z,m_{k};\Theta)-\lambda\cdot\text{Cost}(m_{k})(32)whereλ≥0\lambda\geq 0is a cost-sensitivity parameter andΘ\Thetarepresents algorithm-specific parameters.
+The per-decision candidate setℳd∗\mathcal{M}_{d^{*}}is critical: privacy-constrained decisions restrict candidates to compliant models, while cost-optimized decisions include a broader pool with aggressive cost weighting.
+We categorize algorithms into families based on their selection mechanism (Figure˜18).
+
+Figure 18:Taxonomy of thirteen semantic model selection algorithms organized by selection mechanism. Families span from lightweight rating-based methods (Static, Elo) to learned approaches (RouterDC, Classical ML, RL), adaptive cascading (AutoMix), real-time latency tracking, and multi-round synthesis (ReMoM).
+10.2Rating-Based Selection
+Static.Each model carries a pre-configured quality scoresks_{k}; selection ism∗=arg⁡maxk⁡skm^{*}=\arg\max_{k}s_{k}.
+Serves as a deterministic baseline.
+
+Elo Rating(adapted from RouteLLM[27]).
+Models maintain Elo ratingsRkR_{k}updated from pairwise user preference feedback.
+Selection probability follows the Bradley-Terry model:
+P​(mi≻mj)=11+10(Rj−Ri)/400P(m_{i}\succ m_{j})=\frac{1}{1+10^{(R_{j}-R_{i})/400}}(33)Models are sampled proportional to their expected win rate against the candidate pool.
+Ratings are updated online as user feedback arrives.
+
+10.3Embedding-Based Selection
+RouterDC[5].
+Dual contrastive learning trains query and model encoders to produce embeddings in a shared space.
+Selection maximizes cosine similarity:
+m∗=arg⁡maxmk∈ℳd∗⁡cos⁡(𝐞q,𝐞mk)m^{*}=\arg\max_{m_{k}\in\mathcal{M}_{d^{*}}}\cos(\mathbf{e}_{q},\mathbf{e}_{m_{k}})(34)The contrastive training objective encourages queries to be close to their best-performing model’s embedding and distant from poorly-performing models.
+
+Hybrid[11].
+Combines Elo ratings, embedding similarity, and cost in a weighted score:
+score​(mk)=α⋅R~k+β⋅cos⁡(𝐞q,𝐞mk)+γ⋅(1−c~k)\text{score}(m_{k})=\alpha\cdot\tilde{R}_{k}+\beta\cdot\cos(\mathbf{e}_{q},\mathbf{e}_{m_{k}})+\gamma\cdot(1-\tilde{c}_{k})(35)whereR~k\tilde{R}_{k}andc~k\tilde{c}_{k}are normalized ratings and costs, andα+β+γ=1\alpha+\beta+\gamma=1are configurable weights.
+
+10.4Cascading Selection
+AutoMix[2].
+Formulated as a Partially Observable Markov Decision Process (POMDP).
+Models are ordered by capabilitym1≺m2≺⋯≺mKm_{1}\prec m_{2}\prec\cdots\prec m_{K}.
+The cascade:
+1.Generate responseaka_{k}with current modelmkm_{k}(starting fromk=1k=1, the cheapest).
+
+2.Self-verify: estimate response qualityq^k\hat{q}_{k}usingmkm_{k}itself.
+
+3.Ifq^k≥τk\hat{q}_{k}\geq\tau_{k}, acceptaka_{k}; otherwise, escalate tomk+1m_{k+1}.
+
+The expected cost is:
+𝔼​[C]=∑k=1KCk⋅∏j=1k−1(1−P​(q^j≥τj))\mathbb{E}[C]=\sum_{k=1}^{K}C_{k}\cdot\prod_{j=1}^{k-1}(1-P(\hat{q}_{j}\geq\tau_{j}))(36)whereP​(q^j≥τj)P(\hat{q}_{j}\geq\tau_{j})is the probability that modelmjm_{j}passes self-verification.
+This naturally trades off cost against quality.
+
+10.5Classical ML Selection
+These methods train on routing records{(𝐞q(i),z(i),m∗(i),q(i))}\{(\mathbf{e}_{q}^{(i)},z^{(i)},m^{*(i)},q^{(i)})\}whereq(i)q^{(i)}is a quality score.
+Feature vectors combine embeddings and domain information:
+𝐟=[𝐞q∈ℝd;onehot​(z)∈{0,1}C]\mathbf{f}=[\mathbf{e}_{q}\in\mathbb{R}^{d};\;\text{onehot}(z)\in\{0,1\}^{C}](37)
+KNN.kk-nearest neighbor search with Ball Tree indexing.
+Quality-weighted majority voting:
+m∗=arg⁡maxm​∑i∈kNN​(𝐟)𝟏​[m∗(i)=m]⋅q(i)m^{*}=\arg\max_{m}\sum_{i\in\text{kNN}(\mathbf{f})}\mathbf{1}[m^{*(i)}=m]\cdot q^{(i)}(38)
+KMeans.Assigns queries to pre-computed clusters; selects the best model for the assigned cluster based on a combined quality-latency score:
+m∗=arg⁡maxm⁡(α⋅quality​(m,zcluster)−(1−α)⋅latency​(m))m^{*}=\arg\max_{m}\bigl(\alpha\cdot\text{quality}(m,z_{\text{cluster}})-(1-\alpha)\cdot\text{latency}(m)\bigr)(39)
+SVM.Multi-class SVM with RBF or linear kernel, trained to classify feature vectors directly into model selections.
+
+MLP.A feed-forward neural network (two hidden layers with ReLU activation) mapping𝐟\mathbf{f}to a softmax distribution over candidate models:
+P​(mk∣𝐟)=softmax​(W2⋅ReLU​(W1​𝐟+b1)+b2)kP(m_{k}\mid\mathbf{f})=\text{softmax}\bigl(W_{2}\cdot\text{ReLU}(W_{1}\mathbf{f}+b_{1})+b_{2}\bigr)_{k}(40)The MLP is implemented in the GPU-accelerated Candle runtime for low-latency inference.
+
+10.6Reinforcement Learning Selection
+Thompson Sampling[39].
+Each model maintains a Beta prior:
+θk∼Beta​(αk,βk)\theta_{k}\sim\text{Beta}(\alpha_{k},\beta_{k})(41)Selection samples from each posterior and picks the maximum:m∗=arg⁡maxk⁡θkm^{*}=\arg\max_{k}\theta_{k}.
+Parameters(αk,βk)(\alpha_{k},\beta_{k})are updated from user preference feedback, naturally balancing exploration and exploitation.
+
+GMTRouter[44].
+Models multi-turn user-query-model interactions as a heterogeneous graph.
+Graph neural network message passing captures complex interaction patterns:
+𝐡v(l+1)=AGG​({𝐡u(l)∣u∈𝒩​(v)})\mathbf{h}_{v}^{(l+1)}=\text{AGG}\bigl(\{\mathbf{h}_{u}^{(l)}\mid u\in\mathcal{N}(v)\}\bigr)(42)where nodes represent users, queries, and models, and edges encode historical routing outcomes.
+
+10.7Latency-Aware Selection
+Latency-Aware.Selects the model with the best observed latency using percentile-based Time-per-Output-Token (TPOT) and Time-to-First-Token (TTFT) statistics collected at runtime.
+For each candidate modelmkm_{k}, the selector computes a normalized latency score:
+sk=1|P|​∑p∈Ppercp​(mk)minj⁡percp​(mj)s_{k}=\frac{1}{|P|}\sum_{p\in P}\frac{\text{perc}_{p}(m_{k})}{\min_{j}\,\text{perc}_{p}(m_{j})}(43)whereP⊆{TPOT,TTFT}P\subseteq\{\text{TPOT},\text{TTFT}\}is the set of configured performance metrics andpercp​(mk)\text{perc}_{p}(m_{k})is the observed percentile value for modelmkm_{k}on metricpp.
+Selection minimizes this score:m∗=arg⁡mink⁡skm^{*}=\arg\min_{k}s_{k}.
+This enables adaptive routing that responds to real-time backend performance degradation without requiring explicit latency thresholds as signal conditions.
+
+10.8Multi-Round Reasoning (ReMoM)
+The ReMoM (Reasoning for Mixture of Models) strategy extends single-shot selection to multi-round parallel reasoning with LLM-driven synthesis.
+Inspired by PaCoRe[47]but generalized to heterogeneous model pools, ReMoM executes abreadth scheduleof decreasing parallelism across rounds, where each subsequent round synthesizes the outputs of the previous round via prompted LLM calls (Figure˜19).
+
+Figure 19:ReMoM execution flow with breadth schedule𝐛=[4,2]\mathbf{b}=[4,2].
+Round 1 distributes 4 parallel calls across models (mAm_{A},mBm_{B},mCm_{C}); responses are (optionally compacted and) assembled into a synthesis prompt.
+Round 2 sends 2 parallel synthesis calls.
+A final round (b3=1b_{3}=1, auto-appended) produces the single output.
+Each synthesis prompt includes the original query and all previous-round responses as numbered references, delegating quality judgment to the synthesizing LLM.Breadth schedule.The operator specifies a breadth schedule𝐛=[b1,b2,…,bR]\mathbf{b}=[b_{1},b_{2},\ldots,b_{R}]defining the number of parallel model calls per round.
+A final synthesis round withbR+1=1b_{R+1}=1is automatically appended, yielding a total ofR+1R+1rounds.
+For example,𝐛=[32,4]\mathbf{b}=[32,4]produces three rounds: 32 parallel calls, then 4 parallel calls each synthesizing the 32 responses, then a single final call synthesizing the 4 responses.
+
+Model distribution.At each round,brb_{r}calls are distributed among the candidate modelsℳd∗\mathcal{M}_{d^{*}}according to one of three strategies:
+(1)equal: calls are distributed evenly across all candidates with round-robin remainder allocation;
+(2)weighted: calls are distributed proportionally to model weights (currently equivalent to equal distribution);
+(3)first_only: allbrb_{r}calls target a single model with different random seeds, providing PaCoRe-compatible single-model diversity.
+Calls within each round execute concurrently with configurable concurrency limits.
+
+LLM-driven synthesis.After collecting responses from roundrr, the system constructs a synthesis prompt for roundr+1r+1using a configurable Gotext/template.
+The default template presents the original query alongside all previous-round responses as numbered references, instructing the next-round model(s) to“analyze these references and provide your own comprehensive solution.”When reasoning content is available (e.g., from models supporting extended thinking), the template additionally includes each reference’s chain-of-thought reasoning.
+This approach delegates quality judgment entirely to the synthesizing LLM rather than relying on explicit scoring or weighted aggregation.
+
+Response compaction.To manage prompt length across rounds, responses can be compacted before inclusion in synthesis prompts.
+Two strategies are supported:full(no compaction, the default) andlast_n_tokens(retaining only the finalNNtokens, estimated at∼\sim4 characters per token).
+This is particularly important for high-breadth schedules where concatenating all responses would exceed context limits.
+
+Execution flow.The complete algorithm proceeds as:
+1.Schedule construction: Append[1][1]to the user-specified breadth schedule𝐛\mathbf{b}.
+
+2.Round 1 (parallel generation): Distributeb1b_{1}calls across candidate models; execute concurrently with temperatureTT(default 1.0) for response diversity.
+
+3.Rounds2​…​R+12\ldots R{+}1(synthesis): For each subsequent round, build a synthesis prompt from the previous round’s (optionally compacted) responses, distributebrb_{r}calls, and execute concurrently.
+
+4.Final output: Return the single response from the final round (bR+1=1b_{R+1}=1).
+
+ReMoM is particularly effective when model capabilities are uncertain or when the task benefits from diverse perspectives (e.g., complex reasoning, multi-faceted analysis).
+The breadth schedule provides fine-grained control over the cost–quality tradeoff: higher initial breadth increases diversity at the cost of additional LLM calls, while the funneling structure ensures convergence to a single synthesized answer.
+
+10.9Unified Selection Interface
+All thirteen algorithms implement a common interface:
+Select:(𝐞q,z,ℳ,Θ)→(m∗,c)\text{Select}:(\mathbf{e}_{q},z,\mathcal{M},\Theta)\to(m^{*},c)(44)returning the selected model and a confidence score.
+This uniformity enables:
+(1) per-decision algorithm selection—different routing decisions can use different selection algorithms, allowing cost-optimized decisions to use cascading (AutoMix) while quality-sensitive decisions use embedding-based (RouterDC) selection;
+(2) A/B testing across algorithms on live traffic;
+(3) ensemble methods that combine multiple selectors.
+
+10.10Cost-Aware Selection in Multi-Provider Settings
+In multi-endpoint deployments where the same logical model may be served by different providers at different price points, the selection algorithms operate in conjunction with the endpoint router (Section˜12.3).
+The selection algorithm chooses the bestmodelbased on semantic analysis, and the endpoint router resolves it to the most cost-effectiveprovider endpoint.
+This two-stage process separates quality optimization (which model is best for this query?) from cost optimization (which provider endpoint offers the best price for this model?), enabling fine-grained cost management across heterogeneous multi-cloud deployments.
+
+11Multi-Runtime ML Inference
+The routing system requires low-latency ML inference for signal extraction, classification, and embedding computation—all on the critical path of every request.
+We describe the multi-runtime architecture that addresses the tension between inference speed, hardware flexibility, and model diversity.
+
+11.1Design Constraints
+Three constraints shape the inference architecture:
+1.Latency: Signal extraction must complete within the tail latency budget of the routing system (target:<<100 ms for all signals combined).
+
+2.Hardware heterogeneity: Deployments range from GPU-equipped data centers to CPU-only edge nodes.
+
+3.Model diversity: Different tasks require different model architectures (sequence classification, token classification, NLI, embeddings, MLP).
+
+11.2Four-Runtime Architecture
+We implement four inference runtimes, each optimized for different hardware and task profiles, all exposed to the Go routing process via C FFI and CGo (Figure˜20):
+
+Table 3:Inference runtime characteristicsRuntimeTarget HardwareTasksFrameworkCandleGPU (CUDA), CPUClassification, LoRA, MLPHF Candle[12]LinfaCPU onlyKNN, KMeans, SVMLinfa[21]ONNX RTCPU, GPUEmbeddingsONNX Runtime[25]NLP BindingCPU onlyBM25, N-gram matchingbm25 + ngrammatic (Rust)All runtimes are compiled as Rust shared libraries (.so/.a) and linked to the Go routing process via CGo.
+This eliminates Python runtime overhead, GIL contention, and inter-process communication latency that would arise from serving models in separate Python processes.
+
+Go Routing Processsignal extraction⋅\cdotdecision engine⋅\cdotplugin chainCandlelibcandle_binding.soBERT, ModernBERTDeBERTa v3, MLPLoRA hot-loadingFlash Attention 2Linfaliblinfa_binding.soKNN, KMeans, SVMJSON model import(scikit-learn trained)ONNX Runtimelibonnx_binding.sommBERT-Embed-32K2D MatryoshkaLayer early-exitDim truncationNLP Bindinglibnlp_binding.soBM25 (Okapi) scoringN-gram fuzzy matchAND/OR/NOR rulesKeyword signalCGo / C FFICGo / C FFICGo / C FFICGo / C FFI
+Figure 20:Four-runtime ML inference architecture. The Go routing process links to four Rust shared libraries via CGo/C FFI. Each runtime is specialized for a different class of ML workload, avoiding Python overhead on the critical path.
+11.3Candle Runtime: GPU-Accelerated Classification
+The Candle runtime handles all transformer-based classification tasks, including LoRA adapter loading and inference (Section˜9).
+
+Supported architectures.BERT[6], ModernBERT[42](with Flash Attention and GeGLU), mmBERT-32K (YaRN RoPE for 32K context), DeBERTa v3 (NLI), and feed-forward MLPs (model selection).
+
+Optimization features.Flash Attention 2 kernels reduce attention memory fromO​(n2)O(n^{2})toO​(n)O(n)and improve throughput.
+Optional Intel MKL integration for CPU deployments.
+LoRA adapter hot-loading enables runtime model updates without restart.
+
+11.4ModernBERT-base-32k: Extended Context Window
+The Candle runtime supports ModernBERT-base-32k, extending the context window from 512 tokens (BERT-base) to 32,768 tokens via YaRN (Yet another RoPE extensioN) scaling[29].
+This enables signal extraction from long documents and multi-turn conversations that exceed the traditional 512-token limit.
+
+Architecture and scaling.ModernBERT-base-32k uses Rotary Position Embeddings (RoPE) with YaRN scaling to extend the base model’s 8,192-token context to 32K tokens.
+The model maintains compatibility with existing LoRA adapters trained on BERT-base, enabling seamless migration without retraining classifier heads.
+Flash Attention 2 provides memory-efficient attention computation, reducing memory requirements fromO​(n2)O(n^{2})toO​(n)O(n)for long sequences.
+
+Performance characteristics.Empirical benchmarks on NVIDIA L4 GPU (23GB VRAM) demonstrate reliable performance for context lengths up to 8K tokens:
+•1K tokens: p50 latency∼\sim94 ms at C=1,∼\sim970 ms at C=10 (100% success rate)
+
+•4K tokens: p50 latency∼\sim955 ms at C=1,∼\sim9,389 ms at C=10 (93% success rate, 7 OOM errors)
+
+•8K tokens: p50 latency∼\sim3,525 ms at C=1, fails at C=10 due to insufficient GPU memory
+
+For sequences exceeding 32K tokens, automatic chunking with configurable overlap (default 128 tokens) enables processing of arbitrarily long documents while preserving context continuity.
+
+Hardware requirements.Production deployments for 1K–8K tokens require a GPU with≥\geq23GB VRAM (e.g., NVIDIA L4, A10G).
+Full 32K token support and high concurrency (C=50+) require≥\geq40GB VRAM (e.g., NVIDIA A100).
+CPU inference is supported but incurs significant latency penalties (∼\sim45×\timesslower for 512 tokens).
+
+Backward compatibility.The integration maintains full backward compatibility with existing BERT-base workflows.
+Sequences≤\leq512 tokens exhibit no performance degradation, and existing LoRA adapters (domain classification, PII detection, jailbreak detection) function without modification.
+
+11.5Linfa Runtime: CPU ML Inference
+Classical ML model selection algorithms (KNN, KMeans, SVM) are served by the Linfa runtime.
+These algorithms operate on pre-computed feature vectors and do not require GPU acceleration, making Linfa’s lightweight CPU implementation ideal.
+
+Training-inference split.Models are trained in Python (scikit-learn, custom implementations) and serialized to JSON.
+The Rust runtime loads serialized models at startup and performs inference-only computation.
+This decouples the training environment (Python, GPU-optional) from the inference environment (Rust, CPU-only), enabling simpler deployment.
+
+11.6ONNX Runtime: Efficient Embeddings
+Embedding computation is served by ONNX Runtime, optimized for the mmBERT-Embed-32K model with 2D Matryoshka representation learning[17].
+
+2D Matryoshka trade-offs.The architecture supports two-dimensional quality-latency trade-offs:
+•Layer early-exit: Extract embeddings from intermediate layers (6, 11, 16, or 22 out of 22), achieving∼\sim3–4×\timesspeedup at layer 6 with modest quality degradation.
+
+•Dimension truncation: Reduce embedding dimension from 768 to 64, 128, 256, or 512, reducing memory and computation for similarity search.
+
+For the∼\sim150M parameter embedding model, CPU inference with 2D Matryoshka (layer 11, dimension 256) achieves latency comparable to GPU inference on the full model, making GPU optional for embedding computation.
+
+11.7NLP Binding Runtime: Keyword Classification
+The NLP Binding runtime handles BM25 and N-gram keyword matching for the keyword signal type, complementing the ML-based classifiers served by Candle.
+Unlike the neural runtimes, NLP Binding implements statistical text matching algorithms that require no model weights or GPU:
+
+BM25 (Okapi).The BM25 classifier uses the Rustbm25crate to compute term-frequency–inverse-document-frequency scores between query text and keyword rules.
+Each rule specifies a set of keywords, a Boolean operator (AND/OR/NOR), a score threshold, and case-sensitivity.
+A keyword is considered matched when its BM25 relevance score exceeds the configured threshold.
+
+N-gram fuzzy matching.The N-gram classifier uses thengrammaticcrate to perform fuzzy string matching via character n-gram overlap (default: trigrams, Jaccard similarity).
+This enables matching despite typos and morphological variation—e.g.,"urgnet"matches the keyword"urgent"when the similarity exceeds the configured threshold.
+
+FFI design.The binding follows the same conventions ascandle-binding: Rust#[repr(C)]structs,#[no_mangle] pub extern "C" fnexports, CString-based string passing, and explicit free functions for Rust-allocated memory.
+The Go side wraps each classifier as a handle-based API (BM25Classifier,NgramClassifier) with lifecycle management (New,AddRule,Classify,Free).
+Thread safety is provided by RustMutex-guarded global state with atomic handle generation.
+
+11.8Runtime Selection Strategy
+The routing system selects runtimes based on deployment configuration.
+The NLP Binding is always active when keyword signal rules usebm25orngrammethods:
+•GPU available: Candle (classification + LoRA) + ONNX (embeddings) + Linfa (ML selection) + NLP Binding (keyword).
+
+•CPU only: Candle with MKL (classification) + ONNX with early-exit (embeddings) + Linfa (ML selection) + NLP Binding (keyword).
+
+•Minimal: ONNX (embeddings) + Linfa (ML selection) + NLP Binding (keyword), with classification delegated to external vLLM-served models.
+
+12Request Processing Pipeline
+We implement the routing system as an Envoy[8]External Processor (ExtProc)[7], enabling transparent interception of LLM API traffic without client-side modifications.Figure˜21illustrates the bidirectional request processing pipeline.
+This section describes the pipeline architecture, multi-provider routing, the Responses API integration, and the pluggable authorization factory.
+
+12.1Transparent Interception via ExtProc
+The Envoy ExtProc protocol[7]establishes a bidirectional gRPC stream between the proxy and the routing service for each HTTP request.
+Envoy invokes the processor at four phases—request headers, request body, response headers, response body—and the processor responds with mutations (header modifications, body rewrites) or immediate responses (short-circuiting the backend).
+
+This architecture provides two key advantages:
+(1)transparency: clients send standard OpenAI-compatible API requests to the proxy endpoint with no awareness of the routing layer; and
+(2)composability: the router coexists with other Envoy filters (rate limiting, authentication, load balancing) in the standard filter chain.
+
+12.2Request Body Pipeline
+The request body phase implements the core routing logic as a sequential pipeline:
+
+r→parser′→signalsS(r′)→decided∗→Πpre→selectm∗→routee∗r\xrightarrow{\text{parse}}r^{\prime}\xrightarrow{\text{signals}}S(r^{\prime})\xrightarrow{\text{decide}}d^{*}\xrightarrow{\Pi_{\text{pre}}}\xrightarrow{\text{select}}m^{*}\xrightarrow{\text{route}}e^{*}(45)
+RequestpathrrSignalparse, detect,extractS​(r)S(r)Decisionevaluateφ\varphiselectd∗d^{*}Plugins (Pre)fast response, cache,RAG, modality, memory,selectm∗m^{*}, routee∗e^{*}e∗e^{*}S​(r)S(r)d∗d^{*}respfast resp / cacheResponsepathe∗e^{*}Signalusage, HaluGate,metrics (TTFT/TPOT)Decisionquality gating,cache eligibilityPlugin (Post)format translation,cache write, API xlatresp
+Figure 21:Bidirectional request processing pipeline aligned with the three-layer architecture.Request path(top, left→\toright): the signal layer parses and extractsS​(r)S(r), including safety signals (jailbreak, PII); the decision layer evaluates Boolean formulas to selectd∗d^{*}; the plugin chain executes pre-processing (fast response for safety enforcement, caching, RAG, memory), model selection, and endpoint routing. A cache hit or fast response short-circuits the pipeline (dashed).Response path(bottom, right→\toleft): the same three layers operate in the same order—the signal layer extracts response-side signals (token usage, HaluGate hallucination scores, streaming latency metrics); the decision layer evaluates quality gating and cache eligibility; plugins perform format translation, cache writes, and API translation.The stages execute in strict order:
+(1) API translation (Responses API→\toChat Completions if applicable, seeSection˜12.4);
+(2) request parsing and provider detection;
+(3) signal extraction and decision evaluation (Sections˜3and4);
+(4) fast response check (Section˜5)—if the matched decision activates thefast_responseplugin (e.g., for safety enforcement), the pipeline terminates with an immediate OpenAI-compatible response;
+(5) semantic cache lookup (Section˜5)—cache hits terminate the pipeline with an immediate response;
+(6) RAG context injection (Section˜13);
+(7) modality routing (text vs. diffusion);
+(8) memory retrieval (Section˜13);
+(9) model selection (Section˜10), system prompt injection, and header mutation;
+(10) multi-endpoint resolution and provider-specific auth injection (Sections˜12.3and12.5).
+
+12.3Multi-Endpoint and Multi-Provider Routing
+Production deployments often span multiple model backends across different providers and geographic regions.
+The system supportsmulti-endpoint routingas a first-class concept:
+
+Definition 7(Endpoint Topology).An endpoint topologyℰ={(ei,wi,pi,αi)}i=1L\mathcal{E}=\{(e_{i},w_{i},p_{i},\alpha_{i})\}_{i=1}^{L}definesLLendpoints, each with a weightwi∈(0,1]w_{i}\in(0,1](normalized:∑iwi=1\sum_{i}w_{i}=1), a provider typepi∈𝒫p_{i}\in\mathcal{P}, and an auth profileαi\alpha_{i}.
+
+Once semantic model selection identifies a target modelm∗m^{*}, the endpoint router resolvesm∗m^{*}to a concrete endpointe∗e^{*}from the set of endpoints serving that model.
+Weighted random selection with sticky session affinity distributes load proportionally.
+Failover cascades to the next-weighted endpoint on backend errors.
+
+Each endpoint may use a different provider (e.g., the same logical model “gpt-4o” served by both OpenAI and Azure OpenAI).
+The system performsprovider-specific protocol translationtransparently:
+
+•OpenAI / Azure OpenAI: Native Chat Completions and Responses API formats.
+
+•Anthropic: Translation between OpenAI message schema and Anthropic Messages API (system prompt handling, tool use mapping).
+
+•Bedrock / Vertex AI: Cloud-provider-specific request wrapping, authentication (SigV4 for AWS, OAuth for GCP), and response unwrapping.
+
+•Gemini: Conversion between OpenAI function-calling schema and Gemini tool declarations.
+
+•vLLM / Local: Direct OpenAI-compatible passthrough to self-hosted vLLM instances.
+
+This abstraction allows routing decisions to reference models by capability (“best coding model”) rather than by provider-specific endpoint, and allows the same decision configuration to operate across different deployment topologies.
+
+12.4OpenAI Responses API Support
+The system provides full support for the OpenAI Responses API, which extends Chat Completions with stateful multi-turn conversation management.
+
+The Responses API introducesprevious_response_idchaining: each response carries a unique identifier, and subsequent requests can reference it to maintain conversation context without the client retransmitting the full message history.
+The routing system handles this by:
+
+1.Inbound translation: Responses API requests (withinputfield andprevious_response_id) are normalized to Chat Completions format for signal extraction and decision evaluation, which operate on the unified internal representation.
+
+2.State management: Conversation history is stored in the persistent memory layer (Section˜13), keyed by response ID, enabling context retrieval across turns.
+
+3.Outbound translation: Chat Completions responses from backends are wrapped in Responses API format (withid,outputarray,usagebreakdown) before returning to the client.
+
+4.Routing consistency: The decision engine can optionally pin conversation turns to the same model to avoid mid-conversation quality shifts.
+
+This translation layer is transparent to both the signal engine and the downstream model backends, enabling all routing, safety, and caching features to operate identically on Responses API and Chat Completions traffic.
+
+12.5Authorization Factory
+Multi-provider deployments require diverse authentication mechanisms.
+The system implements apluggable authorization factorythat abstracts auth concerns from routing logic:
+
+Definition 8(Auth Provider).An auth providerα:(Request,Endpoint)→Headers′\alpha:(\text{Request},\text{Endpoint})\to\text{Headers}^{\prime}is a function that enriches outbound request headers with provider-appropriate credentials.
+
+The factory supports multiple auth provider types:
+
+•API Key: Static bearer tokens or API keys, optionally per-endpoint, with header name customization (e.g.,Authorization,x-api-key,api-key).
+
+•OAuth2 / OIDC: Token acquisition with automatic refresh, supporting client credentials and authorization code flows.
+
+•Cloud IAM: AWS SigV4 signing for Bedrock, Google service account tokens for Vertex AI, Azure AD tokens for Azure OpenAI.
+
+•Passthrough: Forwarding the client’s original credentials to the backend, used for deployments where the client authenticates directly.
+
+•Custom: User-defined auth plugins registered at startup, enabling integration with enterprise identity providers (LDAP, SAML, custom JWT issuers).
+
+The auth factory is invokedafterdecision evaluation and model selection, injecting provider-specific credentials into the outbound request headers.
+This separation ensures that routing decisions are auth-agnostic: the decision engine selects models based on capability and cost, and the auth layer handles the mechanics of reaching each provider’s endpoint.
+
+Theauthzsignal type in the signal engine (Section˜3) is complementary but distinct: it performsinboundauthorization (verifying that the requesting user or API key has permission to access specific models or decisions), while the auth factory handlesoutboundauthentication (proving the router’s identity to backend providers).
+
+12.6Response Body Pipeline
+The response path performs:
+(1) token usage extraction for cost accounting;
+(2) format translation (provider-specific→\toOpenAI format);
+(3) streaming metrics computation (TTFT, TPOT);
+(4) hallucination detection via HaluGate (Section˜8);
+(5) semantic cache writes for cache misses;
+(6) Responses API translation (Chat Completions→\toResponses API format, if applicable).
+
+12.7Concurrency Model
+Each gRPC stream (one per HTTP request) runs in an independent goroutine, processing its four phases sequentially.
+Within a request, signal extraction launches parallel coroutines for independent classifiers.
+Shared state (classifier models, cache backends, configuration, auth token caches) is read concurrently by all active streams, with synchronization limited to cache writes, auth token refreshes, and metric updates.
+
+13Memory and Retrieval-Augmented Generation
+Production routing systems must support multi-turn conversations with persistent context and knowledge-augmented responses.
+We describe the memory and RAG subsystems that operate as plugins within the routing pipeline.
+
+13.1Persistent Memory
+The memory system maintains user-scoped knowledge across conversation sessions, enabling personalized routing and context-aware responses.Figure˜22illustrates the full memory lifecycle.
+
+Memory storage.Each conversation turn is stored directly as anepisodic chunk—no external LLM is required.
+The user message and assistant response are concatenated into aQ:/A:block, sanitized (UTF-8 validation, 16 KB cap per entry), and embedded.
+A lightweightentropy gatediscards turns that carry no retrievable signal—greetings, acknowledgments, and short one-word replies—before embedding, reducing index pollution.
+Everyssturns a session-level sliding-window chunk spanning the lastwwturns is additionally stored (defaults:s=3s{=}3,w=5w{=}5), creating overlapping windows so facts near turn boundaries co-occur in at least one chunk—improving multi-hop retrieval coverage.
+
+Retrieval gating.Not every query benefits from memory retrieval.
+A lightweight heuristic determines whether memory search is warranted by filtering out general fact-check queries, tool-augmented requests, and simple greetings, avoiding unnecessary embedding lookups and reducing latency for queries where personal context is irrelevant.
+
+Retrieval.At query time, relevant memories are retrieved via the hybrid search pipeline (vector similarity, BM25, and n-gram matching) over the user’s memory store.
+An optional query-rewriting step reformulates the user’s query for improved retrieval recall.
+Adaptive thresholding adjusts the similarity cutoff based on retrieval mode, preventing cosine-calibrated thresholds from silently discarding all RRF-scored results.
+
+Post-retrieval filtering.Retrieved memories pass through a composableReflectionGatebefore context injection:
+1.Safety: a regex block-list prevents prompt-injection payloads from being surfaced.
+
+2.Recency decay: memories are weighted by recency, prioritizing recent context.
+
+3.Deduplication: near-duplicate entries (high Jaccard similarity) are collapsed to a single representative.
+
+4.Budget: the final set is capped at a configurable count to bound injected context length.
+
+Filtered context is injected as a separate conversation message positioned after system instructions but before user turns, following the context-injection pattern of the OpenAI Agents SDK.
+
+Background consolidation.A scheduled background job merges semantically related memories using greedy single-linkage clustering over word-level Jaccard similarity.
+Memories within each cluster are replaced by a single deduplicated summary entry, reducing store redundancy and improving retrieval precision over time.
+
+ConvTurnEntropyGateSanitize+ EmbedMemoryStorepassdiscardsession window (everyssturns)UserQueryRetrievalGatingHybridSearchReflectionGatepassInjectContext MsgskipWrite pathRead path
+Figure 22:Memory lifecycle.Write path: each conversation turn passes an entropy gate (discarding low-signal turns such as greetings), is sanitized and embedded as an episodicQ:/A:chunk, and stored directly—no LLM inference required. Everyssturns an additional sliding-window chunk is stored.Read path: a heuristic gate skips retrieval for irrelevant queries; qualifying queries run hybrid search (vector + BM25 + n-gram) over the user’s store; retrieved memories pass through aReflectionGate(safety blocklist, recency decay, deduplication, budget cap) before injection as a separate conversation message.
+13.2Retrieval-Augmented Generation
+The RAG plugin retrieves relevant documents from vector stores and injects them as context before model invocation.
+
+Indexing pipeline.Documents are chunked (configurable size and overlap), embedded using the shared embedding model (Section˜11), and indexed in a vector store.
+
+Hybrid retrieval.Pure vector search can miss lexically relevant results when the embedding model underweights rare terms.
+We implement a three-signal hybrid retrieval pipeline (Figure˜23) that scores each candidate chunk along three axes:
+1.Vector similarity: cosine similarity from the embedding index (already in[0,1][0,1]).
+
+2.BM25: an Okapi BM25 inverted index built over chunk contents provides keyword-level relevance, with configurablek1k_{1}(term-frequency saturation, default 1.2) andbb(length normalization, default 0.75) parameters.
+
+3.N-gram Jaccard: characternn-gram sets (defaultn=3n{=}3) capture fuzzy lexical overlap, producing Jaccard similarity in[0,1][0,1].
+
+Score fusion.Two fusion modes combine the three retriever scores into a single ranking:
+(1)Weighted: BM25 scores are min-max normalized to[0,1][0,1], then the final score iswv⋅svec+wb⋅sbm25+wn⋅sngramw_{v}\cdot s_{\text{vec}}+w_{b}\cdot s_{\text{bm25}}+w_{n}\cdot s_{\text{ngram}}with configurable weights (defaults: 0.7, 0.2, 0.1).
+(2)Reciprocal Rank Fusion (RRF):score​(d)=∑r1/(k+rankr​(d))\text{score}(d)=\sum_{r}1/(k+\text{rank}_{r}(d)), which is parameter-free beyond the constantkk(default 60).
+
+QueryEmbedVectorIndexTokenizeBM25IndexCharnn-gramsN-gramIndexcosine∈[0,1]\in[0,1]min-max→[0,1]\to[0,1]Jaccard∈[0,1]\in[0,1]ScoreFusionWeighted / RRFRankedResultsnon-native backends:4×4{\times}top-kkexpansionwv=0.7,wb=0.2,wn=0.1w_{v}{=}0.7,\;w_{b}{=}0.2,\;w_{n}{=}0.1
+Figure 23:Hybrid search pipeline. Each candidate chunk is scored along three axes—vector cosine similarity, BM25 keyword relevance, and characternn-gram Jaccard overlap—then combined via weighted fusion or Reciprocal Rank Fusion (RRF). Backends without native hybrid support fall back to a generic rerank path that fetches4×4{\times}top-kkcandidates from vector search before applying BM25 andnn-gram scoring.Backend abstraction.The RAG plugin accesses vector stores through a commonVectorStoreBackendinterface, decoupling retrieval logic from storage implementation.
+Six backend types are supported (Figure˜24):
+•In-memory: development and testing; no external dependencies.
+
+•Milvus[41]: production-grade distributed vector database with native hybrid search support.
+
+•Llama Stack: delegates vector storage and search to a Llama Stack deployment via its OpenAI-compatible/v1/vector_storesAPI, enabling unified management of LLM serving and retrieval through a single platform. When the Llama Stack instance is configured with the Milvusvector_ioprovider, the backend supports hybrid search by passingranking_options: {ranker: ‘‘rrf’’}in search requests, combining vector similarity with BM25 keyword matching at the provider level.
+
+•External API: any OpenAI-compatible vector store endpoint.
+
+•MCP: retrieval via Model Context Protocol tool servers.
+
+•OpenAI file search: delegated retrieval through OpenAI’s hosted file search API.
+
+Backends that implement native hybrid search (Milvus, Llama Stack with Milvus provider) use their own BM25 and keyword indexes; all other backends fall back to a generic rerank path that fetches an expanded candidate set (4×4{\times}top-kk) from vector search and applies BM25 and n-gram scoring as a post-retrieval reranking step.
+
+Score-range awareness.Different retrieval modes produce scores on fundamentally different scales: cosine similarity yields values in[0,1][0,1]where a threshold of∼\sim0.7 is typical, while RRF scores follow∑1/(k+rank)\sum 1/(k+\text{rank})and typically range from 0.001 to 0.05.
+Applying a cosine-calibrated threshold to RRF scores would silently discard all results.
+The backend interface handles this transparently: when hybrid search is active, score-based filtering is bypassed and result volume is controlled solely by the top-kkparameter.
+
+User QueryRAG PluginVectorStoreInterfaceMilvusLlama StackMCP / API /OpenAIhybridhybrid (via Milvus)vector onlyInject into Prompt
+Figure 24:RAG backend architecture. The RAG plugin accesses vector stores through a common interface. Milvus and Llama Stack (with Milvus provider) support native hybrid search combining vector similarity with BM25 keyword matching via Reciprocal Rank Fusion. Other backends use vector-only retrieval with optional post-retrieval reranking.
+13.3Stateful Conversations (Response API)
+The system supports the OpenAI Responses API for stateful multi-turn conversations:
+
+Conversation chaining.Each response is stored with a unique ID.
+Subsequent requests referenceprevious_response_idto reconstruct the full conversation history without retransmitting the full message sequence.
+A bidirectional translator converts between the Response API format and Chat Completions format for backend model invocation, enabling all routing, safety, and caching features to operate identically on both API surfaces.
+
+Routing continuity.Stored responses include routing metadata (decision, model selection, signal results), enabling consistent routing across conversation turns and providing context for feedback-driven model selection.
+
+State backends.Conversation state is persisted via three backends:
+(1)in-memoryfor development;
+(2)Redisfor production deployments requiring distributed state with high availability—supporting both standalone and cluster modes;
+(3)Milvusfor deployments that benefit from semantic retrieval over conversation history.
+The Redis backend enables horizontal scaling: multiple router replicas share conversation state, and Redis persistence ensures that conversation chains survive pod restarts.
+
+13.4Integration with Signal-Decision Architecture
+Both memory and RAG operate as per-decision plugins.
+Different decisions can activate different RAG configurations (different vector stores, differentkkvalues, different chunk strategies, different search modes) or disable retrieval entirely.
+This enables, for example, a “research assistant” decision that activates RAG with hybrid search over a technical knowledge base while a “casual chat” decision disables retrieval.
+
+14Observability
+Intelligent routing introduces a new observability surface: beyond standard model serving metrics, operators must monitor signal extraction quality, decision matching patterns, plugin effectiveness, and model selection outcomes.
+
+14.1Metrics Taxonomy
+We instrument four metric categories using Prometheus[30]:
+
+Model performance.Per-model request counts, token usage, estimated cost, completion latency, Time-to-First-Token (TTFT), and Time-per-Output-Token (TPOT).
+These metrics enable real-time cost monitoring and performance regression detection across the model fleet.
+
+Routing behavior.Routing modification counts (original model vs. selected model), reason codes (which signal types triggered which decisions), and routing latency (overhead of the routing pipeline itself).
+These metrics answer the question:how is the router changing traffic patterns?
+
+Signal and decision quality.Per-signal-type extraction counts and match rates, per-decision match frequencies and confidence distributions, and per-plugin execution counts and outcomes.
+These metrics enable calibration: if a signal type rarely matches, its threshold may need adjustment; if a decision matches too broadly, its conditions may be under-specified.
+
+Safety and cache effectiveness.PII violation rates by entity type, jailbreak detection rates, hallucination detection latency, cache hit rates, and cache operation latency.
+These metrics quantify the value delivered by the plugin chain.
+
+14.2Distributed Tracing
+We implement OpenTelemetry[28]tracing with a hierarchical span model:
+•Root span: Covers the full request lifecycle from receipt to response.
+
+•Signal spans: Individual spans for each signal type evaluation, capturing latency and results.
+
+•Decision span: Decision evaluation with the matched decision and confidence.
+
+•Plugin spans: Per-plugin execution with type-specific attributes (cache hit/miss, PII types detected, hallucination spans found).
+
+•Upstream span: Backend model invocation, with W3C Trace Context propagation enabling end-to-end tracing through vLLM[18]and other inference frameworks.
+
+This span hierarchy enables operators to diagnose routing latency (“which signal is slow?”), understand routing decisions (“why was this query routed to model X?”), and correlate routing behavior with model serving performance.
+
+15Deployment
+We describe the deployment architecture that enables the routing system to operate from single-node development to production Kubernetes[37]clusters.
+
+15.1Deployment Modes
+Local development.A single command (pip install vllm-sr && vllm-sr serve) bootstraps the complete stack: router, Envoy proxy, and dashboard.
+This lowers the barrier to experimentation with routing configurations.
+
+Kubernetes: Standalone mode.Envoy runs as a sidecar container alongside the router in the same pod.
+The ExtProc filter connects via localhost gRPC.
+Deployed via Helm charts with configurable replicas, resource limits, cache backends, and autoscaling.
+
+Kubernetes: Gateway mode.The router runs as an independent service behind an existing Istio or Envoy Gateway deployment, referenced via the gateway’s ExtProc configuration.
+This mode shares the gateway infrastructure across multiple services.
+
+15.2Kubernetes Operator
+A custom operator manages the lifecycle of routing deployments through aSemanticRouterCustom Resource Definition (CRD).
+The reconciliation loop manages: service accounts, configuration (ConfigMap or CRD-sourced), persistent storage, gateway/route resources, Envoy configuration, deployments, services, and horizontal pod autoscalers.
+
+Backend discovery.The operator discovers model backends via three mechanisms:
+KServe InferenceService resources (for managed model serving),
+label-based Llama Stack discovery, and
+direct Kubernetes Service references.
+
+15.3Dashboard
+A web console (React frontend, Go backend) provides:
+configuration editing with live validation,
+topology visualization of routing flows,
+an interactive playground for testing routing decisions,
+embedded Grafana/Prometheus/Jaeger dashboards for monitoring and tracing, and
+an evaluation framework for benchmarking routing quality.
+
+16Evaluation
+We evaluate the routing system across four dimensions: signal extraction efficiency, GPU-accelerated long-context inference, LoRA multi-task scaling, and end-to-end routing correctness.
+
+16.1Signal Extraction Latency
+Table˜4reports median and p99 latencies for each signal type on an NVIDIA A100 GPU with ModernBERT base model.
+
+Table 4:Signal extraction latency by typeSignal TypeMedianp99Requires MLKeyword<0.1<0.1ms<0.5<0.5msNoContext<0.1<0.1ms<0.5<0.5msNoLanguage<0.5<0.5ms<1<1msNoAuthorization<0.1<0.1ms<0.5<0.5msNoEmbedding1515ms4545msYesDomain6060ms120120msYesFact-check5555ms110110msYesModality5050ms100100msYesFeedback5555ms115115msYesComplexity5050ms105105msYesPreference5555ms110110msYesHeuristic signals complete in sub-millisecond time, while ML signals range from 15–120 ms.
+With parallel evaluation, the wall-clock time is dominated by the slowest active signal (∼\sim120 ms for domain classification) rather than the sum.
+
+16.2GPU-Accelerated Inference with SDPA
+To accelerate ML signal extraction on long prompts, we re-export the mmBERT-32K classifiers from PyTorch using Scaled Dot-Product Attention (SDPA), apply ONNX Runtime graph optimization (Gelu/LayerNorm fusion), and convert weights to FP16.Table˜5reports single-session inference latency on an AMD Instinct MI300X using the ROCm execution provider, compared against CPU (x86-64, ORT default provider).
+
+Table 5:mmBERT-32K inference latency: CPU (FP32) vs. GPU SDPA (FP16), single session, batch size 1Seq. LengthCPU (ms)GPU (ms)Speedup5121206.020×\times1,0242637.734×\times2,04880914.157×\times4,0962,66457.646×\times8,1929,65623741×\timesThe SDPA re-export reduces the ONNX graph from 2,902 to 1,342 operators; FP16 conversion halves model size from 1.2 GB to 587 MB.
+At 8K tokens, single-session GPU inference completes in 237 ms—a 41×\timesspeedup over CPU.
+However, when all three classifiers are loaded concurrently (the operational configuration), SDPA’s𝒪​(n2)\mathcal{O}(n^{2})memory footprint causes OOM beyond∼\sim4K tokens.
+The next section addresses this limitation with flash attention.
+
+16.3Flash Attention via Composable Kernel
+Standard SDPA materializes the full𝒪​(n2)\mathcal{O}(n^{2})attention mask andQ​K⊤QK^{\top}matrix, causing out-of-memory (OOM) failures beyond∼\sim4,096 tokens when three classifiers are loaded concurrently.
+We replace SDPA attention subgraphs with a custom ONNX Runtime operator backed by AMD’s Composable Kernel (CK) tiled flash attention, which computes attention in𝒪​(n)\mathcal{O}(n)working memory.
+For ModernBERT’s local-attention layers (sliding window of 128), the CK kernel’s nativewindow_sizeparameters eliminate the dense mask entirely; a lightweight 1-D padding bias[B,1,1,S][B,1,1,S]replaces the[1,1,S,S][1,1,S,S]broadcast mask for all layers.
+
+Table˜6compares SDPA and FA at concurrency 1.Table˜7then varies the number of concurrent requests to measure throughput under load.
+All measurements are median latency on an AMD Instinct MI300X with three classifiers loaded concurrently (domain, jailbreak, PII evaluated in parallel per request).
+
+Table 6:End-to-end classification latency: SDPA vs. CK Flash Attention (FP16, ROCm EP, 3 classifiers in parallel, concurrency 1, MI300X)Seq. LengthSDPA (ms)FA (ms)Speedup51219191.0×\times1,02426231.1×\times2,04851321.6×\times4,096167513.3×\times8,192OOM105—16,384OOM259—32,768OOM756—Table 7:CK Flash Attention latency under concurrent load (median / p95 in ms, MI300X)C=1C{=}1C=10C{=}10C=20C{=}20Seq. Len.medp95medp95medp955121919771231422381,02423241041671893252,04832321412342754564,09651522819985218478,1921051056018731,0581,73216,3842592601,5672,4263,0894,81732,7687567635,4067,5039,87214,862At concurrency 1 (Table˜6), FA matches SDPA at short sequences and is 3.3×\timesfaster at 4K tokens; beyond 4K tokens SDPA cannot allocate the 1.5 GB attention mask when three models share the GPU.
+Under concurrent load (Table˜7), FA scales gracefully: 20 simultaneous 4K-token requests complete with a median of 521 ms (p95 847 ms), and even 20 concurrent 32K-token requests complete without OOM—a regime entirely inaccessible to SDPA.
+Latency scales approximately linearly with concurrency, confirming that the GPU compute pipeline serializes requests rather than experiencing pathological queuing.
+
+16.4LoRA Memory Efficiency
+Table˜8shows the memory advantage of serving classifiers via LoRA adapters versus independent fine-tuned models.
+
+Table 8:Model memory: independent fine-tuned models vs. LoRA adapters (ModernBERT base, 150M params)Tasks (nn)Independent (MB)LoRA (MB)157357331,71957463,438575Atn=6n=6, the LoRA architecture requires∼\sim6×\timesless model memory (one base model + six∼\sim0.2 MB adapters vs. six full model copies).
+Each task still requires its own forward pass; latency reduction comes fromparallel executionof classifiers rather than from LoRA itself (Section˜9).
+
+16.5Decision Engine Overhead
+Decision evaluation adds negligible latency:<0.1<0.1ms for 10 decisions with 3 conditions each;<0.5<0.5ms for 100 decisions with 5 conditions each.
+This confirms that theO​(M⋅Lmax)O(M\cdot L_{\text{max}})complexity is dominated by signal extraction.
+
+16.6Composable Orchestration Across Deployment Scenarios
+A key claim of this work is that the same architecture serves diverse deployment scenarios through configuration.Table˜9demonstrates how different signal-decision-plugin compositions address different requirements:
+
+Table 9:Composable signal orchestration across deployment scenarios. Each scenario activates a different subset of the thirteen signal types, selection algorithms, and plugin chains—using the same system binary and architecture.ScenarioActive SignalsSelectionKey PluginsPrivacy-regulated (healthcare)authz, domain, languageStatic (compliant models only)Strict PII redaction, no caching, audit loggingCost-optimized (developer tool)complexity, embedding, keywordAutoMix cascadeAggressive semantic cache, header mutation for LoRA adapterMulti-cloud enterprisedomain, modality, authzLatency-awareMulti-endpoint failover, provider auth factory, system prompt injectionMulti-turn assistantembedding, feedback, preferenceElo with session pinResponses API state, memory retrieval, RAG injection
+16.7End-to-End Routing Correctness
+The end-to-end test framework validates routing behavior across eight scenario profiles:
+
+Table 10:End-to-end test profilesProfileValidated BehaviorMulti-endpointMulti-provider routing with weighted distribution and failover across heterogeneous backendsMulti-provider authProvider-specific auth injection (API key, OAuth2, cloud IAM) via authorization factoryAuthZ-RBACRole-based model access (admin/premium/free tiers) with authz signalML model selectionKNN, KMeans, SVM, MLP selection accuracy on held-out queriesKeyword routingKeyword signal matching with AND/OR/NOR combinatorsEmbedding routingEmbedding similarity thresholds and confidence-based decision selectionRAG + Responses APIContext retrieval, injection, and stateful multi-turn via Responses APIRouting strategiesStatic, Elo, RouterDC, AutoMix, Hybrid algorithm comparisonEach profile validates correct model selection, safety enforcement (jailbreak blocked, PII detected), cache behavior (hits after similar queries), multi-provider routing (correct endpoint resolution and auth injection), and header propagation.
+
+16.8Semantic Cache Effectiveness
+At a similarity thresholdθ=0.92\theta=0.92:
+exact-match queries achieve 100% hit rate with<5<5ms lookup latency;
+paraphrased queries achieve 60–80% hit rate depending on paraphrase distance.
+Cache hits eliminate backend model invocation entirely, reducing per-request cost to embedding computation only.
+
+16.9Unified MoM Evaluation Framework
+To validate the robustness of the Mixture of Models (MoM) collection, we implemented a unified evaluation pipeline that benchmarks both merged models and LoRA adapters. The framework standardizes the assessment of heterogeneous model variants across intent classification and PII detection tasks.
+
+The evaluation architecture, shown inFigure˜25, utilizes the following components:
+
+•Schema Normalization:Inputs from diverse sources—including MMLU-Pro for intent and Presidio for token classification—are mapped to a common evaluation schema.
+
+•Comparative Quality Validation:The system computes weighted F1-scores and per-class precision/recall to ensure that the memory efficiency gains reported inTable˜8do not result in significant predictive degradation compared to full-parameter models.
+
+•Parallelized Benchmarking:Large-scale evaluations are executed viaProcessPoolExecutorto minimize wall-clock time. The pipeline incorporates automated OOM recovery and exponential backoff for API-based signal providers to ensure benchmark reliability.
+
+Results include p50 and p99 latency profiling to confirm that model orchestration remains within the operational bounds required for real-time routing.
+
+Figure 25:Unified MoM evaluation pipeline. Configuration and dataset sources feed into the data and model loaders, which populate the model registry. A process pool executor parallelizes inference across model variants, producing confusion matrices and aggregated metrics (weighted F1, per-class precision/recall) for both merged and LoRA models.
+16.10Open Evaluation
+Detailed model selection quality comparisons across algorithms, HaluGate detection accuracy on standard benchmarks (HaluEval, FActScore), and large-scale routing quality evaluation are under preparation in collaboration with the RouterArena team.
+
+17Related Work
+17.1LLM Routing and Model Selection
+Binary routing.RouteLLM[27]pioneered preference-data-driven routing between a strong and weak model, training BERT, MLP, and causal LLM classifiers to estimate query difficulty.
+Our work extends this to multi-model, multi-signal routing with per-decision plugin chains.
+
+Contrastive selection.RouterDC[5]learns shared query-model embeddings via dual contrastive learning.
+We integrate RouterDC as one of thirteen selection algorithms and extend it with signal-conditioned features (domain category, complexity).
+
+Cascading.AutoMix[2]formulates model cascading as a POMDP with self-verification.
+We integrate AutoMix within our plugin-aware framework, where safety checks and caching can prevent unnecessary escalation.
+
+Benchmarking.RouterBench[11]proposed a benchmark for multi-LLM routing with hybrid scoring.
+Our Hybrid selector builds on this approach.
+
+RL-based routing.Router-R1[46]formulates multi-LLM routing as a sequential decision process, using rule-based reward RL for multi-round routing and aggregation.
+GMTRouter[44]uses graph-based learning for personalized multi-turn interactions.
+We integrate both within the unified selection interface and extend them with the ReMoM multi-round reasoning strategy.
+
+A key distinction of our work is that prior approaches address model selection in isolation, while we embed selection within a composable signal orchestration framework that also handles signal extraction, safety enforcement, caching, context augmentation, and multi-provider routing—enabling the same selection algorithms to serve fundamentally different deployment scenarios through configuration.
+
+17.2Multi-Provider and Multi-Endpoint Routing
+Commercial LLM gateway products (OpenRouter, AWS Bedrock, Azure AI Studio) provide multi-provider access but lack the composable signal-driven routing that enables differentiated policies per routing decision.
+API management platforms (Kong, Apigee) offer gateway functionality but are not designed for semantic analysis of LLM requests.
+Our system uniquely combines semantic model selection with multi-provider protocol abstraction, a pluggable authorization factory, and full OpenAI Responses API support for stateful conversations within the same composable framework.
+
+17.3Mixture-of-Experts vs. Mixture-of-Models
+Sparse Mixture-of-Experts (MoE)[36,16]routestokensto specialized sub-networkswithina single model architecture.
+Our system operates at therequest level, routing entire requests acrossdifferent model deployments—a Mixture-of-Models (MoM) approach.
+The two paradigms are complementary: our router can route to MoE models as backends.
+
+17.4LLM Safety
+Prompt injection defenses range from perplexity filtering and input preprocessing[15]to fine-tuned safety classifiers[14].
+PII detection systems[22]identify sensitive information using rule-based and ML approaches.
+Our safety subsystem integrates both within the routing pipeline with per-decision thresholds and policies, using LoRA adapters for memory-efficient multi-task classification.
+
+17.5Hallucination Detection
+SelfCheckGPT[23]detects hallucinations via multi-sample consistency.
+FActScore[26]evaluates factual precision at the atomic fact level.
+HaluGate differs in three respects:
+(1) a gating Sentinel that skips verification for non-factual queries;
+(2) token-level span identification rather than sentence-level scoring;
+(3) NLI-based explanation distinguishing contradiction from neutral unsupported content.
+
+17.6Semantic Caching and RAG
+Semantic caching for LLMs uses embedding similarity to match incoming queries against previously seen requests, avoiding redundant model invocations.
+Our cache extends this with per-decision policies, multiple backends, and integration with the safety pipeline (cache lookups occuraftersafety checks butbeforemodel invocation).
+RAG integration[19,41]augments responses with retrieved context; our contribution is embedding RAG as a per-decision plugin within the routing framework.
+
+18Conclusion
+We have presented vLLM Semantic Router, a signal-driven decision routing system for Mixture-of-Modality model deployments.
+The central contribution iscomposable signal orchestration: the three-layer architecture—signal extraction, Boolean decision evaluation, per-decision plugin chains—enables diverse deployment scenarios to be expressed as different configurations over the same framework, without code changes.
+
+Privacy-regulated deployments activate authz and PII signals with strict filtering plugins; cost-optimized deployments enable cascading selection with aggressive semantic caching; multi-cloud enterprises configure weighted multi-endpoint routing with provider-specific auth injection.
+All use the same signal-decision-plugin machinery, composed differently.
+
+Within this framework,semantic model selectionanalyzes each request’s content through thirteen algorithms—spanning rating-based, contrastive, cascading, classical ML, reinforcement learning, and latency-aware families—to find the most cost-effective model while respecting per-decision privacy and safety constraints.
+The integration of fullOpenAI Responses API supportenables stateful multi-turn routing with conversation-consistent model assignment;multi-endpoint and multi-provider routingabstracts over heterogeneous backends (vLLM, OpenAI, Anthropic, Azure, Bedrock, Gemini, Vertex AI) with transparent protocol translation; and thepluggable authorization factorysupports diverse auth mechanisms across providers without coupling auth logic to routing decisions.
+
+Additional technical contributions include:
+(1) the LoRA-based multi-task classification architecture that servesnnclassifiers from a single base model, reducing aggregate model memory by∼\simn×n\times;
+(2) HaluGate’s gated three-stage hallucination detection pipeline that reduces average detection cost by∼\sim50% through sentinel-based filtering; and
+(3) Rust-native ML inference bindings (Candle, Linfa, ONNX Runtime) that achieve sub-10 ms signal extraction latency.
+
+The system has been validated in production with over 600 merged contributions from 50+ engineers and is deployed as an Envoy ExtProc with Kubernetes operator support.
+
+18.1Future Directions
+Several research directions emerge from this work:
+
+Learned decision policies.Replacing hand-crafted Boolean rules with learned routing policies (e.g., neural routing networks trained on production traffic) could improve routing quality while maintaining interpretability through attention-based explanation.
+
+Differentiable entropy-folding policies.A natural extension of the layered entropy-folding view is to relax symbolic priority gates into trainable soft gates while preserving explicit policy constraints, enabling gradient-based optimization of control depth with auditable safety boundaries.
+
+Adaptive cost optimization.Online learning approaches that continuously adapt model and provider selection based on real-time cost signals, latency measurements, and user feedback—extending the current offline-trained ML selectors to fully adaptive cost-quality optimization.
+
+Contrastive preference routing.The contrastive embedding method used for complexity classification generalizes to user preference learning: a contrastive preference classifier scores queries against exemplar sets representing different user preference profiles, enabling personalized model selection without per-user fine-tuning.
+
+Cross-provider consistency.Techniques for ensuring consistent behavior when routing the same conversation across different providers, addressing differences in instruction following, safety behavior, and output formatting.
+
+Multi-turn safety.Extending safety enforcement from single-turn to multi-turn conversations, detecting adversarial patterns that span multiple interaction rounds.
+Preliminary work applies the contrastive embedding approach—already used for complexity classification—to multi-turn jailbreak detection: each user turn is scored against known-benign and known-adversarial exemplar sets, and accumulated turn-level signals are fused to detect gradual prompt escalation that evades single-turn classifiers.
+
+Federated signal orchestration.Extending composable signal orchestration to federated deployments where signals from multiple routing instances are aggregated for global optimization.
+
+Agent-based policy synthesis.The DSL configuration that specifies routing policies can be viewed as a program in a domain-specific language with a formally complete instruction set (Section˜6.8).
+This reframes router configuration as aprogram synthesisproblem: coding agents (LLMs fine-tuned for code generation) can translate natural-language routing specifications into valid DSL configurations, with routing quality feedback enabling RL-based optimization of the synthesis policy.
+Preliminary experiments suggest that this meta-learning approach—learning towriterouting policies rather than tomakeindividual routing decisions—can significantly reduce configuration effort while maintaining the interpretability and verifiability of symbolic decision rules.
+
+Multi-protocol adapter abstraction.The current system is tightly coupled to Envoy’s External Processor protocol. A multi-protocol adapter architecture would abstract the routing engine from protocol-specific code, enabling support for HTTP REST, native gRPC, Nginx/OpenResty, and custom protocols through thin translation layers.
+This would also enable abstraction of backend proxying (currently Envoy-specific), external authorization mechanisms, and traffic management policies, making the routing engine truly protocol-agnostic and deployable in serverless, edge, and non-Envoy environments.
+
+Acknowledgments
+We gratefully acknowledge the contributors who contributed to the project.
+We thank the Hugging Face Candle team for collaboration on the Candle inference runtime, and the Envoy community for the ExtProc filter.
+AMD has sponsored the project with resources and infrastructure as well as the vLLM project for the development of the project.
+AI-assisted tools were used during the writing and proofreading of this paper.
+The project is open-source athttps://github.com/vllm-project/semantic-router.
+
+References
+Åström & Murray [2008]Karl Johan Åström and Richard M. Murray.Feedback Systems: An Introduction for Scientists and Engineers.Princeton University Press, Princeton, NJ, 2008.
+Aggarwal et al. [2023]Pranjal Aggarwal, Aman Madaan, Ankit Anand, Srividya Pranavi Potharaju, Swaroop Mishra, Pei Zhou, Aditya Gupta, Dheeraj Rajagopal, Karthik Kappaganthu, Yiming Yang, Shyam Upadhyay, Manaal Faruqui, and Mausam.AutoMix: Automatically mixing language models.arXiv preprint arXiv:2310.12963, 2023.
+Bellman & Zadeh [1970]Richard E. Bellman and Lotfi A. Zadeh.Decision-making in a fuzzy environment.Management Science, 17(4):B–141–B–164, 1970.
+Brayton et al. [1984]Robert K. Brayton, Gary D. Hachtel, Curtis T. McMullen, and Alberto L. Sangiovanni-Vincentelli.Logic Minimization Algorithms for VLSI Synthesis.Kluwer Academic Publishers, Boston, MA, 1984.
+Chen et al. [2024]Shuhao Chen, Weisen Jiang, Baijiong Lin, James T. Kwok, and Yu Zhang.RouterDC: Query-based router by dual contrastive learning for assembling large language models.arXiv preprint arXiv:2409.19886, 2024.
+Devlin et al. [2019]Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova.BERT: Pre-training of deep bidirectional transformers for language understanding.arXiv preprint arXiv:1810.04805, 2019.
+Envoy Proxy Authors [2024a]Envoy Proxy Authors.Envoy external processing filter, 2024a.URLhttps://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter.
+Envoy Proxy Authors [2024b]Envoy Proxy Authors.Envoy proxy: An open source edge and service proxy, 2024b.URLhttps://www.envoyproxy.io/.
+Fleisher & Maissel [1975]Harvey Fleisher and Lester I. Maissel.An introduction to array logic.IBM Journal of Research and Development, 19(2):98–109, 1975.
+Hu et al. [2022]Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen.LoRA: Low-rank adaptation of large language models.arXiv preprint arXiv:2106.09685, 2022.
+Hu et al. [2024]Qitian Jason Hu, Jacob Bieker, Xiuyu Li, Nan Jiang, Benjamin Keigwin, Gaurav Ranganath, Kurt Keutzer, and Shriyash Kaustubh Upadhyay.RouterBench: A benchmark for multi-LLM routing system.arXiv preprint arXiv:2403.12031, 2024.
+Hugging Face [2024]Hugging Face.Candle: Minimalist ML framework for Rust, 2024.URLhttps://github.com/huggingface/candle.
+Huntington [1904]Edward V. Huntington.Sets of independent postulates for the algebra of logic.Transactions of the American Mathematical Society, 5(3):288–309, 1904.
+Inan et al. [2023]Hakan Inan, Kartikeya Upasani, Jianfeng Chi, Rashi Rungta, Krithika Iyer, Yuning Mao, Michael Tontchev, Qing Hu, Brian Fuller, Davide Testuggine, and Madian Khabsa.Llama Guard: LLM-based input-output safeguard for human-AI conversations.arXiv preprint arXiv:2312.06674, 2023.
+Jain et al. [2023]Neel Jain, Avi Schwarzschild, Yuxin Wen, Gowthami Somepalli, John Kirchenbauer, Ping yeh Chiang, Micah Goldblum, Aniruddha Saha, Jonas Geiping, and Tom Goldstein.Baseline defenses for adversarial attacks against aligned language models.arXiv preprint arXiv:2309.00614, 2023.
+Jiang et al. [2024]Albert Q. Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, et al.Mixtral of experts.arXiv preprint arXiv:2401.04088, 2024.
+Kusupati et al. [2022]Aditya Kusupati, Gantavya Bhatt, Aniket Rege, Matthew Wallingford, Aditya Sinha, Vivek Ramanujan, William Howard-Snyder, Kaifeng Chen, Sham Kakade, Prateek Jain, and Ali Farhadi.Matryoshka representation learning.arXiv preprint arXiv:2205.13147, 2022.
+Kwon et al. [2023]Woosuk Kwon, Zhuohan Li, Sicheng Zuo, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica.Efficient memory management for large language model serving with PagedAttention.InProceedings of the 29th Symposium on Operating Systems Principles (SOSP), 2023.
+Lewis et al. [2020]Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich Küttler, Mike Lewis, Wen tau Yih, Tim Rocktäschel, Sebastian Riedel, and Douwe Kiela.Retrieval-augmented generation for knowledge-intensive NLP tasks.arXiv preprint arXiv:2005.11401, 2020.
+Li et al. [2010]Lihong Li, Wei Chu, John Langford, and Robert E. Schapire.A contextual-bandit approach to personalized news article recommendation.InProceedings of the 19th International Conference on World Wide Web, pp.  661–670. ACM, 2010.
+Linfa Contributors [2024]Linfa Contributors.Linfa: A Rust machine learning framework, 2024.URLhttps://github.com/rust-ml/linfa.
+Lison et al. [2021]Pierre Lison, Ildikó Pilán, David Sánchez, Montserrat Batet, and Lilja Øvrelid.Anonymisation models for text data: State of the art, challenges and future directions.InProceedings of the 59th Annual Meeting of the Association for Computational Linguistics (ACL), pp.  4188–4203, 2021.
+Manakul et al. [2023]Potsawee Manakul, Adian Liusie, and Mark J.F̃. Gales.SelfCheckGPT: Zero-resource black-box hallucination detection for generative large language models.arXiv preprint arXiv:2303.08896, 2023.
+Mangrulkar et al. [2022]Sourab Mangrulkar, Sylvain Gugger, Lysandre Debut, Younes Belkada, Sayak Paul, and Benjamin Bossan.PEFT: State-of-the-art parameter-efficient fine-tuning methods.InHugging Face, 2022.URLhttps://github.com/huggingface/peft.
+Microsoft [2024]Microsoft.ONNX Runtime: Cross-platform, high performance ML inferencing and training accelerator, 2024.URLhttps://onnxruntime.ai/.
+Min et al. [2023]Sewon Min, Kalpesh Krishna, Xinxi Lyu, Mike Lewis, Wen tau Yih, Pang Wei Koh, Mohit Iyyer, Luke Zettlemoyer, and Hannaneh Hajishirzi.FActScore: Fine-grained atomic evaluation of factual precision in long form text generation.arXiv preprint arXiv:2305.14251, 2023.
+Ong et al. [2024]Isaac Ong, Amjad Almahairi, Vincent Wu, Wei-Lin Chiang, Tianhao Wu, Joseph E. Gonzalez, M Waleed Kadous, and Ion Stoica.RouteLLM: Learning to route LLMs with preference data.arXiv preprint arXiv:2406.18665, 2024.
+OpenTelemetry Authors [2024]OpenTelemetry Authors.OpenTelemetry: An observability framework for cloud-native software, 2024.URLhttps://opentelemetry.io/.
+Peng et al. [2023]Bowen Peng, Eric Alcaide, Quentin Anthony, Amir Albalak, Samuel Arcadinho, Stella Biderman, Huanqi Cao, Xin Cheng, Matteo Chung, Matteo Grella, et al.YaRN: Efficient context window extension of large language models.arXiv preprint arXiv:2309.00071, 2023.
+Prometheus Authors [2024]Prometheus Authors.Prometheus: From metrics to insight, 2024.URLhttps://prometheus.io/.
+Rissanen [1978]Jorma Rissanen.Modeling by shortest data description.Automatica, 14(5):465–471, 1978.
+Rivest [1987]Ronald L. Rivest.Learning decision lists.Machine Learning, 2(3):229–246, 1987.
+Shalev-Shwartz [2012]Shai Shalev-Shwartz.Online learning and online convex optimization.Foundations and Trends in Machine Learning, 4(2):107–194, 2012.
+Shannon [1938]Claude E. Shannon.A symbolic analysis of relay and switching circuits.Transactions of the American Institute of Electrical Engineers, 57(12):713–723, 1938.
+Shannon [1948]Claude E. Shannon.A mathematical theory of communication.The Bell System Technical Journal, 27(3):379–423, 1948.
+Shazeer et al. [2017]Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean.Outrageously large neural networks: The sparsely-gated mixture-of-experts layer.arXiv preprint arXiv:1701.06538, 2017.
+The Kubernetes Authors [2024]The Kubernetes Authors.Kubernetes: Production-grade container orchestration, 2024.URLhttps://kubernetes.io/.
+Thomas [2024]Alec Thomas.Participle: A parser library for Go.https://github.com/alecthomas/participle, 2024.Accessed: 2025-01-15.
+Thompson [1933]William R. Thompson.On the likelihood that one unknown probability exceeds another in view of the evidence of two samples.Biometrika, 25(3/4):285–294, 1933.
+Vaswani et al. [2017]Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Łukasz Kaiser, and Illia Polosukhin.Attention is all you need.InAdvances in Neural Information Processing Systems (NeurIPS), 2017.
+Wang et al. [2021]Jianguo Wang, Xiaomeng Yi, Rentong Guo, Hai Jin, Peng Xu, Shengjun Li, Xiangyu Wang, Xiangzhou Guo, Chengming Li, Xiaohai Xu, et al.Milvus: A purpose-built vector data management system.InProceedings of the 2021 International Conference on Management of Data (SIGMOD), 2021.
+Warner et al. [2024]Benjamin Warner, Antoine Chaffin, Benjamin Clavie, Orion Weller, Oskar Hallstrom, Said Taghadouini, Alexis Gallagher, Raja Biswas, Faisal Ladhak, Tom Aarsen, Nathan Cooper, Griffin Adams, Jeremy Howard, and Iacopo Poli.Smarter, better, faster, longer: A modern bidirectional encoder for fast, memory efficient, and long context finetuning and inference.arXiv preprint arXiv:2412.13663, 2024.
+Williams et al. [2018]Adina Williams, Nikita Nangia, and Samuel R. Bowman.A broad-coverage challenge corpus for sentence understanding through inference.arXiv preprint arXiv:1704.05426, 2018.
+Xie et al. [2025]Encheng Xie, Yihang Sun, Tao Feng, and Jiaxuan You.GMTRouter: Personalized LLM router over multi-turn user interactions.arXiv preprint arXiv:2511.08590, 2025.
+Zadeh [1965]Lotfi A. Zadeh.Fuzzy sets.Information and Control, 8(3):338–353, 1965.
+Zhang et al. [2025a]Haozhen Zhang, Tao Feng, and Jiaxuan You.Router-R1: Teaching LLMs multi-round routing and aggregation via reinforcement learning.arXiv preprint arXiv:2506.09033, 2025a.
+Zhang et al. [2025b]Tianjun Zhang, Yangjun Ruan, and Tatsunori Hashimoto.PaCoRe: Parallel cooperative reasoning with LLMs.arXiv preprint arXiv:2601.05593, 2025b.
+
