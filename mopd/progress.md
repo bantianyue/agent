@@ -11,7 +11,7 @@
 | Step 4c: 文章撰写 | pending |
 | Step 4f: Humanizer 润色 | completed |
 | Step 5: 检查清单 | pending |
-| Step 6: 推送草稿 | pending |
+| Step 6: 推送草稿 | completed |
 
 创建时间: 2026-07-01
 来源: https://arxiv.org/html/2606.30406v1
