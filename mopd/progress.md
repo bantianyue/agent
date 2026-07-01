@@ -21,3 +21,4 @@
 | Step 3: 封面生成 | completed |
 | Step 4: 文章撰写 | completed |
 | Step 4g: 格式修复 | completed |
+| Step 5: 预发布检查 | completed |
