@@ -69,10 +69,21 @@ Claude Managed Agents的出现说明Agent基础设施正在从"自建"走向"托
 
 ---
 
+<div style="background:#2c3e50;padding:16px 18px;border-radius:8px;margin-bottom:16px;">
+<div style="margin-bottom:16px;">
+<a href="https://claude.com/blog/amazon-bedrock-google-cloud-gateway" style="color:#ffffff;text-decoration:none;font-size:15px;font-weight:bold;display:block;margin-bottom:10px;">🔗 Claude apps gateway for Amazon Bedrock and Google Cloud 正式上线</a>
+</div>
+<div style="margin-bottom:16px;">
+<a href="https://claude.com/blog/microsoft-foundry-ga" style="color:#ffffff;text-decoration:none;font-size:15px;font-weight:bold;display:block;margin-bottom:10px;">🔗 Claude in Microsoft Foundry 正式可用</a>
+</div>
+<div style="margin-bottom:16px;">
+<a href="https://claude.com/blog/workload-identity-federation" style="color:#ffffff;text-decoration:none;font-size:15px;font-weight:bold;display:block;margin-bottom:10px;">🔗 Claude Platform 安全接入：Workload Identity Federation</a>
+</div>
+<div>
+<a href="https://platform.claude.com/docs/en/managed-agents/overview" style="color:#ffffff;text-decoration:none;font-size:15px;font-weight:bold;display:block;">📖 Managed Agents 官方文档</a>
+</div>
+</div>
+
 <span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：
 
-https://claude.com/blog/claude-managed-agents
-https://claude.com/blog/amazon-bedrock-google-cloud-gateway
-https://claude.com/blog/microsoft-foundry-ga
-https://claude.com/blog/workload-identity-federation
-https://platform.claude.com/docs/en/managed-agents/overview</span>
+https://claude.com/blog/claude-managed-agents</span>
