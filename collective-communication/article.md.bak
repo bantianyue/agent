@@ -1,0 +1,126 @@
+> 当你将训练或推理从单卡扩展到多 GPU 时，通信就成了一门必修课。NCCL 这类库提供了优化过的 GPU 间通信原语：它们被称为 Collective Communication（集体通信）。训练和推理中共享的消息类型和数量差异很大，但通信原语是**完全相同**的。今天这篇文章带你一次性搞懂所有重要的集体通信原语。
+
+## 一、通信模型：α + nβ
+
+GPU 间发送一条消息的总时间可以建模为：
+
+**总时间 = α + nβ，其中 β = 1/B**
+
+- **α（alpha）**：每次通信的固定开销（建立连接、握手等）。它**不**依赖数据量大小。
+- **β（beta）**：每字节的传输时间，即带宽的倒数。
+- **n**：消息大小（字节数）。
+- **B**：链路带宽（如 NVLink 的 900 GB/s）。
+
+> 记住一句话：**α 是每发一次消息就要付的固定成本，nβ 随消息大小线性增长。**
+
+以 NVIDIA H100 的 NVLink 为例：α ≈ 10 μs，B ≈ 900 GB/s（β ≈ 1.1 ps/byte）。对比两种场景：
+
+- **1 KB 小消息：** α = 10 μs，nβ ≈ 1.1 ns。α 是 nβ 的 **10,000 倍**，固定开销完胜。
+- **1 GB 大消息：** α = 10 μs，nβ ≈ 1.1 ms。nβ 是 α 的 **100 倍**，带宽占主导。
+
+这个权衡决定了算法选择：**小消息要最小化通信轮数（每轮多一个 α），大消息要让总线满载（固定开销可忽略）。**
+
+## 二、通信算法：MST vs Ring
+
+实现集体通信有两种主要算法：**MST（最小生成树）**和 **Ring（环形）**。
+
+### MST 算法
+
+MST 专为小消息设计，优先低延迟。它用生成树结构保证最少的数据传输轮数，但**无法充分利用带宽**，假设每个节点一次只能与一个节点通信。
+
+### Ring 算法
+
+在 Ring 中，每个 GPU 按环形组织，一次只与两个邻居通信：
+
+- **消息分割：** 大消息分成 N 个等块，P 个 GPU 各得 N/P 数据。
+- **数据传输：** 每个 GPU 将块传给下一个邻居，同时从左侧接收、向右侧发送。
+- **效率：** 所有 GPU 同时操作，带宽始终满载。
+
+### Broadcast in MST vs Ring
+
+以 6 个 GPU 为例，将数据从一个 GPU 广播到所有 GPU：
+
+**MST 方案：**
+- 第 1 轮：GPU 0 → GPU 1 和 2
+- 第 2 轮：GPU 1 → GPU 3
+- 第 3 轮：GPU 2 → GPU 4 和 5
+- **总轮数：** log₂(6) ≈ **2.585 轮**
+
+![MST Broadcast](mst_broadcast.png)
+
+**Ring 方案：**
+- 第 1 轮：GPU 0 → GPU 1
+- 第 2 轮：GPU 1 → GPU 2
+- 第 3 轮：GPU 2 → GPU 3
+- **总轮数：** N - 1 = **3 轮**
+
+![Ring Broadcast](ring_broadcast.png)
+
+可以看到，**MST 优化延迟（轮数更少），Ring 优化带宽利用率（每个节点始终忙碌）**。在 ML 系统中，由于要移动大量权重、激活值和 tensor 分片，**大多数消息是带宽受限的**，这就是为什么 Ring 算法占据主导。
+
+## 三、7 大 Collective Communication 原语
+
+### 1. Broadcast（广播）
+
+Broadcast 将一个 GPU（根节点）的数据发送给组内所有 GPU。**每个 GPU 最终持有完全相同的副本。** 上面展示的 MST/Ring 示例就是 Broadcast 的实现方式。
+
+![Broadcast](broadcast.png)
+
+> 训练中：在开始时**分发模型参数**，让所有副本从同一起点开始。
+
+### 2. Reduce（规约）
+
+Reduce 从每个 GPU 获取一个 tensor，执行逐元素操作（求和/均值/最小值/最大值），在单个根 GPU 上生成结果。
+
+> 用于**聚合损失值**，或在应用优化器前**对梯度求和**。结果只存在于一个 GPU 上。
+
+![Reduce](reduce.png)
+
+### 3. Scatter（散射）
+
+Scatter 将一个 GPU 持有的 tensor 切分成等块，分发给不同 GPU。**每个 GPU 持有原始数据的一个唯一部分，没有重复。**
+
+> 在数据并行中，**将不同的 micro-batch 输入数据分配到各 GPU**。这就是 Scatter 的典型用法。
+
+![Scatter](scatter.png)
+
+### 4. Gather（收集）
+
+Gather 是 Scatter 的逆操作。每个 GPU 将 tensor 发给根 GPU，根 GPU 将它们拼接成更大的 tensor。
+
+> 常用于在 rank 0 上收集模型输出或激活值，用于 **checkpoint 保存、日志记录或评估**。
+
+![Gather](gather.png)
+
+### 5. Allgather（全收集）
+
+Allgather = Gather + Broadcast。**每个 GPU 将其数据发给所有其他 GPU，每个 GPU 最终获得来自所有 GPU 的完整拼接数据集。**
+
+> 在 **Tensor Parallelism** 中至关重要：每个 GPU 持有 tensor 的一个分片，但 Attention 等操作需要完整 tensor。Allgather 让每个 GPU **在无中心瓶颈的情况下重建完整 tensor**。
+
+![Allgather](allgather.png)
+
+### 6. Reduce Scatter（规约散射）
+
+Reduce Scatter 将 Reduce 和 Scatter 合并为一个操作：来自所有 GPU 的 tensor 被逐元素规约，结果被分割成块，**每个 GPU 只收到一个块**。
+
+![Reduce Scatter](reduce_scatter.png)
+
+### 7. Allreduce（全规约）
+
+**Allreduce 是分布式训练中最重要的集体通信原语。** 它对来自所有 GPU 的 tensor 进行规约（求和或均值），并将结果广播出去，**每个 GPU 最终得到完全相同的规约 tensor。**
+
+> 在 DDP（分布式数据并行）中，Allreduce 是梯度同步的支柱：每个 GPU 计算本地梯度，Allreduce **确保所有副本应用完全相同的权重更新**。
+
+![Allreduce](all_reduce.png)
+
+## 总结
+
+掌握这些集体通信原语，你就能理解各种分布式训练策略背后的通信模式，将实验从单卡扩展到多卡集群。核心要点很简单：
+
+**ML 工作负载基本都是带宽受限的，所以 Ring 算法在生产系统中占主导地位；而 MST 算法在延迟是瓶颈、消息较小时更有优势。**
+
+接下来，可以进一步了解 torchtitan 等生产就绪的分布式训练库。
+
+参考：
+<span style="font-size:12px;color:#888888;">参考：https://jino-rohit.github.io/blog/11_collective_communication.html</span>

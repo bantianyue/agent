@@ -1,0 +1,199 @@
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+- <strong>FX Graph 是 PyTorch 2.0 编译栈的基石</strong>：从 Dynamo 到 Inductor，每个组件都以 FX Graph 为中间表示。不理解 FX Graph，就无法真正理解 torch.compile。<br><br>
+- <strong>三个核心对象撑起整个体系</strong>：Graph（计算图）、Node（节点，6 个关键字段）、GraphModule（可执行的模块包装）。看懂这三者的关系就掌握了 FX Graph。<br><br>
+- <strong>Symbolic Tracing 用 Proxy 对象拦截操作</strong>：用代理值模拟前向传播，重载 Python 所有可能用到的 dunder 方法（算术运算、属性访问、索引、torch 函数调用），不执行实际计算，只记录节点图。
+</div>
+</div>
+
+---
+
+在 PyTorch 2.0 的编译栈里，FX Graph 是最容易被跳过的：大家在追 torch.compile、Dynamo、Inductor 这些更耀眼的名字时，很少有人愿意先停下来搞懂这层 IR。**但事实是，从 Dynamo 到 Inductor，每一个组件都在以某种方式操作 FX Graph。它是整个编译生态的底层语言。**
+
+本文会从 DAG 的概念开始，深入到 Graph、Node、GraphModule 三个核心对象，最后拆解 symbolic tracing 的拦截机制和它的硬边界。这是一篇入门，但看完之后你就能自信地钻进 torch.compile 的源码了。
+
+## 先从 DAG 说起
+
+FX Graph 本质上是一个有向无环图。PyTorch 提供了一个 `torch.fx` 模块，能把 Python 代码转成 DAG 形式的中间表示。
+
+![](HL4B3h0acAAPBbB.png)
+<span style="font-size:12px;color:rgb(153,153,153);">一个有向无环图（DAG）的结构示意</span>
+
+**DAG 不是新概念，但在 FX Graph 的语境下，它意味着每一段 Python 代码都被拍平成一个节点序列，节点之间有明确的数据流向。** 没有循环，没有分支条件，只有节点和边。
+
+## 三个核心对象
+
+**FX Graph 的整个 API 只有三个概念需要掌握：Graph、Node、GraphModule。**
+
+![](HL4B93waMAADGsw.png)
+<span style="font-size:12px;color:rgb(153,153,153);">Graph、Node、GraphModule 三者的结构关系</span>
+
+拿一个最简单的模型来演示：
+
+```python
+import torch
+import torch.fx
+
+class MyModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(4, 8)
+
+    def forward(self, x):
+        return torch.relu(self.linear(x))
+
+gm = torch.fx.symbolic_trace(MyModel())
+gm.graph.print_tabular()
+```
+
+输出如下：
+
+```
+opcode         name    target                 args         kwargs
+-------------  ------  ---------------------  -----------  --------
+placeholder    x       x                      ()           {}
+call_module    linear  linear                 (x,)         {}
+call_function  relu    <built-in fn relu>     (linear,)    {}
+output         output  output                 (relu,)      {}
+```
+
+**FX Graph 把代码拍平成四个节点：输入占位符 → 调用子模块 → 调用函数 → 输出。** 每一行就是一个 Node，每个 Node 都有明确的 opcode、name、target、args 和 kwargs。
+
+打印 Graph 的文本表示是这样的：
+
+```
+graph():
+    %x : [num_users=1] = placeholder[target=x]
+    %linear : [num_users=1] = call_module[target=linear](args = (%x,), kwargs = {})
+    %relu : [num_users=1] = call_function[target=torch.relu](args = (%linear,), kwargs = {})
+    return relu
+```
+
+**Graph 就是节点的有序容器，Node 是图的基本单元，GraphModule 把 Graph 包装成一个可调用的 nn.Module。**
+
+### Node 的 6 个字段
+
+每一个 Node 有 6 个你一定会碰到的字段：
+
+**`node.op`** 决定节点的类型，一共 6 个值：`placeholder`（输入）、`get_attr`（读参数）、`call_function`（调用 torch op 或 Python 函数）、`call_method`（调用张量方法如 .view()）、`call_module`（调用子模块如 self.linear）、`output`（输出）。
+
+**`node.name`** 是打印时看到的 `%` 前缀变量名。比如 `%add = call_function[target=operator.add]` 中 `node.name` 就是 "add"。
+
+**`node.args`** 是当前节点依赖的节点元组，**通过 args 就能追溯完整的数流向。**
+
+```python
+%add = call_function[target=operator.add](args = (%x, %y))
+# add 依赖 x 和 y
+%relu = call_function[target=torch.relu](args = (%add,), kwargs = {})
+# relu 依赖 add
+```
+
+**`node.kwargs`** 和 args 类似，但针对关键字参数。
+
+**`node.users`** 记录当前节点被多少个其他节点使用：**在做图变换时，删除节点前必须检查 `len(node.users) == 0`**，否则要先把使用方重定向到别的节点。这也是检测死代码的关键指标。
+
+```python
+# 输入 x 被两个节点使用
+%x : [num_users=2] = placeholder[target=x]
+%add = call_function[target=operator.add](args = (%x, %y))
+%neg = call_function[target=torch.neg](args = (%x,))
+# node.users[x] 映射为 {add: 1, neg: 1}
+```
+
+**`node.target` 是最重要也最容易误解的字段**：它的含义完全取决于 `node.op`。不能孤立地读 target。
+
+![](HL4CiBjbgAIsqEZ.png)
+<span style="font-size:12px;color:rgb(153,153,153);">node.target 的含义随 node.op 变化</span>
+
+target="linear" 时：如果 op 是 `call_module`，表示"调用 self.linear"；如果 op 是 `get_attr`，表示"读取 self.linear"（由于 linear 是模块而非张量，会报错）。**所以一定要先看 op，再读 target。**
+
+**`node.meta`** 存储节点的元数据信息，用于传递额外上下文。
+
+## FX Graph 是怎么建起来的
+
+**核心机制叫 symbolic tracing（符号追踪）。**
+
+普通 Python 代码运行时立即执行，执行完你有结果，但没有计算图：不知道是怎么算出来的。Symbolic tracing 就是为了解决这个问题。
+
+**它的工作原理是 Proxy 对象拦截。** torch.fx 创建 Proxy 来包裹每个输入值，然后重载所有在神经网络前向传播中可能用到的 Python dunder 方法：
+
+- `__add__`、`__mul__`、`__sub__` 处理算术运算
+- `__getattr__` 处理属性访问（如 `.shape`、`.view()`）
+- `__getitem__` 处理索引（如 `x[0]`）
+- `__torch_function__` 处理 torch op 调用（如 `torch.relu(x)`）
+- `__call__` 处理子模块调用（如 `self.linear(x)`）
+
+**每次这些钩子被触发，Proxy 就创建一个新 Node 记录操作。** Node 存储 opcode、target 函数和输入参数。前向传播返回时，一个完整的计算图就建好了。
+
+```python
+class MyModel(torch.nn.Module):
+    def forward(self, x):
+        z = x + 1           # Proxy.__add__ 触发 → 创建 Node(op=call_function, target=operator.add)
+        return torch.relu(z) # __torch_function__ 触发 → 创建 Node(op=call_function, target=torch.relu)
+```
+
+**不执行任何实际计算，只模拟和记录。** 这很巧妙，但也有硬边界。
+
+## Symbolic Tracing 的三大限制
+
+**动态控制流无法追踪。** 如果条件判断依赖运行时数据或用户输入，Proxies 没有真实值去评估条件，就追不下去：
+
+```python
+def forward(self, x):
+    if x.sum() > 0:     # proxy 算不了这个！
+        return torch.relu(x)
+    else:
+        return torch.neg(x)
+```
+
+**非 torch 的纯 Python 函数不会被拦截。** 比如 `math.sqrt`：
+
+```python
+from math import sqrt
+
+def normalize(x):
+    return x / sqrt(len(x))
+
+traced = torch.fx.symbolic_trace(normalize)  # 失败！
+```
+
+**静态控制流则完全没有问题。** 如果条件在初始化时就已知，tracing 可以完美处理：
+
+```python
+class MyModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.do_activation = False
+        self.linear = torch.nn.Linear(512, 512)
+
+    def forward(self, x):
+        x = self.linear(x)
+        if self.do_activation:       # 静态的，不依赖数据
+            x = torch.relu(x)
+        return x
+
+# 这个能正常 trace
+```
+
+## 下一站：TorchDynamo
+
+FX Graph 是理解整个 PyTorch 2.0 编译栈的第一步。下一个系列会讲 TorchDynamo：字节码级别的 JIT 编译器，看它如何用不同的方式处理相同的 tracing 问题。
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+这篇是 Jino Rohit「Torch Internals」系列的第一篇，也是整个系列的基础。它的价值不在于炫技，而在于把 FX Graph 从"torch 编译器里的黑盒子"还原成三个你可以手写操作的对象：Graph、Node、GraphModule。这是理解整个 torch.compile 体系最不可跳过的一课。<br><br>
+不过值得留意的是，symbolic tracing 的三大限制其实已经暗示了为什么 PyTorch 需要 TorchDynamo 这个字节码级的方案。FX Graph 的"一次建图，全局可用"虽然高效，但因为 Proxy 无法处理动态控制流，它在实际模型上覆盖率有限。理解这些限制，比只懂原理更有用：它让你在面对 trace 失败报错时能快速判断是框架问题还是模型结构问题。
+</div>
+</div>
+
+---
+
+<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：
+
+https://x.com/jino_rohit/status/2071247775837356399</span>

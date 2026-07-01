@@ -1,0 +1,594 @@
+Title: Can an LLM Spot Other LLMs? — Chinmay Karkar
+
+URL Source: https://chinmaykarkar.com/blog/blogger_blog/
+
+Markdown Content:
+## The Three-Model Problem: Can an LLM Spot Other LLMs?
+
+## Table of Contents
+
+1.   [Introduction](https://chinmaykarkar.com/blog/blogger_blog/#introduction)
+2.   [DataGen and Premise](https://chinmaykarkar.com/blog/blogger_blog/#datagen-and-premise)
+3.   [Reward Shaping and Class Collapse](https://chinmaykarkar.com/blog/blogger_blog/#reward-shaping-and-class-collapse)
+4.   [Design Space of Algorithms](https://chinmaykarkar.com/blog/blogger_blog/#design-space-of-algorithms)
+5.   [Protecting the Deliverable](https://chinmaykarkar.com/blog/blogger_blog/#protecting-the-deliverable)
+6.   [The Separability Diagnostic](https://chinmaykarkar.com/blog/blogger_blog/#the-separability-diagnostic)
+7.   [One Last Shot at Pure RL](https://chinmaykarkar.com/blog/blogger_blog/#one-last-shot-at-pure-rl)
+8.   [Why RL Was Probably Not the Best Tool Here](https://chinmaykarkar.com/blog/blogger_blog/#why-rl-was-probably-not-the-best-tool-here)
+9.   [Trying to Fix RL on Its Own Terms](https://chinmaykarkar.com/blog/blogger_blog/#trying-to-fix-rl-on-its-own-terms)
+10.   [What the Models Actually Learned About the Three Providers](https://chinmaykarkar.com/blog/blogger_blog/#what-the-models-actually-learned-about-the-three-providers)
+11.   [Eternal Sunshine of the Slopless Mind](https://chinmaykarkar.com/blog/blogger_blog/#eternal-sunshine-of-the-slopless-mind)
+12.   [Closing words](https://chinmaykarkar.com/blog/blogger_blog/#closing-words)
+13.   [Appendix](https://chinmaykarkar.com/blog/blogger_blog/#appendix)
+
+## Introduction
+
+The idea to write this blog came out of a discussion with Joey on whether my last blog had claude editing in it, and the distinct tells of smell whether it is Claude or GPT. ![Image 1: image](https://chinmaykarkar.com/blogger_blog_img1.jpg)
+
+I also had been thinking about AI writing, very popular on X articles especially, which I find incredibly difficult to read through. The motivation to pick this problem was that first of all, it was a fun problem to solve and second, find why what is the model "smell" that we are good at detecting and picking up, and can RL kindof simulate that
+
+This seemingly simple problem, turned out to take up the larger part of my two weeks, and sent me and my cointern down a rabbithole on the benefits and shortcomings of RL and related post training techniques.
+
+TL;DR: We tried to RL Qwen3.5-9B into telling Claude, ChatGPT, and Gemini apart from their writing alone. RL kept plateauing, SFT hit insane sample efficiency and numbers, and a linear classifier beat both of them. The rest of the blog is the autopsy: why RL kept failing, what the SNR math says was always going to happen, and what fixes we tried (OPCD/RLSD style on-policy self-distillation) that mostly just confirmed the diagnosis.
+
+## DataGen and Premise
+
+The initial experiments we thought of was very simple, just generate a bunch of blogs on various topics, using Opus4.8 and gpt5.5, and have Qwen-3.5-9B to RL on it. This seemed a really simple and easy to do task, given the verifiable nature of it using labels during datagen.
+
+Our datagen initially consisted of 126 blogs split between chatgpt and claude on 9 categories: `cognitive-science-neuroscience`, `cybersecurity-infrastructure`, `deep-learning-ai`, `economics-systems`, `history`, `literature-cultural-theory`, `philosophy`, `politics`, `stem`.
+
+We did an initial pass@4 analysis on our original subset that was 126 blogs, and there was plenty of headroom for RL to improve, given pass@1 was near random at 50%, and pass@4 was around 94%. We started by filtering out the all pass and all fail groups, and did RL on top of it. For training, we kept the 3 categories that had the lowest pass@4 as the evaluation subset, and trained on the rest.
+
+| Metric | Value |
+| --- | --- |
+| pass@1 | 56.0% |
+| pass@2 | 77.5% |
+| pass@4 | 94.4% |
+| Parse-fail | 0% |
+| Truncation | 0% |
+
+This corpus was as we realised, way too small to provide any signal on. Most of our RL runs peaked at step 4 and then lead to heavy class collapse to one of the two providers. This primarily was due to the fact that the entire corpus with our configs was just 7 steps of RL for covering 1 epoch.
+
+Observations from the first run led us to the conclusion that we need to massively scale datagen to have a variable distribution, that was:
+
+1.   Tough for the model to solve
+2.   Could avoid class collapse
+3.   Had useful variance for RL to learn from.
+
+We designed further datagen steps to grow along three axes at once: provider labels, category coverage, and topics per category. That let us resume generation from disk and only fill the missing (category × topic × model × length) combinations as the project evolved.
+
+The provider axis started with four generator models and then collapsed into the 3-way label space used throughout the experiments: Opus 4.8 → CLAUDE, Gpt 5.5 → CHATGPT, and the two Gemini variants Gemini-3.1-pro-preview + Gemini-3.5-flash merged into a single GEMINI label(this merging was done post RL runs that showed the model just predicted gemini in most cases ). We also generated three lengths per sample: **short** (≈2,500 words / ≈4k tokens, so it fits the 16k RL window and contrastive pairs), **long** (≈5,500 words / ≈9k tokens, for single-text prompts), and **epic** (8–12k words, intentionally outside the window and not used in training).
+
+The category axis mattered just as much. The original 9 categories were heavily technical and analytic.That worked fine for the first binary experiments, but once Gemini entered the picture it became clear that a model trained only on technical-register writing was not going to generalize to the more argumentative and narrative val set. So we expanded from **9 → 21 categories**, adding 12 humanities and social-science categories deliberately register-matched to the held-out evaluation set: `sociology-anthropology`, `law-and-jurisprudence`, `art-architecture-design`, `religion-and-theology`, `linguistics-and-language`, `education-and-pedagogy`, `psychology-and-behavior`, `media-journalism-rhetoric`, `urban-environment-geography`, `business-strategy-management`, `medicine-public-health`, and `music-and-performing-arts`.
+
+Finally, each category got a second wave of topics appended so that the corpus could reach roughly **630 topics total**; about **30 topics per category**. That last expansion was mostly an anti-memorization move: more within-category diversity,and a better shot at testing whether the model had actually learned model's writing style rather than topic templates.
+
+## ⑤ Scaling the corpus along three axes
+
+Each stage grew one dimension — provider labels, then categories, then topic waves — until the data was diverse and balanced enough to RL on.
+
+The build was a staircase, not a leap: collapse the provider labels into a clean 3-way space, register-match the categories ($9 \rightarrow 21$), then double the topic waves out to ≈630 topics.
+
+Now that we had enough data, and runs in between these datagen stages that gave us enough signal to start doing RL on this corpus. The full corpus is on the Hub at [`Samarth0710/copilot-sdk-blogs`](https://huggingface.co/datasets/Samarth0710/copilot-sdk-blogs).
+
+## Reward Shaping and Class Collapse
+
+RL runs have a lot of moving parts, and things go wrong silently. The reward curve can climb while your model is quietly dying underneath. Before we get into the actual problems we hit, here's the small set of diagnostic probes we ended up checking after every single run; a good handy guide to debug and check your runs
+
+1.   **Dead groups** : the fraction of GRPO groups where all completions got the same label (all-correct or all-wrong). An all-wrong group produces zero advantage, which means zero gradient for that sample. If dead groups climb above ≈30% for a specific class, the model is about to abandon that class entirely. This was our earliest collapse alarm. Also can be modified to measure advantage variance. 
+2.   **Per-class reward & recall** : the aggregate reward curve is a liar. A model scoring 8/12 on a balanced batch reports reward = 0.67 while one entire class has recall = 0. We learned to never look at aggregate reward without splitting it by provider label. The confusion matrix was a good indicator of whether we were optimising the right thing or there was class collapse. 
+3.   **Truncation rate** : what fraction of completions hit the max-token ceiling. High truncation means the model is rambling instead of deciding. Early on this was masked by a greedy-decoding bug in eval that inflated truncation to 78%; once we caught it, the real training truncation was our proxy for "is the model being concise?"
+4.   **Validation curves (val + val_ood)** : val was in-distribution categories, val_ood was held-out categories. We watched for the gap between them to tell us whether the model was learning style vs. memorizing.
+
+With these things as checks, there were a bunch of issues that we came across throughout the runs.
+
+### The Collapse Loop
+
+The single biggest (and most recurring) failure mode was class collapse. The mechanism is simple once you see it:
+
+## ⑥ The collapse loop
+
+GRPO's absorbing-state failure in multi-class classification: once a class dies, nothing pushes it back to life.
+
+Once a class enters the loop, GRPO's zero-advantage filter starves it of gradient — an absorbing state the optimizer can never escape, even as the headline reward keeps climbing.
+
+The silently dangerous part of this is that reward keeps going up. If you have a balanced 3-class batch and the model nails the other two classes, aggregate reward climbs to ≈0.67 while one class is completely dead. Our first few runs all had reward curves that looked "healthy", but the model confusion matrix and recall was completely off/dead.
+
+Another issue with balancing trying to fix one class was the model would have bad recalls evenly across the three classes across runs, sometimes it would dump claude, or gemini and othertimes GPT. The models just wanted to collapse into the easiest mode that gave them good rewards.
+
+### Curriculum and Balancing Attempts
+
+Our first instinct was curriculum: sort samples by difficulty (using pass@4 as a proxy), feed easy ones first, and then the harder ones, thus always being on the edge of the capability of the models. This didn't really help because the models would often produce all pass at larger group sizes, and thus by the time curriculum shifted phases, there was a mode collapse.
+
+Next we tried strict class balancing in batch construction: equal samples per provider per batch. This helped delay the collapse but didn't prevent it. The fundamental problem was that balancing the _inputs_ doesn't balance the _gradient_. This just recreates the earlier problem, just at a part of the group instead of the whole group, thus just having a deferred collapse.
+
+### The Fix: Contrastive Pairs and Trios
+
+The real structural fix came from changing _what_ we asked the model to do in each group, rather than just filtering or balancing.
+
+**Contrastive pairs**: we gave the model two blogs from different providers side by side and asked "which one is [PROVIDER]?" This makes collapse structurally impossible because any constant-label policy is guaranteed ≥50% wrong in a contrastive pair, which means it always generates mixed groups, which means gradient always flows. The model cannot collapse into an unrecoverable state, as there is no rest point where one label dominates.
+
+This worked. For the first time, we got runs where all classes maintained nonzero recall throughout training. But we hit a new problem: **marginal drift**. The model would accurately differentiate two providers in a pair, but still had some class collapse when we did a single text shown eval.
+
+**Entropy bonus**: to fight the drifting prior, we added an entropy bonus that rewarded keeping the output distribution spread across all three labels. This helped early training (our best early val score of 0.466 came from an entropy-bonus run), but a continued entropy bonus means that model would essentially be high entropy at stages where it needs a lower entropy to continue learning, and we saw that in the form of long rambling rollouts that were not useful.
+
+**Entropy decay**: the natural follow-up. High entropy bonus early (keeps all classes alive), decay it to near-zero by step 30 (lets the model commit). This stabilized the late-phase blowups.
+
+**Trios**: the final evolution. Instead of pairs, give the model three blogs (one from each provider) and ask it to label all three. This exposes all boundaries simultaneously in a single group and makes the marginal over labels much harder to game. The reward was fraction-correct (0, 1/3, 2/3, or 1) rather than all-or-nothing, which kept gradient flowing even on partially-correct groups. Our best balanced run (all three classes maintaining recall > 0.30 simultaneously) came from the trio + entropy-decay combination.
+
+## Design Space of Algorithms
+
+Once we had a stable ≈0.40 checkpoint with all three classes alive, the natural question was: is the ceiling the _algorithm_? The 2024–26 literature is full of GRPO refinements; DAPO, CISPO, DPPO, MaxRL, Dr. GRPO, ScaleRL. Several of these looked tailor-made for our exact failure mode (a rare class whose gradient keeps getting clipped away). So we ran a clean two-arm ablation, each a single-variable change against our best entropy recipe.
+
+prime-rl's default loss is already DPPO (Divergence-PPO: a total-variation trust region on probability differences), and its advantage is already Dr. GRPO (mean-centered, no std-normalization). So we had effectively two things to try out: CISPO and MaxRL
+
+*   **MaxRL** (custom advantage): reweight so a success on a rarely-solved prompt is amplified — the idea being that it should boost the starved Gemini class.
+*   **CISPO** (custom loss): clip the importance-sampling weight but _never mask_ so that gradient keeps flowing on the rare tokens DPPO would drop.
+
+Both underperformed, and the _reasons_ are more useful than the numbers:
+
+| Arm | Best val | What happened |
+| --- | --- | --- |
+| Entropy (incumbent) | **0.398** | truncation 38% → 2.5%, all 3 classes alive |
+| MaxRL | 0.311 | truncation stuck ≈37%, val capped |
+| CISPO | 0.291 → 0.241 | collapsed to ChatGPT, truncation rose |
+
+**MaxRL** works on the principle that harder prompts, as long as there is solvability, should be rewarded more so as to preserve pass@k and improve pass@1 as well. Looking at a rewritten form of the MaxRL's advantage estimator: 
+
+$$
+\left(\hat{A}\right)_{i}^{\text{MaxRL}} \propto \frac{r_{i} - \hat{r}}{\hat{r}} .
+$$
+
+This shows why MaxRL concentrates learning signal on hard prompts. When $\hat{r}$ is small but non-zero, successful rollouts on that prompt are weighted strongly. By contrast, easy prompts with $\hat{r} \approx 1$ receive relatively low boosts. So it naturally discounts easier solvable prompts and by discounting them, the model never learned brevity, truncation stayed at ≈37% for the entire run, and the reward ceiling sat around 0.31.
+
+**CISPO** was an ablation that we could have avoided seeing that most of the training was effectively on policy, the IS clipping never fires, since the mismatch is zeor.Thus it degenerates to the plain default loss and reproduces the original marginal collapse (this time onto ChatGPT).
+
+The conclusion was that for on-policy, collapse-prone classification RL, the modern trust-region variants are near-no-ops (they only differ from the default _off-policy_, and we're on-policy). Advantage reshaping changes behavior but along the wrong axis. The lever that actually moves the needle is anti-collapse pressure on the unconstrained class marginal which we were already doing with the entropy bonus provided. This was a useful negative result: it ruled out a large ablation space full of fancy estimators.
+
+## Protecting the Deliverable
+
+Our whole premise was that RL should make the model _articulate_ per-provider tells inside `<reason_why>` tags. But the reward only ever checked the `<answer>`. Predictably, by step ≈24 of the later runs, about 11% of correct rollouts had an empty or stub `<reason_why>` a 29-token reasoning with CHATGPT scoring a perfect 1.0. The model was optimizing what we measured and quietly killing what we cared about. kindof reward hacking, but here the reward was for structure rather than substance.
+
+The naive fix would have been an additive format reward, but it was the easiest hackable surface, and a known reward hack. So we used a **multiplicative reason-gate** instead: a rollout scores 1.0 only if the answer is correct _and_ the `<reason_why>` carries ≥12 distinct alphabetic words. Because a wrong answer still scores 0 regardless of its prose, all-wrong groups stay zero-advantage-filtered, and thus avoids reward hacking.
+
+This worked exactly as designed. The `reason_ok` diagnostic went to 1.00 and stayed there. Our best reason-gated validation peaked at 0.4005 (macro recall 0.40, near-uniform marginal, GEMINI recall 0.455 — the highest it had ever been). For the first time we had a checkpoint that was simultaneously accurate, balanced, non-collapsed, and producing the substantive reasoning we actually wanted.
+
+The combined recipe (trio + entropy decay + reason-gate) was our best RL deliverable. The model's learned style fingerprints, harvested from correct rollouts of this balanced checkpoint, were genuinely interesting:
+
+*   **CLAUDE** : essayistic, argumentative, philosophical framing, hedging, a first-person voice
+*   **CHATGPT** : worked examples, numbered sections, heavy LaTeX/formatting, pedagogical scaffolding
+*   **GEMINI** : ASCII diagrams, math notation, a confident narrative register, grand metaphors
+
+These emerged from nothing but a binary correct/incorrect signal. That was the result we set out to earn. But the number, 0.40 on a 3-way task, barely better than the 0.33 you get by guessing, kept nagging. We'd exhausted reward shaping, data scaling, algorithm variants, and loss modifications. Was 0.40 just the ceiling for this task?
+
+## The Separability Diagnostic
+
+Before spending another generation budget or trying yet another RL trick, we asked the question we should have asked at the start: **how separable is this data, really?**
+
+We trained a plain TF-IDF (word 1-2 grams) logistic regression on the same `train` split the RL model learns from, and evaluated it on the same `val` split. The train and val sets share zero `(category, topic)` pairs, so this is honest generalization to unseen topics. We also ran a version on formatting-stripped text to make sure we weren't cheating on surface markup.
+
+| Classifier | What it sees | Val accuracy |
+| --- | --- | --- |
+| LogReg, word 1-2grams | full text | **100%** |
+| LogReg, char 3-5grams | full text | **100%** |
+| LogReg, first 1500 chars only | full text | **100%** |
+| LogReg, function words + punctuation only | zero content | **94%** |
+| RL'd Qwen3.5-9B (best checkpoint) | full text | 40% |
+
+A linear bag-of-words model separates the three providers _perfectly_ on topics it has never seen. And it still hits 94% using nothing but the frequencies of function words (`the`, `of`, `may`, `we`) and punctuation, with every content word removed. The signal isn't subtle, isn't topic-dependent, and isn't hiding deep in the text. It's in the first 1500 characters, in the _style_.
+
+The features the linear model leans on are exactly the tells the RL model had been groping toward:
+
+*   **CHATGPT**: `may`, `may be`, `for example`, `such as`, `not only`, `depends on` (hedging and enumerative)
+*   **CLAUDE**: `you`, `genuinely`, `precisely`, `honest`, `worth`, `exactly` (conversational and sincere)
+*   **GEMINI**: `furthermore`, `we must`, `profound`, `mathematically`, `paradigm` (grandiose and formal)
+
+We also confirmed this at 2x scale after our final datagen expansion (5258 blogs, 21 categories, 630 topics). The result only strengthened: 100% val accuracy, 100% on entirely held-out _categories_ (cross-register), and function-words-only still at 94% OOD. Provider voice is not a topic artifact and not a register artifact; it is a stable, low-level stylistic signature that a linear model reads trivially.
+
+The ≈0.40 ceiling was never the data. The classes are trivially, perfectly separable; the RL'd 9B leaves sixty points of perfectly-available signal on the table. The bottleneck is _exploitation, not information_. Scalar-reward RL from scratch, with thinking off, is simply a very weak teacher for a discrimination that supervised learning finds effortless.
+
+So the next question becomes: can we just _show_ the model the tells?
+
+### SFT Solves It
+
+#### The cheatsheet probe (zero training)
+
+Before any fine-tuning, we tried the cheapest possible intervention: write the empirically-derived per-provider style tells into the system prompt as a "cheatsheet" and evaluate the base model.
+
+| Condition | val | val_ood |
+| --- | --- | --- |
+| Base + cheatsheet | **0.674** | **0.592** |
+
+Just handing the model the tells is worth +0.22 with zero training. The model clearly _can_ apply them, it just does not surface them unprompted. This is the cleanest confirmation that the ceiling is attention/elicitation, not capability.
+
+#### Gold-conditioned teacher SFT
+
+We then ran a proper SFT. The data generation worked like this: for every blog in our training set (2682 blogs, 894/class), we gave the base model the blog plus the cheatsheet _plus_ an analyst note telling it the correct answer, and asked it to write a short, grounded `<reason_why>` explaining what stylistic features point to that provider, followed by the correct `<answer>`. This is a gold-conditioned teacher: it knows the answer and writes a rationale to justify it. The key point is that this gives us perfectly class-balanced training data with substantive reasoning for all three providers, including the historically weak ChatGPT class.
+
+We then trained the model on these teacher-generated examples using the _plain_ prompt. The training target is: given just the blog, produce the reasoning and answer the teacher wrote.
+
+Config: Qwen3.5-9B, thinking OFF, body truncated to 3000 tokens per sample (seq_len 4096), lr 1e-5 cosine, 270 steps. Evaluated each checkpoint on the plain prompt.
+
+| Checkpoint | val | val_ood | ChatGPT recall |
+| --- | --- | --- | --- |
+| base | 0.454 | 0.410 | 0.19 |
+| SFT step 90 | 0.906 | 0.909 | 0.98 |
+| **SFT step 180** | **1.000** | **1.000** | 1.00 |
+| SFT step 270 | 1.000 | 1.000 | 1.00 |
+
+Perfect accuracy on both the in-distribution val _and_ the cross-register OOD set, with all classes balanced. Zero errors across 885 evaluation samples. The historically hopeless ChatGPT class (recall 0.19 at base) goes to 1.00. Gemini, which RL could never get above 0.45, is fully learned by step 180.
+
+We tested for leakage as well, as the SFT teacher data was generated over only training set, and an explicit hard programmatic checks were employed to check for overlap.
+
+A forgetting check (general-text perplexity + capability probes) showed the SFT cost essentially nothing: +3.2% perplexity, all arithmetic/reasoning/code probes intact.
+
+#### STaR self-distillation and the answer-only control
+
+An interesting follow-up we could think of was that can the model learn this from its _own_ reasoning, without ever being told the gold answer during generation?
+
+We ran a STaR-style pipeline. For every training blog, the base model generates rationales (plain prompt, no cheatsheet, k=3 at temp 0.7). We keep only the ones where majority-vote matches the gold label. For the blogs it still gets wrong, we give it the cheatsheet (not the gold answer) and try again (k=2), rejecting any rationale that explicitly cites the cheatsheet rules. This yielded 1913/2682 accepted rationales (71%), which we class-balanced to 357/class = 1071 SFT rows.
+
+Training on these self-generated rationales (same SFT recipe, base init, plain prompt target):
+
+| Method | val | val_ood |
+| --- | --- | --- |
+| STaR self-distillation (reasoning) | 0.932 | 0.953 |
+| **Answer-only on same 1071 gated rows** | **1.000** | **1.000** |
+
+The STaR reasoning run reaches 0.93, impressive. But then we ran the decisive control: strip the reasoning from the same 1071 examples, supervise _only_ the answer token, and retrain. It hits 1.000/1.000. On identical data, answer-only SFT _beats_ reasoning-SFT.
+
+This is probably the most surprising result of the whole project. The self-generated reasoning was not merely unnecessary as a supervision target, it was net-harmful here. Imitating the model's own (sometimes spurious) rationales injected noise and diluted the label gradient. The damage was concentrated exactly in ChatGPT (reasoning-run recall 0.80-0.89, answer-only recall 1.00), the class whose self-generated rationales were weakest.Answer-only SFT on just 1071 self-gated rows matches the gold-conditioned teacher SFT (1.000 on 2892 gold-rationale rows). A small, clean, class-balanced labeled subset is sufficient and OOD-robust.
+
+## One Last Shot at Pure RL
+
+Before closing the RL chapter, we gave RL one final fair shot using two complementary setups.
+
+First, we removed the reasoning channel entirely and trained GRPO on answer-only outputs. Same base init, same 3-way task, but completions were forced to be just `<answer>LABEL</answer>` with no `<reason_why>`. This directly tested whether long reasoning traces were diluting sparse reward signal.
+
+That run did break past the old ≈0.40 cheatsheet-free plateau and peaked around **0.65 / 0.66 (val / val_ood)**. So concentrating signal on the answer token clearly helps optimization. But it still failed as a stable 3-way solution: the policy converged to a degenerate two-class boundary (strong ChatGPT-vs-Gemini, CLAUDE absorbed into CHATGPT), and training eventually stopped on zero-trainable batches.
+
+Second, we ran a practical "help RL succeed" setup: cheatsheet-elicited GRPO, where train-derived style hints were in the system prompt to give the base model a non-collapsed starting floor.
+
+Operationally this looked strong. Reason-gated validation reward climbed **0.443 → 0.662**, truncation dropped from ≈24% to near 0, and the trained regime stayed balanced without catastrophic collapse.
+
+The key question was internalization:
+
+| Regime | val | val_ood |
+| --- | --- | --- |
+| With cheatsheet (trained regime) | 0.659 | 0.650 |
+| Without cheatsheet (internalization check) | 0.348 | 0.378 |
+
+So this final pair of RL runs tells a consistent story. Pure answer-only RL can extract real signal but collapses to a degenerate policy. Cheatsheet-elicited RL can polish behavior and keep training healthy, but does not internalize the discriminator once hints are removed.
+
+## Why RL Was Probably Not the Best Tool Here
+
+The empirical pattern is clear. The interesting question is _why_. There is a clean signal-to-noise argument that explains everything we saw, and it also says SFT was always going to win.
+
+Thinking about the reward assignment, the entire reward signal is carried by one token in a 4096 token long trajectory, which is very sparse task signal to carry on one token.
+
+## ① One token carries the whole reward
+
+A single GRPO rollout is a long trajectory of tokens, but only the final `<answer>` token is ever scored. The reward signal is one bit at the very end.
+
+Every gradient about “did we get the class right?” has to flow back through that one highlighted token. The other ≈4095 tokens carry no task signal at all.
+
+The per-group training signal is then governed by how mixed the group is. If $q$ is the model's current probability of the correct class and $v = q \left(\right. 1 - q \left.\right)$ is the per-rollout variance, the gradient signal scales like $G \cdot v$ and the noise like $\sqrt{G \cdot v}$, giving a signal-to-noise ratio of roughly $\sqrt{G \cdot v}$. With group size $G = 12$, even at the best possible $q = 0.5$ this caps out around $\sqrt{12 \cdot 0.25} \approx 1.7$. That is a tiny SNR for a single optimization step. Healthy training, just very slow movement.
+
+## ② Most informative = most uncertain
+
+Per-rollout reward variance is $v = q \left(\right. 1 - q \left.\right)$, a parabola peaking at $q = 0.5$. The group SNR scales like $\sqrt{G v}$ — which is exactly where the learning signal is largest.
+
+The cruel twist: the point of maximum learning signal ($q = 0.5$) is also the point of maximum uncertainty. Even there, with a group of 12, the best-case SNR is only ≈ 1.7 per step.
+
+_Where does $v = q \left(\right. 1 - q \left.\right)$ come from, and why call $\sqrt{G v}$ the "noise"?_
+Each rollout's reward is a coin flip: $r = 1$ with probability $q$ (correct class), $r = 0$ with probability $1 - q$. That is a Bernoulli random variable. Its mean is $q$ and its variance is
+
+$$
+V a r \left(\right. r \left.\right) = E \left[\right. r^{2} \left]\right. - E \left[\right. r \left]\right.^{2} = q - q^{2} = q \left(\right. 1 - q \left.\right) .
+$$
+
+Sanity check the endpoints. If $q = 0$ the model is always wrong, every rollout returns $0$, variance is $0$. If $q = 1$ the model is always right, every rollout returns $1$, variance is $0$. The variance is maximal at $q = 0.5$, where it equals $0.25$. That is the "most informative" point, which is also the most uncertain point. No variance, no learning signal.
+
+For a group of $G$ independent rollouts, the sum of their rewards has variance $G \cdot v$ (variances add for independent samples). The standard deviation, which is what we feel as noise on a single gradient estimate, is $\sqrt{G \cdot v}$. The mean signal a group carries about the gradient direction scales like $G \cdot v$ (group size times per-rollout informativeness). So when we form a ratio
+
+$$
+\text{SNR} = \frac{\text{signal}}{\text{noise}} sim \frac{G v}{\sqrt{G v}} = \sqrt{G v} ,
+$$
+
+we are asking: how many standard deviations above zero is the gradient estimate? Treating standard deviation as "noise" is the standard convention because gradient estimates are roughly Gaussian around the true gradient by the central limit theorem, and one std is the natural unit for "how far a random draw is likely to wander."
+
+Now layer the entropy bonus on top. The bonus is applied to _every_ token in the keep mask, not just the answer token. So the answer signal has to compete with entropy-driven noise spread over hundreds of reasoning tokens. The crossover happens at roughly
+
+$$
+\beta^{*} \approx \frac{G \cdot v}{L \cdot \overset{ˉ}{s}}
+$$
+
+where $L$ is the number of reasoning tokens and $\overset{ˉ}{s}$ is the average surprisal. For our typical numbers ($G = 12$, $v \approx 0.25$, $L \approx 700$, $\overset{ˉ}{s} \approx 1.5$) that is $\beta^{*} \approx 0.003$. We were running $\beta = 0.02$, roughly $6 \times$ above the crossover, for the entire early phase. The reward curve confirmed this almost embarrassingly cleanly: flat while $\beta$ was high, accelerating once it decayed past the crossover, peaking just as the answer signal regained dominance. The entropy bonus we _needed_ to prevent marginal collapse was simultaneously the thing drowning the learning signal.
+
+## ③ The entropy crossover
+
+The entropy bonus $\beta$ is spread over hundreds of reasoning tokens, drowning the one answer token. Reward stays flat until $\beta$ decays below the crossover $\beta^{*} \approx 0.003$.
+
+The same entropy bonus we needed to stop class collapse was, for the whole early phase, the thing drowning the learning signal. The reward only moves once $\beta$ drops past $\beta^{*}$.
+
+_Where does the entropy crossover come from, in plain words?_
+The entropy bonus rewards the model for keeping its token distributions spread out, with strength $\beta$. The gradient of that bonus, applied per token, looks like $\beta$ times the local surprisal of that token. Add it up across $L$ reasoning tokens with average surprisal $\overset{ˉ}{s}$ and you get a contribution of order $\beta \cdot L \cdot \overset{ˉ}{s}$ to the per-sequence gradient. From the answer token's point of view, that contribution is _noise_: it pushes parameters around for reasons that have nothing to do with whether the final answer was right.
+
+Now the task signal is the same $G v$ from before. Two regimes:
+
+*   If $\beta \cdot L \cdot \overset{ˉ}{s} \ll G v$, the answer reward dominates and the model actually learns the task.
+*   If $\beta \cdot L \cdot \overset{ˉ}{s} \gg G v$, entropy pressure dominates and the model mostly wanders.
+
+Setting the two sides equal gives the crossover
+
+$$
+\beta^{*} \approx \frac{G v}{L \overset{ˉ}{s}} .
+$$
+
+Plug in the numbers and $\beta^{*}$ is around $0.003$. We held $\beta = 0.02$ for the first phase, then decayed it. The reward curve does exactly what this predicts: nothing while $\beta$ is well above $\beta^{*}$, then a clear climb once $\beta$ drops near or below it. The math and the run line up almost too neatly.
+
+The cheatsheet run adds a different, structural problem. When the cheatsheet is in the prompt, the tells are already there in context. The gradient toward _internalizing_ those features in weights scales with their marginal value to the reward, conditional on what is already available, and that is approximately zero. RL can only learn the cheap in-context routing, which is a few bits at most. That is exactly why the cheatsheet run scored 0.66 with the cheatsheet and 0.35 without. No amount of SNR fixes that, it is a structural property of where the gradient points.
+
+And there is the priors problem. Qwen3.5-9B is not randomly initialized in any general sense, but for _this specific lexical-style discrimination_ it might as well be. The base model does not have already prior conditioning of claude writes like X or Y quirks can be attributed to ChatGPT, to discover these features, it is essentially starting from a noisy idea of what to pick up throughout training tries to get a high reward, while stabilising a 3 way classification and with 1 bit signals. This is a lot to ask from a very small SNR.
+
+Now compare to SFT. With dense per-token supervision over a typical example of length $L$, the per-example gradient SNR is roughly $\sqrt{L}$ better than a single-token RL reward. With $L \approx 700$ that is more than an order of magnitude advantage in effective supervision, on a problem whose discriminative signal is already trivially linearly separable. SFT was always going to dominate; the only question was how much.
+
+## ④ Why SFT wins: √L denser supervision
+
+RL supervises one token per example; SFT supervises every token. On a length-$L$ sequence that is a $\sqrt{L}$ advantage in effective signal — roughly an order of magnitude.
+
+Same data, same model — the difference is where the gradient comes from. Dense per-token targets give SFT roughly $\sqrt{L} \approx 26 \times$ the effective signal of a single RL reward.
+
+There are concrete prescriptions that fall out of this analysis. Mask the entropy bonus to the answer token, or keep $\beta \leq \beta^{*}$ from the start, so the entropy lever does not fight the reward signal. Raise SNR by increasing $G$ rather than burning more steps, since SNR grows like $\sqrt{G}$ but linearly in compute. If you need both the cheatsheet floor and internalization, withdraw the cheatsheet during training on a curriculum so the reward gradient toward in-weight features stops being zero. None of these would have changed the bottom line on this particular task, but they would have made RL behave less pathologically.
+
+The honest summary is that this task is the wrong shape for RL. The discriminative signal is dense, content-free, and linearly separable. The right tool for that is dense supervision on a small labeled set, and the answer-only SFT result (1.000/1.000 from 1071 self-gated rows) is what that looks like in practice. Pure RL without a cold start was attempting both feature discovery and classifier stabilization through a channel that is, mathematically, very less likely to gain signal.
+
+RL is not useless. It is just being used outside its comfort zone here. On problems where the right features are already present in the base model and what is missing is search, or sequencing, or calibration, the SNR math looks very different and RL pays off.
+
+## Trying to Fix RL on Its Own Terms
+
+The analysis of the RL runs gave us something to work and ponder upon: the problem is helped with denser credit assignment, and if we could have an on policy dense assignment method of post training, that should work ideally (hello OPD/OPSD).
+
+### Denser Credit Assignment: OPCD and RLSD
+
+The problem was that one token out of thousands carries reward. The obvious fix is to give every token a small amount of signal. The natural way to do that is on-policy self-distillation: have a _teacher_ score the student's rollouts token by token, and use the teacher/student logprob gap as a per-token gradient. If the teacher is meaningfully better than the student, the gap is informative everywhere, not just on the answer token. If you want to know more about these methods, you can check out my earlier [blog](https://chinmaykarkar.com/blog/OPD_blog/).
+
+We use the _same_ policy as both student and teacher: the student rolls out with the plain prompt, and the teacher is the same weights but with the train-derived cheatsheet spliced into the system prompt. The teacher reads the same blog with the tells in context, so it scores rollouts as if it knew what to look for.
+
+Two variants:
+
+*   **OPCD** (on-policy context distillation): the per-token loss is just the detached teacher-student logprob gap, treated as a policy-gradient signal, with a trust region keyed to the _sign_ of the gap. No verifier in the loss; the teacher decides direction and magnitude.
+*   **RLSD** (verifier-anchored self-distillation): the per-token weight is $\left(\right. P_{T} / P_{S} \left.\right)^{s i g n \left(\right. A \left.\right)}$, PPO-clipped on the student ratio. The verifier supplies the _direction_ (reinforce correct trajectories, suppress incorrect), the cheatsheet teacher supplies the per-token _magnitude_, and tokens from neutral-advantage rollouts contribute nothing.
+
+A pre-flight diagnostic confirmed the teacher actually beats the student before we burned any compute.
+
+| step | base / 0 | peak (s12) | final (s40) |
+| --- | --- | --- | --- |
+| **OPCD** | 0.222, trunc 38% | **0.291**, trunc 25% | ≈0.00, trunc 96% |
+| **RLSD** | 0.222, trunc 38% | **0.409**, trunc **9%** | 0.00, trunc 100% |
+
+RLSD at step 12 is the best reasoning-channel number this project ever produced. Plain val accuracy jumped from 0.222 to 0.409 in twelve steps, and it was the _only_ method we ran that improved termination at the same time, truncation dropped from 38% to 9%. The verifier direction plus the cheatsheet magnitude is a genuinely useful early signal.
+
+And then both runs worsened and got bad. OPCD decayed gradually; by step 40 truncation was 96% and reward was effectively zero. RLSD collapsed between step 16 and step 20, going to 100% truncation in one eval interval. The mechanism is the same in both cases: the sampled-token teacher-student gap is a reverse-KL-flavoured objective, and reverse KL is mode-seeking. Unconstrained, both runs collapsed onto a cheatsheet style reasoning mode that never terminates inside the token budget. This leads to heavy truncation, and zero gradient signal.
+
+We ran one more variant, **RLSD-anchored**, that adds a per-step trust region (ratio-band mask in the push direction, tighter CISPO clip, a real k3 KL-to-rollout). It worked exactly as theory predicted, and exactly _only_ as far as theory predicted. The trust region anchors the policy to the _behaviour_ (rollout) policy $\mu$, not to a frozen reference. So it stopped the cliff: truncation stayed bounded in a 37 to 57 percent band and the run never collapsed. But it also flattened the peak: val sat in a 0.18 to 0.25 band for the entire run, indistinguishable from the BASE step-0 floor. The step-12 spike in RLSD was an unstable excursion _away_ from $\mu$, and a local trust region that holds the policy near $\mu$ necessarily prevents that excursion in both directions. You cannot pin the policy to a peak the rollout distribution itself never holds. To capture the RLSD early gain you would need a non-moving reference (frozen base, or a best-checkpoint EMA) or an explicit length/termination penalty plus best-checkpoint selection.
+
+So denser credit assignment did exactly what the SNR argument predicted: it gave RL a real signal to climb on, and it produced the best reasoning-channel peak we have. But without a non-local anchor, the same mode-seeking pull that creates the early gain also drives the late collapse. The reasoning channel is unstable on this task.
+
+### A Warm Start: SFT First, Then RL
+
+Looking at the SFT runs, and their amazing results, we thought what if do a cold start using SFT and then do RL.
+
+The recipe: 60 steps of SFT from BASE on the 1071 STaR self-distilled traces (the same verifier-gated rationales that the answer-only SFT control used), then the standard RL recipe that we used for our other runs.
+
+| step | 0 | 8 | 16 | 24 | 32 | 40 |
+| --- | --- | --- | --- | --- | --- | --- |
+| val | 0.670 | 0.704 | 0.771 | 0.773 | 0.819 | **0.895** |
+| trunc % | 0 | 0 | 0 | 0 | 0 | **0** |
+
+Val accuracy climbs near-monotonically from 0.670 to 0.895 across forty steps, and truncation stays at zero at every eval and every train step.
+
+Every previous reasoning-channel run was being asked to do two things at once: learn the discriminator _and_ learn how to produce a bounded well-formed trace. With a 60-step SFT warmup, the second problem is already solved at step 0. RL only has to do the first, and the verifier reward becomes a clean signal because every rollout terminates cleanly. The mode-seeking failure mode goes away because there is no degenerate non-terminating mode to seek toward.
+
+The cold-start RL reaches 0.895, which is still below answer-only SFT's 1.000. The value of the result is not that it beats SFT (it does not), it is that it isolates _why_ every other reasoning-channel RL run collapsed: cold start, not the channel itself. A warm-started RL run on this task is well-behaved and productive; a base-init RL run is not. .
+
+## What the Models Actually Learned About the Three Providers
+
+We ran every model from all of our trained useful checkpoints on the same 414 val blogs with the plain prompt, kept the rationales, and read them.
+
+### The shared tell vocabulary every healthy model converged on
+
+The most striking thing about reading these traces is that every model that produces coherent reasoning, regardless of training recipe, ends up describing the same three style signatures. Verbatim quotes from the gold-conditioned SFT model on correct predictions:
+
+1.   **CLAUDE →**_"distinctively Claude-style markers, including the use of sincerity adverbs like 'genuinely,' 'honestly,' and 'precisely,' alongside essayistic phrasing. The voice is warm and argument-driven, employing second-person address ('you'), over the hedging or enumerative style typical of ChatGPT or the grandiose formalism of Gemini."_
+2.   **CHATGPT →**_"the distinctively hedging, enumerative style of ChatGPT, characterized by frequent phrases like 'may be,' 'can also,' and 'for example'. The structure relies heavily on explicit lists, numbered steps, and formal definitions (e.g., $E\_{i} = P\_{i} \times B\_{i}$)."_
+3.   **GEMINI →**_"Gemini's distinct formal register through heavy use of intensifiers like 'profound,' 'fundamentally,' and 'massive,' alongside a confident, declarative tone that avoids hedging. Its structure relies on complex mathematical formalization and ASCII diagrams."_
+
+These three short paragraphs are basically the project. Claude is the essayist who uses sincerity adverbs and the second person. ChatGPT is the hedger who builds numbered structure and worked examples. Gemini is the grandiose formalist who reaches for intensifiers, ASCII diagrams, and dense LaTeX. Every grounded model independently rediscovered this same vocabulary, and it lines up one-for-one with what the stylometric linear probe nails (em-dash rate ≈19× higher for Claude, ASCII-diagram rate ≈80× higher for Gemini, headers and hedges concentrated in ChatGPT).
+
+### Training recipe shapes the _character_ of the reasoning
+
+The same tells get delivered very differently depending on how the channel was trained. We measured a few simple things per model: median rationale length, fraction of rationales that name at least one concrete surface feature (vs pure vibes), fraction that use confident vs hedged language, and the prediction distribution.
+
+| Model | val | median len | concrete | confident | pred distribution |
+| --- | --- | --- | --- | --- | --- |
+| Gold-conditioned SFT | 1.000 | 73 w | 0.98 | 0.35 | balanced |
+| STaR self-distill | 0.952 | 82 w | 0.98 | 0.57 | balanced |
+| Cold-start RL | 0.911 | 81 w | 1.00 | 0.36 | balanced |
+| Cold-start SFT (only) | 0.696 | 85 w | 0.99 | 0.46 | balanced |
+| Pure-accuracy RL (peak) | 0.384 | 91 w | 0.98 | **0.74** | **CHATGPT 336/414** |
+| Cheatsheet RL | 0.372 | **15 w** | 0.33 | 0.07 | **CLAUDE 342/414** |
+| Entropy-decay RL | 0.290 | 23 w | 0.50 | 0.04 | **GEMINI 346/414** |
+| RLSD / OPCD (collapsed) | ≈0.00 | 2000+ w* | 0.10 | 0.00 | 100% truncation |
+
+* the tag never closes; runaway text.
+
+### What this says about the channel
+
+The takeaway from reading all of this prose.
+
+First, the tells are _learnable and verbalizable._ Every grounded model independently reads off the same three style signatures in plain language, and what they name matches the linear probe one-for-one. There is no hidden representation problem; the channel can clearly articulate why a piece reads like Claude vs ChatGPT vs Gemini. The discrimination is shallow in exactly the way the stylometric analysis said it would be: punctuation rhythm, intensifier density, em-dash rate, sentence length.
+
+The slightly uncomfortable conclusion is that the reasoning text is largely _post-hoc narration_ on a decision that the model is making from low-level lexical and punctuation statistics. The gold-conditioned SFT model writes beautiful paragraphs about sincerity adverbs and grandiose formalism, but underneath, the function-words-only logistic regression is already getting 94 percent from the same signal without writing anything at all. The model learned to talk about the tells while they are easily on the surface. If I were starting this project from scratch knowing what I know now, three things would change.
+
+*   First, run the separability diagnostic on day one. A linear probe on the raw data takes an hour and tells you whether your problem is a _data_ problem or an _exploitation_ problem.The diagnostic is the cheapest move in the whole playbook and I ran it too late.
+*   Second, match the tool to the task shape. Tasks with dense, linearly separable signal want SFT. Tasks where the right features are present in the base model and what is missing is search, sequencing, or calibration want RL. 
+*   Third, never start reasoning-channel RL from a base model on a task it cannot bound. The cold-start ablation made it obvious in retrospect: every reasoning-channel run that collapsed was being asked to learn the discriminator _and_ learn how to produce a well-formed bounded trace at the same time. RL-Zero type reasoning may work for some other set of problems, but always worth checking if the problem shape is well defined for it or not.
+
+## Eternal Sunshine of the Slopless Mind
+
+One of the weirder reasons I wanted to work on this was to figure out what it is about these LLMs that lets them generate text that is informationally dense and yet, the moment my LLM senses fire, I cannot read through it.
+
+I feel strongly about using AI in writing, and I do not think we are going back to a non-slop era. The models are exceptionally good at producing text that is _great_, just not _human_, and that gap is what makes it hard to read once you have read pieces that were genuinely worked on.
+
+![Image 2: image](https://chinmaykarkar.com/blogger_blog_img4.jpg)
+
+Leo's tweet captures where these models actually are: superhuman for editing and refinement, not for original thought or writing. I catch myself doing it too. I dump a raw thought into the model just to see what comes back, and seven times out of ten it articulates the thought better than I had it in my head. Reminds me of a small moment from my early months at MSR: a few of us were arguing over the framing of a prompt, and the autocomplete suggestion was better than anything any of the researchers in the room had said out loud.
+
+There is real value in still reading human writing. Nothing beats the feel of a piece that you can tell a person actually sat with. A line that stuck with me through this whole project: if you do not put the effort and care into writing something, why would someone else put the effort into reading it. So to anyone here who wants to write: write it out with your own scrappy words, and make sure it is _you_ that is being distilled into those words, not a matrix.
+
+## Closing words
+
+That is the project. I had a ton of fun working on it alongside Samarth, my co-intern at MSR and a very dear friend. This one challenged nearly all of my post-training intuitions and forced me to revisit concepts I thought I had settled, which is the best kind of project to spend two weeks on. I hope all of you had a ton of fun reading it too:)
+
+I am wrapping up my internship and looking for full-time roles in post-training and adjacent areas. At MSR I worked on agentic RL for general tool-calling on benchmarks like BFCL, Taubench, and MCPBench, on agentic verification for longer-horizon tasks, and on self-distillation and synthetic-environment data curation and training. The rest of my work is on my [website](https://chinmaykarkar.com/) and [github](https://github.com/ChinmayK0607). If you think I would be a good fit somewhere, please reach out, I would genuinely love to chat.
+
+## Appendix
+
+### A. The full run ladder
+
+Every run we did on this task, what changed in it, what came out, and where to find the W&B curves, the pushed checkpoint on the Hub, and the val/val_ood inference traces. The checkpoints are public under [CK0607](https://huggingface.co/CK0607); traces live in the dataset [`qwen3.5-9b-blogprovider-traces`](https://huggingface.co/datasets/CK0607/qwen3.5-9b-blogprovider-traces).
+
+| Run | What changed | Key result (val / val_ood) | W&B | HF ckpt | HF traces |
+| --- | --- | --- | --- | --- | --- |
+| **SFT — gold-conditioned** | SFT distilling gold-label-conditioned teacher rationales onto plain prompt (2892 balanced) | val **1.000** / ood **1.000** | — | [ckpt](https://huggingface.co/CK0607/qwen3.5-9b-blogprovider-sft-goldcond) | [traces](https://huggingface.co/datasets/CK0607/qwen3.5-9b-blogprovider-traces/tree/main/qwen3.5-9b-blogprovider-sft-goldcond) |
+| **SFT — answer-only (self-gated)** | Answer-only SFT on 1071 verifier-gated self-rollouts; rationale stripped | val **1.000** / ood **1.000** (beats STaR) | — | [ckpt](https://huggingface.co/CK0607/qwen3.5-9b-blogprovider-selfgated-answeronly) | [traces](https://huggingface.co/datasets/CK0607/qwen3.5-9b-blogprovider-traces/tree/main/qwen3.5-9b-blogprovider-selfgated-answeronly) |
+| **SFT — STaR self-distill** | On-policy STaR; supervise model's own verifier-gated `<reason_why>` | val 0.952 / ood 0.960 | — | [ckpt](https://huggingface.co/CK0607/qwen3.5-9b-blogprovider-star-selfdistill) | [traces](https://huggingface.co/datasets/CK0607/qwen3.5-9b-blogprovider-traces/tree/main/qwen3.5-9b-blogprovider-star-selfdistill) |
+| grpo-thinkoff | First GRPO, thinking off, 3-way | early baseline; sub-SFT | [wandb](https://wandb.ai/ChinmayK0604/blog-author-id-rl/runs/83bc29b237884b86bb813438827e7503) | — | — |
+| div-default (control) | Control DPPO + Dr.GRPO, generic prompt, topic-diverse data | plateaus ≈0.40 (reasoning ceiling) | [wandb](https://wandb.ai/ChinmayK0604/blog-author-id-rl/runs/0tnz73pq) | — | — |
+| div-entropy | + entropy bonus on the control | no gain over control | [wandb](https://wandb.ai/ChinmayK0604/blog-author-id-rl/runs/oyje2fq2) | — | — |
+| curriculum / interleaved | Topic-curriculum and interleaved orderings | no durable gain | [wandb](https://wandb.ai/ChinmayK0604/blog-author-id-rl/runs/rguqxbgn) | — | — |
+| contrastive / pairwise / hardpair | Pair-mining data variants (hard provider pairs) | no durable gain | [wandb](https://wandb.ai/ChinmayK0604/blog-author-id-rl/runs/0aq5vwk2) | — | — |
+| pvg-entropy | Prover-verifier-game style + entropy | no durable gain | [wandb](https://wandb.ai/ChinmayK0604/blog-author-id-rl/runs/y3sb9g8m) | — | — |
+| **RL — cheatsheet (trio)** | GRPO with train-style cheatsheet in context, trio curriculum | cheatsheet-free ≈0.40; plain **0.372 / 0.374** | [wandb](https://wandb.ai/ChinmayK0604/blog-author-id-rl/runs/c8os8n8z) | [ckpt](https://huggingface.co/CK0607/qwen3.5-9b-blogprovider-rl-cheatsheet) | [traces](https://huggingface.co/datasets/CK0607/qwen3.5-9b-blogprovider-traces/tree/main/qwen3.5-9b-blogprovider-rl-cheatsheet) |
+| **RL — entropy-decay** | Entropy-decay schedule ablation (final ckpt) | negative ablation; plain **0.290 / 0.304** | [wandb](https://wandb.ai/ChinmayK0604/blog-author-id-rl/runs/c8os8n8z) | [ckpt](https://huggingface.co/CK0607/qwen3.5-9b-blogprovider-rl-entropydecay) | [traces](https://huggingface.co/datasets/CK0607/qwen3.5-9b-blogprovider-traces/tree/main/qwen3.5-9b-blogprovider-rl-entropydecay) |
+| **RL — pure-accuracy (peak)** | Answer-only / no-reasoning GRPO (reward = label match), peak step_16 | peaked 0.65 then collapsed; plain **0.384 / 0.382** | [wandb](https://wandb.ai/ChinmayK0604/blog-author-id-rl/runs/b1v5cru5) | [ckpt](https://huggingface.co/CK0607/qwen3.5-9b-blogprovider-rl-pureacc-peak) | [traces](https://huggingface.co/datasets/CK0607/qwen3.5-9b-blogprovider-traces/tree/main/qwen3.5-9b-blogprovider-rl-pureacc-peak) |
+| **OPCD (E2)** | On-policy context distillation; cheatsheet teacher → plain student | peak ≈0.29 (s12) → truncation collapse; final ckpt **0.03 / 0.02** (96% trunc) | [wandb](https://wandb.ai/ChinmayK0604/blog-author-id-rl/runs/4dywekt0) | [ckpt](https://huggingface.co/CK0607/qwen3.5-9b-blogprovider-opcd-e2) | [traces](https://huggingface.co/datasets/CK0607/qwen3.5-9b-blogprovider-traces/tree/main/qwen3.5-9b-blogprovider-opcd-e2) |
+| **RLSD (E3)** | Verifier-anchored self-distillation (sign×teacher-gap, PPO-clip) | peak ≈0.41 (s12, trunc 9%) → cliff; final ckpt **0.00 / 0.00** (100% trunc) | [wandb](https://wandb.ai/ChinmayK0604/blog-author-id-rl/runs/h485ltix) | [ckpt](https://huggingface.co/CK0607/qwen3.5-9b-blogprovider-rlsd-e3) | [traces](https://huggingface.co/datasets/CK0607/qwen3.5-9b-blogprovider-traces/tree/main/qwen3.5-9b-blogprovider-rlsd-e3) |
+| RLSD-anchored (E3b) | + KL trust-region anchor on RLSD | collapse prevented but gain killed (flat 0.18–0.25) | [wandb](https://wandb.ai/ChinmayK0604/blog-author-id-rl/runs/14zovr5c) | — | weights not retained |
+| E-LEX (lexical, 40-step) | Hint-free lexical / discriminative-token prompt, control GRPO, base init | 0.137 → 0.262 climb (single-seed, **not** reproduced) | [wandb](https://wandb.ai/ChinmayK0604/blog-author-id-rl/runs/rvlk8sgr) | — | weights not retained |
+| E-LEX-LONG (lexical, 100-step) | Same, 100 steps, reseed | refutes climb: → 0.041, trunc ≈77% | [wandb](https://wandb.ai/ChinmayK0604/blog-author-id-rl/runs/brn85thu) | — | weights not retained |
+| **Cold-start SFT (Phase 1)** | 60-step SFT warmup on STaR traces (the RL init) | val 0.696 / ood 0.682 | [wandb](https://wandb.ai/ChinmayK0604/blog-author-id-rl/runs/92svhbn0) | [ckpt](https://huggingface.co/CK0607/qwen3.5-9b-blogprovider-coldstart-sft) | [traces](https://huggingface.co/datasets/CK0607/qwen3.5-9b-blogprovider-traces/tree/main/coldstart-sft) |
+| **Cold-start RL (Phase 2) ★** | Control GRPO from SFT-60 (the headline) | **0.67 → 0.90, 0% trunc, no collapse**; plain **0.911 / 0.919** | [wandb](https://wandb.ai/ChinmayK0604/blog-author-id-rl/runs/92svhbn0) | [ckpt](https://huggingface.co/CK0607/qwen3.5-9b-blogprovider-coldstart-rl) | [traces](https://huggingface.co/datasets/CK0607/qwen3.5-9b-blogprovider-traces/tree/main/coldstart-rl) |
+
+Code is on the fork branch [`blog-author-id-experiments`](https://github.com/ChinmayK0607/prime-rl/tree/blog-author-id-experiments). The training corpus is at [`Samarth0710/copilot-sdk-blogs`](https://huggingface.co/datasets/Samarth0710/copilot-sdk-blogs).
+
+### B. The bag-of-words prompt ablation (E-LEX)
+
+The separability diagnostic told us a linear bag-of-words model gets 100% by reading discriminative tokens. The natural follow-up is: what if we just _tell_ the LLM to behave like the logreg, and let plain RL do the rest? The lexical-prompt experiment was that ablation.
+
+The recipe was completely vanilla RL: control DPPO + Dr.GRPO, no teacher, no cheatsheet, no advantage shaping, no custom loss. The only thing that changed from the failing control was the system prompt. Instead of the generic "decide which provider wrote this," the lexical prompt asks the model to act as a forensic linguist and weigh the most discriminative tokens, the way a TF-IDF classifier would: tokens that are frequent for one provider and rare across the other two.
+
+The important constraint was that the prompt gives _no example words_ and _does not say which tokens map to which provider._ It explicitly states the model has to infer those associations on its own. The prompt steers attention from topic to surface form, and that is it. RL still has to discover the actual word-to-provider correlations from the verifier reward.
+
+The 40-step run looked like the cleanest result in the project.
+
+| step | 0 | 8 | 12 | 20 | 28 | 36 | 40 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| val | 0.137 | 0.109 | 0.109 | 0.163 | 0.239 | 0.251 | **0.262** |
+| trunc % | 45 | 49 | 51 | 33 | 27 | 30 | **26** |
+
+A U with a strong recovery. The model starts below the generic-prompt baseline because the harder prompt confuses the untrained model, dips to 0.109 around step 8 to 12, and then climbs monotonically to 0.262 by step 40 while truncation falls from 51% to 26%. At the final step it was above the generic baseline and still rising. Across every reasoning-channel method we had tried, this was the first one that was simultaneously clean and showed a sustained non-collapsing climb.
+
+So we reran it to 100 steps with the same config to see how far it would go. It did not reproduce.
+
+| step | 0 | 40 | 60 | 76 | 88 | 100 |
+| --- | --- | --- | --- | --- | --- | --- |
+| val | 0.126 | 0.073 | 0.094 | **0.146** | 0.101 | 0.041 |
+| trunc % | 48 | 68 | 77 | 55 | 45 | 39 |
+
+Same config, same prompt, same recipe, reseeded. The reseeded run drifted the opposite way: truncation climbed to 77% by step 60, accuracy bottomed below 0.05, one transient partial recovery to 0.146 around step 76, then decayed back to 0.041 by step 100. The best the 100-step seed achieved was barely above half the 40-step "peak," and the final state was clearly degenerate.
+
+Both runs are correct. The honest reading is that run-to-run variance on plain GRPO at this scale and recipe _dominates_ the effect of the lexical prompt. RL rollout sampling at temperature 1.0 plus async off-policy dispatch are stochastic even with deterministic data ordering, and we picked up a favorable excursion on the first seed. The 40-step climb was a real run, but it was not a property of the method, it was a property of the seed. A single 40-step RL curve is not evidence of a trend on this task.
+
+Two takeaways from this ablation specifically. First, a zero-shot lexical pass@4 baseline (BASE model, lexical prompt, no training) was basically tied with the generic prompt (val pass@1 0.34 vs 0.37). So the prompt does not hand the untrained model any free accuracy; whatever happens in the trained run is RL learning to use the framing, not the prompt acting as a hint. Second, future reasoning-channel claims on this task need at least two or three seeds before any climb gets called real. We learned that lesson the slightly embarrassing way.
+
+### C. Stylometric features and training configs
+
+#### C.1 The actual surface features
+
+The "tells" the linear probe leans on are not abstract. Below are the per-provider means of ≈40 stylometric features computed over the val + val_ood blogs. The features were normalized per-1k-tokens where rate-like.
+
+| feature | CLAUDE | CHATGPT | GEMINI |
+| --- | --- | --- | --- |
+| em-dash rate | **1.89** | 0.10 | 0.59 |
+| avg sentence length (words) | **20.5** | 13.0 | 18.9 |
+| bold `**` rate | 2.07 | 0.61 | 1.86 |
+| `##` / `###` header rate | 0.52 | **0.94** | 0.68 |
+| LaTeX rate | 2.29 | 2.48 | **4.14** |
+| ASCII-diagram rate | 0.06 | 0.06 | **4.99** |
+| markdown-table rate | 0.07 | 0.29 | **0.84** |
+| `however` / `furthermore` rate | low | low | **high** |
+| second-person `you` rate | **high** | low | low |
+| sincerity adverbs (`genuinely`, `honestly`, `precisely`) | **high** | low | low |
+| hedges (`may`, `may be`, `can also`) | low | **high** | low |
+| intensifiers (`profound`, `fundamentally`, `massive`) | low | low | **high** |
+
+The single biggest discriminators are the em-dash rate (Claude is ≈19× ChatGPT) and the ASCII-diagram rate (Gemini is ≈80× the other two). With ≈40 of these features, a logistic regression hits **val 1.000 / val_ood 1.000** on entirely held-out categories. For comparison, a MiniLM semantic embedding (which tries to use content) gives **val 0.811 / val_ood 0.849**. The stylometric features beat the semantic features cleanly: the discrimination really is shallow surface form, not topic.
+
+#### C.2 Configs
+
+Everything below is what we actually ran on the 8×H100 box. Configs in `examples/blog_author_id/` on the fork branch.
+
+**Base GRPO recipe (control DPPO + Dr.GRPO, all reasoning-channel runs).**
+
+*   Model: Qwen3.5-9B from BASE, thinking OFF, FSDP HF trainer (4 train ranks) + vLLM inference (4 ranks, tp=2 dp=2), port 8300.
+*   Sampling: temp 1.0, top_p 1.0, max prompt 16384 tok, max completion 4096 tok, `enable_thinking=false` via renderer (and `extra_body={chat_template_kwargs={enable_thinking=false}}` in eval, see appendix D).
+*   Group / batch: G = 12 rollouts per prompt, train batch 144 prompts. Eval batch 414 (the val split), eval every 4 steps.
+*   Optimizer: lr 1e-6 cosine, max_steps 40, warmup 4.
+*   Loss: prime-rl default = DPPO (TV trust region on probability differences) with Dr. GRPO advantage (mean-centered, no std-normalization). KL-to-rollout `β = 1e-3 · log_ratio²` (the default near-zero anchor).
+*   Reward: 3-way label match. Reason-gated runs additionally require `<reason_why>` ≥ 12 distinct alphabetic words for the rollout to count as correct (multiplicative gate, not additive).
+*   Entropy: bonus `β_ent = 0.02` early, linearly decayed to ≈0 by step 30 in the entropy-decay runs; off otherwise.
+
+**OPCD / RLSD (on-policy self-distillation).** Same base RL recipe, plus:
+
+*   `training_mode = "opcd"` or `"rlsd"`.
+*   Teacher = the live student inference pool (same weights, weight-broadcast every step) with the train-derived cheatsheet spliced into the system prompt; student rolls out plain. Splice identity (`cheat_prefix + plain_tail == cheat_prompt`) verified token-for-token before launch.
+*   OPCD loss: detached per-token teacher–student logprob gap as PG signal; trust region keyed to the sign of the gap. No verifier in the loss.
+*   RLSD loss: per-token weight `(P_T / P_S)^sign(A)`, PPO/CISPO-clipped on the student ratio. Verifier supplies direction, teacher supplies magnitude; `A == 0` contributes nothing.
+*   RLSD-anchored (E3b) tightens this: distillation clip `c` 2.0 → 1.0, CISPO `eps` 0.2 → 0.1, a ratio-band trust-region mask (drop tokens whose ratio already moved past `1 ± 0.1` in the push direction), and a proper k3 KL-to-rollout at `β = 0.5` replacing the near-zero default.
+*   Pre-flight diagnostic (`scripts/diag_teacher_student.py`) confirms teacher > student on val before any 8×H100 launch.
+
+**SFT (gold-conditioned and STaR).** Same impl, different data:
+
+*   Model: Qwen3.5-9B BASE, thinking OFF, `impl="hf"` (pure-PyTorch path; the Triton `fla` fast path needs `causal-conv1d` which we did not install, so we ran the slower but stable fallback — see appendix D).
+*   Sequence: body truncated to ≤3000 tok per sample, seq_len 4096, packing on.
+*   Optimizer: lr 1e-5 cosine, 270 steps for gold-conditioned, 200 steps for STaR / answer-only, ckpt every 40-90.
+*   Loss: standard CE on the assistant span only.
+*   Data: gold-conditioned = 2682 blogs × 3 per-class = 2892 balanced teacher rationales (teacher saw the cheatsheet + an "ANALYST NOTE" with the correct answer). STaR = 1071 verifier-gated self-rollouts (357 / class, class-balanced cap). Answer-only control = the same 1071 rows with the rationale stripped.
+
+**Cold-start RL (the headline).** Two phases:
+
+*   Phase 1: SFT recipe above, 60 steps on the 1071 STaR rows. Save `weights/step_60`.
+*   Phase 2: standard GRPO recipe above, **same control settings**, no teacher, no cheatsheet, generic prompt, reason-gate on, init from `outputs/coldstart_sft/weights/step_60` instead of BASE. Everything else identical. 40 steps. Reproduced on a second seed (0.652 → 0.905, 0% truncation throughout).
+
+### D. Reproducibility and infra gotchas
+
+Five things that bit us and would bite anyone trying to reproduce. None of them are obvious from the configs alone.
+
+*   **Qwen3.5-9B fast path needs `causal-conv1d`.** Qwen3.5-9B's gated-delta-rule + short-conv layers need _both_`fla` and `causal-conv1d` to take the Triton fast path. If only `fla` and `triton` are installed (the default), `transformers` silently logs _"fast path is not available, falling back to torch implementation"_ and you run the pure-PyTorch path at roughly ≈8.8k tok/s with MFU ≈5.5%. Slower, but correct, and as a side benefit it sidesteps the `fla` Triton `grid-Z > 65535` crash that hits the vLLM inference path on long sequences. To enable fast path: `pip install causal-conv1d` and keep seq_len ≤ 16384.
+*   **The thinking-off eval gotcha.** prime-rl's _training_ rollouts honor `enable_thinking=false` via the renderer, but the _eval_ path uses the chat-completions client which does NOT. If you only set `enable_thinking=false` in the trainer config you will see eval truncation jump to ≈100% and reward go to ≈0 silently — the model is sitting in `<think>` mode and burning through `max_tokens`. The fix is `extra_body={chat_template_kwargs={enable_thinking=false}}` on the eval client. Caught us early; could have eaten a week.
+*   **`HF_HUB_OFFLINE=1` is required.** vLLM tries to list repo files from the Hub at startup. If the box has flaky Hub access, the DP coordinator hangs and the run silently never starts. Setting `HF_HUB_OFFLINE=1` after a one-time snapshot download fixes it.
+*   **Port 8000 was taken.** The shared box had an unrelated service on port 8000. We ran on 8200 / 8300. Worth checking before launching.
+*   **The ckpt-interval disk blowup.** The trainer preserves the ≈18 GB weight-broadcast on every checkpoint-interval step. With `[ckpt] interval=4` over 40 steps, that retains 180 GB+ of broadcasts and will fill a 2 TB disk by step 14 (we crashed mid-OPCD run this way). Fix: `[ckpt] interval=40 keep_last=1` and `[trainer.ckpt] interval=40 keep_last=1`. The eval interval stays 4 for the val curve; the broadcasts are unrelated.
+
+A smaller one specifically for cold-start: the prime-rl trainer's weight-save omits the multimodal processor files (Qwen3.5-9B is a VLM). After SFT, you have to copy `preprocessor_config.json`, `video_preprocessor_config.json`, `merges.txt`, `vocab.json` from the BASE snapshot into the saved ckpt directory before vLLM and the next-phase trainer can load it as a local path.
+
+### E. Forgetting and capability baseline
+
+Worth showing the SFT-to-1.000 deliverable doesn't trade general capability for the task. We evaluated BASE Qwen3.5-9B against the gold-conditioned SFT (`sft_warmup/step_180`) on two yardsticks (`scripts/eval_e0_forgetting.py`, HF teacher-forcing):
+
+*   **General-text perplexity** on 4 generic paragraphs + 150 GSM8K test items: **BASE 2.779 → SFT 2.866** (+3.2%). Negligible.
+*   **Six capability probes** (arithmetic 47×23, the "all-but-9" trick, two factual probes, a trick-reasoning probe, a one-line sum-of-squares code probe): **6 / 6 intact and correct** on the SFT model. The arithmetic answer is right, the "all but 9 are dead → 9 survive" answer is right, the one-line code is identical to base.
+
+The gold-conditioned SFT internalized the tells at essentially zero general-capability cost. That is the bar any future internalization method on this task has to clear before it can claim it is doing something the SFT solver is not.

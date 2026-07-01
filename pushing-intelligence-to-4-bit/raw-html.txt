@@ -1,0 +1,136 @@
+# NVIDIA Research Blog - Pushing Intelligence to 4-bit
+# Source: https://research.nvidia.com/labs/eai/blogs/pushing-intelligence-to-4-bit/
+# URL: 2026-06-29 · Authors: Wei Huang, Yukang Chen, Weian Mao, Luozhou Wang, Shuai Yang, Song Han
+# Reading time: 16 minutes
+# 
+# ===== RAW HTML EXTRACTED TEXT =====
+
+Pushing Intelligence to 4-bit
+
+Wei Huang, Yukang Chen, Weian Mao, Luozhou Wang, Shuai Yang, Song Han
+June 29, 2026 · 16 min read
+
+Four-bit floating point (FP4) encodes each value in just sixteen levels. Until recently that was usable only for storage; with NVIDIA's NVFP4 format and Blackwell hardware, it now supports the full lifecycle of large models—training, inference, and even long-video generation—at close to 16-bit accuracy. This post explains how FP4 reaches that point across LLMs, diffusion, and video, and what remains unsolved.
+
+The core difficulty is representational: four bits afford only fifteen distinct magnitudes, so accuracy depends entirely on how those magnitudes are scaled. NVFP4 addresses this with fine-grained, two-level scaling that Blackwell executes natively—and the payoff now extends across the whole stack, from LLM weights and activations to the KV cache, attention, and full diffusion-based video generation. FP4 has moved from a storage-only compression trick to a primitive for both inference and training.
+
+NVFP4 gives Blackwell Tensor Cores a practical 4-bit path for weights, activations, the KV cache, and attention—across language, vision, and video models alike.
+
+In this post:
+- Why four bits is hard
+- NVFP4: a smarter ruler
+- LLMs with FP4
+- Video generation with FP4
+- KV cache quantization with FP4
+- FP4 attention
+
+---
+
+## 1. Why Four Bits Is Hard
+
+Most people meet quantization through integers—INT8, INT4, weights packed into fewer bits with one scale factor. FP4 is different: still four bits, but with a floating-point shape (sign, exponent, mantissa). The E2M1 flavor has 1 sign, 2 exponent, 1 mantissa bit, which yields exactly fifteen distinct values: {0, ±0.5, ±1, ±1.5, ±2, ±3, ±4, ±6}.
+
+Think of FP4 as a tiny ruler with only a handful of marks. A 4-bit code only picks which mark; something else has to decide where the ruler is placed over the real numbers. That "something" is the scale, and it is what the format's accuracy ultimately depends on—whether the tensor is an LLM's weights, a diffusion model's activations, or a KV cache.
+
+Fifteen marks is almost nothing: if a tensor mixes tiny values, big outliers, and everything between, one global ruler wastes most of its marks on empty space. The fix is to stop using one ruler for the whole tensor. MXFP4, the Open Compute Project's microscaling format, gives every block of 32 values its own power-of-two scale (an E8M0 exponent), so one outlier only distorts its local block. The catch is that a power-of-two dial is coarse: if the ideal scale sits between two powers of two, MXFP4 must round it, and the tiny 4-bit budget pays for the error. NVFP4 sharpens exactly this.
+
+[Figure 1: NVFP4 quantization error vs MXFP4 — NVFP4 has ~88% lower quantization error]
+
+[Figure 2: NVFP4 vs MXFP4 two-level scaling comparison — NVFP4 uses finer FP8 E4M3 block scale per 16 values, vs MXFP4's E8M0 per 32 values]
+
+## 2. NVFP4: A Smarter Ruler
+
+NVFP4 uses a fine-grained, two-level scaling approach:
+- Element-level: 4-bit E2M1 values
+- Block-level: A finer, dynamically computed FP8 (E4M3) scale shared by a block of 16 values (vs. MXFP4's coarser power-of-two E8M0 scale per 32 values)
+- Per-tensor: A global FP32 scale
+
+This design provides a "sharper dial" and smaller blocks, reducing the impact of outliers. NVFP4 achieves ~88% lower quantization error than MXFP4's power-of-two scaling. The total cost is ~4.5 bits/value vs. MXFP4's ~4.25.
+
+[Figure 3: NVFP4 two-level scaling across weights, activations, and KV cache. FP4 (4-bit E2M1) values + per-16-value FP8 scale + per-tensor FP32 scale]
+
+## 3. LLMs with FP4
+
+Goal: Accelerate matrix multiplication on Blackwell Tensor Cores.
+
+Performance: Up to a 4× throughput ceiling over BF16. Achieves ~1.9× faster pretraining than FP8 (Llama-3.1 405B) and up to ~3× peak inference throughput of FP8.
+
+Accuracy: Post-training quantization of DeepSeek-R1 to NVFP4 stays within ~1% of FP8 (MMLU-Pro: 85→84, GPQA: 81→80). MXFP4 required 36% more tokens to reach the same loss in a pretraining run.
+
+Deployment: Ships in TensorRT-LLM and TensorRT Model Optimizer. Used in production models like DeepSeek-V4 (1.6T-parameter MoE) and OpenAI GPT-OSS (120B model on a single 80GB GPU).
+
+[Figure 4: W4A4 inference throughput on Blackwell — up to 3× peak throughput of FP8, 4× ceiling over BF16]
+
+[Figure 5: DeepSeek-R1 accuracy: INT4 vs MXFP4 vs NVFP4 vs FP8 — NVFP4 within 1% of FP8]
+
+[Figure 6: Pretraining loss curves: NVFP4 matches FP8 closely, MXFP4 needs 36% more tokens]
+
+## 4. Video Generation with FP4
+
+Example System: LongLive-2.0 — An autoregressive model for minute-long, 720p video generation in real time.
+
+Training: Uses NVFP4 to cut AR-training iteration time by up to 2.1× over BF16. Distribution-matching distillation (DMD) in 4-bit drops peak memory from 70.5 GB to 49.0 GB per GPU (0.69×).
+
+Inference: A 5B model achieves 45.7 FPS at 720p. W4A4 + NVFP4 KV cache drops inference peak memory from 36.4 GB to 19.4 GB and raises throughput (24.8 → 32.0 FPS).
+
+[Figure 7: LongLive-2.0 video generation at 720p — 45.7 FPS on a Blackwell GPU. Training iteration time: 2.1× faster than BF16. Peak memory: 19.4 GB vs 36.4 GB (FP16)]
+
+## 5. KV Cache Quantization with FP4
+
+Problem: KV cache dominates memory for long sequences.
+
+Performance: NVFP4 cuts KV cache footprint by ~50% versus FP8 with under 1% accuracy loss, beating MXFP4 by ~5%.
+
+Hardware Advantage: Dequantizes along Blackwell's native FP4→FP8 datapath. A custom parallel dequantization kernel keeps overhead under 2%.
+
+[Figure 8: KV cache memory comparison across sequence lengths — FP16 vs FP8 vs MXFP4 vs NVFP4]
+
+## 6. FP4 Attention
+
+With weights, activations, and the KV cache in four bits, the remaining component is attention itself—the two matrix multiplies that turn queries and keys into scores, and scores into a weighted sum of values.
+
+Attention has followed the same precision curve as the rest of the model, one format at a time:
+- FlashAttention-2: FP16/BF16 baseline
+- FlashAttention-3: FP8 on Hopper (~1.2 PFLOP/s on H100)
+- SageAttention: INT8 QK, FP16 PV (~2.1× over FA2)
+- SageAttention2: INT4 QK, FP8 PV (~3× over FA2)
+- SageAttention3: NVFP4 on Blackwell — both matmuls
+
+Challenge: The softmax map P has values in [0,1], wasting the 4-bit range.
+
+Solution: A two-level trick that stretches each row of P by a per-token FP32 factor before quantization.
+
+Performance: Achieves 1038 TOPS on an RTX 5090, ~5× FlashAttention2, and ~2.4–3× end-to-end on video diffusion. The stretch technique raises P's cosine similarity from 93.3% to 99.5%.
+
+[Figure 9: Precision ladder for attention — BF16/FP16 → FP8 → INT8/INT4 → FP4 (NVFP4), each step faster]
+
+[Figure 10: SageAttention3 — both matmuls in NVFP4. The key trick: stretch P to fill range before quantizing]
+
+## Conclusion: FP4 Is The Future
+
+Historically, 4-bit precision implied a large accuracy penalty. On Blackwell, NVFP4 reduces that penalty to roughly 1% on many tasks while delivering substantial speedups. The approach now spans the landscape: LLMs (DeepSeek-R1), diffusion and image generation (FLUX), and autoregressive video (LongLive-2.0).
+
+The recurring lesson is that FP4 works only when the format, the kernels, the cache, and attention are co-designed—fine-grained scaling, fused kernels, hardware-accelerated dequantization, and the dedicated handling that the softmax map requires.
+
+Open Problems:
+1. Better scales: Smarter per-block scale search, rotations/Hadamard transforms, and outlier handling
+2. KV-cache dequantization efficiency: Faster fused dequant and storing more of attention in low precision
+3. FP4 attention quality: Closing the performance gap with FP4 GEMMs
+4. QAT vs PTQ: Narrowing the gap between cheap post-training quantization and compute-heavy quantization-aware training
+
+## References
+
+1. Introducing NVFP4 for Efficient and Accurate Low-Precision Inference. NVIDIA Technical Blog, 2025.
+2. OCP Microscaling Formats (MX) Specification. Open Compute Project, 2023.
+3. NVFP4 Trains with Precision of 16-Bit and Speed and Efficiency of 4-Bit. NVIDIA Technical Blog, 2025.
+4. Optimizing Inference for Long Context and Large Batch Sizes with NVFP4 KV Cache. NVIDIA Technical Blog, 2025.
+5. LongLive-2.0: An NVFP4 Parallel Infrastructure for Long Video Generation. arXiv:2605.18739, 2026.
+6. SageAttention3: Microscaling FP4 Attention for Inference and Exploration of 8-bit Training. arXiv:2505.11594, 2025.
+7. DeepSeek-V4. DeepSeek-AI, 2026. 1.6T-parameter MoE.
+8. OpenAI gpt-oss (gpt-oss-120b). OpenAI, 2025.
+9. FlashAttention-2. arXiv:2307.08691.
+10. FlashAttention-3. arXiv:2407.08608.
+11. SageAttention. arXiv:2410.02367.
+12. SageAttention2. arXiv:2411.10958.
+13. SVDQuant Meets NVFP4. MIT Han Lab Blog, 2025.
+14. RTX 5090 Workstation Configuration Journey. MIT Han Lab Blog, 2025.

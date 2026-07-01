@@ -1,0 +1,119 @@
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+- <strong>NVFP4量化误差比MXFP4低88%</strong>：通过16值块粒度 + FP8动态缩放，解决了4-bit精度15个值的根本限制<br><br>
+- <strong>LLM训练提速1.9倍、推理3倍</strong>：DeepSeek-R1量化到NVFP4后，MMLU-Pro仅降1分（85→84），MXFP4需要多36% 的token才能达到相同损失<br><br>
+- <strong>KV Cache缩减50%</strong>：NVFP4 KV Cache与FP8相比精度损失 < 1%，解量化开销不到2%<br><br>
+- <strong>FP4 Attention达1038 TOPS</strong>：SageAttention3通过行拉伸技巧解决softmax P在 [0,1] 范围的量化难题，余弦相似度从93.3% 提升到99.5%<br><br>
+- <strong>视频生成45.7 FPS @ 720p</strong>：LongLive-2.0用NVFP4使训练迭代加速2.1倍，推理峰值显存从36.4GB降至19.4GB
+</div>
+</div>
+
+四位浮点数（FP4）将每个值编码为仅16个级别。这个分辨率在过去只够做存储用。而随着NVIDIA的NVFP4格式和Blackwell硬件的到来，FP4现在支撑着大模型的完整生命周期：训练、推理，甚至长视频生成：精度接近16位。
+
+FP4的精度损失现在已经被压到许多任务上仅约1%，同时带来显著的加速。这项工作已经覆盖了从LLMs（DeepSeek-R1）、扩散和图像生成（FLUX）到自回归视频（LongLive-2.0）的广阔图景。
+
+NVFP4给Blackwell Tensor Core提供了一条实用的4-bit路径：覆盖权重、激活值、KV Cache和注意力机制：横跨语言、视觉和视频模型。
+
+**为什么4-bit很难**
+
+大多数人接触量化是从整数开始的：INT8、INT4，权重用单个缩放因子压缩到更少的比特位。FP4则不同：仍然是四个比特位，但使用浮点结构（符号位、指数、尾数）。E2M1格式有1个符号位、2个指数位、1个尾数位，正好能表示15个不同的值：{0, ±0.5, ±1, ±1.5, ±2, ±3, ±4, ±6}。
+
+可以把FP4想象成一把只有几个刻度的微型尺子。4位的编码只决定用哪个刻度；另外还需要别的机制来决定这把尺子放在实数轴上的什么位置。那个"别的机制"就是缩放因子，它最终决定了格式的精度：无论这个张量是LLM的权重、扩散模型的激活值，还是KV Cache。
+
+15个刻度几乎等于什么都没有：如果一个张量里既有极小值、又有极大离群值、还有介于中间的一切，一把全局统一的尺子会把大部分刻度浪费在空白空间上。
+
+解决办法是停止对整个张量用一把尺子。MXFP4，开放计算项目出的微观缩放格式，让每32个值的块拥有自己的2的幂次缩放（E8M0指数），这样单个离群值只会扭曲它所在的局部块。但它的代价是2的幂次缩放比较粗糙：如果理想缩放值落在两个幂次之间，MXFP4必须四舍五入，而微小的4位预算要为这个误差买单。NVFP4正好优化了这一点。
+
+![](figure_1.png)
+<span style="font-size:12px;color:rgb(153,153,153);">NVFP4与MXFP4微块缩放对比：NVFP4每个16值块使用更细粒度的FP8 E4M3动态缩放，而MXFP4是每32值块使用粗粒度的E8M0缩放。</span>
+
+**NVFP4：更聪明的尺子**
+
+NVFP4使用细粒度的两级缩放方案：
+- **元素级**：4位E2M1值
+- **块级**：一个更精细的、动态计算的FP8（E4M3）缩放因子，由每16个值共享（对比MXFP4每32个值共用一个粗粒度的E8M0缩放）
+- **张量级**：一个全局FP32缩放因子
+
+这种设计提供了"更精细的刻度盘"和更小的块，从而减少了离群值的影响。NVFP4的量化误差比MXFP4的2的幂次缩放低约88%。总代价约为每值4.5位，而MXFP4约为4.25位。
+
+![](figure_2.png)
+<span style="font-size:12px;color:rgb(153,153,153);">NVFP4 E2M1格式的两级结构：1位符号 + 2位指数 + 1位尾数，每16个值共享一个FP8 E4M3缩放因子。</span>
+
+**LLM与FP4**
+
+目标是在Blackwell Tensor Core上加速矩阵乘法。
+
+性能上，相对于BF16有最高4倍的吞吐量上限。相比FP8，预训练加速约1.9倍（Llama-3.1 405B），推理峰值吞吐量可达FP8的约3倍。
+
+准确性方面，将DeepSeek-R1后训练量化到NVFP4后，精度与FP8的差距在约1% 以内（MMLU-Pro：85→84，GPQA：81→80）。MXFP4在同一预训练运行中需要多36% 的token才能达到相同的损失。
+
+部署方面，已集成在TensorRT-LLM和TensorRT Model Optimizer中，并用于DeepSeek-V4（1.6T参数MoE）和OpenAI GPT-OSS（120B模型单卡运行在80GB GPU上）等生产级模型中。
+
+![](figure_3.png)
+<span style="font-size:12px;color:rgb(153,153,153);">NVFP4在Blackwell Tensor Core上的GEMM硬件实现：权重和激活值以FP4进入，共享指数进行高效计算。</span>
+
+![](figure_4.png)
+<span style="font-size:12px;color:rgb(153,153,153);">NVFP4在LLM训练和推理中的性能：FP4推理峰值吞吐量约为FP8的3倍，训练加速约1.9倍。</span>
+
+**FP4视频生成**
+
+代表系统：LongLive-2.0：一个能实时生成分钟级720p视频的自回归模型。
+
+训练方面，NVFP4将自回归训练迭代时间缩短了高达2.1倍（相对BF16）。分布匹配蒸馏在4位下将每GPU峰值显存从70.5GB降至49.0GB（0.69倍）。
+
+推理方面，一个5B模型以45.7 FPS的速度生成720p视频。W4A4 + NVFP4 KV Cache将推理峰值显存从36.4GB降至19.4GB，吞吐量从24.8 FPS提升到32.0 FPS。
+
+![](figure_5.png)
+<span style="font-size:12px;color:rgb(153,153,153);">LongLive-2.0实时720p视频生成：5B自回归模型以45.7 FPS运行，基础50步版本仅3.3 FPS，加速约14倍。过去帧保持固定，只计算下一块。</span>
+
+![](figure_6.png)
+<span style="font-size:12px;color:rgb(153,153,153);">NVFP4 DMD分布式匹配蒸馏训练流水线：FP16教师模型引导4位学生模型训练。</span>
+
+![](figure_7.png)
+<span style="font-size:12px;color:rgb(153,153,153);">LongLive-2.0不同精度下的推理延迟和显存占用对比。NVFP4显存占用和延迟均显著低于FP16。</span>
+
+**KV Cache FP4量化**
+
+KV Cache是长序列推理中显存的最大消耗者。NVFP4将KV Cache占用空间相对于FP8减少了约50%，精度损失不到1%，比MXFP4好约5%。硬件优势在于它能沿Blackwell原生FP4→FP8数据路径进行解量化，定制的并行解量化内核将开销控制在2% 以内。
+
+![](figure_8.png)
+<span style="font-size:12px;color:rgb(153,153,153);">不同序列长度下KV Cache显存对比：FP16 → FP8 → MXFP4 → NVFP4。</span>
+
+**FP4注意力机制**
+
+当权重、激活值和KV Cache都进入4位后，剩下的组件就是注意力机制本身：将查询和键转化为分数、再将分数转化为值加权和的两个矩阵乘法。
+
+注意力机制走的精度曲线与模型其他部分一致：
+- FlashAttention-2：FP16/BF16基线
+- FlashAttention-3：Hopper上的FP8（H100约1.2 PFLOP/s）
+- SageAttention：INT8 QK, FP16 PV（约为FA2的2.1倍）
+- SageAttention2：INT4 QK, FP8 PV（约为FA2的3倍）
+- SageAttention3：Blackwell上的NVFP4：两个matmul全4位
+
+难点在于softmax映射P的值域在 [0,1]，会浪费4位的表示范围。SageAttention3用了一个两步技巧：在量化之前，先将P的每一行乘以一个逐token的FP32因子进行拉伸，以填满可表示的范围。
+
+最终，在RTX 5090上达到1038 TOPS，约为FlashAttention2的5倍，端到端视频扩散加速约2.4–3倍。拉伸技巧将P的余弦相似度从93.3% 提升到99.5%。
+
+![](figure_9.png)
+<span style="font-size:12px;color:rgb(153,153,153);">注意力机制的精度演进阶梯：BF16/FP16（FlashAttention-2）→ FP8（FlashAttention-3）→ INT8/INT4（SageAttention 1/2）→ NVFP4（SageAttention3），每一步都更快。</span>
+
+![](figure_10.png)
+<span style="font-size:12px;color:rgb(153,153,153);">SageAttention3两步走策略：将P的 [0,1] 值拉伸后量化，使两个matmul都能在NVFP4上运行。达到1038 TOPS，约为FlashAttention2的5倍。</span>
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+这篇NVIDIA研究博客的方法论本身就是值得注意的一点：他们把FP4当作一个需要"格式 + 内核 + 缓存 + 注意力联合设计"的系统问题，而不是一个单一的量化方案。这种视角在业界很少见：大多数量化工作只关注单一组件（如仅权重量化或仅KV Cache），而NVFP4同时覆盖了训练、推理、KV Cache和注意力：从逻辑上看，这种全栈式的co-design很可能是4-bit走向实用的关键拼图。<br><br>
+另外一个角度的反思是，NVFP4在DeepSeek-R1上的MMLU-Pro只掉了1分（85→84）。当量化对精度的侵蚀已经可以小到这个程度，那"大模型跑在4位精度"这件事就不只是节约显存了：它意味着更低的推理延迟、更高的吞吐、更低的单次推理成本，而这些直接转换成应用层的架构选择。
+</div>
+</div>
+
+---
+<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：
+
+https://research.nvidia.com/labs/eai/blogs/pushing-intelligence-to-4-bit/</span>
