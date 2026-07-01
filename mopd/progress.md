@@ -25,3 +25,4 @@
 | Step 4g: 格式修复 | completed |
 | Step 5: 预发布检查 | completed |
 | Step R: resync - 从微信草稿同步封面和标题 | completed |
+| Step R2: resync - 从微信草稿下载最新版含新图，新建草稿推送 | completed |
