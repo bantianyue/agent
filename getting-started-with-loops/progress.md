@@ -17,3 +17,4 @@
 来源: https://claude.com/blog/getting-started-with-loops
 | Step 0b: 语言类型判断 | completed |
 | Step 0c: 来源类型确认 | completed |
+| Step 3: 封面生成 | completed |
