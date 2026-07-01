@@ -603,6 +603,7 @@
 | 2026-07-01 17:08 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-01 17:09 | 📝 | 翻译写作中 |
 | 2026-07-01 17:16 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0VhccufFUQiARI3p-BJFlOIukz539iyXvZZ8wp8OvrKi |
+| 2026-07-02 now | 🔄 已同步 | 从微信草稿同步封面和标题 |
 
 ### #48 - vllm-semantic-router
 
