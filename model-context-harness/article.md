@@ -157,14 +157,14 @@
 <strong style="font-size:15px;color:#666666;">更多 Harness 专题精选</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-- <strong>Agent Harness Engineering</strong>：Agent可靠性的天花板不是模型，而是基础设施层<br><br>
-🔗 https://mp.weixin.qq.com/s/xP1cEoO_plRpWItxhqeQnQ<br><br>
-- <strong>一张图说明 Prompt → Context → Harness</strong><br><br>
-🔗 https://mp.weixin.qq.com/s/bM_48gTerwj3e03ChpaAYw<br><br>
-- <strong>深度拆解 Hermes Agent</strong>：一个最优秀Harness的九层架构<br><br>
-🔗 https://mp.weixin.qq.com/s/1Sgdxx2WfDwlhc-tf2V1MQ<br><br>
-- <strong>Code as Agent Harness</strong>：可执行、可验证、有状态的Agent系统新范式<br><br>
-🔗 https://mp.weixin.qq.com/s/O0gzjbgy3IhB9TolXUIBzA
+- <strong>Agent Harness Engineering</strong><br>
+<code>https://mp.weixin.qq.com/s/xP1cEoO_plRpWItxhqeQnQ</code><br><br>
+- <strong>一张图说明 Prompt → Context → Harness</strong><br>
+<code>https://mp.weixin.qq.com/s/bM_48gTerwj3e03ChpaAYw</code><br><br>
+- <strong>深度拆解 Hermes Agent：一个最优秀Harness的九层架构</strong><br>
+<code>https://mp.weixin.qq.com/s/1Sgdxx2WfDwlhc-tf2V1MQ</code><br><br>
+- <strong>Code as Agent Harness：可执行、可验证、有状态的Agent系统新范式</strong><br>
+<code>https://mp.weixin.qq.com/s/O0gzjbgy3IhB9TolXUIBzA</code>
 </div>
 </div>
 
