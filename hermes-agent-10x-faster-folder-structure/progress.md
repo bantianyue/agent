@@ -18,3 +18,5 @@
 | Step 0a: TASKS.md任务追踪 | completed |
 | Step 0b: 语言类型判断 | completed |
 | Step 0c: 来源类型确认 | completed |
+| Step 3: 封面生成 | completed |
+| Step 4: 文章撰写 | completed |
