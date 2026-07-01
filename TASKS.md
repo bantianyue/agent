@@ -56,8 +56,8 @@
 | 44 | 2026-07-01 | https://research.nvidia.com/labs/eai/blogs/pushing-intelligence-to-4-bit/ | Pushing Intelligence to 4-bit | pushing-intelligence-to-4-bit | 把智能压进4比特：NVIDIA NVFP4全栈精度革命 | cover | ✅ 已推送 |
 | 45 | 2026-07-01 | https://x.com/mem0ai/status/2071990201531118063 | ChatGPT 记忆的真相：无 RAG、无检索、只有一份预加载的 Profile | chatgpt-memory-works | ChatGPT 记忆的真相：无 RAG、无检索、只有一份预加载的 Profile | cover.png | ✅ 已推送 |
 | 46 | 2026-07-01 | https://claude.com/blog/getting-started-with-loops | getting-started-with-loops | getting-started-with-loops | Claude 入门 Loops：让 Agent 自己循环工作，直到完成为止 | cover.png | ✅ 已推送 |
-| 47 | 2026-07-01 | https://arxiv.org/html/2606.30406v1 | 2606-30406 | mopd | MOPD：多教师同策略蒸馏，打散后训练中的能力耦合 | cover.png | ✅ 已推送 |
-| 48 | 2026-07-01 | https://arxiv.org/html/2603.04444v4 | vLLM Semantic Router | vllm-semantic-router | TBD | TBD | 📥 进行中 |
+| 47 | 2026-07-01 | https://arxiv.org/html/2606.30406v1 | 2606-30406 | mopd | 小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，让多领域能力无损集成 | cover_wx.jpg | ✅ 已推送 |
+| 48 | 2026-07-01 | https://arxiv.org/html/2603.04444v4 | vLLM Semantic Router | vllm-semantic-router | vLLM 开源语义路由器：13种信号+13种算法，一个配置搞定模型路由 | cover.png | ✅ 已推送 |
 || 33 | 2026-06-27 | https://www.langchain.com/blog/deep-agents-prompt-caching | Prompt Caching with Deep Agents | deep-agents-prompt-caching | 推理成本省80%：Deep Agents缓存实测 | cover | ✅ 已推送 |
 ## 状态历史
 
@@ -610,3 +610,5 @@
 |--------|------|------|
 | 2026-07-01 17:54 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-01 17:54 | 📥 | 开始提取内容 |
+| 2026-07-01 19:36 | ⏳ | 推送中 |
+| 2026-07-01 19:36 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0aiwv1fT-qaQ1OhVChGVG--wO4CJUDGcMcC2aSg8_2uk |
