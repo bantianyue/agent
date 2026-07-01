@@ -7,8 +7,8 @@
 | Step 1: 内容提取 | completed |
 | Step 2: 图片下载 | completed |
 | Step 3: 封面生成 | completed |
-| Step 4: 文章撰写 | in_progress |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 格式修复 | pending |
-| Step 5: 预发布检查清单 | pending |
+| Step 4: 文章撰写 | completed |
+| Step 4f: Humanizer 润色 | completed |
+| Step 4g: 格式修复 | completed |
+| Step 5: 预发布检查清单 | in_progress |
 | Step 6: 推送草稿 | pending |
