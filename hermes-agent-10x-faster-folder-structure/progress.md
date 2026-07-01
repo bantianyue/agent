@@ -9,7 +9,7 @@
 | Step 3: 封面设计 | pending |
 | Step 4a: 素材清单 | pending |
 | Step 4c: 文章撰写 | pending |
-| Step 4f: Humanizer 润色 | pending |
+| Step 4f: Humanizer 润色 | completed |
 | Step 5: 检查清单 | pending |
 | Step 6: 推送草稿 | pending |
 
@@ -20,3 +20,4 @@
 | Step 0c: 来源类型确认 | completed |
 | Step 3: 封面生成 | completed |
 | Step 4: 文章撰写 | completed |
+| Step 5: 预发布检查 | completed |
