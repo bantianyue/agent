@@ -1,0 +1,138 @@
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+- <strong>CXL 替代 RDMA 做 KV cache 解耦</strong>：稀疏注意力模型（如 DeepSeek-V3.2）解码时只活跃少数 KV 条目，但 RDMA 仍全量预取全部 KV cache，浪费带宽和内存<br><br>
+- <strong>CXL 的独特优势</strong>：近 DRAM 延迟（1.04-1.64× DRAM）+ cache-line 粒度 load/store 语义，天然适合按需取 top-k KV 条目<br><br>
+- <strong>性能数据</strong>：相比 RDMA 解耦池，SAC 实现 2.1× 更高吞吐、9.7× 更低 TTFT、1.8× 更低 TBT，接近本地 DRAM 上限的 91%
+</div>
+</div>
+
+---
+
+**LLM 长上下文推理的瓶颈正在从计算转向内存。当 GPU HBM 和本地 DRAM 面对 TB 级的 KV cache 需求时，RDMA 解耦内存池是当前标准方案。但对于已进入稀疏注意力时代的模型（DeepSeek-V3.2、GLM-5.1、DeepSeek-V4），这个标准方案本身就是个巨大的效率漏洞。**
+
+![论文标题与作者信息](paper_header.png)
+<span style="font-size:12px;color:rgb(153,153,153);">论文标题、作者列表与 arXiv 元数据。本文来自北京大学与阿里云团队，共 10 位作者。</span>
+
+---
+
+### 一、核心问题：RDMA 全量取 KV cache，稀疏注意力只用了 21%
+
+DeepSeek-V3.2 等模型使用的稀疏注意力（DeepSeek Sparse Attention，DSA）通过一个轻量级 Lightning Indexer 动态计算相关性分数，每层只取 top-k（2048）个 KV latent vectors 做注意力计算。计算复杂度从 O(L²) 降到 O(kL)。这是效率上的胜利。
+
+但 RDMA 解耦系统依然采用"全量预取"策略——在解码开始前，把完整的 prefix KV cache 从远程存储拉到本地内存。这造成了两个根本性问题：
+
+**传输瓶颈**：稀疏注意力的吞吐受 batch size 限制而非计算能力。长上下文下 KV cache 可达数十 GB，高并发时 RDMA 传输队列延迟飙到数十秒，直接拖垮首 Token 延迟（TTFT）。
+
+**本地内存浪费**：论文实测 128K 上下文中只有 **21%** 的 KV cache 被实际访问。但完整的 prefix KV cache（DeepSeek-V3.2 在 128K 下需要 9.2GB/请求）必须驻留本地。维持高并发意味着 TB 级本地内存，成本爆炸。
+
+直观的解决方案是"按需只取 top-k"。但 RDMA 做不到：top-k 索引是运行时动态确定的，RDMA 微秒级延迟无法满足实时要求；且 top-k KV 条目是离散小块数据，用 RDMA 取需要数十次独立请求或复杂的 gather/scatter 操作，协议栈开销巨大。
+
+![DeepSeek Sparse Attention 工作流](x1.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 1：DeepSeek Sparse Attention（DSA）工作流。Lightning Indexer 动态计算相关性分数，只取 top-k KV latent vectors 做注意力计算。</span>
+
+---
+
+### 二、SAC 方案：用 CXL 的 cache-line 粒度 load/store，按需取 top-k
+
+CXL（Compute Express Link）基于 PCIe 物理层，但协议栈远比 RDMA 精简。它的核心区别：
+
+- **延迟逼近 DRAM**：实测 CXL 解耦内存的延迟仅为本地 DRAM 的 **1.04-1.64×**（RDMA 是 4-19.7×，过毫秒级）
+- **cache-line 粒度**：支持 64 字节粒度的 load/store 操作，天然适配稀疏、细粒度的数据读取
+- **零协议开销**：硬件的 load/store 语义，无需 RDMA 的内存 pinning、queue pair 同步、上下文切换等协议栈
+
+论文提出的 SAC（Sparse Attention on CXL）系统正是基于这些特性：
+
+**架构三组件**：
+1. **Prefill Instance**：计算预填充阶段，全量 KV cache 在 GPU 本地计算完成后写入 CXL 内存池
+2. **Decode Instance**：基于 SGLang 的 HiSparse 框架，每层解码时直接从 CXL 内存池取 top-k KV 到 GPU
+3. **CXL 解耦 KV cache 系统**：管理 KV cache 和元数据，全部映射到全局 CXL 地址空间
+
+![SAC 系统架构](x6.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 6：SAC 系统架构概览和工作流，展示计算实例与解耦 CXL 内存池之间的交互。</span>
+
+硬件拓扑上，系统基于 **XConn XC50256 CXL 交换机芯片**（256 PCIe 5.0 lanes），512 GB/s 总带宽，连接最多 8 台服务器。每台服务器通过 PCIe 5.0 x16 适配器接入 CXL 交换机。
+
+![硬件拓扑](x7.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 7：SAC 系统硬件拓扑。每个 NUMA 节点通过 PCIe 5.0 x16 适配器连接 CXL 交换机，CXL 内存池通过交换机共享给多台服务器。</span>
+
+**关键设计决策**：
+
+CXL 的近 DRAM 延迟使得 KV cache 可以采用**与本地 GPU 完全相同的 layer-first 内存布局**，GPU 访问 CXL 内存和访问本地内存使用相同的逻辑。这彻底消除了 RDMA 解耦系统中的"局部性感知调度"复杂度。
+
+元数据管理也从传统的集中式 RPC/网络交互转型：SAC 把元数据也放在 CXL 全局共享内存中，用原生 load/store 做跨服务器同步，替代了沉重的远程过程调用（RPC）。
+
+**带宽优化**方面，SAC 通过 **CXL device interleaving**（设备交错）策略——轮询分配请求到不同 CXL 设备，避免多 GPU 同时访问同一设备的竞争——将解码吞吐提升 **9.2%**（峰值 14.2%）。
+
+![CXL interleaving 示例](x8.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 8：CXL 设备交错（interleaving）示例。轮询分配 GPU rank 到不同 CXL 设备，避免链路竞争。</span>
+
+---
+
+### 三、性能数据：2.1× 吞吐、9.7× TTFT、1.8× TBT
+
+论文在 8×H20 GPU + 2TB CXL 内存池的硬件上，用 DeepSeek-V3.2（AWQ 4-bit 量化）跑端到端评估。对比基线为 RDMA 解耦池和本地 DRAM（上限）。
+
+**端到端对比**：
+
+SAC 在 Round-2（Cache Hit，即 KV cache 已经预存在池中）表现尤其突出：
+
+| 指标 | SAC vs RDMA | SAC vs DRAM 上限 |
+|------|------------|-----------------|
+| 吞吐（Throughput） | **2.1× 更高** | 91%（仅差 9%） |
+| TTFT（首 Token 延迟） | **9.7× 更低** | 接近 |
+| TBT（Token 间隔时间） | **1.8× 更低** | 接近 |
+
+**为什么 RDMA 不行？** 高并发下 RDMA 的 KV cache 全量传输打满带宽，TTFT 急剧恶化（因为请求必须等完整 KV cache 到齐才能开始解码）。PCIe 总线也要同时处理 KV cache 流入和 HiSparse swap-in 过程，进一步拉高 TBT。
+
+![Round-2 性能对比](x10.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 10：Round-2（解码阶段）性能对比。SAC 吞吐 2.1× 高于 RDMA，TTFT 低 9.7×，TBT 低 1.8×。</span>
+
+**吞吐可扩展性**——这是 SAC 最亮眼的数据：
+
+| 上下文长度 | SAC vs RDMA 吞吐提升 |
+|-----------|-------------------|
+| 32K | **2.0×** |
+| 64K | **2.5×** |
+| 128K | **3.1×** |
+
+RDMA 的吞吐增长在低并发下就达到平台——全量取 KV cache 把传输带宽吃光了。SAC 通过按需只取 top-k，每请求带宽占用大幅下降，吞吐与并发保持线性增长。
+
+![吞吐可扩展性对比](x11.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 11：解码吞吐可扩展性对比。SAC 保持线性增长，RDMA 快速达到平台。</span>
+
+**与 GPU HBM 对比**：低并发下 GPU HBM 吞吐更高，但高并发时 HBM 容量成为瓶颈（最大 batch 无法继续增长）。这正是 CXL 解耦内存的价值——用低层级内存提供必要的扩展容量。
+
+---
+
+### 四、关键讨论：CXL 不只是"更快存储"，是 GPU 内存层次的自然延伸
+
+论文在讨论部分明确区分了 SAC 与之前工作（Beluga、TraCT）的定位：
+
+- 之前工作把 CXL 当作 **faster storage tier**（更快的存储层）——用于大块 KV block 的传输
+- SAC 把 CXL 视为 **direct extension of GPU's memory hierarchy**（GPU 内存层次的直接扩展）——针对非连续访问模式做细粒度、实时的 top-k 取数
+
+"从 Transfer 到 On-Demand Fetching"是 SAC 的核心范式转换。在密集注意力模型中，CXL 是性能优化器；对稀疏注意力模型，CXL 是必需品——因为没有其他方案能做到实时按需取 top-k。
+
+这个思路也延续到 DeepSeek-V4（支持 1M 上下文，混合使用压缩稀疏注意力和重度压缩注意力），和 SAC 共享相同的 top-k 访问模式，可以直接受益。
+
+---
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+本文最值得关注的地方不是"CXL 比 RDMA 快"——这几乎是共识。真正的贡献在于它精准定位了 RDMA 在稀疏注意力时代的结构性缺陷：<strong>RDMA 的协议模型天然与稀疏、细粒度的数据访问模式不匹配，这不是带宽或延迟的问题，是语义的错位</strong>。CXL 的 cache-line 粒度 load/store 恰好弥合了这个错位，使得"解耦内存"从存储扩展变为内存层次的自然延伸。<br><br>
+
+但 SAC 的当前实验也存在局限——只在 DeepSeek-V3.2 上做了端到端评估，且硬件规模有限（8 GPU + 2TB CXL）。对于更大规模集群（数百 GPU、数十 TB 内存），CXL 交换机拓扑的竞争和可扩展性还需要更多验证。<br><br>
+
+从产业角度看，这个方向的意义可能更深远：<strong>随着模型稀疏化成为趋势，推理系统的架构正在从"网络中心"走向"内存中心"</strong>——CXL 交换机取代 RDMA NIC，load/store 取代 message passing。这可能是未来几年 AI 基础设施最底层的架构变化之一。
+</div>
+</div>
+
+---
+
+<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://arxiv.org/html/2606.19746v1</span>
