@@ -8,4 +8,6 @@
 | Step 3: 封面设计 | completed |
 | Step 4: Humanizer 润色 | completed（翻译文章，无需实质性改动） |
 | Step 5: 检查清单 | completed |
-| Step 6: 推送草稿 | completed ✅ |
+| Step 6: 推送草稿 | completed |
+| Step 4d-i: 传送门 | completed |
+| Step 5: 预发布检查 | completed |
