@@ -165,4 +165,13 @@ VeriCache同时支持token-dropping和量化两类压缩方法：不是提出新
 </div>
 
 
+<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">【传送门】
+从权重到上下文再到基础设施：LLM Agent的外化之路
+Claude Code Workflow 深度技术洞察：DAG 不再由人画
+AI Brief: Agent创业、自动化悖论与企业风险
+Hermes Agent创始团队揭秘：会自我进化的AI智能体
+Anthropic 3亿收购Stainless：CEO详解MCP协议未来
+</span>
+
+
 <span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://arxiv.org/html/2605.17613v1</span>
