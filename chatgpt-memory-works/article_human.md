@@ -3,7 +3,7 @@
 <strong style="font-size:16px;color:#1a6ba0;">要点速览</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-- <strong>ChatGPT记忆不是RAG</strong>：它不搜索历史对话，而是将一份持续更新的用户Profile摘要预加载到每一轮的System Prompt中<br><br>
+- <strong>ChatGPT记忆不是RAG</strong>：不搜索历史对话，而是将一份持续更新的用户Profile摘要预加载到每一轮的System Prompt中<br><br>
 - <strong>Profile有六个段落</strong>：安全研究员逆向工程发现，这份Profile包含Model Set Context、Recent Conversation Content（仅用户消息）等结构化段落，用 |||| 分隔符和intent_tags标记<br><br>
 - <strong>Dreaming：后台自动整合</strong>：2026年6月上线的Dreaming系统在后台读取多年对话、自动更新Profile，无需用户介入，内部评估事实回忆从41.5% 提升到82.8%<br><br>
 - <strong>Profile也是攻击面</strong>：引用外部文档可能将攻击者内容写入长期记忆，记忆是一个"写入面"，任何能写入它的东西都是攻击面的一部分
@@ -14,9 +14,9 @@
 
 ChatGPT会记住你，但方式和大多数人想象的不同。
 
-它不会搜索你的旧对话。没有向量数据库在你提问时悄悄拉取历史。相反，在每次消息中，ChatGPT都会把一份基于你过去对话构建的"你是谁"摘要，直接注入到它的上下文中。
+它不搜索你的旧对话。没有向量数据库在你提问时悄悄拉取历史。相反，在每次消息中，ChatGPT都会把一份基于你过去对话构建的"你是谁"摘要，直接注入到它的上下文中。
 
-2026年6月，OpenAI重建了这份摘要的构建方式，并给它取了一个名字：**Dreaming**。
+2026年6月，OpenAI重构了这份摘要的构建方式，并给它取了一个名字：**Dreaming**。
 
 **没有检索机制**
 
