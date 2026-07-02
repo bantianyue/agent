@@ -1,3 +1,4 @@
+
 <div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;">
 <div style="text-align:center;margin-bottom:10px;">
 <strong style="font-size:16px;color:#1a6ba0;">要点速览</strong>
@@ -22,7 +23,8 @@ LongCat Lab的诞生本身就是一个充满戏剧性的故事。2023年初，Ch
 
 **今天回头看，那笔收购是一笔超值的投资。** 团队虽然不完全一样，但王慧文奠定的基础催生了LongCat 2.0：一个1.6T参数、60%+ 基准测试成绩的模型，而且是完全在中国国产芯片上训练出来的。这在训练大模型越来越难的今天，本身就是一次宣言。
 
-<span style="font-size:12px;color:rgb(153,153,153);">美团LongCat从Nvidia NVL72 "跳"向华为CloudMatrix 384</span>
+![](03.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">美团LongCat从Nvidia NVL72"跳"向华为CloudMatrix 384</span>
 
 LongCat 2.0最大的亮点不是参数规模：DeepSeek V4 Pro也是1.6T，Moonshot据说也有1T参数模型。真正的新意在于：**这是第一个公开已知完全在华为Ascend 910C上训练的模型，只用了5万颗ASIC。**
 
@@ -42,13 +44,14 @@ Nvidia NVL72用72个GPU组成一个单扩展域：任何GPU都可以直接访问
 
 **更值得关注的是内存池化。** CloudMatrix 384把所有192个CPU的DRAM聚合为一个共享高性能内存池，384个NPU中的任何一个都可以通过UB网络以统一带宽和延迟访问。这彻底改变了一个关键瓶颈：传统架构中KV缓存必须路由到持有它的节点，否则远程访问太慢。在CloudMatrix中，任何NPU都可以从共享池直接拉取数据，请求调度完全与数据位置解耦。
 
+![](02.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">来源：SemiAnalysis CloudMatrix 384分析</span>
+
 好处是三重：消除了传统架构中DRAM利用率低下的孤岛问题；简化了调度（不需要缓存感知路由）；显著提高了突发工作负载下的缓存命中率。**这几乎是每个做KV缓存优化的人梦寐以求的能力：Nvidia生态系统中还需要通过SGLang HiCache + Mooncake等软件层实现，华为已经在硬件层面内置了。**
 
 另一个巧妙的设计是 **N+1容错**：每个机架有一个备用NPU。当NPU故障时自动激活恢复训练。路由系统还支持链路故障的快速自动愈合。这使得华为可以在系统中大量使用"低性能"组件而不牺牲可靠性：因为他们的系统组件数是Nvidia等效系统的数倍，故障是必然的，关键是如何从故障中恢复。
 
 **LongCat团队自己也做了一个同样精妙的设计。** 受DeepSeek Engram方法的启发（用CPU内存换取ASIC计算和HBM），他们添加了一个N-gram Embedding模块，将嵌入空间扩展了约100倍。通过保存n-gram token组合来捕获更丰富的局部上下文，代价是多用了一些CPU DRAM，但省下了更宝贵的ASIC FLOPs和HBM带宽。公平地说，LongCat的论文《LongCat Flash》在DeepSeek Engram发布仅两周后就发表了，且关键设计有显著差异：很可能是独立发明。
-
-<span style="font-size:12px;color:rgb(153,153,153);来源：SemiAnalysis CloudMatrix 384分析</span>
 
 这背后反映的是一个更宏大的趋势：**整个中国AI生态系统已经达到了"逃逸速度"。** DeepSeek的MLA、DSA、CSA、HCA等技术被广泛采用：比如CSA和HCA将KV缓存的HBM需求减少98%，DSpark将解码阶段带宽需求减少66%。长鑫存储正在突破HBM3，长江存储提供了"足够好"的NAND。从芯片到互联到内存到模型架构，所有关键环节都开始有了国产替代方案。
 
