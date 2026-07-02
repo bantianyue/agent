@@ -22,11 +22,11 @@ ChatGPT会记住你，但方式和大多数人想象的不同。
 
 官方来看，ChatGPT的记忆有两个部分。Saved memories是可保存的离散事实：你可以告诉ChatGPT"记住我是素食者"，或者它可以在觉得有用时自行保存。Reference chat history则利用你过去的对话来推断你的兴趣和偏好。
 
-但让人惊讶的部分：也是OpenAI没有明确说明的部分：是检索机制。**它根本不存在。**
+但OpenAI没有明确说检索机制，因为**它根本不存在。**
 
-安全研究员Johann Rehberger直接测试了这一点，发现ChatGPT无法回忆起一年前的某次具体对话。Simon Willison收回了自己最初认为它是用RAG的猜测。实际情况要简单得多：ChatGPT维护一份你之前对话的详细摘要，经常用新细节更新它，然后每次你开始新聊天时，这份摘要就会被注入到上下文里。
+安全研究员Johann Rehberger验证了这一点，发现ChatGPT无法回忆起一年前的某次具体对话。Simon Willison收回了自己最初认为它是用RAG的猜测。实际情况要简单得多：ChatGPT维护一份之前对话的详细摘要，并时常用新细节更新它。每次开始新聊天时，把这份摘要注入到上下文里。
 
-所以，记忆不是按提问区检索的。它是预加载的。**一份持久的个人Profile在每一轮的System Prompt中都跟着你。**
+So，记忆不是按提问区检索的。它是预加载的。**一份持久的个人Profile在每一轮的System Prompt中都跟着你。**
 
 Rehberger记录到，这份Profile大致包含六个命名段落：Model Set Context、Assistant Response Preferences、Notable Past Conversation Topic Highlights、Helpful User Insights、Recent Conversation Content和User Interaction Metadata。
 
