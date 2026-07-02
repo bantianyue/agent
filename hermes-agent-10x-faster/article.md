@@ -25,7 +25,11 @@
 
 一名搜索者需要一张地图。没有地图，Agent就是在黑暗中行走，把每个文件都当成可能的答案。
 
-> 围绕Agent搭建的结构，比Agent自身的能力做得更多。
+<div style="background:#f0f7fa;padding:16px 18px 14px 18px;border-radius:6px;margin:16px 0;border-left:4px solid #5b9bd5;">
+<div style="font-size:15px;color:#2c6a9e;line-height:1.7;">
+围绕Agent搭建的结构，比Agent自身的能力做得更多。
+</div>
+</div>
 
 作者用一个比喻说透了这件事：**文件夹结构是一个笼子**：它约束Agent的移动方式，但不约束Agent能做什么。在笼子里，Agent自由奔跑。没有笼子，Agent只会到处游荡。
 
@@ -46,7 +50,11 @@
 
 该问题在各模型上都无一幸免：作者试了Opus、GPT 5.5、Qwen和GLM，都是这种模式。**不是某个模型特别笨，是文件夹结构在Agent开始核心工作前就已成了瓶颈。**
 
-> 一个写文章、写代码、做规划的Agent，不应该把大部分时间花在"找东西"上。
+<div style="background:#f0f7fa;padding:16px 18px 14px 18px;border-radius:6px;margin:16px 0;border-left:4px solid #5b9bd5;">
+<div style="font-size:15px;color:#2c6a9e;line-height:1.7;">
+一个写文章、写代码、做规划的Agent，不应该把大部分时间花在"找东西"上。
+</div>
+</div>
 
 ## 最小的笼子最好用
 
@@ -85,7 +93,11 @@ INDEX.md本身也经历了三次迭代。第一个版本列出了文件夹里的
 
 当作者让Agent去提取一个发布的推广策略时，它先读 `05.Brand/INDEX.md`，然后打开 `03.Promotion/01. Promotion Strategy.md`，直接开始干活。
 
-> 文件夹结构是一个笼子，它约束Agent的移动方式，但不约束Agent能做什么。在笼子里，Agent自由奔跑。没有笼子，它只会到处游荡。
+<div style="background:#f0f7fa;padding:16px 18px 14px 18px;border-radius:6px;margin:16px 0;border-left:4px solid #5b9bd5;">
+<div style="font-size:15px;color:#2c6a9e;line-height:1.7;">
+文件夹结构是一个笼子，它约束Agent的移动方式，但不约束Agent能做什么。在笼子里，Agent自由奔跑。没有笼子，它只会到处游荡。
+</div>
+</div>
 
 ## 笼子也有锁
 
@@ -106,7 +118,11 @@ INDEX.md本身也经历了三次迭代。第一个版本列出了文件夹里的
 ![](img6_wandering.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">没有地图的Agent就像在黑暗中行走：先把最浪费时间的文件夹修好，再改下一个</span>
 
-> 从最浪费时间的一个文件夹开始，修好它，准备好了再改下一个。
+<div style="background:#f0f7fa;padding:16px 18px 14px 18px;border-radius:6px;margin:16px 0;border-left:4px solid #5b9bd5;">
+<div style="font-size:15px;color:#2c6a9e;line-height:1.7;">
+从最浪费时间的一个文件夹开始，修好它，准备好了再改下一个。
+</div>
+</div>
 
 ## 脚手架比能力更值钱
 
@@ -114,7 +130,11 @@ INDEX.md本身也经历了三次迭代。第一个版本列出了文件夹里的
 
 一个INDEX.md和几个编号前缀，就是Agent游荡和Agent干活的全部差距。
 
-> 当能力周围的脚手架坏了，模型能力就变得廉价。把脚手架建好，模型才有用武之地。
+<div style="background:#f0f7fa;padding:16px 18px 14px 18px;border-radius:6px;margin:16px 0;border-left:4px solid #5b9bd5;">
+<div style="font-size:15px;color:#2c6a9e;line-height:1.7;">
+当能力周围的脚手架坏了，模型能力就变得廉价。把脚手架建好，模型才有用武之地。
+</div>
+</div>
 
 <div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
 <div style="text-align:center;margin-bottom:8px;">
