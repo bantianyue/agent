@@ -11,3 +11,4 @@
 | Step 6: 推送草稿 | completed |
 | Step 4d-i: 传送门 | completed |
 | Step 5: 预发布检查 | completed |
+| Step 2: 图片下载嵌入 | completed |
