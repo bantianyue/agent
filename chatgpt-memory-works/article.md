@@ -30,7 +30,11 @@ ChatGPT会记住你：但方式和大多数人想象的不一样。
 
 Rehberger记录到，这份Profile大致包含六个命名段落：Model Set Context、Assistant Response Preferences、Notable Past Conversation Topic Highlights、Helpful User Insights、Recent Conversation Content和User Interaction Metadata。
 
-**细节让这个机制变得具体。** Recent Conversation Content保存了你的近期对话，但只有你输入的消息，不包括ChatGPT的回复。原因是数据量太大，Prompt Injection和幻觉会成为重大风险。条目之间用 |||| 分隔符隔开，带有内部intent_tags（如translation或argument_or_summary_generation），并带有精确到秒的时间戳。
+**
+![](img2_profile.png)
+<span style="font-size:12px;color:rgb(153,153,153);">Rehberger逆向工程发现的ChatGPT Profile六个段落结构</span>
+
+细节让这个机制变得具体。** Recent Conversation Content保存了你的近期对话，但只有你输入的消息，不包括ChatGPT的回复。原因是数据量太大，Prompt Injection和幻觉会成为重大风险。条目之间用 |||| 分隔符隔开，带有内部intent_tags（如translation或argument_or_summary_generation），并带有精确到秒的时间戳。
 
 Saved memories则通过另一条路径工作：模型调用一个bio工具（to=bio）来持久化一个事实，随后该事实会以带日期条目的形式出现在未来System Prompt的 # Model Set Context段落中。
 
@@ -43,6 +47,10 @@ Saved memories则通过另一条路径工作：模型调用一个bio工具（to=
 这个方案简单，能扩展到数亿用户：但它也有天花板。**这也正是Dreaming要解决的问题。**
 
 **Dreaming：后台自动更新的记忆**
+
+
+![](img3_dreaming.png)
+<span style="font-size:12px;color:rgb(153,153,153);">OpenAI Dreaming系统架构示意</span>
 
 预加载的Profile会腐烂。事实堆积起来，变陈旧，相互矛盾，手工维护的Saved memories列表在跨越数年的聊天和数亿人的规模下无法扩展。所以2026年6月，OpenAI推出了一种构建Profile的新方式：Dreaming。
 
@@ -58,13 +66,25 @@ OpenAI报告这一变化将内部事实回忆评估从2024年的41.5% 提高到2
 
 Willison称这是一个值得暂停的隐私问题：**ChatGPT实际上在收集我们先前互动的档案，并将这些信息应用到每一次未来的聊天中。** 他更尖锐的问题是：有哪款消费产品能像这样构建出一份人类可读的用户Profile？他的反对不是因为记忆存在，而是因为Profile在没有用户明确许可或控制的情况下被倾倒到模型上下文中。
 
+
+![](img4_security.png)
+<span style="font-size:12px;color:rgb(153,153,153);">Rehberger展示Google Doc引用可写入攻击者控制的记忆条目</span>
+
 还有安全层面。因为不受信任的内容可以到达模型，它也可以到达记忆。Rehberger展示了聊天中引用的一份Google Doc可以将攻击者控制的条目写入长期记忆。2024年的一项研究显示，该功能可能被转化为一个持久的监视通道：模型被指示监视并存储用户的个人数据，以便日后泄露（arXiv:2406.00199）。
 
-**持久的教训是结构性的：记忆是一个写入面，任何能写入它的东西都是你攻击面的一部分。**
+**
+![](img5_willison.png)
+<span style="font-size:12px;color:rgb(153,153,153);">Simon Willison对ChatGPT持久Profile的隐私担忧</span>
+
+持久的教训是结构性的：记忆是一个写入面，任何能写入它的东西都是你攻击面的一部分。**
 
 **它的边界在哪里**
 
 ChatGPT的记忆为做好一件事而构建：让一个消费应用感觉像认识你。让它擅长这件事的设计选择，也正是它的边界。
+
+
+![](img6_boundary.png)
+<span style="font-size:12px;color:rgb(153,153,153);">ChatGPT记忆边界与Mem0可移植层的对比</span>
 
 它是封闭的、单应用的。Profile只生活在ChatGPT内部，你的编辑器Agent、终端Agent、你自己的应用都无法读取或写入它。它是预加载的，不是检索的：你不能决定针对某个任务该暴露哪些记忆。它是为终端用户而不是开发者构建的：没有干净的方式来限定范围、按Agent分支，或者让一个人的身份记忆跨越他们实际使用的各种工具。
 
