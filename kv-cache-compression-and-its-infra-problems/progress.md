@@ -18,7 +18,7 @@
 | Step 4f: Humanizer 润色 | pending |
 | Step 4g: 文本格式修复 | pending |
 | Step 5: 预发布检查 | completed |
-| Step 6: 推送草稿 | pending |
+| Step 6: 推送草稿 | completed |
 
 创建时间: 2026-07-02
 来源: https://research.nvidia.com/labs/eai/blogs/kv-cache-compression-and-its-infra-problems/
