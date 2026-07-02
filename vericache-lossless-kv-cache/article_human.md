@@ -165,16 +165,4 @@ VeriCache同时支持token-dropping和量化两类压缩方法：不是提出新
 </div>
 
 
-<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/TIqnnVEu6Oy3-wtKttGa0aU4ElWsRXWq6RDETiOx-LdBI_QC2MVyAo55enn5p-Tz" target="_blank" data-linktype="2">从权重到上下文再到基础设施：LLM Agent的外化之路</a><br><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/Vn6IytoT8knZhQF-vLcGLg" target="_blank" data-linktype="2">Claude Code Workflow深度技术洞察：DAG不再由人画</a><br><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/aba943QHv_QRWEyK6g9Xfg" target="_blank" data-linktype="2">AI Brief: Agent创业、自动化悖论与企业风险</a><br><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/-xmiwcQP--wVA2iihg28vg" target="_blank" data-linktype="2">Hermes Agent创始团队揭秘：会自我进化的AI智能体</a><br><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/9QtSgk3jn5JSqcCB1ZKinA" target="_blank" data-linktype="2">Anthropic 3亿收购Stainless：CEO详解MCP协议未来</a><br><br>
-</span>
-
----
-
-<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：
-
-https://arxiv.org/html/2605.17613v1</span>
+<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://arxiv.org/html/2605.17613v1</span>
