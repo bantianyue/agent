@@ -78,9 +78,10 @@ for i, url in enumerate(imgs):
     try:
         req_img = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req_img, timeout=30) as r:
+            data = r.read()
             with open(os.path.join(r'D:\06_Hermes\articles\2072421710692028900', filename), 'wb') as f:
-                f.write(r.content)
-        print(f'OK {filename}')
+                f.write(data)
+        print(f'OK {filename} ({len(data)//1024}KB)')
     except Exception as e:
         print(f'FAIL {filename}: {e}')
 
@@ -89,9 +90,10 @@ if thumb_url:
     try:
         req_thumb = urllib.request.Request(thumb_url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req_thumb, timeout=15) as r:
+            data = r.read()
             with open(r'D:\06_Hermes\articles\2072421710692028900\cover_wx.jpg', 'wb') as f:
-                f.write(r.content)
-        print(f'✅ Cover downloaded: cover_wx.jpg')
+                f.write(data)
+        print(f'✅ Cover downloaded: cover_wx.jpg ({len(data)//1024}KB)')
     except Exception as e:
         print(f'❌ Cover download failed: {e}')
 
