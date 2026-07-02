@@ -164,15 +164,20 @@ VeriCache同时支持token-dropping和量化两类压缩方法：不是提出新
 </div>
 </div>
 
+---
 
-<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/a0ZppQR7VpVc_xEDqgYY9w" target="_blank" data-linktype="2">Prompt →Context→Harness 演变背后的逻辑：认知逐步外化，为模型减负</a><br><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/Vn6IytoT8knZhQF-vLcGLg" target="_blank" data-linktype="2">Claude Code Workflow 深度技术洞察：DAG 不再由人画</a><br><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/aba943QHv_QRWEyK6g9Xfg" target="_blank" data-linktype="2">AI Brief: Agent创业、自动化悖论与企业风险</a><br><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/-xmiwcQP--wVA2iihg28vg" target="_blank" data-linktype="2">Hermes Agent创始团队揭秘：会自我进化的AI智能体</a><br><br>
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/TrDau7cG1M7kwsLQNwOpzA" target="_blank" data-linktype="2">揭秘最快的GLM-5.2推理优化技术：如何将吞吐推到 280 TPS</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/UPOlNSnSWBLnxgEFOmWbzg" target="_blank" data-linktype="2">Prompt Cache各厂商策略对比：结合Deep Agents看Cache策略未来的优化方向</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/lcs_gT9vfs0eaW001g2dfg" target="_blank" data-linktype="2">SGLang用Waterfill+LPLB解决DeepEP MoE负载不均，吞吐提升7.3%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/oq46CcmcBBTlfdCAzaOvhA" target="_blank" data-linktype="2">英伟达硬核4-bit量化: NVFP4将智能压缩到4比特</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/xP1cEoO_plRpWItxhqeQnQ" target="_blank" data-linktype="2">Agent Harness Engineering：为什么Agent可靠性的天花板不是模型，而是基础设施层</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/-xmiwcQP--wVA2iihg28vg" target="_blank" data-linktype="2">Hermes Agent创始团队揭秘：会自我进化的AI智能体</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/SZC06ibLkUU_S2GL5wSPJQ" target="_blank" data-linktype="2">65 行 Prompt，把 AI 编程准确率从 65% 拉到 94%</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/9QtSgk3jn5JSqcCB1ZKinA" target="_blank" data-linktype="2">Anthropic 3亿收购Stainless：CEO详解MCP协议未来</a>
 </span>
 
+---
 
-<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">参考：
 https://arxiv.org/html/2605.17613v1</span>
