@@ -15,3 +15,4 @@
 
 创建时间: 2026-06-30
 来源: https://arxiv.org/html/2606.11169v1
+| Step 0: 模式判断与恢复检查 | completed |
