@@ -33,10 +33,10 @@
 
 我测试了5个日常任务的查找耗时。改造前的数据触目惊心：
 
-- 查找当前文章简报：打开7个文件，用时2:00
-- 查找品牌色定义：打开5个文件，用时1:12
-- 查找文章排期：打开4个文件，用时0:48
-- 查找同主题历史文章：打开6个文件，用时1:36
+- 找当前文章简报：打开7个文件，用时2:00
+- 找品牌色定义：打开5个文件，用时1:12
+- 找文章排期：打开4个文件，用时0:48
+- 找同主题历史文章：打开6个文件，用时1:36
 - 提取发布推广策略：打开3个文件，用时0:34
 
 每项任务都跨了多个文件夹，大部分情况下Agent先打开归档版本，然后才发现活跃版本在另一个文件夹里。**Agent的能力被消耗在"导航"上，而不是"干活"上。**
@@ -44,19 +44,19 @@
 ![](img3_before.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">优化前：5个常见任务的查找耗时，最慢的要花2分钟打开7个文件</span>
 
-这个问题在各个模型上都是一致的：作者试了Opus、GPT 5.5、Qwen和GLM，模式全部相同。**不是某个模型特别笨，是文件夹结构在Agent开始核心工作前就已成了瓶颈。**
+该问题在各模型上都无一幸免：作者试了Opus、GPT 5.5、Qwen和GLM，都是这种模式。**不是某个模型特别笨，是文件夹结构在Agent开始核心工作前就已成了瓶颈。**
 
 > 一个写文章、写代码、做规划的Agent，不应该把大部分时间花在"找东西"上。
 
 ## 最小的笼子最好用
 
-解决方案只有三个规则，三者配合使用：
+解决方案就三个规则，配合使用：
 
 **规则一：按「关切领域」而不是「内容类型」组织文件夹。** 品牌工作归品牌文件夹，编辑策略归编辑策略文件夹，Agent不需要跨边界去它不该在的地方找东西。
 
 **规则二：编号让阅读顺序明确化。** `01. Brand System` 在 `02. Editorial Strategy` 之前被读取，Agent不需要猜测。文件夹内部的文件也用同样逻辑编号，`01. Articles` 是起始点，`02. Previous Articles` 是补充。编号不必完美，只要指向正确方向即可。
 
-**规则三：每个主要文件夹的根目录放一份INDEX.md。** 这是Agent的地图：列出每个子文件夹和规范文件，加上一段"Where To Go"告诉Agent该从哪里开始。Agent先读INDEX.md，知道里面有什么之后再接触具体文件。它像一道"软审批门"：Agent在搞清楚自己在跟什么打交道之前，不允许开始干活。
+**规则三：每个主文件夹的根目录放一份INDEX.md。** 这是Agent的地图：列出每个子文件夹和规范文件，加上一段"Where To Go"告诉Agent该从哪里开始。Agent先读INDEX.md，知道里面有什么之后再接触具体文件。它像一道"软审批门禁"：Agent在搞清楚在跟什么打交道之前，先别开始干活。
 
 改造后，作者将品牌文件夹重组为按关切领域编号的结构：
 
@@ -91,11 +91,11 @@ INDEX.md本身也经历了三次迭代。第一个版本列出了文件夹里的
 
 作者踩过的坑值得留意：
 
-**第一个错误：在每个子文件夹都放INDEX.md。** 地图太多了，Agent花在读索引上的时间超过干活的时间。只在需要地图的文件夹放：子文件夹超过4-5个的地方。只有4-5个文件的小文件夹，Agent直接导航进去，不需要地图。
+**错误1：在每个子文件夹都放INDEX.md。** 地图太多了，Agent花在读索引上的时间超过干活的时间。只在需要地图的文件夹放：子文件夹超过4-5个的地方。只有4-5个文件的小文件夹，Agent直接导航进去，不需要地图。
 
-**第二个错误：Agent还没迷路就开始建结构。** 多数人过度设计Agent的基础设施，因为觉得"它需要完善的基础架构"。作者的规则是"最小接口原则"：Agent迷路了再加结构，加刚好够解决这个特定问题的量，不加多。
+**错误2：Agent还没迷路就开始建结构。** 多数人过度设计Agent的基础设施，因为觉得"它需要完善的基础架构"。作者的规则是"最小接口原则"：Agent迷路了再加结构，加刚好够解决这个特定问题的量，不加多。
 
-**第三个错误：嵌套结构。** 子文件夹里又套子文件夹，两层变成了五层。Agent要读多个INDEX文件、解析多套编号序列才能找到单个文件。恢复成扁平子文件夹后，导航速度立刻回升。**深度是快速查找的敌人，而多数重组误以为深度就是精度。**
+**错误3：嵌套结构。** 子文件夹里又套子文件夹，两层变成了五层。Agent要读多个INDEX文件、解析多套编号序列才能找到单个文件。恢复成扁平子文件夹后，导航速度立刻回升。**深度是快速查找的敌人，别误以为深度就是精度。**
 
 ## 改之前先量
 
@@ -108,20 +108,20 @@ INDEX.md本身也经历了三次迭代。第一个版本列出了文件夹里的
 
 > 从最浪费时间的一个文件夹开始，修好它，准备好了再改下一个。
 
-## 脚架比能力更值钱
+## 脚手架比能力更值钱
 
-这篇文章讨论的是Hermes Agent的文件夹结构，但它的逻辑适用于所有有文件系统的Agent：Claude Code、OpenCode、Codex CLI都一样。Agent能力的下限由模型决定，上限由它周围的基础设施决定。最贵的能力，在结构损坏的时候一文不值。
+虽然讨论的是Hermes Agent的文件夹结构，但它的逻辑适用于所有有文件系统的Agent：Claude Code、OpenCode、Codex CLI都一样。**Agent能力的下限由模型决定，上限由它周围的基础设施决定。**最贵的能力，在结构损坏的时候也一文不值。
 
 一个INDEX.md和几个编号前缀，就是Agent游荡和Agent干活的全部差距。
 
-> 当能力周围的脚手架坏了，能力就变得廉价。把脚手架建好，能力自己会搞定自己。
+> 当能力周围的脚手架坏了，模型能力就变得廉价。把脚手架建好，模型才有用武之地。
 
 <div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
 <div style="text-align:center;margin-bottom:8px;">
 <strong style="font-size:15px;color:#8b6f4c;">结语</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-有意思的是，这篇文章的章节结构（# The Structure Your Agent Can't See → # What Capability Wastes On → # The Smallest Cage That Works → # Every Cage Has a Lock → # Measure Before You Reorganize）本身就是一种"编号+地图"的实践：读者不需要猜测文章讲什么，每个章节标题已经标明了位置。作者没有意识到他连写文章都在用INDEX.md的逻辑。这一点他自己大概不会点破，但它恰恰证明了这个原则的普适性：不只是文件夹，所有需要导航的东西都需要一张地图。<br><br>
+有意思的是，这篇文章的章节结构（# The Structure Your Agent Can't See → # What Capability Wastes On → # The Smallest Cage That Works → # Every Cage Has a Lock → # Measure Before You Reorganize）本身就是一种"编号+地图"的实践：读者不需要猜测文章讲什么，每个章节标题已经标明了位置。作者没有意识到他连写文章都在用INDEX.md的逻辑。恰恰证明了这个原则的普适性：不只是文件夹，所有需要导航的东西都需要一张地图。<br><br>
 另外，这个模式和Hermes Agent的SOUL.md + SKILL.md体系其实是同一个逻辑的不同层级：SOUL.md是顶层地图（你是谁、你遵循什么原则），SKILL.md是每个功能模块的自述（任务地图）。但作者往前走了一步，把"地图"下沉到了文件夹级别。顶层文件够用只是在Agent不迷路的前提下。一旦Agent开始跨文件夹工作，文件夹级别的地图就成了必需品。
 </div>
 </div>
@@ -133,7 +133,7 @@ INDEX.md本身也经历了三次迭代。第一个版本列出了文件夹里的
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/aiJs5CC8Gb6qa_xDRNEjTA" target="_blank" data-linktype="2">Dynamic Subagents：用代码编排Agents，告别逐轮工具调用</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/mFuUJ79DRodIK6shVWOgpw" target="_blank" data-linktype="2">OpenAI GPT-5.6: 安全之外新增Prompt Cache断点+两种推理模式; 放弃版本号</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/xP1cEoO_plRpWItxhqeQnQ" target="_blank" data-linktype="2">Agent Harness Engineering：为什么Agent可靠性的天花板不是模型，而是基础</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/9QtSgk3jn5JSqcCB1ZKinA" target="_blank" data-linktype="2">Anthropic 3亿收购Stainless：CEO详解MCP协议未来</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/-JYim8I-W-hWWNwkxWTWUg" target="_blank" data-linktype="2">Anthropic Harness实践：Claude Code 如何征服百万行级代码库</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/o6pnSWW01pahFQelJSbSPA" target="_blank" data-linktype="2">华为「韬定律」全解析：从 τ 常数到4GHz麒麟</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/PLNx54PxO1A0oYc47hz99g" target="_blank" data-linktype="2">Anthropic三连：Claude Opus 4.8-更聪明+诚实；CC动态工作流+算力控制</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/Pdjz39WG9SS6IpWWAJ6pPw" target="_blank" data-linktype="2">Claude Opus 4.8击败Opus 4.7、GPT-5.5和Gemini 3.1 P</a></span>
