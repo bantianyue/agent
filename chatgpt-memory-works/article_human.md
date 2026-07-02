@@ -28,7 +28,13 @@ ChatGPT会记住你，但方式和大多数人想象的不同。
 
 So，记忆不是按提问区检索的。它是预加载的。**一份持久的个人Profile在每一轮的System Prompt中都跟着你。**
 
-Rehberger记录到，这份Profile大致包含六个命名段落：Model Set Context、Assistant Response Preferences、Notable Past Conversation Topic Highlights、Helpful User Insights、Recent Conversation Content和User Interaction Metadata。
+Rehberger记录到，这份Profile大致包含六个命名段落：
+Model Set Context - 模型设定语境
+Assistant Response Preferences - 助手回复偏好
+Notable Past Conversation Topic Highlights - 过往对话重点话题摘录
+Helpful User Insights - 有用用户洞察信息
+Recent Conversation Content - 近期对话内容
+User Interaction Metadata - 用户交互元数据。
 
 **
 ![](img2_profile.jpg)
@@ -36,15 +42,15 @@ Rehberger记录到，这份Profile大致包含六个命名段落：Model Set Con
 
 细节让这个机制变得具体。** Recent Conversation Content保存了你的近期对话，但只有你输入的消息，不包括ChatGPT的回复。原因是数据量太大，Prompt Injection和幻觉会成为重大风险。条目之间用 |||| 分隔符隔开，带有内部intent_tags（如translation或argument_or_summary_generation），并带有精确到秒的时间戳。
 
-Saved memories则通过另一条路径工作：模型调用一个bio工具（to=bio）来持久化一个事实，随后该事实会以带日期条目的形式出现在未来System Prompt的 # Model Set Context段落中。
+Saved memories则是另外一回事：模型调用一个bio工具（to=bio）来持久化一个事实，随后该事实会以带日期条目的形式出现在未来System Prompt的 # Model Set Context段落中。
 
 **为什么选择"全部塞进去"而不是检索**
 
-为什么不构建成大多数记忆系统那种精心的检索管道？shloked.com的作者将OpenAI的策略总结为**"在规模和聪明才智之间赌前者"**：没有向量数据库、没有知识图谱、没有RAG。OpenAI只是在每条消息中包含一切：压缩的用户知识记忆、Model Set Context、最近对话、元数据，全部内容，每一次。
+不同于大多数记忆系统的检索Pipline，OpenAI的策略可总结为**"在规模和机巧之间赌前者"**(大力出奇迹)：没有向量数据库、没有知识图谱、没有RAG。OpenAI只是在每条消息中包含一切：压缩的用户知识记忆、Model Set Context、最近对话、元数据，全部内容，每一次。
 
-逻辑是：一个足够强的模型加上一个足够大的上下文窗口，不需要检索层来决定该暴露什么。把整个Profile交给它，让注意力机制自己排序。
+逻辑是：足够强的模型 + 足够大的上下文窗口，则不需要检索层来决定该暴露什么。把整个Profile交给它，让注意力机制自己排序。
 
-这个方案简单，能扩展到数亿用户：但它也有天花板。**这也正是Dreaming要解决的问题。**
+这个方案简单，数亿用户都在用：但它也有天花板。**这也正是Dreaming要解决的问题。**
 
 **Dreaming：后台自动更新的记忆**
 
@@ -52,19 +58,19 @@ Saved memories则通过另一条路径工作：模型调用一个bio工具（to=
 ![](img3_dreaming.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">OpenAI Dreaming系统架构示意</span>
 
-预加载的Profile会腐烂。事实堆积起来，变陈旧，相互矛盾，手工维护的Saved memories列表在跨越数年的聊天和数亿人的规模下无法扩展。所以2026年6月，OpenAI推出了一种构建Profile的新方式：Dreaming。
+预加载的Profile会腐烂。事实堆积起来，变陈旧，相互矛盾，手工维护的Saved memories列表在跨越数年的聊天和数亿人的规模下无法扩展。所以2026年6月，OpenAI推出了Dreaming。
 
-**Dreaming是一个后台进程，读取你多年的对话，重新整理ChatGPT对你的记忆，不需要你要求它保存任何东西。** OpenAI给出的典范示例是记忆的自我修正："你七月要去新加坡"在行程结束后自动变为"你去了2026年7月的新加坡"。
+**Dreaming是一个后台进程，读取你多年的对话，重新整理ChatGPT对你的记忆，无需你干涉。** OpenAI给出的典范示例是记忆的自我修正："你七月要去新加坡"在行程结束后自动变为"2026年7月你去了新加坡"。
 
-OpenAI报告这一变化将内部事实回忆评估从2024年的41.5% 提高到2026年架构下的82.8%，偏好遵循度71.3%，时间敏感准确性75.1%。这些都是OpenAI自己的数据，未公开评估集，也没有独立第三方复现过。
+OpenAI报告这一变化将内部事实回忆评估从2024年的41.5% 提高到2026年架构下的82.8%，偏好遵循度71.3%，时间敏感准确性75.1%。
 
-名字本身就是线索。ChatGPT现在在后台、在会话之间整理记忆：**整个行业已经开始这样做了。** 同期Google的"Language Models Need Sleep"为权重提出了Dreaming阶段，从Mem0到GBrain的记忆产品都推出了空闲期整合。OpenAI把"Dreaming"放在消费产品上，是迄今为止最明确的信号：**后台整合：而非更大的上下文：才是记忆的未来方向。**
+名字本身就是线索。ChatGPT在后台、在会话间整理记忆：**整个行业已经开始这样做了。** 同期Google的"Language Models Need Sleep"为权重提出了Dreaming阶段，Cluade Code泄露的代码也暴露了其Dreaming记忆。从Mem0到GBrain的记忆产品都推出了空闲期整合。OpenAI把"Dreaming"放在消费产品上，是迄今为止最明确的信号：**后台整合：而非更大的上下文：才是记忆的未来方向。**
 
 **永久Profile的代价**
 
 一份持久的、人类可读的个人Profile非常强大：而这正是问题所在。
 
-Willison称这是一个值得暂停的隐私问题：**ChatGPT实际上在收集我们先前互动的档案，并将这些信息应用到每一次未来的聊天中。** 他更尖锐的问题是：有哪款消费产品能像这样构建出一份人类可读的用户Profile？他的反对不是因为记忆存在，而是因为Profile在没有用户明确许可或控制的情况下被倾倒到模型上下文中。
+这是一个值得深思的隐私问题：**ChatGPT实际上在收集我们先前互动的档案，并将这些信息应用到每一次未来的聊天中。** 更尖锐的问题是：有哪款消费产品能像这样构建出一份人类可读的用户Profile？在没有用户明确许可或控制的情况下被倾倒到模型上下文中。
 
 
 ![](img4_security.jpg)
@@ -80,7 +86,7 @@ Willison称这是一个值得暂停的隐私问题：**ChatGPT实际上在收集
 
 **它的边界在哪里**
 
-ChatGPT的记忆为做好一件事而构建：让一个消费应用感觉像认识你。让它擅长这件事的设计选择，也正是它的边界。
+ChatGPT的记忆为了：让一个消费应用感觉像认识你。让它擅长这件事的设计选择，也正是它的边界。
 
 
 ![](img6_boundary.jpg)
@@ -95,13 +101,15 @@ ChatGPT的记忆为做好一件事而构建：让一个消费应用感觉像认�
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
 这篇文章最有价值的部分不在于它拆解了ChatGPT的记忆机制，而在于它点出了一个被忽视的结构性问题：当记忆被设计成"全部预加载"而非"按需检索"时，整个Profile既是用户体验的基石，也是安全攻击的永久写入面。<br><br>
 Dreaming的推出其实是对这个问题的侧面印证。如果预加载方案真的能无限扩展，就不需要一个后台进程来做自动整合和更新。OpenAI自己的数据显示41.5% → 82.8% 的提升幅度也说明，之前的记忆系统在规模下面临着严重的陈旧性和准确性问题。<br><br>
-文中最后的开发者层（Mem0）虽然带产品推广性质，但它提出的"检索而非预加载""按身份限定、跨工具可移植"的对比，确实点出了ChatGPT当前方案在开发者场景下的核心短板。
+针对ChatGPT记忆的短板，已有记忆产品采用了"检索而非预加载""按身份限定、跨工具可移植"的方案。各有所长，百家争鸣。记忆的赛道还很远。
 </div>
 </div>
 
 ---
 
 <span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/ngZTD0_FCP7N8m-nVAwv5Q" target="_blank" data-linktype="2">Claude Code 记忆系统Memory架构剖析</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tQmHn4iCqUzh3_SVZtvgzQ" target="_blank" data-linktype="2">Agent记忆百家争鸣: 没有统一架构,取决于具体任务</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/qcIFzXsBalSGpca5fzJKxg" target="_blank" data-linktype="2">Claude Code动态Workflow Vs. SubAgent Vs. Skill</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/aiJs5CC8Gb6qa_xDRNEjTA" target="_blank" data-linktype="2">Dynamic Subagents：用代码编排Agents，告别逐轮工具调用</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/mFuUJ79DRodIK6shVWOgpw" target="_blank" data-linktype="2">OpenAI GPT-5.6: 安全之外新增Prompt Cache断点+两种推理模式; 放弃版本号</a><br>
