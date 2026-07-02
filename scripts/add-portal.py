@@ -127,6 +127,9 @@ def generate_portal_html(articles: list[dict]) -> str:
     for i, a in enumerate(articles):
         url = a.get("url", "")
         title = a.get("title", "")
+        # 标题截断：最大 52 字符（以 "Agent Harness Engineering..." 为准），超长加 ...
+        if len(title) > 52:
+            title = title[:49] + "..."
         tag = f'<a class="normal_text_link mp_article_text_link" href="{url}" target="_blank" data-linktype="2">{title}</a><br>'
         lines.append(tag)
     
