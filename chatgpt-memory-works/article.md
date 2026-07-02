@@ -81,10 +81,4 @@ Dreaming的推出其实是对这个问题的侧面印证。如果预加载方案
 
 ---
 
-<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：
-
-https://x.com/mem0ai/status/2071990201531118063
-https://embracethered.com/blog/posts/2025/chatgpt-memory-and-chat-history/
-https://simonwillison.net/2025/May/21/chatgpt-memory/
-https://shloked.com/chatgpt-memory-bitter-lesson/
-https://arxiv.org/abs/2406.00199</span>
+<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://x.com/mem0ai/status/2071990201531118063，https://embracethered.com/blog/posts/2025/chatgpt-memory-and-chat-history/，https://simonwillison.net/2025/May/21/chatgpt-memory/，https://shloked.com/chatgpt-memory-bitter-lesson/，https://arxiv.org/abs/2406.00199</span>

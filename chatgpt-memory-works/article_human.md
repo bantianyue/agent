@@ -81,10 +81,16 @@ Dreaming的推出其实是对这个问题的侧面印证。如果预加载方案
 
 ---
 
-<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/qcIFzXsBalSGpca5fzJKxg" target="_blank" data-linktype="2">Claude Code 动态Workflow Vs. SubAgent Vs. Skill</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/aiJs5CC8Gb6qa_xDRNEjTA" target="_blank" data-linktype="2">Dynamic Subagents：用代码编排Agents，告别逐轮工具调用</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/mFuUJ79DRodIK6shVWOgpw" target="_blank" data-linktype="2">OpenAI GPT-5.6: 安全之外新增Prompt Cache断点+两种推理模式; 放弃版本号</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/xP1cEoO_plRpWItxhqeQnQ" target="_blank" data-linktype="2">Agent Harness Engineering：为什么Agent可靠性的天花板不是模型，而是基础</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/o6pnSWW01pahFQelJSbSPA" target="_blank" data-linktype="2">华为「韬定律」全解析：从 τ 常数到 4GHz 麒麟，一张时间表看清未来十年芯片路线</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/PLNx54PxO1A0oYc47hz99g" target="_blank" data-linktype="2">Anthropic三连：Claude Opus 4.8-更聪明+诚实；CC动态工作流+算力控制</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/Pdjz39WG9SS6IpWWAJ6pPw" target="_blank" data-linktype="2">Claude Opus 4.8 击败 Opus 4.7、GPT-5.5 和 Gemini 3.1 P</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/oDZJbvskv_ocNgPUH1DHVA" target="_blank" data-linktype="2">AI暗输出：为何AI价值在GDP统计中失效了</a></span>
 
-https://x.com/mem0ai/status/2071990201531118063
-https://embracethered.com/blog/posts/2025/chatgpt-memory-and-chat-history/
-https://simonwillison.net/2025/May/21/chatgpt-memory/
-https://shloked.com/chatgpt-memory-bitter-lesson/
-https://arxiv.org/abs/2406.00199</span>
+---
+
+<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://x.com/mem0ai/status/2071990201531118063，https://embracethered.com/blog/posts/2025/chatgpt-memory-and-chat-history/，https://simonwillison.net/2025/May/21/chatgpt-memory/，https://shloked.com/chatgpt-memory-bitter-lesson/，https://arxiv.org/abs/2406.00199</span>
