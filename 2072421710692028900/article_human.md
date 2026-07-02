@@ -23,19 +23,13 @@ LongCat Lab的诞生本身就是一个充满戏剧性的故事。2023年初，Ch
 
 **今天回头看，那笔收购是一笔超值的投资。** 团队虽然不完全一样，但王慧文奠定的基础催生了LongCat 2.0：一个1.6T参数、60%+ 基准测试成绩的模型，而且是完全在中国国产芯片上训练出来的。这在训练大模型越来越难的今天，本身就是一次宣言。
 
-![](03.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">美团LongCat从Nvidia NVL72"跳"向华为CloudMatrix 384</span>
+![](02.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">Source: SCMP 美团超级应用生态</span>
 
 LongCat 2.0最大的亮点不是参数规模：DeepSeek V4 Pro也是1.6T，Moonshot据说也有1T参数模型。真正的新意在于：**这是第一个公开已知完全在华为Ascend 910C上训练的模型，只用了5万颗ASIC。**
 
-![](04.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">LongCat Benchmark成绩对比</span>
-
-![](05.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">Terminal Bench基准测试结果</span>
-
-![](06.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">LongCat 2.0在多个基准上的表现</span>
+![](03.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">Source: LongCat — LongCat 2.0 Benchmark 成绩</span>
 
 据SemiAnalysis的分析，华为存够了160万颗910C芯片的零部件。5万颗就能训出一个1.6T模型，160万颗意味着什么不言而喻。而且中芯国际还在基于7nm节点为华为持续供货：逻辑芯片不是瓶颈。
 
@@ -47,65 +41,47 @@ Nvidia NVL72用72个GPU组成一个单扩展域：任何GPU都可以直接访问
 
 华为CloudMatrix 384的思路完全不同：**用384个NPU组成一个单扩展域。** 每个Ascend 910C单芯片确实降级，但把384颗拼在一起，总BF16算力达到300 PFLOPs：几乎是GB200 NVL72的两倍！聚合内存容量超3.6倍，内存带宽超2.1倍。
 
-![](07.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">NVL72 vs CloudMatrix 384规格对比</span>
+![](05.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">Source: LongCat — CloudMatrix 384 vs NVL72 规模对比</span>
 
-![](08.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">NVL72 vs CloudMatrix 384详细参数对比</span>
-
-![](09.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">不同GPU/NPU集群性能映射</span>
+![](06.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">Source: DeepSeek — Engram Embedding 存储与计算通信重叠示意</span>
 
 **代价也是巨大的：功耗是NVL72的4.1倍。** 每FLOP功耗差2.5倍，每TB/s内存带宽功耗差1.9倍。但对中国来说，电力是国内供应链，光通信和网络设备也是：这是一笔可控的成本。
 
+![](07.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">Source: Nvidia — NVL72 机架架构</span>
+
 支撑这套系统的核心是 **UB-Mesh**：华为开源的统一互联协议。它被设计用来取代目前数据中心中PCIe、NVLink、TCP/IP的"混合"方案，统一为内存语义（load/store/atomic）的互联结构。在CloudMatrix 384中，384个NPU和192个鲲鹏CPU通过UB交换机全互连，节点间带宽退化低于3%，延迟增加不到1微秒。
 
-![](10.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">UB-Mesh互联架构拓扑</span>
-
 ![](11.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">CloudMatrix 384内部互联结构</span>
+<span style="font-size:12px;color:rgb(153,153,153);">Source: Huawei Central — CloudMatrix 384 互联架构</span>
+
+![](09.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">Source: Huawei — CloudMatrix 384 规格（红色数字标注来自 Blackwell 对比）</span>
 
 **更值得关注的是内存池化。** CloudMatrix 384把所有192个CPU的DRAM聚合为一个共享高性能内存池，384个NPU中的任何一个都可以通过UB网络以统一带宽和延迟访问。这彻底改变了一个关键瓶颈：传统架构中KV缓存必须路由到持有它的节点，否则远程访问太慢。在CloudMatrix中，任何NPU都可以从共享池直接拉取数据，请求调度完全与数据位置解耦。
-
-![](12.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">内存池化架构示意</span>
-
-![](02.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：SemiAnalysis CloudMatrix 384分析</span>
 
 好处是三重：消除了传统架构中DRAM利用率低下的孤岛问题；简化了调度（不需要缓存感知路由）；显著提高了突发工作负载下的缓存命中率。**这几乎是每个做KV缓存优化的人梦寐以求的能力：Nvidia生态系统中还需要通过SGLang HiCache + Mooncake等软件层实现，华为已经在硬件层面内置了。**
 
 另一个巧妙的设计是 **N+1容错**：每个机架有一个备用NPU。当NPU故障时自动激活恢复训练。路由系统还支持链路故障的快速自动愈合。这使得华为可以在系统中大量使用"低性能"组件而不牺牲可靠性：因为他们的系统组件数是Nvidia等效系统的数倍，故障是必然的，关键是如何从故障中恢复。
 
-![](13.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">N+1容错机制示意</span>
+![](10.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">Source: Huawei — N+1 容错与自动愈合架构</span>
 
 **LongCat团队自己也做了一个同样精妙的设计。** 受DeepSeek Engram方法的启发（用CPU内存换取ASIC计算和HBM），他们添加了一个N-gram Embedding模块，将嵌入空间扩展了约100倍。通过保存n-gram token组合来捕获更丰富的局部上下文，代价是多用了一些CPU DRAM，但省下了更宝贵的ASIC FLOPs和HBM带宽。公平地说，LongCat的论文《LongCat Flash》在DeepSeek Engram发布仅两周后就发表了，且关键设计有显著差异：很可能是独立发明。
 
-![](14.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">LongCat Flash N-gram嵌入架构</span>
-
 ![](15.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">N-gram模块与标准架构对比</span>
-
-![](16.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">预热策略效果对比</span>
-
-![](17.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">处理流水线示意</span>
+<span style="font-size:12px;color:rgb(153,153,153);">Source: Huawei — N-gram 嵌入模块架构</span>
 
 这背后反映的是一个更宏大的趋势：**整个中国AI生态系统已经达到了"逃逸速度"。** DeepSeek的MLA、DSA、CSA、HCA等技术被广泛采用：比如CSA和HCA将KV缓存的HBM需求减少98%，DSpark将解码阶段带宽需求减少66%。长鑫存储正在突破HBM3，长江存储提供了"足够好"的NAND。从芯片到互联到内存到模型架构，所有关键环节都开始有了国产替代方案。
-
-![](18.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">中国AI生态供应链全景</span>
-
-![](19.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">中国芯片产业链布局</span>
 
 **一个外卖公司做出了一流的基础模型。** 如果Uber或Doordash不造模型，为什么美团要？答案是：中国有微信、支付宝、抖音、淘宝这样的超级应用：西方还没有见过这种东西。AI让这些超级应用变得更强大，帮助用户自动驾驶日常生活。不能掌控LLM层的公司，在这个赛道上连参赛资格都没有。
 
 而对于华为来说，他们正在证明一件事：**出口管制不是不可逾越的天花板。** 用更多芯片、更先进的互联、更聪明的架构设计，可以用"低配组件"做出"超配系统"。CloudMatrix 384不是Nvl72的替代品：两者根本就是不同哲学下的产物。
+
+![](25.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">美团：AGI 将由每天数百万次外卖配送来支撑</span>
 
 ---
 
