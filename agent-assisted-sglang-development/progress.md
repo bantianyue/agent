@@ -32,4 +32,4 @@
 | Step 4a-i: 要点速览 | completed |
 | Step 4c: 写正文 | completed |
 | Step 4d-i: 传送门 | completed |
-| Step 4g: 格式修复 | completed 
+| Step 4g: 格式修复 | completed |
