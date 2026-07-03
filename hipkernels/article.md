@@ -137,7 +137,7 @@ HIP kernel生成领域目前还没有被广泛采纳的基准或评估协议。�
 
 ## 未来工作
 
-另一个重要方向是理解性能如何随更大的合成数据集扩展——即编译和正确率是否随更多合成数据继续提升。研究团队还对失败驱动的后训练感兴趣：一个有前景的方向是使用更强的模型配合test-time scaling，反复尝试失败问题，将成功方案加回训练数据集。
+另一个重要方向是理解性能如何随更大的合成数据集扩展：即编译和正确率是否随更多合成数据继续提升。研究团队还对失败驱动的后训练感兴趣：一个有前景的方向是使用更强的模型配合test-time scaling，反复尝试失败问题，将成功方案加回训练数据集。
 
 <div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
 <div style="text-align:center;margin-bottom:8px;">
