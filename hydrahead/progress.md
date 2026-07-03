@@ -23,3 +23,7 @@
 创建时间: 2026-07-04
 来源: https://arxiv.org/html/2606.20097v1
 | Step 0a: 语言类型判断 | completed |
+| Step 1: 内容提取 | completed |
+| Step 2: 图片下载 | completed |
+| Step 3: 封面生成 | completed |
+| Step 4a: 关键素材清单 | completed |
