@@ -15,10 +15,16 @@
 | Step 4d: 写结语 | pending |
 | Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
 | Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
+| Step 4f: Humanizer 润色 | completed |
 | Step 4g: 文本格式修复 | pending |
 | Step 5: 预发布检查 | pending |
 | Step 6: 推送草稿 | pending |
 
 创建时间: 2026-07-03
 来源: https://edge-bench.org/
+| Step 0c: 来源类型确认 | completed |
+| Step 2: 图片下载 | completed |
+| Step 3: 封面生成 | completed |
+| Step 4a: 关键素材清单 | completed |
+| Step 4g: 格式修复 | completed |
+| Step 4d-i: 传送门 | completed |
