@@ -27,4 +27,4 @@
 | Step 3: 封面生成 | completed |
 | Step 4a: 关键素材清单 | completed |
 | Step 4g: 格式修复 | completed |
-| Step 4d-i: 传送门 | completed 
+| Step 4d-i: 传送门 | completed |
