@@ -4,7 +4,7 @@
 |------|------|
 | Step 0: 目录创建与TASKS.md | completed |
 | Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
+| Step 0b: 来源类型确认 | completed |
 | Step 1: 内容提取（全文） | pending |
 | Step 2: 全部图片下载 | pending |
 | Step 3: 封面生成（900×383 + 500×500） | pending |
