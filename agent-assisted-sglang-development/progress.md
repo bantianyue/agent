@@ -22,3 +22,9 @@
 
 创建时间: 2026-07-03
 来源: https://www.lmsys.org/blog/2026-07-02-agent-assisted-sglang-development
+| Step 0a: TASKS.md任务追踪 | completed |
+| Step 0b: 语言类型判断 | completed |
+| Step 0c: 来源类型确认 | completed |
+| Step 1: 内容提取 | completed |
+| Step 2: 图片下载 | completed |
+| Step 3: 封面生成 | completed |
