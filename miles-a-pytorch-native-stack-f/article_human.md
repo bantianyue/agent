@@ -45,7 +45,7 @@ Miles直接构建在Ray分布式运行时之上。在Miles的运行中，每个�
 
 ### 把worker放在哪些GPU上
 
-Miles使用Ray的GPU感知调度器和placement group来放置actor，支持分离式部署（rollout和训练在不同节点）和共置部署（rollout和训练在同一节点），通过启动时的Ray placement spec配置。进程放置需要机架感知，以方便精心的共置策略、预留备用节点，这对错误隔离也至关重要：在机架内隔离问题（比如区分一块坏GPU还是整个机架故障）并不总是直截了当的。
+Miles使用Ray的GPU感知调度器和placement group来放置actor，支持分离式部署（rollout和训练在不同节点）和共置部署（rollout和训练在同一节点），通过启动时的Ray placement spec配置。进程放置需要机架感知，以方便精心的共置策略、预留备用节点，这对错误隔离也：在机架内隔离问题（比如区分一块坏GPU还是整个机架故障）并不总是直截了当的。
 
 ### 在RL流水线中移动数据
 
