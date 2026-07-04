@@ -1,0 +1,398 @@
+要查看键盘快捷键，按下问号
+查看键盘快捷键
+1
+文章
+查看新帖子
+对话
+Jetha Chan
+@jetha
+Attention With 4-bit Q (A4Q): a new native NVFP4 attention sm120/121 kernel
+2
+8
+25
+3,330
+tl,dr: Attention With 4-bit Q (A4Q), a new kernel for sm120/sm121 headed to @vllm_project as a contribution once some community work lands first. Try it out and let me know what you think!
+I thought about holding this blog post back until blocking FlashInfer work lands, but ehh it's fine.
+Everyone's been kicking the tires on Claude Fable before our harnesses turn into pumpkins next week, and I'm no exception.
+What did I do? I had Claude build a native fp4 attention kernel for sm120/121.
+Why did I do it? NVIDIA ships 13,453 pre-compiled attention kernels with TensorRT-LLM, and they're largely compiled for the datacenter parts: sm100a, sm100f, sm103a.
+Unfortunately, on a 5090, an RTX PRO 6000, or a DGX Spark there's no directory for your architecture. That's a sensible line for a datacenter-first library to draw; it just means consumer Blackwell needs its own attention path, and that's the gap A4Q fills.
+Because of that lack of a kernel from TensorRT-LLM, at time of writing, on sm120/121 the 4-bit KV cache gets unpacked through an fp16 convert chain that burns ~9 instructions per tensor-core op. Prefill attention on the pre-existing fp4 path ran 1.8× slower than plain bf16 attention. In other words, you read a quarter of the bytes and it takes nearly twice as long.
+I knew roughly why, but "roughly" isn't a number, so this campaign was about figuring that out.
+In more detail. Our new kernel, A4Q, runs QKᵀ on consumer Blackwell's block-scaled fp4 MMA instead: straight from the cache, zero dequant, and the whole Gemma family comes along (well, with my patches).
+I proved it out on consumer Blackwell (sm120) end-to-end; the Spark (sm121) is bit-identical at the ISA level and now measured serving in its own right on a GB10 — passkey retrieval green and the long-context decode-tok/s curve below both ran on Spark silicon, A4Q provably firing.
+Bottom line:
+The measured win — on wide-KV models. Gemma-4-26B-A4B decodes 2.01× faster end to end at 100k context, Gemma-4-31B 1.44× — NVFP4 KV on both sides, batch-1 steady state, on a DGX Spark. That's the headline, and it's the honest one: a real long-context serving speedup on hardware you can actually buy.
+The kernel is faster still; the model decides how much you feel. The QKᵀ kernel alone runs 8.9× over the shipping fp4 path (12× at 100k) and beats bf16 — but that's measured at wide KV (16 heads). End to end you get it only where attention is a real slice of the step and the heads are wide. Narrow the KV and it evaporates.
+The KV-width law — the one thing to remember. Across six models the end-to-end win sorts perfectly by KV width (num_kv_heads × head_dim): everything ≥4096 wins (both Gemma-4s), everything ≤1024 washes — Nemotron (Mamba hybrid), Qwen3.5/3.6 (linear hybrid), and even pure-softmax Qwen3-30B (narrow GQA). It isn't softmax-vs-hybrid and it isn't head_dim alone; it's KV width. The field traded that away for GQA around 2024; Gemma-4 kept it, and A4Q rewards exactly that choice.
+Correctness and memory are universal — only the speedup is Gemma's. Six models (Gemma-4, Nemotron-3, two Qwens) serve with NVFP4 weights and NVFP4 KV at passkey 12/12 and GSM8K parity, and every one gets the 4× KV-memory saving (more context fits). A4Q serves them all correctly — it just accelerates the wide-KV ones. (It's also the only path that runs Gemma-4's 512-wide VO-split heads on the tensor core at all; every other engine punts them to software.)
+Bit-exact, with an asterisk worth stating plainly. The arithmetic is exact: the QK path matches a dequantized reference at max_abs_diff = 0.0 (fp4 × fp8-scale into an fp32 accumulator has nothing left to round). The approximation is quantizing Q to four bits — and its cost at the model level is nothing you can measure (the passkey/GSM8K rows below).
+Why would you want this? If your model's decode step is bottlenecked on attention, which is exactly where Gemma lives. 
+Where might you not want this? If your model isn't attention-bound. A Mamba-hybrid like Nemotron-3-Nano spends most of its decode step outside attention, so A4Q is an honest wash there.
+Beginnings: Jaymin dreams in SHUFB
+I started all of this by asking myself, what a console programmer would do with the problem of optimizing LLM inference.  Specifically what would a PS3-era programmer do, the kind of programmer who shipped games on machines that punished you for not knowing exactly what the silicon did.
+I know the answer, because I know one.
+My friend Jaymin Kessler (@okonomiyonda, okonomiyonda.bsky.social) is a Playstation programmer of much renown, who often expresses nostalgia for the PS3 and specifically SHUFB, a PS3 SPU byte-shuffle instruction that it is beyond the scope of this article to describe. 
+Jaymin would have told me to start from the instruction set; to read the whole thing, to know what the chip can do before deciding what your code should do.
+Only one problem - NVIDIA doesn't, at time of writing, publish that information. So, of course I asked an AI to do it for me, because it's 2026 right now.
+What I asked was, "can you tell me what the instruction set differences are across all Blackwell variants, not from the published docs?"
+For more details on that campaign and its results, read my separate article here:
+https://x.com/jetha/status/2073209650196226392
+The road to A4Q: disassembly hijinks
+Once I had that information in hand, I had Claude spend an evening disassembling attention kernels built for other GPUs - in particular sm100 (datacenter Blackwell).
+On sm100, NVIDIA's fp4-KV attention kernel is a tidy pipeline:
+TMA loads packed fp4 straight into shared memory,
+a special LDSM variant unpacks 4-bit values with hardware assist, and then
+an instruction called QMUL4 does the whole dequantization
+Four e2m1 values times a broadcast fp8 scale, producing four fp8 values - in one instruction, half an instruction per value. The result feeds a plain fp8 tensor-core MMA.
+Then Claude disassembled our own sm121 kernel from the JIT cache. QMUL4 count: zero. The instruction does not exist on consumer Blackwell. 
+What the compiler emits instead is a three-hop chain:
+fp4→fp16 convert,
+fp16→bf16 convert (because our Q was bf16), then
+a multiply to apply the block scale
+About three instructions per two values, with a pile of nibble-shuffling on the side. Roughly nine non-MMA instructions for every MMA. The kernel is doing arithmetic janitorial work 90% of the time.
+Unfortunately, the datacenter design doesn't port over directly.
+PTX has no e2m1→e4m3 convert on this architecture, so an fp8-compute version of their recipe would cost more instructions than what we already ship; the datacenter kernel is built around the tcgen05 path and its QMUL4 dequant, which consumer Blackwell reaches through a different instruction entirely.
+NVIDIA's own consumer-targeted attention (there's a kernel called XQA in their open source) does exactly what the fp4 path did before A4Q; convert to fp16 and pay for it.
+So this isn't an oversight on anyone's part: consumer Blackwell simply has a different fp4 instruction, and the attention kernel around it hadn't been written yet.
+The one weird trick NVIDIA did give us
+Consumer Blackwell does have one relevant piece of hardware: mma.sync with kind::mxf4nvf4.block_scale. 
+This is a tensor-core matrix multiply where both operands are fp4 and the hardware applies an fp8 scale factor to every 16 values along the reduction dimension, accumulating in fp32.
+Stare at that and then stare at the NVFP4 cache format: fp4 values, fp8 scale per 16 elements along the head dimension. For QKᵀ, the reduction dimension is the head dimension. The cache format and the MMA's scale layout line up exactly. K can go from cache bytes to tensor core without a single dequantization instruction.
+(P×V can't — V's scales sit on the wrong axis for that matmul, and this constrains literally every kernel including NVIDIA's, which is why their P×V dequantizes V in registers too. Ours keeps doing fp16 there. Fine.)
+The catch is that the MMA needs both sides in fp4. Q — computed fresh every step in bf16 — has to be quantized to e2m1 on the fly. Which means the whole idea lives or dies on one question: does quantizing Q to four bits ruin the model?
+Sanity check: measure before you build
+I've been burned enough times to pre-register kill criteria before writing kernel code, so two gates went first.
+Gate one: maybe the current kernel is fine and the slowness is bandwidth, in which case a new kernel buys nothing.
+Measured: at Gemma-27B shapes on an RTX PRO 6000, the bf16 attention kernel achieves ~1,600 GB/s of effective cache bandwidth at decode. The fp4 kernel achieves eleven percent of that at batch 1. It's not waiting on memory; it's drowning in convert instructions. Headroom confirmed.
+Gate two: quality. Claude captured real Q/K/V activations from a Gemma-3-27B serve — all 62 layers — and measured what per-16-block fp4 Q does on top of the fp4 K we already ship.
+Answer: almost nothing. The K quantization we've been running in production is the dominant error term; adding Q moves argmax agreement by about −0.012 on average, and by −0.005 on the global-attention layers that actually carry long context. Q is consumed once and never stored; it rides along basically free.
+Both gates green. Build.
+Building A4Q
+The kernel is called A4Q (attention with 4-bit Q) and the design decision I'm happiest about is what it doesn't touch.
+The FA2 paged-attention kernel in my vLLM fork already handles paging, GQA, causal and sliding-window masks, variable-length batches, and the fp16 P×V pipeline, and, crucially, it already stages the packed fp4 K tiles and their scale factors in shared memory, because the old dequant path needed them there too.
+When I did that first campaign, none of this was the point: the goal was just to get an fp4 KV cache serving at all, and the shared-memory staging was a means to feed the slow convert path. The vLLM-side writer that packs the E2M1 tiles, the paging, the FlashInfer-side scale-staging — every bit of that plumbing was built for the slow path, and every bit of it turned out to be exactly the foundation the fast path needed.
+A4Q replaces one function: where compute_qk used to expand fp4 through the convert chain into a bf16 MMA, it now feeds the same shared-memory bytes directly into the block-scaled MMA. Q arrives pre-packed from a small quantize kernel (one warp per row, 43 microseconds at 8k context — under 2% of attention time). The softmax never notices anything changed.
+Well, almost nothing changed.
+The part that usually takes time, getting the per-thread fragment layouts and scale-factor register mappings right for a hand-rolled PTX MMA, went in on the first try, because Claude cribbed the exact layouts from the CUTLASS atom and validated them in a 100-line standalone unit test before touching the real kernel.
+The unit test came back bit-exact, and so did the integrated kernel: against a reference computed on dequantized inputs, the new QK path produces max_abs_diff = 0.0. Not close — identical. Four-bit values times fp8 scales into an fp32 accumulator is exact arithmetic; there's no rounding left to disagree about.
+On a RTX PRO 6000 with Gemma 3 27B, causal prefill:
+context
+	
+bf16-FA2
+	
+fp4 path (old)
+	
+A4Q (quant + kernel)
+	
+vs old fp4
+
+
+8k
+	
+2.305 ms
+	
+4.063 ms
+	
+2.454 ms
+	
+1.66×
+
+
+32k
+	
+34.473 ms
+	
+64.374 ms
+	
+38.783 ms
+	
+1.66×
+The fp4 dequant tax is essentially gone — quarter-size cache at within 7–13% of bf16 speed. End to end through vLLM (it's wired behind a default-off flag), it holds up across a six-model NVFP4 matrix at passkey and GSM8K parity on every row, which the next section breaks down.
+The whole thing from bandwidth study, quality probes, unit test, kernel, CUDA quantizer, vLLM wiring, end-to-end evals closed in one day, for $5.34 of rented GPU. Every gate I pre-registered passed, and the correctness budget of "two debug cycles max" went unused.
+I'd love to claim this is what always happens. It is not what always happens.
+Two halves: the kernel in FlashInfer, the serving in vLLM
+Like the NVFP4-KV work before it, A4Q is two pieces of work in two repositories, and it's worth naming which is which — partly for credit, partly because that split is exactly where the serving-integration failures I describe below come from.
+The kernel is in FlashInfer. The FA2 paged-attention path Claude modified — the block-scaled QKᵀ MMA, the on-the-fly Q-quantizer, the dense-packed prefill tiles, and the split-KV decode — all live in the FlashInfer fork I maintain. That's the fork that has carried the fp4-KV attention path all along; A4Q is the QK-MMA swap plus the small quantize kernel on top of it. This is where the arithmetic happens.
+The serving integration is in vLLM. Making that kernel reachable is the vLLM half: routing --kv-cache-dtype nvfp4 to the A4Q path behind a default-off flag, the cache writer and the exact byte-layout contract it has to honor, the dispatch relaxation that lets Gemma-4's 512-wide heads reach the kernel instead of dropping to a software fallback, and the six-model eval battery that proved the matrix below. It's also where the serialization-contract safeguards live — the ones whose absence is the entire "keeps me up at night" story further down.
+The two are stacked the way you'd expect: the vLLM path depends on the FlashInfer kernel, not the other way around. Kernel first, serving on top — which is also the order the upstream PRs go in.
+Six models, in native 4-bit
+A kernel that only works on the shape you tuned it for is a demo, not a result. So Claude ran the whole set NVIDIA (and Red Hat) ship in NVFP4 — six checkpoints across three families, each serving with NVFP4 weights and an NVFP4 KV cache, A4Q on:
+Model
+	
+attention geometry
+	
+passkey
+	
+GSM8K (A4Q on)
+	
+GSM8K (fp4-KV, A4Q off)
+
+
+Gemma-4-26B-A4B
+	
+MoE, 512-wide VO-split
+	
+12/12
+	
+0.973
+	
+0.980
+
+
+Gemma-4-31B-IT
+	
+dense, 512-wide VO-split
+	
+12/12
+	
+0.987
+	
+0.987
+
+
+Nemotron-3-Nano-30B-A3B
+	
+MoE, head-128
+	
+12/12
+	
+0.940
+	
+0.947
+
+
+Nemotron-3-Super-120B-A12B
+	
+MoE, head-128
+	
+12/12
+	
+0.973
+	
+0.987
+
+
+Qwen3.6-35B-A3B
+	
+MoE, head-256, linear-attn hybrid
+	
+12/12
+	
+0.980
+	
+0.973
+
+
+Qwen3.5-122B-A10B
+	
+MoE, head-256, linear-attn hybrid
+	
+12/12
+	
+0.967
+	
+0.973
+Passkey is 12/12 everywhere, A4Q on or off. GSM8K moves by at most two problems out of 150 between A4Q and the fp4-KV baseline — noise — and the bf16-weights control I ran (Nemotron Nano, same NVFP4 cache) lands at 0.940, dead level with the NVFP4-weights + A4Q number. Four-bit Q changes nothing you can measure at the model level.
+Speed is the part I want to be careful about, because it's set by attention geometry, not by the model's name — and the families split on it.
+Nemotron is head-128, which is where the kernel flies. Batch-1 decode attention, RTX PRO 6000, kernel-only median:
+context
+	
+shipping fp4
+	
+A4Q
+	
+bf16
+	
+A4Q vs fp4
+	
+A4Q vs bf16
+
+
+8k
+	
+0.174 ms
+	
+0.075 ms
+	
+0.059 ms
+	
+2.3×
+	
+0.8× (bf16 faster)
+
+
+32k
+	
+0.658 ms
+	
+0.074 ms
+	
+0.174 ms
+	
+8.9×
+	
+2.4×
+
+
+100k
+	
+2.366 ms
+	
+0.197 ms
+	
+0.510 ms
+	
+12.0×
+	
+2.6×
+Look at the A4Q column as the cache grows 12×: 0.075 → 0.074 → 0.197 ms. Split-KV keeps decode nearly flat where the dequant path grows linearly - that's the entire 8.9×. Prefill on the same head-128 geometry, with the dense-packed K tiles (the repack in the caveats), matches bf16 to within half a percent (1.686 vs 1.684 ms at 8k) and runs 1.7–1.85× the old fp4 path.
+But here's the number that keeps the rest honest. A kernel speedup is not a token speedup; attention is only part of the decode step, so the end-to-end multiple is however large attention's slice was. For these MoE models at short context that slice is 1–2%, so on the GSM8K runs above (a few hundred output tokens) A4Q is a wash end to end, lost in the MoE's shadow;  the kernel's 8.9× is real, but at 500 tokens you feel none of it.
+Attention's slice grows with the cache, though, so I measured it end to end on the DGX Spark (sm121) — batch-1 steady-state decode tok/s, A4Q on vs. off, NVFP4 KV on both sides:
+model (attention character)
+	
+32k
+	
+64k
+	
+100k
+
+
+Gemma-4-31B-IT — dense, 512-wide VO-split
+	
+1.16×
+	
+1.30×
+	
+1.44×
+
+
+Gemma-4-26B-A4B — wide-head MoE
+	
+1.42×
+	
+1.67×
+	
+2.01×
+
+
+Nemotron-3-Nano-30B — head-128, Mamba-hybrid
+	
+0.88×
+	
+0.88×
+	
+1.01×
+
+
+Qwen3.6-27B — dense FFN, linear-attn hybrid
+	
+0.98×
+	
+1.00×
+	
+1.00×
+
+
+Qwen3.6-35B-A3B — head-256, linear-attn hybrid
+	
+0.99×
+	
+0.98×
+	
+0.96×
+Three things to read from this table:
+Gemma is where A4Q pays off, and the win grows with context — 1.16→1.44× on the dense model, up to 2.0× on the MoE — because long-context global attention is a real slice of Gemma's step.
+
+The sparse MoE tops the table for a reason intrinsic to A4Q: it fires only ~4B of its 26B parameters per token, so its FFN is cheap and attention becomes the dominant cost at long context — exactly the cost A4Q cuts. The dense 31B pays its full parameter count in FFN on every token, so the same wide-head attention is a smaller slice of its step and the win is diluted (1.44× vs 2.0×). A4Q rewards the models that spend their time in attention, and a sparse MoE leaning on long-context global attention spends the most.
+Gemma-4 has interesting geometry (wide, asymmetric heads), 256-wide for the sliding/local layers, and a 512-wide VO-split for the global ones. Those global heads are the geometry every other engine punts to a software fallback; A4Q runs them on the tensor core.
+
+At 8k prefill it's 1.34–1.35× the shipping fp4 path — 3.68 vs 4.93 ms for the 512-wide split, 3.78 vs 5.09 ms for head-256. A smaller multiple than head-128, but Gemma-4 is the family that leans hardest on long-context global attention, so it's where the decode win compounds on a real workload instead of a microbenchmark.
+Nemotron and Qwen are the counter-examples. Nemotron-3-Nano even carries the biggest kernel win of all (that 8.9× above), yet both models only hover around parity end to end — a slight regression, not a speedup.
+There's no contradiction, and it's the same story every time: these are all hybrids. Nemotron-Nano is mostly Mamba; Qwen3.6-35B is three-quarters gated-deltanet linear attention, so most of their layers carry no softmax-attention KV at all. Softmax attention was never the decode bottleneck, so there's nothing for A4Q to give back.
+A4Q pays off exactly when attention is what you're waiting on; the end-to-end number being a fraction of the kernel number is the point, not the fine print.
+Where it all stands - it's not even submitted yet, let alone merged
+Now, strictly speaking, the work isn't done yet - work isn't done, until it gets merged. So, where are we?
+A4Q depends on my earlier vLLM work (link), specifically:
+FlashInfer #3684 - asymmetric VO-split NVFP4 paged prefill (qk=512/vo=256) for Gemma-4 on SM120/121
+That PR is open upstream and currently parked: a set of overlapping NVFP4-paged-KV PRs is landing first, and once they're in I rebase #3684 onto them, with the A4Q kernel stacked on top.
+Both halves are already pushed and running — the kernel on jethac/flashinfer (a4q-integration), the serving on jethac/vllm — and shipping as sm120 + sm121 wheels.
+The upstream A4Q PRs go up once that rebase clears and I've signed off: FlashInfer (kernel) first, vLLM (serving) on top, with the per-repo PR list alongside.
+But I want to try it today!
+FlashInfer kernel — release A4Q flashinfer @ 25c92562 (sm120a + sm120f/sm121)
+flashinfer_python-0.6.13-py3-none-any.whl — https://github.com/jethac/flashinfer/releases/download/a4q-flashinfer-25c92562/flashinfer_python-0.6.13-py3-none-any.whl
+a4q-jit-modules-12.0a.tar.gz (sm120a JIT modules) — https://github.com/jethac/flashinfer/releases/download/a4q-flashinfer-25c92562/a4q-jit-modules-12.0a.tar.gz
+a4q-jit-modules-12.0f.tar.gz (sm120f / sm121 JIT modules) — https://github.com/jethac/flashinfer/releases/download/a4q-flashinfer-25c92562/a4q-jit-modules-12.0f.tar.gz
+  vLLM serving — sm120a / x86_64 (RTX 5090, RTX PRO 6000)
+vllm-0.1.dev1+g884e01b4f.sm120a.a4q-cp312-cp312-linux_x86_64.whl   https://github.com/jethac/vllm/releases/download/sm120a-wheels-884e01b4f-a4q/vllm-0.1.dev1%2Bg884e01b4f.sm120a.a4q-cp312-cp312-linux_x86_64.whl
+  vLLM serving — sm121a / arm64 (DGX Spark / GB10)
+vllm-0.1.dev1+g884e01b4f.sm121a.arm64.a4q-cp312-cp312-linux_aarch64.whl —  https://github.com/jethac/vllm/releases/download/sm121a-arm64-wheels-884e01b4f-a4q/vllm-0.1.dev1%2Bg884e01b4f.sm121a.arm64.a4q-cp312-cp312-linux_aarch64.whl
+All Python 3.12 (cp312); the %2B in the vLLM URLs is just the encoded + in the version string — the links work as-is. FlashInfer @ 25c92562, vLLM @ 884e01b4f.
+How I built this (or, Jetha begs for compute)
+Three models built this, across two vendors:
+Claude Fable did the analysis and planning, while I had the credits for it: the design study, the ideation, and the framing of the questions and kill criteria the whole build was measured against.
+Claude Opus 4.8 did the engineering, once the Fable credits ran out and end to end from there: the kernel and its hand-rolled PTX, the CUDA quantizer, the disassembly, the eval battery, the certification, and the first draft of this piece.
+GPT 5.5 (in Codex) is currently studying the whole campaign and porting A4Q down to llama.cpp so the kernel reaches the GGUF world too.
+Compute was a mixture of:
+ephemeral sm120 boxes provisioned through @vast_ai, still my favorite for scaling up investigations
+my trusty Lenovo ThinkStation PGX representing the sm121 camp, a DGX Spark in vendor clothing.
+Unfortunately, costs add up, and there's really only so much one Spark can do...
+So if you're at NVIDIA, at a cloud, or a hardware OEM: holy god I'd love some more hardware. Like, por favor.
+I'll do genuinely useful, fully-open, honestly-reported work with the cycles - kernels shipped, numbers published, nothing hidden.
+(In particular I would absolutely love to get an RTX Spark laptop early. While we're wishing, I'd love to get one 128gb and one 64gb SKU just to make sure all our GB10 stuff works even on binned-memory variants.)
+And if you're at AMD or another GPU vendor: slide into my DMs too, I'd love to learn more about your stacks!
+Until next time.
+想发布自己的文章？
+升级为 Premium
+下午4:26 · 2026年7月4日
+·
+3,330
+ 查看
+2
+8
+25
+30
+相关
+查看引用
+发布你的回复
+
+
+回复
+相关用户
+Jetha Chan
+@jetha
+关注了你
+正在关注
+ in . now: ??? prev: 
+@GoogleDeepmind
+, Google Stadia
+当前趋势
+有什么新鲜事
+生活风格 趋势
+Happy 4th of July
+趋势 Here's to 250，#TicketToHeavenFinalEP
+生活风格 趋势
+#4thJuly
+美国 的趋势
+Patriot Front
+趋势 Mount Rushmore，Thomas Jefferson
+美国 的趋势
+Beyoncé
+趋势 Donk，MORNING DEW
+显示更多
+条款
+ ·
+隐私
+ ·
+Cookie
+ ·
+辅助功能
+ ·
+美国 TIDA
+ ·
+广告信息
+ ·
+更多
+© 2026 X Corp.
+自动批量下载
+推文和评论

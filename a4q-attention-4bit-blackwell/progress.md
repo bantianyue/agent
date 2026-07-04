@@ -22,3 +22,10 @@
 
 创建时间: 2026-07-04
 来源: https://x.com/jetha/status/2073322454198649215
+| Step 0a: TASKS.md任务追踪 | completed |
+| Step 0b: 语言类型判断 | completed |
+| Step 0c: 来源类型确认 | completed |
+| Step 1: 内容提取 | completed |
+| Step 2: 图片下载 | completed |
+| Step 3: 封面生成 | completed |
+| Step 4a: 列出关键素材 | completed |
