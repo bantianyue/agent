@@ -1,0 +1,171 @@
+# Jino Rohit
+
+# Torch Internals (Part 1) - FX Graphs
+
+June 26, 2026 • 10 min read
+
+This is a new blog series where I will try to unpack the ecosystem across pytorch and pytorch compile. Ive always wanted an excuse to dig deep and find out why and how torch does what it does and how excellently it does this. Hopefully by the end of the blog series, you will have a deeper understanding of how pytorch 2.0 ecosystem works and are able to debug programs more comfortably.
+
+## What is even a FX graph?
+
+What's a FX graph? Why should I care? I want to read torch.compile and skip this boring graphs.
+
+Bad news! understanding fx graphs are fundamental to understanding every other components of the compile ecosystem. From dynamo to inductor, each of them make use of fx graph in some way or the other. Good news! Im going to unpack everything in one blog!
+
+FX Graph is an intermediate representation (IR) provided by a PyTorch module that transforms Python code into a directed acyclic graph (DAG).
+
+## The good ol' DAGs
+
+DAGs stands for Directed Acyclic Graph that is basically made up on nodes and directed edges.
+
+Here's a cool DAG
+
+## The Three Core Objects
+
+FX Graph has exactly three concepts you need to understand - `Graph`, `Node`, and `GraphModule`.
+
+| Concept | Meaning |
+| --- | --- |
+| Graph | A directed graph consisting of several nodes that represents the entire computation. |
+| Node | An operation node in the graph (input, operator call, output, etc.) |
+| GraphModule | A subclass of nn.Module that wraps Graph |
+
+Let me show you what I mean. Here is a simple model traced with `torch.fx.symbolic_trace`:
+
+`torch.fx.symbolic_trace`
+
+import torch
+import torch.fx
+
+class MyModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(4, 8)
+
+    def forward(self, x):
+        return torch.relu(self.linear(x))
+
+gm = torch.fx.symbolic_trace(MyModel())
+gm.graph.print_tabular()
+
+This prints:
+
+| opcode | name | target | args | kwargs |
+|--------|------|--------|------|--------|
+| placeholder | x | x | () | {} |
+| call_module | linear | linear | (x,) | {} |
+| call_function | relu | <built-in fn relu> | (linear,) | {} |
+| output | output | output | (relu,) | {} |
+
+FX Graph flattens the Python code into a series of nodes.
+
+### Graph
+
+A torch.fx.Graph is a computation graph that internally holds a sequence of nodes.
+
+You can print it to see the full structure:
+
+print(gm.graph)
+
+graph():
+    %x : [num_users=1] = placeholder[target=x]
+    %linear : [num_users=1] = call_module[target=linear](args = (%x,), kwargs = {})
+    %relu : [num_users=1] = call_function[target=torch.relu](args = (%linear,), kwargs = {})
+    return relu
+
+### Node
+
+Node is the basic unit that represents an input, a function call, or an output.
+
+Every Node has mainly 6 fields you will interact with.
+
+### node.op
+
+`node.op` tells you the broad category of the node. There are exactly six possible values:
+
+| node.op | Meaning |
+|---------|---------|
+| placeholder | Function input |
+| get_attr | Module parameter |
+| call_function | A Python function call |
+| call_method | A method call on a value (e.g., `.view()`) |
+| call_module | A submodule call (e.g., `self.linear`) |
+| output | Return value |
+
+### node.name
+
+`node.name` is the temporary variable name you see with the `%` prefix when you print the graph.
+
+### node.args
+
+`node.args` is a tuple of Nodes that this node depends on. This is how you trace the dataflow.
+
+### node.kwargs
+
+Same as args but for keyword parameters.
+
+### node.users
+
+`node.users` is the number of times this node is being used by another node.
+
+This is essential for graph transforms. Before deleting a node, you must check that `len(node.users) == 0` or redirect its users to a different node first.
+
+### node.target
+
+This is the most important field - and also the most confusing, because its meaning *depends on node.op*. You cannot read target in isolation.
+
+| node.op | target means | example |
+|---------|-------------|---------|
+| placeholder | the argument name | "x" |
+| get_attr | dot-separated path to the attribute | "linear.weight" |
+| call_function | the actual function object | torch.relu, operator.add |
+| call_method | the method name (a string) | "view", "permute" |
+| call_module | submodule path | "linear", "block.0" |
+
+Take `target="linear"`. If op is `call_module`, it means "call self.linear". If op is `get_attr`, it means "read self.linear" (which would error since linear is a module, not a tensor). So always **check op before target**.
+
+### node.meta
+
+`node.meta` holds metadata information about the node.
+
+## How FX Graphs are Built
+
+So far we have seen that torch.fx magically turns python code into this graph, but how? It does this by a concept called **symbolic tracing**.
+
+### Symbolic Tracing
+
+First of, why do we need symbolic tracing?
+
+When normal python code runs, it immediately executes the code and after the execution, you have the result but you dont know how you got there, basically the computation graph.
+
+Hence we turn to symbolic tracing. With symbolic tracing, torch.fx intercepts this call and says "hey, I saw a relu operation" and creates a `Node` instead. No actual computation happens. It only simulates it.
+
+This interception is done by **Proxy** objects. A Proxy wraps each input value and overrides every Python dunder method that could be used in a neural network forward pass:
+
+| Dunder / Hook | Triggered by |
+|---------------|-------------|
+| `__add__` | `x + 1` |
+| `__mul__` | `x * 2` |
+| `__sub__` | `x - 3` |
+| `__getattr__` | `.shape`, `.view()` |
+| `__getitem__` | `x[0]` |
+| `__torch_function__` | `torch.relu(x)` |
+| `__call__` | `self.linear(x)` |
+
+Every time one of these hooks fires, the Proxy creates a new Node and records the operation.
+
+### Limitations of Symbolic Tracing
+
+**1. Dynamic control flow** - if the condition depends on program execution paths that change at runtime based on variables, data, or user input, it can't be traced because Proxies don't have real values to evaluate the condition:
+
+Only one branch is traced (the one taken during tracing), giving you an incorrect graph.
+
+**2. Non-torch Python functions** - plain Python functions aren't intercepted.
+
+**3. Static control flow is fine** - if the condition is known during initialization, tracing works perfectly.
+
+## Wrapping Up
+
+Understanding FX Graphs are the first step to understanding the entire PyTorch 2.0 compilation stack.
+
+In the next post, we will look at **TorchDynamo** - the bytecode-level JIT and how it handles this a bit differently.
