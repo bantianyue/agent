@@ -64,7 +64,7 @@ Prompt、样本和更新后的权重在rollout actor和trainer rank之间持续�
 ![](img2_megatron.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">Megatron-LM 训练后端的分布式训练结构</span>
 
-Miles使用Megatron-LM作为生产训练后端
+Miles使用Megatron-LM作为生产训练后端，直接接入Megatron的参数解析器、模型构建流水线、训练循环、并行原语和分布式checkpoint格式：而不是将其当作黑盒库包装。这让Miles获得了前沿规模dense和MoE训练所需的基础设施，同时保持了清晰用户侧工作流。
 
 ### 统一参数接口
 
@@ -131,6 +131,9 @@ Miles最重要的设计选择之一是让核心trainer保持小。
 这些扩展点让Miles适用于各种后训练工作流：经典的RLHF风格训练、基于规则的reward训练、代码和Agentic任务、MoE后训练、低精度实验，以及需要自定义可观测性或安全审查的生产流水线。
 
 简而言之，Miles做了系统层面的决策：放置、权重同步、容错、低精度方案：让用户代码可以专注于算法和产品逻辑。
+
+![](img3_architecture.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">Small Core, Many Extension Points：Miles 的核心设计哲学架构图</span>
 
 ## 展望
 
