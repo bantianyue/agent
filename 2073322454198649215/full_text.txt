@@ -1,0 +1,37 @@
+Attention With 4-bit Q (A4Q): a new native NVFP4 attention sm120/121 kernel
+
+tl,dr: Attention With 4-bit Q (A4Q), a new kernel for sm120/sm121 headed to vllm_project as a contribution once some community work lands first.
+
+I thought about holding this blog post back until blocking FlashInfer work lands, but ehh it's fine.
+
+Everyone's been kicking the tires on Claude Fable before our harnesses turn into pumpkins next week, and I'm no exception.
+
+What did I do? I had Claude build a native fp4 attention kernel for sm120/121.
+
+Why did I do it? NVIDIA ships 13,453 pre-compiled attention kernels with TensorRT-LLM, and they're largely compiled for the datacenter parts: sm100a, sm100f, sm103a.
+
+Unfortunately, on a 5090, an RTX PRO 6000, or a DGX Spark there's no directory for your architecture. That's a sensible line for a datacenter-first library to draw; it just means consumer Blackwell needs its own attention path, and that's the gap A4Q fills.
+
+Because of that lack of a kernel from TensorRT-LLM, at time of writing, on sm120/121 the 4-bit KV cache gets unpacked through an fp16 convert chain that burns ~9 instructions per tensor-core op. Prefill attention on the pre-existing fp4 path ran 1.8× slower than plain bf16 attention. In other words, you read a quarter of the bytes and it takes nearly twice as long.
+
+I knew roughly why, but "roughly" isn't a number, so this campaign was about figuring that out.
+
+In more detail. Our new kernel, A4Q, runs QKᵀ on consumer Blackwell's block-scaled fp4 MMA instead: straight from the cache, zero dequant, and the whole Gemma family comes along (well, with my patches).
+
+I proved it out on consumer Blackwell (sm120) end-to-end; the Spark (sm121) is bit-identical at the ISA level and now measured serving in its own right on a GB10 — passkey retrieval green and the long-context decode-tok/s curve below both ran on Spark silicon, A4Q provably firing.
+
+Bottom line:
+
+The measured win — on wide-KV models. Gemma-4-26B-A4B decodes 2.01× faster end to end at 100k context, Gemma-4-31B 1.44× — NVFP4 KV on both sides, batch-1 steady state, on a DGX Spark. That's the headline, and it's the honest one: a real long-context serving speedup on hardware you can actually buy.
+
+The kernel is faster still; the model decides how much you feel. The QKᵀ kernel alone runs 8.9× over the shipping fp4 path (12× at 100k) and beats bf16 — but that's measured at wide KV (16 heads). End to end you get it only where attention is a real slice of the step and the heads are wide. Narrow the KV and it evaporates.
+
+The KV-width law — the one thing to remember. Across six models the end-to-end win sorts perfectly by KV width (num_kv_heads × head_dim): everything ≥4096 wins (both Gemma-4s), everything ≤1024 washes — Nemotron (Mamba hybrid), Qwen3.5/3.6 (linear hybrid), and even pure-softmax Qwen3-30B (narrow GQA). It isn't softmax-vs-hybrid and it isn't head_dim alone; it's KV width. The field traded that away for GQA around 2024; Gemma-4 kept it, and A4Q rewards exactly that choice.
+
+Correctness and memory are universal — only the speedup is Gemma's. Six models (Gemma-4, Nemotron-3, two Qwens) serve with NVFP4 weights and NVFP4 KV at passkey 12/12 and GSM8K parity, and every one gets the 4× KV-memory saving (more context fits). A4Q serves them all correctly — it just accelerates the wide-KV ones. (It's also the only path that runs Gemma-4's 512-wide VO-split heads on the tensor core at all; every other engine punts them to software.)
+
+Bit-exact, with an asterisk worth stating plainly. The arithmetic is exact: the QK path matches a dequantized reference at max_abs_diff = 0.0 (fp4 × fp8-scale into an fp32 accumulator has nothing left to round). The approximation is quantizing Q to four bits — and its cost at the model level is nothing you can measure (the passkey/GSM8K rows below).
+
+Why would you want this? If your model's decode step is bottlenecked on attention, which is exactly where Gemma lives.
+
+Where might you not want this? If your model isn't attention-bound. A Mamba-hybrid like Nemotron-3-Nano spends most of its decode step outside attention, so A4Q is an honest wash there.
