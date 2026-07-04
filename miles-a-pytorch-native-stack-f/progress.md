@@ -22,3 +22,7 @@
 
 创建时间: 2026-07-04
 来源: https://pytorch.org/blog/miles-a-pytorch-native-stack-for-large-scale-llm-rl-post-training/
+| Step 0a: TASKS.md任务追踪 | completed |
+| Step 0b: 语言类型判断 | completed |
+| Step 0c: 来源类型确认 | completed |
+| Step 1: 内容提取 | completed |
