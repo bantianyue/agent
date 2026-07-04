@@ -83,7 +83,7 @@ graph():
 
 每个Node主要有6个字段，理解它们就等于理解了FX Graph的90%。
 
-<strong>node.op</strong> — 操作的广义类别，共6种取值：
+<strong>node.op</strong>：操作的广义类别，共6种取值：
 
 | node.op | 含义 |
 |---------|------|
@@ -94,7 +94,7 @@ graph():
 | call_module | 子模块调用（如 self.linear） |
 | output | 返回值 |
 
-<strong>node.target — 最重要的字段，也是最容易混淆的字段。</strong>它的含义完全取决于node.op：
+<strong>node.target</strong>：最重要的字段，也是最容易混淆的字段。它的含义完全取决于node.op：
 
 | node.op | target 含义 | 示例 |
 |---------|-------------|------|
@@ -106,9 +106,9 @@ graph():
 
 比如 `target="linear"`。如果op是 `call_module`，表示"调用self.linear"；如果op是 `get_attr`，表示"读取self.linear"（但linear是模块不是tensor，会报错）。**所以处理FX Graph时，第一原则就是：先检查op，再读target。**
 
-<strong>node.users</strong> — 当前节点被其他节点使用的次数。这对图变换至关重要：删除节点前必须检查 `len(node.users) == 0`，否则需要先将依赖重定向到其他节点。它也是检测死代码的标准方法。
+<strong>node.users</strong>：当前节点被其他节点使用的次数。这对图变换至关重要：删除节点前必须检查 `len(node.users) == 0`，否则需要先将依赖重定向到其他节点。它也是检测死代码的标准方法。
 
-**node.args / node.kwargs** — 当前节点依赖的其他Node。通过args你可以追踪数据流向。**node.name** 是打印图时以 `%` 开头的临时变量名。**node.meta** 存储元数据信息。
+**node.args / node.kwargs**：当前节点依赖的其他Node。通过args你可以追踪数据流向。**node.name** 是打印图时以 `%` 开头的临时变量名。**node.meta** 存储元数据信息。
 
 ## FX Graph是如何构建的？
 
