@@ -1,0 +1,219 @@
+<p class="mb-4 leading-7 text-muted-foreground">How do you make an AI model run as fast as possible? This is a question we obsess over at
+Moondream HQ. The GPU handles all the math involved in model inference, so at first glance it
+doesn't seem like there's much to it: just tell it what to do and wait for the answer. But if
+you start looking at how it actually works under the hood, you find that the GPU often sits
+idle, not for lack of work, but because the CPU hasn't told it what to do next yet. This
+phenomenon is called a <strong>GPU bubble</strong>.</p>
+<p class="mb-4 leading-7 text-muted-foreground">When a typical AI model generates text, it produces one <strong>token</strong> at a time (a token is a
+chunk of text, roughly a few characters). Each token depends on the tokens before it, a
+property called <em>autoregressive</em>, so generation is sequential. You can't compute the third
+token before you have the second. This decode loop involves a round trip between the CPU and
+GPU. The GPU does most of the heavy lifting to run the actual model, performing billions of
+arithmetic operations to produce the next token. But there's also a surprising amount of work
+done by the CPU. It selects which requests to run next, sets up the metadata the GPU needs for
+them, picks the actual token out of the model's output and records it, and more.</p>
+<p class="mb-4 leading-7 text-muted-foreground">The challenge is that one token's worth of GPU work is <em>small</em>, while the CPU housekeeping is a
+fixed cost paid on every trip. If the GPU has to wait for that housekeeping before it can start
+the next token, it sits idle for part of every loop. This is why we get GPU bubbles.</p>
+<p class="mb-4 leading-7 text-muted-foreground">In this post we're going to dive into how <a class="text-primary font-medium underline underline-offset-4" href="/p/photon">Photon</a> hides these bubbles using a
+technique called <em>pipelined decoding</em>. The idea is to overlap the two kinds of work: we start
+GPU work on the next token while the CPU is still finishing the last one.</p>
+<h2 class="text-xl font-semibold md:text-2xl mt-12 mb-4" id="the-bubble">The bubble</h2>
+<p class="mb-4 leading-7 text-muted-foreground">Here's the shape of the problem.</p>
+<p class="mb-4 leading-7 text-muted-foreground"><img src="/images/blog/popping-the-gpu-bubble/timeline-comparison.svg" alt="Blocking vs pipelined decode timelines" class="rounded-lg dark:brightness-[0.92] dark:invert dark:hue-rotate-180"></p>
+<p class="mb-4 leading-7 text-muted-foreground">In the blocking version (top), every step is a baton pass. The CPU plans and launches a
+forward, the GPU runs it, then the CPU <em>synchronizes</em>, waits for the results to land,
+commits them, and only then starts planning the next step. This is because the plan depends
+on the token we select. For example, if the model indicates it has finished answering,
+then we need to schedule a new pending request from our queue. The GPU sits idle waiting
+for the CPU to finish its commit-plan-launch work.</p>
+<p class="mb-4 leading-7 text-muted-foreground">The fix is to <strong>pipeline the loop.</strong> Launch the next forward
+while the current step's token is still coming back and being committed. That's the
+<strong>pipelined</strong> version (bottom): the forwards run back-to-back, and the CPU work is overlapped
+underneath them.</p>
+<p class="mb-4 leading-7 text-muted-foreground">The reason we can is that the token we just sampled doesn't have to leave the GPU. The next
+forward reads it straight from GPU memory as its input. We still want a copy on the CPU
+eventually, to detokenize it, stream it, and decide whether the request is done, but that is
+bookkeeping we can do a moment later, in the background, while the next forward already runs.
+Not waiting on that copy is the move that removes the bubble.</p>
+<p class="mb-4 leading-7 text-muted-foreground">Making it safe requires three things, that we cover in the rest of this post: keeping step
+buffers from colliding (ping-pong slots), getting the sampling order right for constrained decoding
+(forward now, sample later), and cleaning up after a request finishes (zombies).</p>
+<h2 class="text-xl font-semibold md:text-2xl mt-12 mb-4" id="mechanism-1-ping-pong-slots">Mechanism 1: ping-pong slots</h2>
+<p class="mb-4 leading-7 text-muted-foreground">To run a decode step, the GPU needs a working set of buffers: a place to stage the input (the
+last generated token and its position in the sequence), a place for the model to write its
+output (the <em>logits</em>, one score per word in the vocabulary), a place to land the sampled token,
+and some bookkeeping the attention kernel needs to find each sequence's cached keys and values
+(its KV cache). We keep <em>pinned</em> (page-locked) host buffers on both ends, so the copies on and
+off the GPU run as background DMA (direct memory access) transfers instead of blocking the CPU.</p>
+<p class="mb-4 leading-7 text-muted-foreground">These buffers are allocated once and reused on every step. We work hard to avoid performing
+GPU memory allocations at runtime, because they can cause device synchronization and introduce
+bubbles. Fixed buffer addresses are also needed for capturing the decode step once as a
+<a href="https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/" target="_blank" rel="noopener noreferrer" class="text-primary font-medium underline underline-offset-4">CUDA graph</a> and replaying it,
+reducing kernel launch overhead. We call this bundle a <a href="https://github.com/m87-labs/kestrel/blob/bb530fad318ff82c1367af4629964938cff72eaa/kestrel/models/moondream/decode_slot.py" target="_blank" rel="noopener noreferrer" class="text-primary font-medium underline underline-offset-4"><code class="rounded text-sm font-mono">DecodeSlot</code></a>.</p>
+<p class="mb-4 leading-7 text-muted-foreground">This works, but introduces a blocker for pipelining. The buffers stay in use until the step is
+done, so we cannot start the next step until the current one finishes. To overlap two steps,
+the second step needs its own working set, otherwise it can overwrite the results of the first
+step before the CPU has read them. So we keep two slots and alternate between them, ping-pong
+style.</p>
+<p class="mb-4 leading-7 text-muted-foreground"><img src="/images/blog/popping-the-gpu-bubble/pingpong-slots.svg" alt="Ping-pong slots" class="rounded-lg dark:brightness-[0.92] dark:invert dark:hue-rotate-180"></p>
+<p class="mb-4 leading-7 text-muted-foreground">One thing to note about launch: we don't execute kernels the instant we issue a launch from CPU.
+Instead, we enqueue them onto a <em>stream</em> -- an ordered queue that the GPU drains in order. Work
+on the same stream runs sequentially, while work on separate streams can overlap. Both slots put
+their forwards onto the same compute stream. The slots are not for GPU parallelism. They only
+exist so the CPU can process one slot's results while the GPU runs the other slot's forward.</p>
+<p class="mb-4 leading-7 text-muted-foreground">The forwards all share that one compute stream, but the copies do not. Each step's
+device-to-host copy, the one that brings the sampled token back for bookkeeping, goes on a
+<em>separate</em> copy stream, so it can run while the GPU is busy with the next forward. That is what
+lets us not wait for it. We anchor the copy to an event recorded the instant the step's outputs
+are written, so it waits on exactly that step's work and nothing queued behind it.</p>
+<p class="mb-4 leading-7 text-muted-foreground"><img src="/images/blog/popping-the-gpu-bubble/deferred-copy.svg" alt="The copy runs in the background" class="rounded-lg dark:brightness-[0.92] dark:invert dark:hue-rotate-180"></p>
+<p class="mb-4 leading-7 text-muted-foreground">A slot only becomes free once its results have been read, not just once the GPU is done with it.
+Its pinned host buffer is the landing site for a copy that may still be in flight, so handing
+the slot to a new step too early would overwrite a copy mid-transfer, creating a hard-to-debug
+corruption bug. So the slot stays reserved through the commit that reads it, and is released
+only once that commit has finished.</p>
+<h2 class="text-xl font-semibold md:text-2xl mt-12 mb-4" id="mechanism-2-forward-now-sample-later">Mechanism 2: forward now, sample later</h2>
+<p class="mb-4 leading-7 text-muted-foreground">The next forward can run ahead because it doesn't depend on anything the CPU does with the last
+token. But two things about the <em>next</em> step do depend on the last step's committed result. One
+is which sequences are still in the batch: if a request just finished, it shouldn't be in the
+next forward. That is the next section (zombies). The other is what tokens the next step is even
+allowed to sample, and that one is this section.</p>
+<p class="mb-4 leading-7 text-muted-foreground">It comes from <em>constrained decoding</em>. Moondream's spatial skills return structured output
+instead of free text: <code class="rounded text-sm font-mono">point</code> returns a coordinate, <code class="rounded text-sm font-mono">detect</code> returns boxes, <code class="rounded text-sm font-mono">segment</code> returns
+an outline. We get those from the same decode loop by restricting which tokens the model may
+produce at each step: we force the scores (the <em>logits</em>) of the disallowed ones to negative
+infinity before we sample. A <code class="rounded text-sm font-mono">point</code> step has to emit a coordinate, a <code class="rounded text-sm font-mono">detect</code> request walks an
+x, y, size cycle, and so on. Which tokens are allowed, the <em>mask</em>, depends on what has been
+produced so far, so the mask for step <em>t+1</em> depends on the token we sampled at <em>t</em>.</p>
+<p class="mb-4 leading-7 text-muted-foreground">The dependency is in <em>sampling</em>, not in the forward.</p>
+<p class="mb-4 leading-7 text-muted-foreground"><img src="/images/blog/popping-the-gpu-bubble/advance-tick.svg" alt="The forward needs no mask; only sampling does" class="rounded-lg dark:brightness-[0.92] dark:invert dark:hue-rotate-180"></p>
+<p class="mb-4 leading-7 text-muted-foreground">Each scheduler tick goes through three phases: <strong>launch, commit, and finalize</strong>:</p>
+<ol class="mb-6 list-decimal space-y-2 pl-6 text-muted-foreground marker:text-muted-foreground">
+<li class="text-muted-foreground"><strong>Launch</strong> the forward for <em>t+1</em>. It doesn't depend on the mask, so it goes immediately.</li>
+<li class="text-muted-foreground"><strong>Commit</strong> step <em>t</em>: wait on the in-flight copy and advance the request's decode state. That
+is needed to decide the mask for <em>t+1</em>.</li>
+<li class="text-muted-foreground"><strong>Finalize sampling</strong> for <em>t+1</em>: with the state current, build the mask and sample.</li>
+</ol>
+<p class="mb-4 leading-7 text-muted-foreground">Sampling <em>t+1</em> lands after committing <em>t</em> because the commit is what makes <em>t+1</em>'s mask correct.
+We call this "commit-before-finalize" ordering. The GPU runs the <em>t+1</em> forward through steps 2
+and 3, so the commit disappears from the critical path.</p>
+<p class="mb-4 leading-7 text-muted-foreground">For plain text there is no mask, so forward and sampling can both run a step ahead. For
+constrained sequences the forward still runs ahead, but sampling waits on the previous commit,
+which caps how far ahead we get with no special-casing. One loop handles both.</p>
+<h2 class="text-xl font-semibold md:text-2xl mt-12 mb-4" id="mechanism-3-zombies-finalize-early-release-late">Mechanism 3: zombies: finalize early, release late</h2>
+<p class="mb-4 leading-7 text-muted-foreground">Back in <em>forward now, sample later</em> we flagged two ways the next step depends on the last
+step's committed result. The sampling mask was one. Batch membership is the other, and it
+takes a bit of care to handle right.</p>
+<p class="mb-4 leading-7 text-muted-foreground">To launch step <em>t+1</em> we first decide its batch, which sequences are in it, and we do that
+before committing step <em>t</em>. So what happens when a sequence hits its stop token at <em>t</em>, but is
+already baked into <em>t+1</em>'s forward? You can't un-launch GPU work. The sequence is finished, yet
+still physically present in a batch that's executing.</p>
+<p class="mb-4 leading-7 text-muted-foreground">Photon calls these <strong>zombies</strong>, and instead of bolting on cancellation logic, it lets the
+behavior emerge from two per-sequence fields:</p>
+<ul class="mb-6 list-disc space-y-2 pl-6 text-muted-foreground marker:text-muted-foreground">
+<li class="text-muted-foreground"><code class="rounded text-sm font-mono">finalized</code>: <code class="rounded text-sm font-mono">True</code> after the sequence has hit EOS or its length cap.</li>
+<li class="text-muted-foreground"><code class="rounded text-sm font-mono">inflight_refs</code>: the number of in-flight steps that still reference this sequence (0, 1, or 2).</li>
+</ul>
+<p class="mb-4 leading-7 text-muted-foreground"><img src="/images/blog/popping-the-gpu-bubble/zombie-lifecycle.svg" alt="A finished sequence rides step t+1 as a zombie" class="rounded-lg dark:brightness-[0.92] dark:invert dark:hue-rotate-180"></p>
+<p class="mb-4 leading-7 text-muted-foreground">When step <em>t</em> commits and detects EOS, the sequence is marked <code class="rounded text-sm font-mono">finalized</code> and its result is
+emitted — but it isn't torn down, because <code class="rounded text-sm font-mono">inflight_refs</code> is still nonzero (step <em>t+1</em>
+references it). At step <em>t+1</em>'s commit, the sequence is already <code class="rounded text-sm font-mono">finalized</code>, so the commit
+is <strong>skipped</strong>: no token is appended, no state mutates. The zombie was harmlessly along for
+the ride — it occupied its slot and wrote some KV that nobody will read. Only when
+<code class="rounded text-sm font-mono">inflight_refs</code> finally hits 0 are its KV pages and LoRA slot released.</p>
+<p class="mb-4 leading-7 text-muted-foreground">This finalize-early, release-late dance is a small amount of refcounting that replaces what
+would otherwise be a thicket of "cancel this row mid-flight" special cases.</p>
+<h2 class="text-xl font-semibold md:text-2xl mt-12 mb-4" id="prefill-rides-the-same-pipeline">Prefill rides the same pipeline</h2>
+<p class="mb-4 leading-7 text-muted-foreground">So far this has all been about decode steps, but a real serving loop is constantly doing two
+<em>different</em> kinds of work: <strong>prefill</strong> (processing a new request's prompt + image, the
+expensive one-shot forward over many tokens) and <strong>decode</strong> (one token at a time for everyone
+already running).</p>
+<p class="mb-4 leading-7 text-muted-foreground">Photon doesn't separate them. A prefill is just another <code class="rounded text-sm font-mono">kind="prefill"</code> launch in the
+<em>same</em> two-slot pipeline. Because the pipeline only cares that a slot is free, not what kind
+of work last used it, a prefill forward can be launched into one slot while a decode step
+from the other slot is still being committed, and vice versa. The expensive prefill forward
+runs on the GPU while the CPU commits decode results; the next decode forward runs while the
+CPU finishes admitting the just-prefilled request. The same commit ordering (and the same
+<code class="rounded text-sm font-mono">inflight_refs</code> bookkeeping) keeps everything correct across the two kinds, so none of the
+zombie or constrained-decode logic needs a special case for "what if a prefill is in flight."</p>
+<p class="mb-4 leading-7 text-muted-foreground">This matters most when outputs are short. A request that emits three tokens spends
+almost all of its life in prefill and admission, not decode, so a workload of many short
+requests is really a stream of prefills with a little decode sprinkled in. Sharing one
+pipeline is what lets that stream overlap its own CPU bookkeeping instead of serializing
+prefill behind decode and back again.</p>
+<h2 class="text-xl font-semibold md:text-2xl mt-12 mb-4" id="a-cost-model-for-the-bubble">A cost model for the bubble</h2>
+<p class="mb-4 leading-7 text-muted-foreground">How much should pipelining actually buy you? You can predict it from the parts of a decode
+step, and then check the prediction against measurement.</p>
+<p class="mb-4 leading-7 text-muted-foreground">A decode step is three pieces of work:</p>
+<ul class="mb-6 list-disc space-y-2 pl-6 text-muted-foreground marker:text-muted-foreground">
+<li class="text-muted-foreground"><strong>forward</strong>: the heavy GPU matmuls. At decode this is memory-bandwidth bound: every token
+streams the whole weight set through the cores, so it has a floor near
+<code class="rounded text-sm font-mono">weight_bytes / memory_bandwidth</code>. It shrinks as memory gets faster or as the model gets smaller.</li>
+<li class="text-muted-foreground"><strong>sampling</strong>: turning the scores into a committed token: the constrained-decode mask, the
+argmax/sample, the spatial (grounding) decode, and the device→host copy of the result. All
+GPU work.</li>
+<li class="text-muted-foreground"><strong>bookkeeping</strong>: the CPU around it. Choose the next batch (<code class="rounded text-sm font-mono">plan</code>), launch the graph
+(<code class="rounded text-sm font-mono">launch</code>), commit the previous step (<code class="rounded text-sm font-mono">commit</code>).</li>
+</ul>
+<p class="mb-4 leading-7 text-muted-foreground">A blocking loop runs the three in series, so the GPU sits idle through the bookkeeping — that
+idle is the bubble. Pipelining slides the bookkeeping of one step underneath the <em>forward +
+sampling</em> of the next, so the period collapses toward <code class="rounded text-sm font-mono">forward + sampling</code> and the bubble
+disappears. Measured per step, pipelined, that's exactly what we see — the GPU is busy for
+essentially the whole period (steady-state medians, moondream2, ms):</p>
+<div class="my-6 overflow-x-auto"><table class="w-full min-w-[640px] border-collapse text-sm tabular-nums [&amp;_td]:text-right [&amp;_th]:text-right"><thead><tr class="border-b border-border"><th class="px-3 py-2 font-medium"></th><th class="px-3 py-2 font-medium">forward (ms)</th><th class="px-3 py-2 font-medium">sampling (ms)</th><th class="px-3 py-2 font-medium">period (ms)</th></tr></thead><tbody><tr class="border-b border-border/60"><td class="px-3 py-2 font-semibold">3090 · 1 stream</td><td class="px-3 py-2">4.87</td><td class="px-3 py-2">0.20</td><td class="px-3 py-2">5.10</td></tr><tr class="border-b border-border/60"><td class="px-3 py-2">8 streams</td><td class="px-3 py-2">6.66</td><td class="px-3 py-2">0.27</td><td class="px-3 py-2">6.97</td></tr><tr class="border-b border-border/60"><td class="px-3 py-2">32 streams</td><td class="px-3 py-2">10.24</td><td class="px-3 py-2">0.26</td><td class="px-3 py-2">10.52</td></tr><tr class="border-b border-border/60"><td class="px-3 py-2 font-semibold">B200 · 1 stream</td><td class="px-3 py-2">2.45</td><td class="px-3 py-2">0.14</td><td class="px-3 py-2">2.63</td></tr><tr class="border-b border-border/60"><td class="px-3 py-2">8 streams</td><td class="px-3 py-2">3.12</td><td class="px-3 py-2">0.14</td><td class="px-3 py-2">3.30</td></tr><tr><td class="px-3 py-2">32 streams</td><td class="px-3 py-2">3.80</td><td class="px-3 py-2">0.14</td><td class="px-3 py-2">3.98</td></tr></tbody></table></div>
+<p class="mb-4 leading-7 text-muted-foreground"><code class="rounded text-sm font-mono">forward + sampling ≈ period</code>; the leftover GPU idle is under 0.05 ms. So what was hiding it
+worth? It comes down to a tug-of-war between two things — how much of a step you manage to tuck
+away, against a small penalty for running ahead:</p>
+<pre class="overflow-x-auto p-4"><code class="rounded text-sm font-mono">speedup  =   T_block / T_pipe    ×      (1 − z)
+            └─ bubble hidden ─┘     └─ zombie tax ─┘
+</code></pre>
+<p class="mb-4 leading-7 text-muted-foreground">Two symbols, two ideas. The first term is the win, and it's the whole GPU-speed story: how long
+a step takes blocking (<code class="rounded text-sm font-mono">T_block</code>) over how long it takes pipelined (<code class="rounded text-sm font-mono">T_pipe</code>) — i.e. how much
+faster the step runs once the bookkeeping is tucked underneath it.</p>
+<p class="mb-4 leading-7 text-muted-foreground">The second, <code class="rounded text-sm font-mono">z</code>, is the price of running ahead — the <strong>zombie tax</strong> from Mechanism 3. Launch step
+<em>t+1</em> before committing <em>t</em>, and a sequence that just finished still has a forward in flight: a
+wasted step. On a single stream that's one wasted forward for every <code class="rounded text-sm font-mono">L</code> tokens the request
+generated, so about 1% at <code class="rounded text-sm font-mono">L ≈ 110</code>. Pack a batch, though, and it nearly vanishes — the zombie is
+just one more row in a step that's already paying full price to stream the weights, so it rides
+along almost free. The tax bites hardest at one stream and fades exactly where throughput lives,
+which is why predicting it needs both <code class="rounded text-sm font-mono">L</code> and the batch size.</p>
+<p class="mb-4 leading-7 text-muted-foreground">Here's that step, measured both ways — blocking idles each step while the CPU commits the last
+token and re-launches; pipelining runs that work (and the async mask upload) underneath the
+forward, so the forwards never stop:</p>
+<p class="mb-4 leading-7 text-muted-foreground"><img src="/images/blog/popping-the-gpu-bubble/decode-timeline.svg" alt="Blocking vs pipelined decode, measured per-step on a B200" class="rounded-lg dark:brightness-[0.92] dark:invert dark:hue-rotate-180"></p>
+<p class="mb-4 leading-7 text-muted-foreground">Now put real numbers in it. Measure each piece on its own — the two step times and <code class="rounded text-sm font-mono">L</code> — and the
+model's prediction should land on what the benchmark actually delivers (depth-1 blocking vs
+depth-2 pipelined, nothing else changed):</p>
+<div class="my-6 overflow-x-auto"><table class="w-full min-w-[720px] border-collapse text-sm tabular-nums [&amp;_td]:text-right [&amp;_th]:text-right"><thead><tr class="border-b border-border"><th class="px-3 py-2 font-medium"></th><th class="px-3 py-2 font-medium">blocking (ms)</th><th class="px-3 py-2 font-medium">pipelined (ms)</th><th class="px-3 py-2 font-medium">L</th><th class="px-3 py-2 font-medium">predicted</th><th class="px-3 py-2 font-medium">observed</th></tr></thead><tbody><tr class="border-b border-border/60"><td class="px-3 py-2 font-semibold">3090 · 1 stream</td><td class="px-3 py-2">5.44</td><td class="px-3 py-2">5.10</td><td class="px-3 py-2">104</td><td class="px-3 py-2">+5.7%</td><td class="px-3 py-2">+6.5%</td></tr><tr class="border-b border-border/60"><td class="px-3 py-2">8 streams</td><td class="px-3 py-2">7.52</td><td class="px-3 py-2">6.97</td><td class="px-3 py-2">113</td><td class="px-3 py-2">+7.6%</td><td class="px-3 py-2">+7.8%</td></tr><tr class="border-b border-border/60"><td class="px-3 py-2">32 streams</td><td class="px-3 py-2">11.74</td><td class="px-3 py-2">10.52</td><td class="px-3 py-2">113</td><td class="px-3 py-2">+11.1%</td><td class="px-3 py-2">+11.6%</td></tr><tr class="border-b border-border/60"><td class="px-3 py-2 font-semibold">B200 · 1 stream</td><td class="px-3 py-2">3.11</td><td class="px-3 py-2">2.63</td><td class="px-3 py-2">115</td><td class="px-3 py-2">+17.2%</td><td class="px-3 py-2">+17.6%</td></tr><tr class="border-b border-border/60"><td class="px-3 py-2">8 streams</td><td class="px-3 py-2">4.04</td><td class="px-3 py-2">3.30</td><td class="px-3 py-2">115</td><td class="px-3 py-2">+22.2%</td><td class="px-3 py-2">+21.9%</td></tr><tr><td class="px-3 py-2">32 streams</td><td class="px-3 py-2">5.55</td><td class="px-3 py-2">3.98</td><td class="px-3 py-2">104</td><td class="px-3 py-2">+39.1%</td><td class="px-3 py-2">+35.4%</td></tr></tbody></table></div>
+<p class="mb-4 leading-7 text-muted-foreground">Three things to read out of it:</p>
+<ol class="mb-6 list-decimal space-y-2 pl-6 text-muted-foreground marker:text-muted-foreground">
+<li class="text-muted-foreground"><strong>The win grows with GPU speed.</strong> Same workload, +12% on a 3090 but +35% on a B200 at 32
+streams. The bookkeeping is GPU-speed-independent, so as the forward shrinks — faster memory,
+or a smaller model — the bubble is a bigger share of the step. Pipelining is insurance against
+the GPU getting faster, which for us is the same thing as the model getting smaller.</li>
+<li class="text-muted-foreground"><strong>The zombie tax is real but small, and it amortizes.</strong> At one stream the zombie is a whole
+wasted forward — about 1% at L≈110. At batch it's one extra <em>row</em> in a step that's
+memory-bound on the weights, not the row count, so it costs almost nothing: at 32 streams the
+3090's observed +11.6% lands right on the <em>no-zombie</em> per-step ratio. The tax bites at a single
+stream and fades exactly where throughput lives. (The B200's 32-stream row sits a few points
+under prediction for a duller reason — at ~4 ms/step the whole run is under half a second, so
+prefill and the end-of-run batch ramp-down are a visible slice of the wall.)</li>
+<li class="text-muted-foreground"><strong>It only pays once the bubble is actually hideable.</strong> (This is how we caught a bug, in fact:
+the pipelined numbers came out at <em>blocking</em> speed, traced to an accidental synchronous copy
+while building the constrained-decode mask. Moving it to the copy stream was worth +11% on the
+3090 and +34% on the B200.)</li>
+</ol>
+<h2 class="text-xl font-semibold md:text-2xl mt-12 mb-4" id="its-never-just-one-thing">It's never just one thing</h2>
+<p class="mb-4 leading-7 text-muted-foreground">That's the whole technique: ping-pong slots so two steps don't collide, a forward/sampling split
+so even constrained decoding can run ahead, and a little zombie refcounting so finished requests
+tear down cleanly. The GPU stops waiting on the CPU, and you get back anywhere from
+a few percent to a third; more the faster your accelerator/model is.</p>
+<p class="mb-4 leading-7 text-muted-foreground">But Photon isn't fast because of this one technique, or any single technique. It's fast because
+dozens of these details compound across the serving stack: how we resize and tile images on the
+way in, the kernels that run the model, the scheduler ordering here, and the synchronization
+points we remove from the hot path. No one piece is the whole story; the stack gets fast when
+enough of them line up.</p>
+<p class="mb-4 leading-7 text-muted-foreground">We'll keep writing these up, one corner of the stack at a time. <a href="https://x.com/moondreamai" target="_blank" rel="noopener noreferrer" class="text-primary font-medium underline underline-offset-4">Follow us on Twitter</a>
+so you don't miss the next one. And keep an eye out for Photon 2.0, coming soon: we can't share
+details yet, but it's a big one.</p>
