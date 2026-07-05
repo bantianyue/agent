@@ -8,9 +8,9 @@
 | Step 1: 内容提取（全文） | pending |
 | Step 2: 全部图片下载 | pending |
 | Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
+| Step 4a: 列出关键素材清单 | completed |
+| Step 4a-i: 写要点速览 | completed |
+| Step 4b: 确定独立观点 | completed |
 | Step 4c: 写正文（含full_translation） | pending |
 | Step 4d: 写结语 | pending |
 | Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
@@ -24,3 +24,4 @@
 来源: https://openrouter.ai/blog/announcements/fusion-beats-frontier/
 | Step 0c: 来源类型确认 | completed |
 | Step 1: 内容提取 | completed |
+| Step 3: 封面生成 | completed |
