@@ -5,7 +5,7 @@
 | # | 日期 | 源 URL | 源标题 | 文章目录 | 生成标题 | 封面 | 当前状态 |
 | 1 | 2026-07-05 | https://moondream.ai/blog/popping-the-gpu-bubble | popping-the-gpu-bubble | popping-the-gpu-bubble | TBD | TBD | 📥 进行中 |
 | 2 | 2026-07-05 | https://blogs.microsoft.com/blog/2026/07/02/microsoft-frontier-company-ai-engineering-that-amplifies-and-protects-your-intelligence/ | microsoft-frontier-company-ai | microsoft-frontier-company | 微软 Frontier Company 成立：25亿美元、6000人，从平台商到转型服务商 | cover.png | ✅ 已推送 |
-| 3 | 2026-07-05 | https://dev.classmethod.jp/articles/nvidia-nemo-switchyard-first-touch/ | nvidia-nemo-switchyard-first-t | nemo-switchyard-first-touch | TBD | TBD | 📥 进行中 |
+| 3 | 2026-07-05 | https://dev.classmethod.jp/articles/nvidia-nemo-switchyard-first-touch/ | nvidia-nemo-switchyard-first-t | nemo-switchyard-first-touch | NVIDIA NeMo Switchyard 上手：pip安装、无GPU、Claude Code一键连接的LLM路由 | cover.png | ✅ 已推送 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -30,3 +30,5 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-05 11:56 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-05 12:00 | ⏳ | 推送中 |
+| 2026-07-05 12:00 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0dtg2u9H4WNRXOfU6xdIiNas4kdmjNEmbQRPkqXIUWav |

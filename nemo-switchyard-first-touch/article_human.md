@@ -82,6 +82,10 @@ Switchyard的转换层把所有请求先转成中间表示，`output_config.effo
 
 最终方案：weak和classifier统一用DeepSeek V4 Flash，strong换GLM-5.2。判定成本骤降至约 **1/12**（从 $0.0047/次到约 $0.0004/次），但判定延迟从2.1s升至7.2s：去掉了reasoning反而变慢，因为prompt处理本身速度取决于模型和provider。
 
+值得一提的是，作者还测试了 **DGX Spark完全本地路由** 的方案：用ollama跑Qwen 3.6:35B（strong）和Qwen 3:1.7B（weak），所有routing判定也在本地完成。问「2+2是？」1.7B秒回，问「停机问题用对角线法证明」自动切换到35B。但classifier如果太小（1.7B）会无视tool_choice强制指定，导致全部分类失败：classifier需要选能稳定执行tool calling的模型。
+
+另外在配置上有个小陷阱要注意：target的 `format:` 省略时默认OpenAI格式，送给Claude系模型时prompt caching的cache_control会被剥离。文档明确写了这一点。如果在profile中用 `llm-routing` 且tier名不是默认的 `strong`/`weak`（比如改成 `strong-glm`、`weak-ds`），就一定要显式指定 `fallback_target_on_evict`，否则Switchyard启动时会报错找不到 `strong` target。
+
 ### 现阶段的真实状态
 
 Switchyard目前是 **v0.1.0 Alpha**，有已知问题待解决。Alpha阶段值得注意的：
