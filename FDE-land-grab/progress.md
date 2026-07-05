@@ -1,15 +1,13 @@
-# Progress: FDE 土地争夺战 - 公众号文章
+# Progress: FDE 土地争夺战 - 公众号文章 (重做)
 
 ## 步骤
-- [x] Step 1: 搜索素材和信息 — 完成
-- [x] Step 2: 生成文章配图（6张）— 完成
-- [x] Step 3: 撰写文章并保存为md — 完成
-- [x] Step 4: 发布到微信公众号 — 草稿已保存
-
-## 发布结果
-- ✅ 草稿已成功保存到微信公众号
-- ⚠️ 内文图片因 Windows 路径兼容性问题未自动上传（已知 bug）
-- 封面图已成功上传
-
-## 下一步操作
-用户需要手动在「内容管理 → 草稿箱 → 编辑 → 插入图片」将 imgs/ 下的 6 张图片插入到对应位置
+- [x] Step 1: 搜索官方出处的素材源
+- [x] Step 2: 下载真实配图
+  - [x] 01-anthropic-announcement.png — 待用截图
+  - [x] 02-openai-deployco.png — 待用
+  - [x] 03-aws-hero.jpg ✅ 已下载 (AWS 官网新闻稿配图)
+  - [x] 04-microsoft-announcement.png — 待用
+  - [x] 05-palantir-fde-blog.png — 待用
+  - [x] 06-mit-nanda-report.png — 待用
+- [ ] Step 3: 重新撰写文章，改用真实来源配图
+- [ ] Step 4: 发布到微信公众号
