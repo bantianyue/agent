@@ -15,9 +15,9 @@
 | Step 4d: 写结语 | pending |
 | Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
 | Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
+| Step 4f: Humanizer 润色 | completed |
 | Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
+| Step 5: 预发布检查 | completed |
 | Step 6: 推送草稿 | pending |
 
 创建时间: 2026-07-05
@@ -25,3 +25,4 @@
 | Step 0c: 来源类型确认 | completed |
 | Step 1: 内容提取 | completed |
 | Step 3: 封面生成 | completed |
+| Step 4g: 格式修复 | completed |
