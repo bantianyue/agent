@@ -13,12 +13,12 @@
 | Step 4b: 确定独立观点 | completed |
 | Step 4c: 写正文（去"二、限时开放"章） | completed |
 | Step 4d: 写结语 | completed |
-| Step 4d-i: 写传送门 | pending |
+| Step 4d-i: 写传送门 | in_progress |
 | Step 4e: 写参考区 | completed |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
+| Step 4f: Humanizer 润色 | completed |
+| Step 4g: 文本格式修复 | completed |
 | Step 5: 预发布检查 | pending |
 | Step 6: 推送草稿 | pending |
 
 创建时间: 2026-07-06
-来源: https://mimo.xiaomi.com/zh/blog/mimo-tilert-1000tps
+来源: https://mimo.xiaomi.com/zh/blog/mimo-tilert-1000tps| Step 4d-i: 传送门 | completed |

@@ -32,7 +32,7 @@
 
 ## FP4量化：在万亿参数上精准瘦身
 
-在万亿参数（1T）的尺度上，传统的8比特（FP8 / INT8）甚至16比特推理，会带来极其恐怖的显存占用和内存带宽压力。降低参数的比特位宽，可以直接贡献于解码生成速度。因此，团队采用了业界较为通用且验证过几乎无损的FP4（MXFP4）量化。
+在万亿参数（1T）的尺度上，传统的8比特（FP8 / INT8）甚至16比特推理，会带来极大的显存占用和内存带宽压力。降低参数的比特位宽，可以直接贡献于解码生成速度。因此，团队采用了业界较为通用且验证过几乎无损的FP4（MXFP4）量化。
 
 但关键是"怎么瘦身"：如果对整个模型一刀切地进行FP4量化，模型在复杂推理、逻辑代码上的精度往往会退化。MiMo-V2.5-Pro是典型的MoE架构，Expert占据了参数的绝大部分，且对量化的精度容忍度最高。因此他们选择**只对MoE Expert进行FP4量化，其他模块保留原精度**。通过FP4 QAT（量化感知训练），能力与原模型基本持平。
 
@@ -100,6 +100,19 @@ TileRT部分模块已在GitHub开源：[github.com/tile-ai/TileRT](https://githu
 更值得注意的其实是TileRT的执行模型思路。当推理速度进入1000 TPS尺度后，瓶颈从"计算不够快"变成了"执行边界太多"。传统推理框架对算子边界的容忍度在这个尺度下完全失效，常驻内核、Tile流水线、Warp Specialization这些系统层面的革新，可能比模型量化和投机解码本身更难复现：这正是推理优化的下一个主战场
 </div>
 </div>
+
+---
+
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/u_H2C9KaHyzbBCI9DocEVQ" target="_blank" data-linktype="2">Claude Code动态工作流：把编排搬进代码中</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/VQILf7LfK6ug0QaokGe6Hw" target="_blank" data-linktype="2">Polar: 英伟达NVIDIA的开源Agentic RL框架支持任意Harness</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/1Sgdxx2WfDwlhc-tf2V1MQ" target="_blank" data-linktype="2">深度拆解Hermes Agent：一个最优秀Harness(之一)的九层架构</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/xP1cEoO_plRpWItxhqeQnQ" target="_blank" data-linktype="2">Agent Harness Engineering：为什么Agent可靠性的天花板不是模型，而是基...</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/qHscVKN06FEGTru80STlxA" target="_blank" data-linktype="2">M²A多模态双层混合记忆系统：记住你的每一次变化</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/hIab8mXanh0rdpEq_aHo7Q" target="_blank" data-linktype="2">Hermes Desktop来了：从CLI到原生桌面应用，黄仁勋GTC首秀的产品正式公开</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/VZRcpl6vL7riJp77ZmtSIg" target="_blank" data-linktype="2">Hermes vs OpenClaw创始人隔空互怼：假星标，抄袭，死亡威胁各种瓜</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4Iz5SjE4D240EL4MmKrWZQ" target="_blank" data-linktype="2">OpenAI Dreaming记忆系统：从记住你到理解你</a><br>
+</span>
 
 ---
 
