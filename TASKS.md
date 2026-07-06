@@ -10,7 +10,7 @@
 | 5 | 2026-07-06 | https://x.com/tanayj/status/2072766211256119475 | 2072766211256119475 | rl-beyond-verifiable | RL Beyond the Verifiable：当RL的奖励信号不可验证时 | cover.png | ✅ 已推送 |
 | 6 | 2026-07-06 | https://moondream.ai/blog/popping-the-gpu-bubble | popping-the-gpu-bubble | popping-the-gpu-bubble | Popping the GPU Bubble：Moondream 如何用流水线解码消除 GPU 闲置 | cover.png | ✅ 已推送 |
 | 7 | 2026-07-06 | https://x.com/tanayj/status/2072766211256119475 | 2072766211256119475 | 2072766211256119475 | TBD | TBD | 📥 进行中 |
-| 8 | 2026-07-06 | https://arxiv.org/html/2606.28436v1 | 2606-28436 | long-sequence-moe | TBD | TBD | 📥 进行中 |
+| 8 | 2026-07-06 | https://arxiv.org/html/2606.28436v1 | 2606-28436 | long-sequence-moe | Dockerless：无需Docker环境的代码补丁验证器，编码Agent训练不再卡在跑测试 | cover.png | ✅ 已推送 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -76,3 +76,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-06 15:24 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-06 15:35 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0RL0RQhxTN98LJE2_4f1u9xb3OT1p9V6_7rduBZVPlUf |
