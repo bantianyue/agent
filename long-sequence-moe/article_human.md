@@ -5,7 +5,7 @@
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
 - <strong>告别Docker环境</strong>：Dockerless是一个无需仓库级运行环境的智能体验证器，通过主动探索代码库来评判补丁正确性，彻底绕开为每个仓库搭Docker的痛点<br><br>
 - <strong>AUC超越最强开源方案14.3点</strong>：在验证器的评测集上达到81.0 AUC，超越现有最强开源验证器DeepSWE Verifier 14.3个点，也优于GPT-5.4等闭源模型<br><br>
-- <strong>无环境post-training匹敌有环境方案</strong>：用Dockerless同时做SFT数据筛选和RL奖励信号，SWE-bench Verified达62.0%，仅比用真实测试执行的版本低0.4点
+- <strong>无环境后训练媲美有环境</strong>：用Dockerless同时做SFT数据筛选和RL奖励信号，SWE-bench Verified达62.0%，仅比用真实测试执行的版本低0.4点
 </div>
 </div>
 
