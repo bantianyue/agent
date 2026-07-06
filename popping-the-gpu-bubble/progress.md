@@ -26,3 +26,4 @@
 | Step 3: 封面生成 | completed |
 | Step 4c: 写正文（含结构对齐 + 补全章节） | completed |
 | Step 4d-i: 传送门 | completed |
+| Step 6: 推送草稿（覆盖） | completed |
