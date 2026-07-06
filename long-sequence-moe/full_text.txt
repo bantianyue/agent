@@ -1,0 +1,340 @@
+Dockerless: Environment-Free Program Verifier for Coding Agents
+AbstractProgram verifiers play a central role in training coding agents, including selecting trajectories for supervised fine-tuning (SFT) and providing rewards for reinforcement learning (RL).
+Standard execution-based verification requires running unit tests inside per-repository environments such as Docker images, incurring substantial environment setup costs.
+We propose Dockerless, an environment-free agentic patch verifier that evaluates generated code patches without executing them.
+Rather than simply matching candidate patches to references, Dockerless judges patch correctness using evidence gathered through agentic repository exploration.
+On a verifier evaluation benchmark, Dockerless outperforms the strongest open-source verifier by14.314.3AUC points.
+Using Dockerless as both the SFT trajectory filter and the RL reward enables a fully environment-free post-training pipeline.
+The resulting model reaches62.0%62.0\%,50.0%50.0\%, and35.2%35.2\%resolve rate on SWE-bench Verified, Multilingual, and Pro, respectively.
+It surpasses the Qwen3.5-9B baseline by2.42.4,8.78.7, and2.92.9points, matching environment-based post-training.
+
+11footnotetext:Equal contribution.22footnotetext:Corresponding authors:  and1Introduction
+Program verifiers play a critical role in training automated coding agents. Whether curating high-quality trajectories for supervised fine-tuning (SFT)[yuan2023scaling,pan2025training,jain2025r2e,zeng2025pruning]or providing rewards for reinforcement learning (RL)[wei2025swerl,luo2025deepswe], verifiers determine whether the agent rollouts successfully resolve issues. Currently, the gold standard for this correctness feedback relies on executing test cases inside isolated, per-repository environments[jimenez2024swe,pan2025training,jain2025r2e].
+
+However, execution-based verification imposes substantial engineering overhead.
+Setting up these environments requires building custom Docker images, resolving per-repository dependencies, identifying relevant tests, and writing test-execution scripts and result parsers.
+Even advanced automated pipelines still succeed on only a limited share of candidate repositories[jain2025r2e,badertdinov2026swe,li2026repolaunch,zhang2025swebenchgoeslive].
+More fundamentally, many real-world repositories, especially private, enterprise, or legacy codebases, lack reproducible environments or comprehensive test suites altogether[pan2025training,zan2026multi], making execution-based verification unreliable or infeasible.
+
+Figure 1:Comparison of verifiers for SWE agents. Docker-based tests are accurate but depend on costly per-repository environments. LLM scorers sidestep that cost but score patches based on surface-level information, without actively inspecting the repository. Dockerless instead deeply explores the codebase to judge the patch, requiring no per-repository environment while retaining repository grounding.To reduce setup costs, recent work executes agent rollouts from a single shared base image rather than per-repository Docker containers[sun2026swe,ludwig2026swe,xu2025scalable].
+Yet, the verifier remains a critical bottleneck.
+Existing environment-free verifiers score patches using only surface-level information, without ever inspecting the repository[shum2025swe,wang2026rubric,luo2025deepswe].
+Such shallow approaches are insufficient for complex SWE tasks, where determining functional equivalence requires deep repository context: for example, whether a modified function is actually called by the failing behavior, or whether an alternative implementation correctly integrates with surrounding modules.
+
+To close this gap, we propose Dockerless, an environment-free agentic verifier that actively explores the repository to judge patch correctness. As shown infigure˜1, rather than blindly matching textual diffs, Dockerless grounds its verification in the actual codebase.
+Given an issue description, a reference patch, and a candidate patch, Dockerless first derives several verification questions from the issue and the reference patch. It then dispatches dedicated sub-agents to gather repository evidence for each question.
+Finally, it aggregates the collected evidence into a correctness score indicating whether the candidate patch correctly resolves the issue.
+We train Dockerless via rejection sampling on3.73.7K issues from SWE-Gym[pan2025training]and Multi-SWE-RL[zan2026multi], retaining only question-answer-judge trajectories whose final verdict matches the ground-truth test outcome.
+
+Ultimately, Dockerless unlocks a fully environment-free post-training pipeline: rollout collection, SFT data filtering, and RL reward computation can all run on a minimal base image withzero per-repository setup.
+As a standalone verifier, Dockerless outperforms the strongest open-source baseline by14.314.3AUC points on a verifier evaluation benchmark.
+For SFT, training on the top25%25\%of trajectories filtered by Dockerless (44K out of1616K) surpasses training on the full environment-free pool by1.81.8,6.46.4, and3.43.4points on SWE-bench Verified, Multilingual, and Pro, respectively.
+For RL, using Dockerless as an environment-free reward outperforms RL with the DeepSWE Verifier by1.41.4,2.72.7, and1.11.1points on the same three benchmarks.
+End-to-end, our fully environment-free post-training pipeline produces a model that reaches62.0%62.0\%,50.0%50.0\%, and35.2%35.2\%resolve rate on SWE-bench Verified, Multilingual, and Pro[jimenez2024swe,openai2024introducing,yang2025swe,deng2025swe], improving over the Qwen3.5-9B baseline by2.42.4,8.78.7, and2.92.9points, respectively.
+By matching the performance of standard environment-based post-training, Dockerless establishes environment-free post-training as a scalable and viable path for the vast long tail of real-world repositories.
+
+•We propose Dockerless, an environment-free agentic verifier that scores patches by actively exploring the repository with parallel sub-agents.
+
+•By providing reliable correctness feedback, Dockerless enables a fully environment-free post-training pipeline for SFT trajectory filtering and RL rewards, scaling coding-agent post-training.
+
+•Empirically, Dockerless outperforms the strongest open-source verifier by14.314.3AUC points, while the resulting fully environment-free post-training pipeline achieves performance comparable to standard environment-based post-training.
+
+Figure 2:Architecture of Dockerless. The verifier takes the issuexx, reference patchyrefy_{\text{ref}}, and candidate patchyy, and proceeds in two stages.
+(1) Question generation and exploration: the verifier first generatesKKverification questions and dispatches parallel sub-agents to collect evidence-backed answers from the codebase.
+(2) Judgment: the verifier conditions on the issue, the patches, and the collected(Qk,Ak)(Q_{k},A_{k})pairs to produce a binary verdict token, whose logits define the continuous scorerϕ​(x,y)r_{\phi}(x,y).
+2Methodology
+2.1Problem Setting
+Given an issuexxand a candidate patchyy, a verifier assigns a correctness scorer​(x,y)∈[0,1]r(x,y)\in[0,1]indicating whetheryyresolvesxx.
+
+In standard SWE post-training, which we call theenvironment-based(env-based) setting, candidate patches are verified by executing held-out tests inside a repository-specific environment (ExE_{x}).ExE_{x}consists of a Docker image with pinned dependencies, a curated unit-test suite, and a working test runner.
+This produces a binary correctness signal:
+renv​(x,y)=𝟙​[tests in​Ex​pass under​y].r_{\text{env}}(x,y)=\mathbb{1}\!\left[\,\text{tests in }E_{x}\text{ pass under }y\,\right].(1)However, building these environments is prohibitively expensive, and many real-world codebases lack reproducible environments or usable test suites.
+
+To make post-training scalable, we consider theenvironment-free(env-free) setting in which agents run in a single minimal base image without repository-specific dependencies, test runners, or access toExE_{x}.
+This setting is already practical on the agent side: frontier models under the OpenHands scaffold retain much of their performance after removing the per-repository environment, with resolve-rate drops of3.03.0–13.913.9points (Appendix˜A).
+Thus, env-free rollouts can be collected at scale; the remaining bottleneck is verification.
+Our goal is to train an environment-free verifierrϕ​(x,y)r_{\phi}(x,y)that can replacerenvr_{\text{env}}for both SFT trajectory filtering and RL reward computation.
+
+2.2Architecture of Dockerless
+As illustrated infigure˜2, the verifier operates in two stages.
+First, given an issuexxand a reference patchyrefy_{\text{ref}}, the model proposes a small set of verification questions{Q1,…,QK}\{Q_{1},\dots,Q_{K}\}. These questions ask, for example,where in the repository the fix should take effect,what the patched code is supposed to do,what tests or assertions would confirm correctness, andwhether other parts of the repository could break.
+Answering these questions grounds the verifier’s eventual judgment in repository exploration rather than in surface-level comparison between the candidate and the reference patch.
+For each question, a sub-agent then explores the repository through read-only shell tools (e.g., find, grep, rg) and returns a short evidence-backed answerAkA_{k}.
+TheKKsub-agents run in parallel for efficiency.
+
+After all sub-agents return their answers, Dockerless aggregates the collected evidence to judge whether the candidate patchyyresolves the issuexx.
+Given(x,yref,y,{(Qk,Ak)}k=1K)(x,y_{\text{ref}},y,\{(Q_{k},A_{k})\}_{k=1}^{K}), the verdict model outputs a binary token in{0,1}\{0,1\}, where11denotes a correct patch.
+At inference time, we convert the logits of the two verdict tokens into a continuous score:
+rϕ​(x,y)=exp⁡(ℓ1)exp⁡(ℓ0)+exp⁡(ℓ1),r_{\phi}(x,y)=\frac{\exp(\ell_{1})}{\exp(\ell_{0})+\exp(\ell_{1})},whereℓ0\ell_{0}andℓ1\ell_{1}are the logits for tokens0and11.
+The full prompts used at both stages are listed inAppendix˜G.
+
+Figure 3:Training pipeline for Dockerless: teacher-generated question-answer-judge trajectories are rejection-sampled by matching the predicted verdict against the ground-truth, and used to fine-tune a base model.
+2.3Dockerless Training
+We train the verifierrϕr_{\phi}via rejection sampling on execution-labeled candidate patches.
+Each example is a tuple(x,yref,y,r⋆)(x,y_{\text{ref}},y,r^{\star}), wherer⋆∈{0,1}r^{\star}\in\{0,1\}is the ground-truth verdict obtained by running the held-out unit tests on the candidate patchyy.figure˜3gives an overview of the training pipeline.
+
+To construct training trajectoriesτ\taufor the question-answer-judge, an agent powered with a teacher model explores the repository until making a judgment verdictr^∈{0,1}\hat{r}\in\{0,1\}for each example.
+We then reject-sample these trajectories, keeping only those whoser^\hat{r}matches the execution labelr⋆r^{\star}; the retained examples form𝒟rej\mathcal{D}_{\text{rej}}.
+This keeps the training signal consistent end-to-end, and the verifier learns how to reason step-by-step and conclude the final verdict rather than from lucky matches.
+We additionally cap the negative-to-positive sample ratio atρ\rhoto mitigate class imbalance, following the recipe ofshum2025swe.
+
+The verifier is then trained with the standard next-token cross-entropy over the full output sequence.
+ℒϕ=−𝔼𝒟rej​[∑t=1Tlog⁡pϕ​(zt∣x,yref,y,z<t)],\mathcal{L}_{\phi}=-\mathbb{E}_{\mathcal{D}_{\text{rej}}}\left[\sum_{t=1}^{T}\log p_{\phi}(z_{t}\mid x,y_{\text{ref}},y,z_{<t})\right],(2)wherez=(z1,…,zT)z=(z_{1},\ldots,z_{T})denotes the token sequence in the question-answer-judge trajectoriesτ\tau.
+A single backbone is shared across question generation, sub-agent exploration, and the final judging stage, jointly trained underequation˜2.
+Full training details are insection˜D.1.
+
+2.4Environment-Free Post-training
+Figure 4:Env-free post-training pipeline for Dockerless. (A) Environment-free RFT: candidate rollouts are scored by Dockerless, and the top-KKare kept to fine-tune the base model, yielding the SFT model. (B) Environment-free RL: starting from the SFT model, GRPO uses Dockerless as the per-rollout reward source, yielding the RL model.With Dockerless trained, we now apply it in the environment-free post-training pipelines, illustrated infigure˜4.
+
+Environment-free RFT.
+Rejection-sampling fine-tuning (RFT)[yuan2023scaling]curates SFT data by keeping only the high-quality rollouts whose final patches pass per-repository unit tests[pan2025training,jain2025r2e].
+We instead start from an agent, collect a large pool of rollouts in a minimal Linux image without instantiating per-repository environments, and use Dockerless as the rejection signal.
+We score each rollout’s final patch with Dockerless and form𝒟RFT\mathcal{D}_{\text{RFT}}by keeping the top-KKrollouts globally ranked byrϕr_{\phi}.
+We then fine-tune the model on𝒟RFT\mathcal{D}_{\text{RFT}}with the standard SFT objective, yielding the SFT model.
+
+Environment-free RL.
+We further use Dockerless as the reward model for RL on top of the SFT model. During RL, rollouts are collected in the same minimal Linux image used for env-free RFT, i.e., without a per-repository environment.
+For each rollout on issuexx, letyiy_{i}denote its final patch. We scoreyiy_{i}with Dockerless and userϕ​(x,yi)r_{\phi}(x,y_{i})as the reward.
+We then optimize the model with GRPO[shao2024deepseekmath]. For each group ofGGrollouts on issuexx, let{y1,…,yG}\{y_{1},\dots,y_{G}\}denote their final patches. We form group-normalized advantages
+Ai=rϕ​(x,yi)−r¯σ^r,r¯=1G​∑j=1Grϕ​(x,yj),A_{i}=\frac{r_{\phi}(x,y_{i})-\bar{r}}{\hat{\sigma}_{r}},\qquad\bar{r}=\frac{1}{G}\sum_{j=1}^{G}r_{\phi}(x,y_{j}),(3)whereσ^r\hat{\sigma}_{r}is the standard deviation of the verifier rewards in the group. These advantages are then used in the standard GRPO objective.
+To improve reward stability, we compute each reward by averagingMMindependent Dockerless evaluations of the same final patch.
+
+3Experimental Settings
+Benchmarks.
+For agent resolve rate, we evaluate on SWE-bench Verified[jimenez2024swe,openai2024introducing], SWE-bench Multilingual[yang2025swe], and SWE-bench Pro[deng2025swe].
+For evaluating the verifier itself, we follow recent practice[shum2025swe]and construct a balanced trajectory-level verifier evaluation benchmark of776776samples (500500from SWE-bench Verified and276276from Multi-SWE-bench Flash[zan2026multi]); construction details are insection˜C.3.
+
+ModelBaseTrainingEnv-freeVerifiedMultilingualProOpen-source modelsSWE-Gym-7BQwen2.5-Coder-7BSFTNo11.43.03.3SWE-Dev-7BQwen2.5-Coder-7BSFTNo10.64.24.0SWE-Lego-8BQwen3-8BSFTNo41.219.016.1Qwen3.5-9B–––59.641.332.3Ours: SFT on varying rollout sourcesEnv-SFT-9BQwen3.5-9BSFTNo60.048.333.9Dockerless-SFT-9BQwen3.5-9BSFTYes60.647.735.3Ours: RL on varying rollout and reward sources+ DeepSWE-Verifier RLDockerless-SFT-9BRLYes60.647.334.1+ Test-Execution RLDockerless-SFT-9BRLNo62.451.335.7Dockerless-RL-9BDockerless-SFT-9BRLYes62.050.035.2
+Table 1:Resolve rate (%) on SWE-bench Verified, Multilingual, and Pro under env-based evaluation.Baseis the starting model of each training stage;Trainingmarks SFT or RL;Env-freeindicates whether the full training stage avoids per-repository Docker: “Yes” uses only a minimal base image, while “No” uses per-repository Docker;
+Bold rows are our headline models; gray rows are controlled comparisons that isolate the SFT rollout source or the RL rollout and reward source.
+Evaluation protocol.
+We use OpenHands[wang2025openhands]as the default agent scaffold with a maximum of150150turns.
+For env-based evaluation, the agent runs inside the original per-repository Docker image with repository dependencies and test runners.
+For env-free evaluation, the agent runs in a minimal Ubuntu 22.04 LTS image (ubuntu:jammy-20260109) with only the repository checkout at the base commit.
+The main paper reports env-based evaluation, following the standard SWE evaluation protocol; env-free numbers are deferred toAppendix˜B.
+We report resolve rate for issue resolution.
+For verifier evaluation, we follow[shum2025swe]and report AUC, a discrimination metric aligned with SFT filtering and RL rewards.
+
+Baselines.
+For agent performance, we compare our SFT and RL models against open-source SWE specialists at the same scale (under1010B parameters): SWE-Gym-7B[pan2025training], SWE-Dev-7B[wang2025swedev], SWE-Lego-8B[tao2026swelego], and the base model Qwen3.5-9B[team2026qwen35].
+For verifier evaluation, we compare Dockerless against four frontier LLMs used zero-shot as judges (DeepSeek-V3.2[liu2025deepseek], Kimi-K2.5[team2026kimi], GLM-5[zeng2026glm], GPT-5.4[openai2026gpt54]) and four trained verifiers: SWE-Gym Verifier[pan2025training], R2E-Gym Verifier[jain2025r2e], OpenHands Critic[wang2026rubric], and DeepSWE Verifier[luo2025deepswe].
+
+Implementation details.
+We use Qwen3.5-9B[team2026qwen35]as the backbone for both Dockerless and the downstream post-training.
+Dockerless is trained on rejection-sampled trajectories from3.73.7K execution-labeled issues drawn from SWE-Gym[pan2025training]and Multi-SWE-RL[zan2026multi], and usesK=2−4K{=}2-4verification questions.
+For downstream post-training, we use SWE-Rebench-v2[badertdinov2026swev2]. We collect env-free trajectories for SFT and sample RL rollouts from the same task pool.
+Full training data construction and hyperparameters are deferred toAppendices˜CandD.
+
+4Results
+4.1Main results
+Fully environment-free post-training reaches strongest open-source performance.
+Starting from Qwen3.5-9B, our fully environment-free post-training pipeline produces Dockerless-RL-9B, which reaches62.062.0,50.050.0, and35.235.2resolve rate on SWE-bench Verified, Multilingual, and Pro, respectively (table˜1).
+This improves over the base model by+2.4+2.4,+8.7+8.7, and+2.9+2.9points and over the next-best open-source SWE specialist (SWE-Lego-8B) by+20.8+20.8,+31.0+31.0, and+19.1+19.1points.
+
+Env-free SFT matches env-based SFT.
+We next isolate the SFT stage by comparing two Qwen3.5-9B SFT models that differ only in the source of their training rollouts: Env-SFT-9B uses trajectories collected with a per-repository environment, while Dockerless-SFT-9B uses env-free trajectories filtered by Dockerless.
+Despite removing test execution from SFT data filtering, Dockerless-SFT-9B achieves comparable performance to the env-based baseline (60.660.6vs.60.060.0on Verified,47.747.7vs.48.348.3on Multilingual, and35.335.3vs.33.933.9on Pro).
+
+Env-free RL approaches env-based RL.
+We then isolate the RL stage on top of the same SFT initialization, Dockerless-SFT-9B.
+The three RL variants differ in their rollout environment and reward source: Dockerless-RL-9B uses env-free rollouts with Dockerless rewards, DeepSWE-Verifier RL uses DeepSWE Verifier rewards, and Test-Execution RL uses per-repository Docker with oracle test-execution rewards.
+Dockerless-RL-9B achieves performance close to Test-Execution RL (62.062.0vs.62.462.4on Verified,50.050.0vs.51.351.3on Multilingual, and35.235.2vs.35.735.7on Pro), while outperforming DeepSWE-Verifier RL by+1.4+1.4,+2.7+2.7, and+1.1+1.1points.
+
+4.2Verifier evaluation
+ModelVerifiedMulti-SWEDeepSeek-V3.269.458.5Kimi-K2.570.763.9GLM-573.262.5GPT-5.475.959.5SWE-Gym Verifier61.053.7R2E-Gym Verifier64.355.1OpenHands Critic48.652.2DeepSWE Verifier66.762.9Dockerless81.072.1Table 2:Verifier AUC on the trajectory-level verifier evaluation benchmark, with splits from SWE-bench Verified and Multi-SWE-bench Flash.We compare Dockerless against two baseline families on the balanced trajectory-level verifier evaluation benchmark (table˜2): four frontier LLMs (DeepSeek-V3.2, Kimi-K2.5, GLM-5, GPT-5.4) used zero-shot as judges (section˜G.4), and four trained open-source verifiers (SWE-Gym Verifier, R2E-Gym Verifier, OpenHands Critic, DeepSWE Verifier).
+
+With agentic repository exploration, Dockerless reaches81.081.0AUC on SWE-bench Verified and72.172.1AUC on Multi-SWE-bench Flash, outperforming every baseline in both splits.
+Compared with the strongest trained open-source verifier, Dockerless improves AUC by14.314.3points on Verified and9.29.2points on Multi-SWE-bench Flash; compared with the strongest frontier LLM judge, it improves by5.15.1and8.28.2points, respectively.
+These results show that the design of Dockerless, which combines agentic repository exploration with rejection-sampled trajectory training, yields a stronger patch verifier.
+This strong verifier performance is the key signal used insection˜4.1: Dockerless filters env-free SFT trajectories and supplies rewards for env-free RL, enabling post-training without per-repository test execution.
+
+4.3Effect of the SFT data filter
+Training DataVerifiedMultilingualProNone (base)59.641.332.3All 16K58.841.331.9Random 4K58.244.332.0Env-based 4K60.048.333.9Dockerless 4K60.647.735.3Table 3:Effect of the SFT data filter on downstream resolve rate (%) under env-based evaluation.
+All SFT rows use the same Qwen3.5-9B backbone and SFT recipe; only the selected training data differs.
+The base row reports Qwen3.5-9B.We hold the SFT backbone and recipe fixed, and vary only the selected training data (table˜3).
+Starting from a pool of1616K env-free trajectories,All 16Ktrains on the full unfiltered pool,Random 4Ksamples44K trajectories uniformly, andDockerless 4Kkeeps the top-ranked44K trajectories selected by Dockerless.
+As an env-based comparison,Env-based 4Kuses44K trajectories obtained with per-repository environments.
+
+Dockerless achieves effective trajectory filtering.
+Training on all env-free trajectories does not improve over the base model:All 16Kreaches58.858.8,41.341.3, and31.931.9, below or equal to the base on all three benchmarks.
+This shows that raw env-free rollouts cannot be used directly for SFT; low-quality trajectories need to be filtered.Dockerless 4Ksubstantially outperformsRandom 4Kon all three benchmarks (60.660.6vs.58.258.2on Verified,47.747.7vs.44.344.3on Multilingual, and35.335.3vs.32.032.0on Pro),
+demonstrating that Dockerless provides a more effective selection signal than random sampling.
+
+Env-free RFT matches env-based trajectory collection.
+More importantly, env-free trajectory collection combined with Dockerless filtering achieves performance comparable to SFT on env-based trajectories.Dockerless 4KmatchesEnv-based 4Kacross the three benchmarks (60.660.6vs.60.060.0on Verified,47.747.7vs.48.348.3on Multilingual, and35.335.3vs.33.933.9on Pro).
+This suggests a scalable path for RFT: collect rollouts without per-repository setup, then use a strong verifier to select the trajectories worth training on.
+
+4.4Effect of the number of verification questions
+Figure 5:Verifier AUC vs. number of verification questionsKKon SWE-bench Verified verifier evaluation benchmark.figure˜5studies how the number of verification questions affects Dockerless performance.
+We vary the number of verification questionsK∈{0,1,2,4,6,8}K\in\{0,1,2,4,6,8\}on the SWE-bench Verified split of our verifier evaluation benchmark.
+For each setting, Dockerless first derivesKKverification questions from the issue and reference patch, dispatches one sub-agent per question to gather repository evidence, and then judges the candidate patch from the collected Q&A evidence.
+We report AUC against the execution-based ground truth.
+
+Dockerless performance improves asKKincreases from0to44, rising from78.378.3AUC with no verification question to81.081.0AUC atK=4K{=}4.
+This shows that asking verification questions and gathering repository evidence helps Dockerless judge patch correctness.
+Beyond four questions, performance fluctuates rather than improving monotonically (79.679.6atK=6K{=}6,80.380.3atK=8K{=}8), suggesting that additional questions often introduce redundant or noisy evidence.
+We therefore let Dockerless generate22–44verification questions at inference time, balancing verifier accuracy and per-call exploration cost.
+
+4.5Latency analysis
+Dockerless performs a multi-step repository exploration before issuing a reward, so its reward computation is expected to take longer.
+We therefore analyze RL training latency under the three reward sources insection˜4.1: Dockerless, the DeepSWE Verifier, andTest-Execution, using76807680rollouts.
+
+figure˜6decomposes each RL step into agent rollout time and reward-evaluation time.
+Agent rollouts dominate the wall-clock cost, taking23082308s on average, whereas reward evaluation adds only4141–180180s.
+Although Dockerless requires more reward-evaluation time than the other verifier rewards, it still accounts for only7.2%7.2\%of the total per-rollout time.
+Thus, in the RL setting, the additional cost of agentic verification is small compared with the cost of generating rollouts.
+The end-to-end latency distribution shows the same pattern.
+As shown inAppendix˜F, total per-rollout times under the three reward sources almost overlap, because throughput is dominated by slow rollouts approaching the timeout rather than by reward computation.
+
+Figure 6:Per-rollout wall-clock breakdown during RL under three reward sources.Figure 7:Representative case where the candidate patch resolves the issue but uses a different surface form from the reference patch.
+4.6Case study
+figure˜7shows a representative case on amatplotliboffsetTextcolor issue: the candidate patch passes execution (renv=1.0r_{\text{env}}{=}1.0) but rewrites the fix as an inline conditional rather than the helper-variable refactor used by the reference patch.
+Both baselines assign low scores: text similarity returns0.4680.468, and the DeepSWE Verifier assigns0.0350.035.
+Dockerless instead dispatches one sub-agent per verification question. The gathered evidence confirms that the fix is applied to bothXAxisandYAxisinitialization paths inlib/matplotlib/axis.py, and that theinheritvs. explicitlabelcolorsemantics are preserved.
+With this repository-grounded evidence, Dockerless scores the patch0.9960.996, in agreement with the execution result.
+The case illustrates how Q&A evidence can support a correct judgment even when the candidate patch differs substantially from the reference patch in surface form.
+
+5Related Work
+5.1Software Engineering Agents
+Large language models (LLMs) have rapidly evolved from generating simple code snippets[PengGGHL24,abs-2501-01329,GaoWGWZL23,shi2024code]to real-world software engineering tasks[jimenez2024swe,yang2024swe,li2025swe,chen2025swe]. SWE agents are typically post-trained with a two-stage SFT-then-RL recipe on scaffolds such as SWE-agent[yang2024swe]and OpenHands[wang2025openhands], with SFT on curated or execution-filtered trajectories[pan2025training,jain2025r2e,yang2025swe,badertdinov2026swe,yang2025kimi]and RL driven by test-execution rewards[wei2025swerl,luo2025deepswe,golubev2025training,shao2024deepseekmath,yu2025dapo].
+A complementary line builds env-free rollout pipelines that share a single base image across repositories[sun2026swe,xu2025scalable,ludwig2026swe], but they still constrain the agent during rollout, by exposing only a small set of static tools[xu2025scalable], by simulating tool returns with a learned transition model[sun2026swe], or by prompt-level restrictions on what may be executed[ludwig2026swe].
+Dockerless instead lets the agent issue any shell command in a minimal Linux image and receive real tool feedback, and replaces both the RFT-stage filter and the RL reward source with a single env-free agentic verifier.
+
+5.2Verifiers for SWE agents
+A line of work trains LM verifiers that score a patch from a fixed prompt, ranging from execution-trained classifiers[pan2025training,jain2025r2e]and a scaled 30B mixture-of-experts critic[shum2025swe]to group-wise textual reasoning over candidates[xu2025scalable]and rubric-supervised or RL-distilled variants[wang2026rubric,luo2025deepswe].
+None of these call tools or inspect the repository at scoring time.
+A more recent line frames the verifier itself as an agent, but places that agent outside the SWE patch outcome setting.
+Some target domains far from SWE patches, namely mathematical reasoning[zhang2026agentv,zeng2026glimprouter]and competitive programming[ma2026scaling,hu2026line,Gao0GL25,abs-2510-17130].
+Others place the agent at rubric authoring rather than at scoring[raghavendra2026agentic], or score intermediate trajectory steps under a fixed rubric rather than the final patch[han2026swe].
+Dockerless instead places the agent at SWE patch outcome scoring itself, actively exploring the repository through real tool calls before issuing a verdict.
+
+6Conclusion
+In this work, we propose Dockerless, an agentic verifier that scores patches by actively exploring the repository, requiring no per-repository environment.
+We show that Dockerless can serve as both the trajectory filter for SFT and the reward signal for RL, yielding a fully environment-free post-training pipeline for coding agents.
+Dockerless outperforms prior open-source verifiers, and the resulting model matches the performance of its environment-based counterpart while requiring zero per-repository setup.
+We believe that agentic, evidence-grounded verification provides a new perspective on reward modeling for code, and opens a scalable path toward post-training on the long tail of real-world repositories without reproducible execution environments.
+
+References
+
+Appendix AFrontier-model env-base vs. env-free
+Setting.
+We motivate Dockerless by first checking whether env-free agent rollouts are useful at all on SWE-bench.
+Four frontier models (DeepSeek-V3.2, Kimi-K2.5, GLM-5, GPT-5.4) are run under the OpenHands scaffold on SWE-bench Verified, Multilingual, and Pro.
+The env-based setting uses the per-repository Docker image with the held-out test suite, exactly as intable˜1; the env-free setting replaces it with the minimal Ubuntu image fromsection˜3, with no per-repository dependencies and test runner.
+We compare resolve rate (Pass@1) under the two settings.
+
+Figure 8:Frontier-model resolve rate (%) on SWE-bench Verified, Multilingual, and Pro under env-based and env-free settings. Solid bars are env-free; hatched extensions show the additional gain from per-repository environments, so the full bar height equals the env-based score.
+Removing the environment costs only a few points.
+The hatched portion of every bar infigure˜8is small: across the four models and three benchmarks, env-free evaluation costs at most13.913.9points and on average7.17.1points of resolve rate, with the strongest model (GPT-5.4) staying within3.03.0–4.04.0points across all three benchmarks.
+In the env-free setting, the model already solves a large fraction of issues that its env-based counterpart can solve on the same benchmarks.
+
+Implications for the verifier.
+The agent side of the env-free pipeline is therefore already largely feasible: rollouts can be collected at scale on benchmarks where no per-repository Docker is available, with only a moderate quality hit.
+The blocker is the verifier side, since without test execution there is no built-in correctness signal to filter rollouts or reward RL.
+This is the gap Dockerless closes; the corresponding env-free results on our own models are reported inAppendix˜B.
+
+Appendix BEnv-free evaluation results
+Setting.
+table˜1reports env-based evaluation only.
+For completeness, we re-evaluate the same models fromtable˜1under env-free evaluation, where the agent runs in a minimal Ubuntu 22.04 LTS image with only the repository checkout at the base commit, with no per-repository Docker, no test runner, and no pre-installed dependencies (definition insection˜3).
+Numbers are reported intable˜4.
+
+ModelVerifiedMultilingualProSWE-Gym-7B9.05.72.2SWE-Dev-7B8.47.02.2SWE-Lego-8B32.017.712.7Qwen3.5-9B50.238.326.0Env-SFT-9B50.036.727.2Dockerless-SFT-9B52.041.029.4Dockerless-RL-9B53.842.330.6Table 4:Resolve rate (%) on SWE-bench Verified, Multilingual, and Pro under env-free evaluation: the agent runs in a minimal Ubuntu image with only the repository checkout, with no per-repository Docker image and no pre-installed dependencies.
+These are the same models astable˜1, evaluated under the stricter env-free setting.
+Ranking is preserved across environments.
+Dockerless-RL-9B remains the strongest sub-1010B model on every benchmark under env-free evaluation (53.853.8,42.342.3,30.630.6), ahead of Dockerless-SFT-9B by1.21.2–1.81.8points and of the env-based-SFT baselineEnv-SFT-9Bby3.83.8,5.65.6, and3.43.4points on Verified, Multilingual, and Pro respectively.
+The aggregate story fromtable˜1therefore carries over to env-free deployment: a fully env-free pipeline (Dockerless-SFT-9B and Dockerless-RL-9B trained without test execution) still produces the strongest model when the deployment setting also forbids test execution.
+
+Dockerless-trained models are more robust to env-free deployment.
+Comparing each model’s env-based score intable˜1to its env-free score intable˜4, the average drop is9.49.4points forEnv-SFT-9B,7.17.1points for Dockerless-SFT-9B, and6.86.8points for Dockerless-RL-9B.
+The env-free-trained models thus suffer a smaller env-base-to-env-free gap than the env-based-trained baseline, which is the expected direction: a model that has been trained on env-free rollouts has seen the same distribution it is evaluated on at deployment, while the env-based-trained baseline is exposed to a distribution shift.
+The same trend holds for the open-source SFT specialists, whose absolute scores are too low to draw strong conclusions but whose gaps lie in the same range.
+
+Appendix CDataset Construction
+C.1Agentic verifier training data
+We construct a training corpus from execution-labeled patches in SWE-Gym[pan2025training]and Multi-SWE-RL[zan2026multi], withr⋆∈{0,1}r^{\star}\in\{0,1\}being the verdict obtained from running the held-out unit tests on the candidate patch.
+These datasets are disjoint from our verifier evaluation benchmark built from SWE-bench Verified and Multi-SWE-bench Flash.
+For each source example, a strong frontier teacher model (GLM-5) proposes one or more candidate(Q​+​A​+Judge trajectory,r^)(Q\text{+}A\text{+Judge trajectory},\hat{r})tuples via the same workflow used at inference (section˜2.2).
+We then keep only tuples whose predicted verdictr^\hat{r}matchesr⋆r^{\star}, and apply two additional cleaning passes: we discard answer trajectories with fewer than44or more than3030turns, and we remove malformed or interrupted exchanges.
+Finally, we cap the negative-to-positive sample ratio at4:14{:}1to mitigate class imbalance, following the recipe ofshum2025swe.
+The resulting corpus covers3.73.7K unique issues.
+Each training example bundles one question-generation trajectory,KKsub-agent answer trajectories, and one final-judgment trajectory, all generated by the same teacher.
+We do not enforce a target ratio across these three sub-tasks; they are jointly trained on the same backbone underequation˜2.
+Both inputs (the candidate patch text and the rendered Q+A context) are truncated to10,00010{,}000characters before being fed to the model.
+
+C.2Env-free rollout data
+The pool of env-free rollouts used to construct𝒟RFT\mathcal{D}_{\text{RFT}}is collected on SWE-Rebench-v2[badertdinov2026swev2].
+Starting from the OpenHands agent and a minimal Linux image, the agent receives only the issuexxand the repository at the base commit, with no per-repository Docker image; OpenHands tools remain available and may include execution feedback from running standard developer utilities.
+We collect a pool of1616K rollouts at sampling temperature1.01.0, from which the downstream filter selects44K trajectories globally ranked by Dockerless.
+
+C.3Verifier evaluation benchmark
+We construct a balanced trajectory-level verifier benchmark to evaluate Dockerless against prior verifiers (table˜2).
+The benchmark contains500500samples drawn from SWE-bench Verified and276276samples drawn from Multi-SWE-bench Flash, with positive and negative labels balanced within each split.
+Trajectories are collected from several models running under the SWE-agent and OpenHands scaffolds in a1:11{:}1split, and each (issue, candidate patch) pair is labeled positive or negative via standard evaluation inside the per-repository Docker environment with held-out tests; positive and negative labels are balanced1:11{:}1within each split.
+
+Appendix DTraining Details
+D.1Agentic verifier
+The agentic verifier is initialized from Qwen3.5-9B[team2026qwen35]and fine-tuned with standard next-token cross-entropy on the filtered trajectories described insection˜C.1(equation˜2).
+We report results from the best checkpoint, reached at150150optimizer steps on a held-out validation split.
+We use AdamW with learning rate1.0​e−51.0\mathrm{e}{-5}(cosine decay to1.0​e−61.0\mathrm{e}{-6}, warmup ratio0.050.05), weight decay0.010.01, batch size256256, and maximum sequence length32,76832{,}768.
+
+At inference, we serve the trained model via vLLM with the OpenAI-compatible API.
+The verifier generates22–44verification questions per scoring call, with one sub-agent dispatched per question to explore the repository in parallel.
+At the answer position, we read the logits of the “0” and “11” verdict tokens and convert them into the dense score via softmax (section˜2.2).
+
+D.2Env-free SFT
+Each candidate rollout’s final patch is scored by Dockerless withM=2M{=}2independent agentic passes; we report the mean dense score and discard any pass that fails (e.g., due to inference-time errors or timeouts).
+We then build𝒟RFT\mathcal{D}_{\text{RFT}}by selecting the top-ranked44K rollouts globally from the1616K pool.
+The SFT model is initialized from Qwen3.5-9B[team2026qwen35]and trained with standard maximum-likelihood on𝒟RFT\mathcal{D}_{\text{RFT}}.
+We use the same AdamW configuration as the verifier (section˜D.1), trained for33epochs.
+
+D.3Env-free RL
+We initialize the RL policy from the SFT model produced insection˜D.2and run GRPO[shao2024deepseekmath]with Dockerless as the per-rollout reward source.
+For each issuexx, we sample a group ofG=8G{=}8rollouts and score every rollout withM=2M{=}2independent agentic passes through Dockerless; failed passes are dropped and the remaining dense scores are averaged to formrϕ​(x,yi)r_{\phi}(x,y_{i}).
+The group-normalized advantages fromequation˜3drive the policy update following the standard GRPO objective; no test execution is performed at any step.
+We use actor learning rate2.0​e−62.0\mathrm{e}{-6}, training batch size6464, PPO mini-batch size6464,88responses per prompt, clipping range[0.2,0.27][0.2,0.27], entropy coefficient0, KL coefficient0(no KL loss), maximum150150turns per rollout, and sampling temperature1.01.0.
+We train for5050RL steps in total.
+
+Appendix EPer-Language Analysis
+While the aggregate SFT (w/o env) vs. SFT (w/ env) gap intable˜1is small, the per-language breakdown (figure˜9) is uneven, and the unevenness has a consistent pattern.
+
+Figure 9:Per-language comparison of SFT (w/o env) and SFT (w/ env) resolve rate, aggregated across SWE-bench Verified, Multilingual, and Pro. Bubble size encodes the number of test instances per language. Points above the diagonal mark languages where SFT (w/ env) wins, below the diagonal where SFT (w/o env) wins.The two languages where SFT (w/ env) clearly wins are also the two compilation-heavy ones in the benchmark: Rust (+7.0+7.0) and C (+13.3+13.3).
+On the remaining high-volume languages (Python, Go, JavaScript, Java, PHP), the two settings stay within±2.5\pm 2.5points of each other.
+The two large gaps below the diagonal (TypeScript−13.3-13.3, C++−8.3-8.3) come from splits with only3030and1212instances, so we do not read them as evidence either way.
+
+We attribute the Rust/C gap to compiler diagnostics being available only inside the per-repository environment: env-base trajectories can observe type errors and link failures at intermediate steps, while env-free trajectories must infer the same information from the source alone.
+This is consistent with the broader claim that the residual value of env-base supervision is concentrated in compiler signal, not in test execution per se, although Rust and C are only two languages and we do not treat this as proof.
+
+The takeaway fortable˜1is that the headline “env-free matches env-base” holds across the high-volume languages that dominate the aggregate, but understates a real77–1313point gap on compilation-heavy languages.
+Closing that gap likely requires surfacing compiler-style feedback inside the env-free pipeline rather than scaling env-base data further, which we leave to future work.
+
+Appendix FLatency distribution
+Figure˜10complements the mean numbers insection˜4.5by showing the full distribution of per-rollout wall-clock time (rollout + reward) for the three reward sources.
+The three distributions overlap almost completely: a single mode around24002400–30003000s and a heavy tail extending to the hard timeout.
+The choice of reward source shifts the mean by less than150150s, well inside the spread of the rollout distribution itself, so the end-to-end RL step is bottlenecked by the slowest rollouts in each group rather than by reward latency.
+
+Figure 10:Distribution of total per-rollout wall-clock time (rollout + reward) under three reward sources, on76807680rollouts collected during RL training. All three sources produce near-identical distributions; the long right tail is set by slow rollouts, not by the verifier.
+Appendix GPrompt Templates
+We list below the full prompts used by Dockerless.
+
+G.1Question generation prompt
+The question generator takes the issue description and the reference patch and emits22–44diagnostic questions, each tagged with one of four categories (location, behavior, test evidence, edge case) and accompanied by a short rationale.
+
+Stage 1: Question Generation Prompt## RoleYou are an expert code reviewer specialized in analyzing patches across different programming languages.## TaskGenerate2--4 focused questionsthat would provide strong evidence for judging whether a candidate’s patch correctly fixes the issue. Your questions should help distinguish a correct fix from an incorrect or incomplete one.## Input### Issue Description{issue_description}### Golden Patch (Correct Solution){golden_patch}## Analysis FrameworkBefore generating questions, briefly analyze: (1) Bug Type, (2) Failure Scenario, (3) Success Criteria.## Question CategoriesYour questions MUST fall into one of these categories:•Location: identify WHERE the fix should be applied.•Behavior: understand WHAT the code should do.•Test Evidence: find HOW to verify correctness.•Edge Cases: discover WHAT ELSE might break.## Output FormatOutput a single JSON object with an analysis field (bug_type, failure_scenario, success_criteria) and a questions list, each item carrying id, category, question, and rationale.## Key PrincipleFocus on evidence that can distinguish between a complete fix, a partial fix, and an incorrect fix.
+
+G.2Sub-agent exploration prompt
+The sub-agent runs a ReAct-style read-only shell loop. It is configured with a fixed system message and a per-question instance template, and emits a final answer through aSUBMIT_ANSWERheredoc.
+
+Stage 1: Sub-agent System MessageYou are a code exploration assistant that answers questions by running shell commands. You analyze codebases in various programming languages (Python, Java, JavaScript, Go, C++, etc.).## Response FormatEvery response MUST contain: (1) aTHOUGHTsection explaining your reasoning, and (2) exactlyONEbash command in a code block.## RulesThis is a READ-ONLY task; do NOT modify any files. Execute ONE command per response. Use non-interactive commands only. Chain commands with && or || when needed in a single block.
+Stage 1: Sub-agent Per-Question Instance Template<question>Answer the following question by exploring the codebase.### Issue Description{issue_description}### Golden Patch{golden_patch}### Question{question}</question><instructions>## GoalFind concrete evidence that helps verify if a patch correctly fixes the issue. This is a READ-ONLY task.## Search Strategy (priority order)(1) Test Evidence: find tests that validate the correct behavior. (2) Error Location: find where the error or failure occurs. (3) Code Context: understand the code being patched, including definitions and call sites. (4) Documentation & Configuration: find expected-behavior documentation.## Final Answer FormatWhen evidence is sufficient, submit the answer via a cat <<’ANSWER_EOF’ block containing: a SUBMIT_ANSWER marker, a Direct Answer, Key Findings, and one or more FILE / RANGE code-evidence blocks.## Important NotesFocus on concrete evidence (actual code, tests, assertions). Prioritize test cases. Include file paths and line numbers for all evidence. Be language-aware but use language-agnostic search patterns.</instructions>
+
+G.3Final scoring prompt
+The judge model conditions on the issue, the reference patch, the candidate patch, and the Q&A context collected by the sub-agents, and produces a single binary verdict token whose logits define the continuous scorerϕ​(x,y)r_{\phi}(x,y).
+
+Stage 2: Final Scoring Prompt## Role:You are an expert code reviewer.## Task:Evaluate whether the ‘‘Generated Patch’’ solves the issue described in the ‘‘Issue Description’’ correctly, using the Q&A context gathered in Stage 1 and the golden patch (a correct solution) as a reference.## Issue Description:{issue_description}{context}## Golden Patch:{golden_patch}## Generated Patch:{generated_patch}## Response Format:You must follow the response format strictly:<answer>[0 for not solving the issue, 1 for solving the issue]</answer>
+
+G.4Zero-shot LLM-as-judge prompt
+For the frontier LLM-as-judge baselines intable˜2(DeepSeek-V3.2, Kimi-K2.5, GLM-5, GPT-5.4), we query each model zero-shot with the issue description, the reference (golden) patch, and the candidate patch, and parse the binary verdict from the<answer>tag.
+
+Zero-shot LLM-as-Judge Prompt## Role:You are an expert code reviewer.## Task:Your task is to evaluate whether the ‘‘Generated Patch’’ solves the issue described in the ‘‘Issue Description’’ correctly based on the issue description and a golden patch (a reference correct solution).## Issue Description:{issue_description}## Golden Patch:{golden_patch}## Generated Patch:{generated_patch}## Response Format:You must follow the response format strictly:<answer>[0 for not solving the issue, 1 for solving the issue]</answer>
+
