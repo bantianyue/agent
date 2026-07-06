@@ -1,0 +1,1724 @@
+\pdftraileridredacted\correspondingauthorGaotang Li<gaotang3@illinois.edu>and Bhavana Dalvi Mishra<bhavana@google.com>.This work was done while Gaotang Li interned at Google Cloud AI Research.
+
+RubricEM: Meta-RL with Rubric-guided Policy Decomposition beyond Verifiable Rewards
+Gaotang LiUniversity of Illinois Urbana-ChampaignBhavana Dalvi MishraGoogle Cloud AI ResearchZifeng WangGoogle Cloud AI ResearchJun YanGoogle Cloud AI ResearchYanfei ChenGoogle Cloud AI ResearchChun-Liang LiGoogle Cloud AI ResearchLong T. LeGoogle Cloud AI ResearchRujun HanGoogle Cloud AI ResearchGeorge LeeGoogle Cloud AI ResearchHanghang TongUniversity of Illinois Urbana-ChampaignChen-Yu LeeGoogle Cloud AI ResearchTomas PfisterGoogle Cloud AI Research
+AbstractTraining deep research agents—systems that plan, search, evaluate evidence, and synthesize long-form reports—pushes reinforcement learning beyond the regime of verifiable rewards. Their outputs lack ground-truth answers, their trajectories span many tool-augmented decisions, and standard post-training offers little mechanism for turning past attempts into reusable experience. In this work, we argue that rubrics should serve not merely as final-answer evaluators, but as the shared interface that structures policy execution, judge feedback, and agent memory. Based on this view, we introduceRubricEM, a rubric-guided reinforcement learning framework that combines stagewise policy decomposition with reflection-based meta-policy training.RubricEMfirst makes research trajectories stage-aware by conditioning planning, evidence gathering, review, and synthesis on self-generated rubrics. It then assigns credit with Stage-Structured GRPO, which uses stagewise rubric judgments to provide denser semantic feedback for long-horizon optimization. In parallel,RubricEMtrains a shared-backbone reflection meta-policy that distills judged trajectories into reusable rubric-grounded guidance for future attempts. The resultingRubricEM-8B achieves strong performance across four representative long-form research benchmarks, outperforming comparable open models and approaching proprietary deep-research systems.
+Beyond final performance, we perform thorough analyses to understand the key ingredients ofRubricEM.
+
+1Introduction
+Deep research agents answer complex information-seeking questions by autonomously planning, searching, evaluating evidence, and synthesizing long-form reports.
+Yet how to train this capability remains unclear: proprietary systems such as Gemini and OpenAI’s deep research(google2025gemini;openai2025deepresearch)reveal little about their methodology, while most existing efforts rely on verifiable search proxies(jin2025searchr1;song2025r1searcher;nguyen2025sfrdeepresearch)or high-quality imitation data(tongyi2025deepresearch;moonshot2025kimiresearcher;perplexity2025sonardeepresearch).
+End-to-end RL for long-form research is difficult because outputs lack ground-truth verification, judge feedback is coarse and delayed over long tool-augmented rollouts, and conventional post-training mostly converts judged attempts into parametric updates without producing explicit reusable guidance.
+This raises the central question of this work:
+
+How can reinforcement learning train deep research agents beyond verifiable rewards, while enabling long-horizon credit assignment and learning from experience?
+Rubrics offer a natural handle for open-ended tasks whose quality cannot be verified by exact answers(gunjal2025rubrics;shao2025dr;chen2025rm).
+Prior work mainly uses them as judge-side criteria for assigning rewards to final responses.
+Our key perspective is that rubrics should instead serve as a shared interface throughout reinforcement learning.
+The same criteria that define success can guide the agent’s planning and search, support process-level judgment over intermediate decisions, and be distilled into reusable reflections for learning from experience.
+Based on this view, we proposeRubricEM, a rubric-guided reinforcement learning framework that combines stagewise policy decomposition with reflection-based meta-policy evolution.
+The nameRubricEMreflects anExpectation–Maximization (EM)-inspired estimate–maximize view(dempster1977em)(beyond supervised settings): the latent structure of an open-ended research task—what matters, where credit belongs, and what should be remembered—is estimated through rubrics, which condition policy reasoning, judge scoring, and memory evolution.
+Training then maximizes the task policy and reflection meta-policy under these rubric-conditioned estimates.
+
+RubricEMfirst realizes rubric-guided policy decomposition through arubric-guided reasoning scaffold.
+During planning, the agent generates task-specific rubrics and carries them through four stages: planning, research, review, and answer synthesis.
+This converts a flat long-horizon rollout into rubric-conditioned decision stages, where each stage defines both a distinct decision mode and a natural unit for optimization.
+The scaffold also makes rubrics operational across the training loop: they guide search and synthesis, serve as on-policy references for the judge, and produce structured traces that can be distilled into reusable reflections.
+
+Building on this decomposition,RubricEMassigns credit withStage-Structured GRPO(SS-GRPO).
+Rather than broadcast a single terminal score to all tokens, SS-GRPO scores Plan, Research, Review, and Answer with stage-specific rubrics.
+The judge maintains an evolving rubric buffer for each stage, extending prior evolving-rubric evaluation(shao2025dr)from final-answer judging to process-level feedback.
+These stagewise scores define denser returns that combine local stage quality with downstream impact, giving GRPO finer-grained credit signals while remaining critic-free.
+
+Figure 1:RubricEMfirst instills a rubric-guided structured scaffold into the task policy, so that each trajectory follows stage-structured reasoning under self-generated rubrics. During RL, we propose Stage-Structured GRPO to provide finer-grained, denser credit assignment. In parallel, a shared-backbone reflection meta-policy is jointly trained to generate rubric-grounded reflections, which are stored in a rubric bank to support both cross-episode transfer and within-episode refinement. Together, rubrics serve as the shared interface across the agent, the judge, and their evolutions.Finally,RubricEMmakes experience reuse an explicit RL objective throughReflection Meta-Policytraining.
+The task policy and reflection meta-policy share one backbone: after a task rollout is judged, the backbone samples rubric-grounded reflection candidates conditioned only on the query and raw trajectory, while a separate judge scores these candidates using the task-rollout judgments.
+The reflection scores provide auxiliary RL rewards on reflection tokens, updating the shared parameters; the highest-scored accepted reflection is also written into an agent rubric bank as natural-language memory.
+The bank conditions future rollouts in two modes: within-episode refinement retrieves the previous reflection for the same query, while cross-episode transfer retrieves reflections from related questions.
+Thus, each reflection updates the agent both parametrically and textually.
+We designed an efficient asynchronous reflection branch to train this meta-policy alongside task-policy RL without adding a sequential bottleneck, a notable problem in prior meta-RL literature(jiang2026metarl).
+
+Together, these components yieldRubricEM-8B, an 8B deep research agent trained with 1400 RL steps.
+Fig.1gives an overview of the framework, and Fig.2illustrates a concrete example.
+Across four representative long-form research benchmarks,RubricEM-8B achieves state-of-the-art performance among comparable open models, improves over strong prior RL systems with fewer training steps, and approaches proprietary deep-research systems such as Gemini and OpenAI Deep Research.
+Beyond final scores, we conduct extensive ablations and analyses, including multiple 600-step RL ablations, scaffold comparisons, inference scaling, and out-of-domain short-form transfer.
+These results support a broader recipe for long-horizon RL beyond verifiable rewards: expose task structure, assign credit to that structure, and convert judged attempts into reusable experience.
+
+Figure 2:Example of the rubric-guided stage-structured search agent trajectory, meta-policy reflection, and stagewise judge rubrics during a single RL step.
+2Related Work
+The Post-training recipes of deep research agents.Most existing open-source training efforts for deep research focus on short-answer tasks with verifiable rewards(jin2025searchr1;song2025r1searcher;chen2025research;jiang2025deepretrieval;zhao2025rsearch;han2025deep).
+Meanwhile, proprietary systems mainly report scaling high-quality imitation data and training on verifiable short-form settings(openai2025deepresearch;google2025geminideepresearch;perplexity2025sonardeepresearch;moonshot2025kimiresearcher).
+Our work takes an orthogonal direction: making reinforcement learning effective for open-ended, long-form deep research.
+The closest work to ours is DR Tulu(shao2025dr), which studies end-to-end RL for deep research beyond verifiable rewards.
+We build on this foundation by introducing fine-grained credit assignment and jointly trained meta-policy evolution, yielding denser learning signals and reusable guidance during the challenging long-horizon RL process.
+
+Credit assignment and meta-RL with language models.Recent work on agentic reinforcement learning has increasingly emphasized the need for finer-grained credit assignment(mousavi2026post;deepseek2026v4;qian2025toolrl;xi2026agentprm;zhang2026reasoning).
+However, most of these methods operate in verifiable settings, where trajectories can be decomposed into subgoals with reliable process-level supervision.
+A related line of work trains meta-policies during reinforcement learning, often referred to as Meta-RL(jiang2026metarl;yang2026mage).
+While promising, these methods are typically evaluated on verifiable or synthetic tasks and often introduce explicit dependencies across rollouts, leading to substantial training overhead.
+In contrast, our work targets open-ended real-world deep research tasks, where neither intermediate progress nor final answers admit simple
+automatic verification.
+We improve meta-policy training efficiency by removing cross-rollout dependencies and designing an efficient reflection-training infrastructure.
+
+3RubricEM
+3.1Preliminaries and notations
+We study deep research agents for complex information-seeking queries.
+Given a queryq∼𝒟q\sim\mathcal{D}, an agent interacts with a tool environment𝒯\mathcal{T}and produces a trajectoryτ=(a1,o1,…,aT,oT),\tau=(a_{1},o_{1},\dots,a_{T},o_{T}),whereata_{t}denotes the agent emission at turntt, which may be either a textual segment or a structured tool call, andoto_{t}is the resulting tool output (withot=∅o_{t}=\varnothingwhen no tool is invoked).
+We consider a language-model-based agent that autoregressively samples the next stepat∼πθ​(at∣ht),ht=(q,a<t,o<t),a_{t}\sim\pi_{\theta}(a_{t}\mid h_{t}),h_{t}=(q,a_{<t},o_{<t}),and eventually produces a final long-form answer
+grounded in retrieved evidence.
+
+3.2Structured Reasoning Scaffold
+A central design choice inRubricEMis to impose explicit stage structure on agent trajectories.
+Astagerefers to a semantically defined segment of the trajectory that serves a distinct decision role, such as planning, evidence gathering, self-evaluation, or final synthesis.
+In long-horizon research tasks, these stages provide a stable high-level organization over otherwise noisy token-level generation.
+When these decision modes are collapsed into a flat autoregressive process, the trajectory lacks such stage-level organization.
+The policy must therefore infer its current decision mode from local context alone, which can lead to inefficient exploration and compounding errors over long horizons(xu2025cognitive;feng2026environment).
+We formalize the value of explicit stage information as follows.
+Lethhdenote a random decision point along a trajectory induced by the current policy, letc=ϕ​(h)c=\phi(h)denote a compressed state representation, letzzdenote the current stage label, and letU​(h,a)U(h,a)denote the expected downstream value of taking actionaaat historyhhand then continuing the rollout.
+
+Theorem 1(Value of stage information).Under mild assumptions in Assump.1, define
+Vflat:=𝔼​[maxa∈𝒜⁡𝔼​[U​(h,a)∣c]],Vstage:=𝔼​[maxa∈𝒜⁡𝔼​[U​(h,a)∣c,z]].V_{\mathrm{flat}}:=\mathbb{E}\!\left[\max_{a\in\mathcal{A}}\mathbb{E}[U(h,a)\mid c]\right],\qquad V_{\mathrm{stage}}:=\mathbb{E}\!\left[\max_{a\in\mathcal{A}}\mathbb{E}[U(h,a)\mid c,z]\right].
+If there exists a measurable set𝒞0\mathcal{C}_{0}with positive probability and two task-relevant stages such that for everyc∈𝒞0c\in\mathcal{C}_{0},p​(z∣c)>0p(z\mid c)>0,p​(z′∣c)>0p(z^{\prime}\mid c)>0, and thatarg⁡maxa∈𝒜⁡𝔼​[U​(h,a)∣c,z]∩arg⁡maxa∈𝒜⁡𝔼​[U​(h,a)∣c,z′]=∅.\arg\max_{a\in\mathcal{A}}\mathbb{E}[U(h,a)\mid c,z]\;\cap\;\arg\max_{a\in\mathcal{A}}\mathbb{E}[U(h,a)\mid c,z^{\prime}]=\varnothing.Then
+Vstage>Vflat.V_{\mathrm{stage}}>V_{\mathrm{flat}}.
+
+Theorem1identifies when explicit stage information is beneficial.
+In long-horizon research trajectories, the same local context may call for different actions across planning, searching, reviewing, and final synthesis.
+When these stage-specific optimal actions disagree, a flat policy acts under an aliased context, whereas a stage-aware policy can condition on the current decision mode.
+This yields a strict value improvement on any positive-probability set where such aliasing occurs.
+We therefore make stage structure explicit rather than implicit in a flat trajectory.
+The proof is deferred to Appen.E.1.
+
+Specific stage instantiation.We instantiate this idea with four rubric-guided stages:Plan→Research→Review→Answer.\textsc{Plan}\rightarrow\textsc{Research}\rightarrow\textsc{Review}\rightarrow\textsc{Answer}.Each stage is marked by a stage-level XML tag with a lightweight internal schema.
+The outer scaffold is sequential, whileResearchallows local iteration and in-place plan revision.
+The overview is in Fig.3and detailed below:
+
+Plan.Within<structured_plan>, the agent analyzes the user’s explicit and implicit needs in<analysis>, translates them into<rubrics>, and then proposes a concrete<research_plan>.
+The rubrics specify (i) a knowledge checklist of information to gather, (ii) analytical criteria for the final write-up, and (iii) negative constraints on what the answer should avoid.
+
+Research.The agent iteratively issues<call_tool>actions.
+After each tool response, the agent performs a<state_evaluation>step, which compares the accumulated evidence against the plan and rubrics, decides whether further search is needed, and optionally revises thePlanin place.
+
+Review.Within<review>, the agent maps collected evidence back to the rubrics through<rubrics_review>and prepares a writing plan, including the main thesis and section outline.
+
+Answer.Within<answer>, the agent synthesizes the final long-form response with citation support.
+
+Figure 3:Rubric-guided structured reasoning scaffold inRubricEM. The agent follows a high-level workflow of Plan, Research, Review, and Answer, each with a lightweight internal schema. Rubrics are generated in Plan and then guide evidence collection, evaluation, and final writing. During Research, the agent iterates between tool use and state evaluation; once evidence is sufficient, it enters Review and then produces the final grounded Answer. The full description is in Appen.B.1Importantly, rubrics are not merely evaluation artifacts inRubricEM: they are generated inPlan, can be revised duringResearch, and guide subsequent stages throughout the trajectory.
+This instantiation is motivated by three considerations.
+First, it is task-aligned: deep research naturally involves planning, evidence acquisition, self-evaluation, and synthesis, so the four stages reflect the task rather than an arbitrary template.
+Second, explicit criteria give the policy a stable target for planning, self-checking, and feedback, echoing rubric-based learning and explicit-principle approaches(panadero2017review;tai2018developing;bai2022constitutional).
+Third, because self-generated rubrics vary across rollouts of the same query, they provide per-rollout references that help the judge discover more aligned and discriminative stagewise criteria.
+We validate the effectiveness of the scaffold and its importance for RL in Sec.5.2.
+
+Finally, the scaffold directly enables our later RL design: stage boundaries define the units for SS-GRPO credit assignment, and rubric-conditioned traces define the memory format for the rubric bank (Sec.3.4).
+We therefore view the scaffold not as a formatting warm-up, but as an SFT-induced structural prior that prepares the policy for effective RL(zhang2026good).
+
+SFT distillation.To instantiate the scaffold in the policy, we perform teacher–student distillation from Gemini-3.1-Pro.
+For each query, the teacher is prompted to produce a stage-structured trajectory that follows the XML schema above.
+Because raw teacher traces do not always obey the target scaffold, we apply rejection sampling to discard outputs that violate stage boundaries, tool-calling syntax, citation format, or grounding constraints.
+The resulting SFT corpus teaches Qwen3-8B not only tool use and evidence citation, but also the stage discipline and rubric conditioning required by our later RL design.
+We defer details of the data-generation and filtering pipeline to Append.B.2.
+
+3.3Stage-Structured GRPO
+Building on the structured scaffold above, we proposeStage-Structured GRPO (SS-GRPO)for finer-grained credit assignment in deep research.
+Prior work on process supervision and long-horizon agent RL suggests that denser process-level rewards can substantially improve credit assignment(yang2026patching;tan2026hindsight;qian2025toolrl;wu2026demystifying;wang2026subgoal).
+However, in open-ended deep research, we do not have oracle intermediate rewards: the quality of planning, search, review, and synthesis is semantic, task-dependent, and difficult to verify automatically.
+SS-GRPO therefore uses the explicit stage boundaries from Sec.3.2together with rubric-guided judging to construct stage-level learning signals, as illustrated in Fig.4.
+
+Stagewise scores and returns.Given a queryqq, we samplennrollouts{τi}i=1n∼πθ(⋅∣q)\{\tau_{i}\}_{i=1}^{n}\sim\pi_{\theta}(\cdot\mid q)and partition each intoKKsemantic stages; in our instantiation,K=4K=4corresponding to Plan, Research, Review, and Answer.
+Letℬi,k\mathcal{B}_{i,k}be the tokens in stagekkof rolloutτi\tau_{i}, and letRi,k∈[0,1]R_{i,k}\in[0,1]be the LLM-judge score under the corresponding stage rubric.
+Rather than assign the same final score to all tokens, SS-GRPO uses a causal stage-dependence matrixΛ=(λk,j)\Lambda=(\lambda_{k,j}), withλk,j=0\lambda_{k,j}=0forj<kj<kandλk,k=1\lambda_{k,k}=1, and definesGi,kΛ=∑j=kKλk,j​Ri,j.G^{\Lambda}_{i,k}=\sum_{j=k}^{K}\lambda_{k,j}R_{i,j}.Thus each stage keeps its own score while receiving credit from downstream stages it enables.
+Terminal reward broadcast is considered a special case.
+
+When stage returns help.The benefit of stage returns depends on a simple trade-off: intermediate judging recovers process information omitted by terminal-only rewards, but also introduces judge noise.
+AppendixE.2, Thm.3formalizes this intuition: stage-weighted credit improves the gradient approximation when the recovered intermediate signal outweighs cumulative judge misalignment.
+Thus SS-GRPO needs no oracle process reward, only sufficiently aligned stagewise judging with bounded noise. This motivates the stagewise evolving-rubric judge below.
+
+Stagewise evolving-rubric judge.As shown in the top panel of Fig.4, the judge contrasts multiple rollouts for the same query and proposes discriminative rubrics for each stage.
+The judge maintains a separate rubric buffer for Plan, Research, Review, and Answer, reuses previous high-discrimination rubrics, and removes items that no longer separate trajectory quality.
+Because the policy trajectories are themselves rubric-guided, the judge can also use trajectory-generated rubrics as references when constructing new judge rubrics, while still scoring trajectories against the judge-side rubric buffer rather than blindly rewarding a rollout’s own self-rubric.
+This makes the intermediate rewards both stage-local and adaptive to the current policy distribution. Further details are deferred to Append.C
+
+Stagewise normalization and objective.We instantiate SS-GRPO as a critic-free stagewise variant of GRPO by normalizing returns separately within each stage across the rollout group:
+Ai,k=Gi,kΛ−1n​∑i′=1nGi′,kΛStdi′⁡[Gi′,kΛ]+ϵ.A_{i,k}=\frac{G_{i,k}^{\Lambda}-\frac{1}{n}\sum_{i^{\prime}=1}^{n}G_{i^{\prime},k}^{\Lambda}}{\operatorname{Std}_{i^{\prime}}[G_{i^{\prime},k}^{\Lambda}]+\epsilon}.All tokens in the same stage blockℬi,k\mathcal{B}_{i,k}share the advantageAi,kA_{i,k}.
+The resulting objective is
+ℒSS​-​GRPO=−1n​∑i=1n∑k=1K∑t∈ℬi,kmin⁡(ρi,t​Ai,k,clip⁡(ρi,t,1−η,1+η)​Ai,k)+β​DKL​(πθ∥πref),\mathcal{L}_{\mathrm{SS\text{-}GRPO}}=-\frac{1}{n}\sum_{i=1}^{n}\sum_{k=1}^{K}\sum_{t\in\mathcal{B}_{i,k}}\min\!\Big(\rho_{i,t}A_{i,k},\operatorname{clip}(\rho_{i,t},1-\eta,1+\eta)A_{i,k}\Big)+\beta D_{\mathrm{KL}}(\pi_{\theta}\,\|\,\pi_{\mathrm{ref}}),(1)
+whereρi,t=πθ​(ai,t∣hi,t)πθold​(ai,t∣hi,t).\rho_{i,t}=\frac{\pi_{\theta}(a_{i,t}\mid h_{i,t})}{\pi_{\theta_{\mathrm{old}}}(a_{i,t}\mid h_{i,t})}.We keep the estimator critic-free because stage supervision is judge-defined, evolving during training, and collected from expensive long-horizon tool-augmented rollouts; adding a learned stage-conditioned critic would introduce substantial additional complexity.
+
+3.4Meta-Policy Training with Reinforcement Learning
+Beyond single-trajectory optimization,RubricEMmakes experience reuse part of RL.
+A shared backbone serves as both the task policy and a reflection meta-policy: rubric-guided task rollouts provide judged experience, and the reflection policy is trained with LLM-judge rewards to produce reusable natural-language guidance.
+Accepted reflections enter anagent rubric bankfor future retrieval, giving the agent both parametric RL updates and textual memory updates.
+This retains the meta-RL goal of improving future rollouts from past experience, while our asynchronous design avoids a sequential rollout–reflection–update bottleneck.
+
+Figure 4:Detailed RL training pipeline ofRubricEM.
+The top panel expands Fig.1with two coupled judge-agent loops.
+For task-policy training, an LLM judge contrasts stage-structured rollouts to build a buffer of discriminative stagewise rubrics, which provide dense stagewise rewards for SS-GRPO.
+For reflection meta-policy training, a sampled trajectory and query prompt multiple candidate reflections; the judge scores all candidates using its accumulated rubrics and trajectory scores under within-episode and cross-episode criteria.
+These scores update the meta-policy, and only the best reflection is written to the agent rubric bank.
+The bottom panel shows the asynchronous implementation, where reflection rollout, judging, and update run on previous trajectories to avoid synchronous overhead.
+Details are provided in Appen.CandD; Alg.1gives the formal procedure.Joint training of the reflection meta-policy.After task-policy rollouts are judged, we sample a query–trajectory pair and prompt the shared backbone to generate multiple reflection candidates, treating the trajectory as fixed context and backpropagating only through reflection tokens.
+A privileged LLM judge scores every candidate using the original question, raw trajectory, stagewise rubric scores, and evaluator justifications from task-rollout judging.
+These scores assess whether each reflection is useful forwithin-episode refinementandcross-episode transfer; all candidate scores provide RL signals for updating the reflection meta-policy, while only the highest-scored accepted reflection is written into the agent rubric bank.
+Because the reflection generator and task policy share the same backbone, this reflection-side objective becomes an auxiliary RL signal for the task policy rather than a purely inference-time memory mechanism.
+AppendixE.3formalizes the positive-transfer case where judge-scored reflection updates are aligned on average with future task improvement.
+
+Coupled agent–judge co-evolution.The reflection loop is coupled with the stagewise evolving judge from Sec.3.3.
+On-policy rollouts expose new criteria and failure modes, which update the judge-side stagewise rubric buffer; the updated judge then scores both task trajectories and reflection candidates.
+Accepted reflections return to the agent through the rubric bank and condition future rollouts.
+Thus, the agent evolves through policy and rubric-bank updates, while the judge evolves through rubric-buffer updates rather than parameter updates.
+
+Rubric bank and two modes of adaptation.Each bank item retrospectively distills a completed trajectory into reflection rubrics and takeaways, summarizing what mattered after one trial.
+Unlike the prospective rubrics generated during planning, bank items encode outcome-aware lessons. An example is shown in Fig.2.
+They support two adaptation modes:within-episode refinement, which retrieves a query’s own prior reflection on a repeated attempt, andcross-episode transfer, which retrieves reflections from related past questions.
+During training, we realize both modes with a two-encounter curriculum: each query is first solved with cross-episode retrieval and later replayed with its newly generated within-episode reflection, requiring no extra rollout dependencies.
+
+Efficient asynchronous execution.As shown in the bottom panel of Fig.4, a synchronous implementation would block the next task rollout until reflection generation, reflection judging, and the meta-policy update for the current step are finished.
+We instead allow the reflection branch to lag by one RL step.
+During stepNN, the inference engine runs the heavy tool-augmented task rollouts, while the training engine consumes the prepared reflection batch from stepN−1N-1for the meta-policy update.
+After the step-NNtrajectories are judged, their reflection rollout and judging jobs are launched asynchronously to prepare the reflection batch for stepN+1N+1.
+This one-step staleness trades exact synchrony for higher infrastructure utilization: both inference and training engines remain occupied, and meta-policy training adds effectively no extra wall-clock overhead to the SS-GRPO loop. The detailed descriptions are in Appen.D.
+
+4Experiment
+4.1Experimental Setup
+We evaluateRubricEMon four representative long-form benchmarks:HealthBench(arora2025healthbench),ResearchQA(yifei2025researchqa),DeepResearchBench (DRB)(du2025deepresearch),
+andResearchRubrics(sharma2026researchrubrics).
+Our experimental setup is built upon DR Tulu, where we generally share the same base infrastructure, training datasets, hyperparameters, and evaluation protocols.
+We use Gemini-flash-grounded Google Search and Semantic Scholar as the search engines.
+The training data is sampled from diverse public query sources, including realistic search conversations from SearchArena(miroyan2025search)and research-oriented questions from OpenScholar(asai2024openscholar).
+The SFT stage includes both short-form and long-form data, while the RL stage exclusively focuses on long-form queries.
+Further details on datasets, training and inference setups, evaluation protocols, and the full baseline list are provided in Appen.F.
+
+Table 1:The performance comparison between best-performing baselines. Bold numbers indicate the best performance among proprietary and non-proprietary categories.ModelHealthBenchResearchQADRBResearchRubricsAverageClosed Deep ResearchClaude-Sonnet Search–64.334.5––Perplexity-Sonar (High)–69.140.7––Perplexity Deep Research–75.342.348.7–Gemini Deep Research–68.548.861.5–Gemini 3.1 Pro + Search47.574.544.449.153.9GPT-5 + Search59.578.250.760.562.2OpenAI Deep Research53.879.246.959.759.9Fixed Pipeline Deep ResearchWebThinker QwQ-32B36.572.837.942.247.4WebThinker-32B-DPO39.474.240.641.949.0Ai2 ScholarQA – Claude Sonnet32.075.036.138.145.3Open Deep Research ModelsSearch-R1-7B-0.127.99.50.09.3WebExplorer-8B33.764.836.733.442.2Tongyi DeepResearch-30B-A3B46.266.740.649.550.8DR Tulu-8B (SFT)38.168.539.038.446.0DR Tulu-8B (RL, 1900 steps)50.274.343.446.453.6OursQwen3-8B + Our Search24.558.428.224.533.9RubricEM-8B (SFT)39.071.843.042.849.2RubricEM-8B (RL, 1400 steps)49.374.547.850.355.5
+
+4.2Main Results
+Tab.1comparesRubricEMwith the strongest baselines from each category followingshao2025dr.
+We use reported numbers when available, and reproduce the remaining baselines if possible.
+
+RubricEMachieves strong long-form research performance.RubricEM-8B-RL achieves the highest average score among non-proprietary deep research systems in our evaluation, reaching 55.5 with an 8B backbone. It surpasses strong open baselines, including DR Tulu-8B-RL, Tongyi DeepResearch-30B-A3B, and WebThinker-32B-DPO. It also compares favorably with proprietary systems: on the benchmarks where both scores are available,RubricEM-8B-RL outperforms Perplexity Deep Research on average, and it remains within 4.4 average points of OpenAI Deep Research while outperforming it on DRB. These results show that our training recipe can produce competitive long-form research behavior at small model scale.
+
+The RL recipe is both effective and efficient.Starting from the structured SFT checkpoint, RL improves the average score from 49.2 to 55.5, with gains on all four long-form benchmarks. This gain is not simply inherited from the teacher: althoughRubricEM-8B-SFT is distilled from Gemini-3.1-Pro, the finalRubricEM-8B-RL model surpasses it on average. Compared with the closest prior RL system, DR Tulu,RubricEMstarts from a stronger SFT checkpoint, reaches a higher final average score, and uses fewer RL steps (1400 vs. 1900). Since the two systems also differ in teacher model and search backend (RubricEMuses a weaker teacher but a stronger search backend), we conduct controlled ablations in Sec.5to isolate the contribution of our proposed components.
+
+5Empirical Analysis
+Figure 5:Ablation studies of our RL training recipes under a 600-step budget.
+Each proposed component improves performance, and the fullRubricEMrecipe performs best.5.1RL Training Recipes
+We ablate the RL components ofRubricEMunder a fixed 600-step budget, using the same training configuration and initializing every run from the sameRubricEM-SFT checkpoint.
+To reduce evaluation cost, all ablation runs are evaluated on the same fixed random 100-example subset of each benchmark.
+We compare four recipes:Baseline-RL, standard answer-only GRPO;SS-GRPO, which replaces terminal reward broadcast with stagewise rubric credit;Meta-Policy, which keeps answer-only GRPO but adds reflection meta-policy training and rubric-bank retrieval; andRubricEM(Full), which combines SS-GRPO and Meta-Policy.
+Results are shown in Fig.5.
+Under this matched setting, both SS-GRPO and Meta-Policy improve over Baseline-RL, and the full recipe performs best across benchmarks.
+This shows that stagewise credit assignment and reusable-experience learning provide complementary gains under the same training budget and compute.
+
+5.2Structured Scaffolding and Inference-Time Experience Reuse
+We further analyze the structured scaffold and inference-time experience reuse in Fig.6.
+For scaffolding, we compare structured and unstructured SFT checkpoints, then continue both under matched 600-step RL settings.
+Fig.6(a) shows that the structured scaffold improves distillation quality, while Fig.6(b) shows that it also makes subsequent RL more effective.
+Without the scaffold, RL gains are small and unstable for 600 steps, suggesting that rubric-conditioned stages provide useful structure for exploration and credit assignment.
+We additionally isolate the prompt-level effect by running Gemini-3.1-Pro with the same search backend under either our scaffold or a standard ReAct (think & act) prompt.
+As shown in Fig.6(c), our scaffold yields higher DRB performance, indicating that the structure itself improves deep-research behavior before student-side training.
+We also evaluate whether the learned meta-policy can be further leveraged at inference time on DRB.
+Cross-episode reuse retrieves reflections from related past questions, while within-episode reuse retrieves the agent’s prior reflection for the same question.
+As shown in Fig.6(d),RubricEMbenefits from both reuse modes, whereas Baseline-RL does not under the same retrieval setting.
+This indicates that Reflection Meta-Policy Training learns actionable, reusable guidance rather than simply increasing the amount of context provided to the model.
+
+Figure 6:Ablations on structured scaffolding and inference-time experience reuse.
+Panels (a,b) show that the rubric-guided scaffold improves both SFT distillation quality and subsequent RL gains.
+Panel (c) isolates the prompt-level effect: with the same Gemini-3.1-Pro model and search backend, our scaffold outperforms a standard ReAct prompt on DRB.
+Panel (d) shows that the learned meta-policy enables cross-episode transfer and within-episode refinement, while Baseline-RL does not benefit from the same reuse.
+5.3Short-Form Benchmark Performance
+In addition to the long-form benchmarks in Tab.1, we evaluateRubricEMon four short-form search benchmarks: SimpleQA(wei2024measuring), 2Wiki(ho2020constructing), WebWalker(wu2025webwalker), and DeepSearchQA (DSQA)(gupta2026deepsearchqa).
+These evaluations are out-of-domain for the RL stage, since online RL uses only long-form prompts.
+We compare with DR Tulu and report results in Tab.2.
+AlthoughRubricEMis trained primarily for long-form deep research, the result shows strong transfer to short-form search benchmarks.RubricEM-SFT already learns effective search-and-answer behavior, and long-form RL further improves performance despite using no short-form RL data.
+The gains are most pronounced on more complex tasks, suggesting that our RL recipe teaches transferable tool-use and evidence-grounding skills rather than only long-form report writing.
+Overall, these results show that a compact 8B model can generalize beyond its long-form training distribution through effective RL.
+
+Table 2:Short-form Model Performance. Despite being primarily trained on long-form data,RubricEMgeneralizes well on out-of-distribution short-form deep research questions.ModelSimpleQA2WikiWebWalkerDSQAAvg.DR Tulu BaselineDR Tulu-8B (SFT)75.566.531.95.344.8DR Tulu-8B (RL, 1900 steps)80.168.039.18.349.0OursQwen3-8B + Our Search84.061.542.615.250.8RubricEM-8B (SFT)92.177.564.737.067.8RubricEM-8B (RL, 1400 steps)92.378.870.053.073.5
+
+6Conclusions
+We presentedRubricEM, a rubric-guided RL framework for deep research beyond verifiable rewards.RubricEMstructures long-horizon trajectories, assigns stage-aware credit, and distills judged attempts into reusable guidance through a shared-backbone reflection meta-policy.
+Across benchmarks and analyses,RubricEM-8B shows strong performance, with ablations supporting each proposed recipe.
+Further discussions and limitations are included in Appen.H.
+
+References
+
+Contents1Introduction
+2Related Work
+3RubricEM3.1Preliminaries and notations
+3.2Structured Reasoning Scaffold
+3.3Stage-Structured GRPO
+3.4Meta-Policy Training with Reinforcement Learning
+
+4Experiment4.1Experimental Setup
+4.2Main Results
+
+5Empirical Analysis5.1RL Training Recipes
+5.2Structured Scaffolding and Inference-Time Experience Reuse
+5.3Short-Form Benchmark Performance
+
+6Conclusions
+References
+AAdditional Related Works
+BDetails on Structured ScaffoldsB.1Scaffold Description and System PromptB.1.1Stage 1: Planning (Plan)
+B.1.2Stage 2: Research (Research)
+B.1.3Stage 3: Review (Review)
+B.1.4Stage 4: Answer (Answer)
+B.1.5Cross-Stage Design Principles
+B.1.6Full System Prompt
+
+B.2SFT Data Generation ProcessB.2.1Teacher Model and Prompt Adaptation
+B.2.2Multi-Round Generation Pipeline
+B.2.3Quality Filtering and Rejection Sampling
+B.2.4Training Data Format
+
+CDetails on Stagewise Evolving Rubric EvaluationC.1Rubric Buffer
+C.2Adaptive Rubric Generation
+C.3Stagewise Scoring
+C.4Buffer Management and Implementation
+
+DAsynchronous Reflection Pipeline and Windowed CurriculumD.1Training Pipeline Architecture
+D.2One-Step Deferred Reflection Training
+D.3Windowed Curriculum
+D.4Trajectory Sampling and Candidate Generation
+D.5Bank Persistence and Retrieval
+D.6Prompt TemplatesD.6.1Reflection Generation Prompt
+D.6.2Judge Scoring Prompt
+D.6.3Injection Formats
+
+ETheoretical AnalysisE.1Value of Stage Information
+E.2Judge-Aligned Stage-Weighted Credit Assignment
+E.3Judge-Gated Co-Evolution of Policy and Rubric Bank
+
+FExperiment DetailsF.1Training DetailsF.1.1Supervised Fine-Tuning
+F.1.2Reinforcement Learning
+
+F.2Evaluation DetailsF.2.1Long-Form Benchmarks
+F.2.2Short-Form Benchmarks
+
+F.3Infrastructure
+F.4Baselines
+
+GAlgorithm
+HLimitations and Discussions
+
+Appendix AAdditional Related Works
+The Post-training recipes of deep research agents.Deep research agents are increasingly framed as post-trained, tool-interacting policies rather than merely prompt-engineered retrieval pipelines[zhang2025agenticdeepresearch,li2025rlfoundations,shi2025deepsurvey].
+Closed-source systems demonstrate strong long-horizon research capabilities, but their training recipes remain proprietary or only described at a high level[openai2025deepresearch,google2025geminideepresearch,perplexity2025sonardeepresearch,moonshot2025kimiresearcher].
+Most open training work instead studies search-augmented reasoning as a proxy for deep research, using short-answer or otherwise verifiable tasks whose rewards come from answer matching, retrieval quality, or rule-based process signals[jin2025searchr1,song2025r1searcher,chen2025research,jiang2025deepretrieval,zhao2025rsearch,wang2025stepsearch,fan2025ssrl,zhang2025evolvesearch,mei2025o2searcher].
+These methods teach models when and how to retrieve, but leave open how RL should be structured for unverifiable long-form reports.
+
+Recent work has begun to move toward long-horizon deep research agents, focusing on real-web or scalable search training[zheng2025deepresearcher,wu2025webdancer,li2025websailor,gao2025asearcher], workflow and report-state design[li2025webthinker,qiao2025webresearcher,han2025deep], and large-scale agentic SFT/RL or RLAIF recipes built largely around verifiable or ground-truth-anchored answer supervision[liu2025webexplorer,nguyen2025sfrdeepresearch,tongyi2025deepresearch,wan2025pokee].
+These works mainly improve the data, environment, workflow, or scale of deep research agents.
+Our focus is orthogonal in emphasis: rather than scaling agentic pipelines under verifiable answer supervision, we study the RL algorithmic structure needed for open-ended long-form research trajectories.
+
+The closest work to ours is DR Tulu, which introduces RLER and establishes the first open end-to-end recipe for training long-form deep research agents beyond verifiable rewards[shao2025dr].
+We build on this foundation but target the remaining challenge of making RL more effective and training-efficient in this setting.
+While DR Tulu shows that extended RL training is important for long-form deep research,RubricEMimproves RL efficiency through a structure–assign–evolve recipe: rubric-guided stages structure trajectories, stage-level credit assignment provides denser learning signals, and a jointly trained reflection meta-policy turns judged experience into reusable guidance for policy evolution.
+Empirically, this yields larger gains with fewer RL training steps.
+
+Credit assignment in LLM agentic reinforcement learning.
+Credit assignment is a central challenge in agentic RL because sparse outcome rewards make it unclear which intermediate planning, tool-use, or reasoning decisions should be reinforced.
+Prior work addresses this issue through process supervision for mathematical reasoning[lightman2023let,wang2023math], tool- or turn-level reward shaping for interactive agents[qian2025toolrl,li2025encouraging], and more general agentic credit-assignment mechanisms such as process reward models, implicit step rewards, trajectory-graph advantage assignment, and hierarchical transition decomposition[xi2026agentprm,liu2026agentic,li2026salt,luo2025agent,peng2026hiper].
+These methods show that dense or process-aware supervision is crucial for long-horizon agent training, but they are typically designed for domains with verifiable intermediate correctness, structured environment states, tool-specific signals, or learned critics.RubricEMstudies a different regime: open-ended long-form deep research beyond verifiable rewards, where intermediate progress is semantic rather than objectively checkable.
+We therefore assign credit at the level of rubric-guided stages, using stage-specific judge scores and causal stage-dependent returns to provide denser supervision without requiring step labels or a learned critic.
+
+Meta-RL with language models.
+Meta-reinforcement learning studies agents that use past experience to adapt future behavior, with classic formulations including recurrent fast-adaptation policies such as RL2and Learning to Reinforcement Learn, gradient-based adaptation such as MAML, and latent-context inference methods such as PEARL[duan2016rl,wang2016learning,finn2017model,rakelly2019efficient].
+For LLM agents, this perspective is natural because trajectories contain rich textual artifacts (plans, tool calls, observations, critiques, and failures) that can be distilled into reusable guidance.
+Recent language-agent Meta-RL methods train meta-policies to improve exploration and exploration–exploitation across repeated tasks[jiang2026metarl,yang2026mage], while MetaClaw studies continual agent evolution through failure-driven skill synthesis and a reusable skill library[xia2026metaclaw].
+However, these works are typically evaluated in verifiable, synthetic, or task-completion settings, and often rely on explicit support–query or cross-rollout dependencies that are costly for long-horizon web research.RubricEMtargets open-ended long-form research beyond verifiable rewards: we train a shared-backbone reflection meta-policy on judged trajectories as fixed context, distill rubric-grounded reflections into a reusable rubric bank, and run this reflection branch asynchronously without imposing a sequential cross-rollout bottleneck on task-policy RL.
+
+Appendix BDetails on Structured Scaffolds
+This section describes the rubric-guided structured scaffold in detail (Section3.2), presents the full agent system prompt, and documents the SFT data generation pipeline.
+
+B.1Scaffold Description and System Prompt
+The structured reasoning scaffold decomposes each agent trajectory into four semantically distinct stages, each marked by XML tags and governed by specific behavioral requirements. We describe each stage in detail below, followed by the full system prompt.
+
+B.1.1Stage 1: Planning (Plan)
+The planning stage is the foundation of the entire trajectory. Upon receiving a user query, the agent must:
+
+1.Exploratory thinking(<think>): The agent begins with unstructured brainstorming in a computational workspace. This block is used to identify initial questions, obvious roadblocks, missing variables, and to assess the multi-dimensional complexity of the query (retrieval difficulty, reasoning load, intellectual depth, and formatting demands). No structured XML tags are used inside this block.
+
+2.Structured plan(<structured_plan>): The agent then produces a visible, structured planning document containing exactly three sub-components:
+•<deep_analysis>: Deconstructs the user’s query into explicit needs (what they directly ask for), implicit needs and gaps (hidden constraints, missing variables, potential roadblocks), and a complexity assessment that determines how much effort the agent should invest.
+
+•<rubric>: The agent acts as an expert grader and creates a self-evaluation checklist for the eventual answer. This rubric contains three categories: (i) aknowledge checklistspecifying the exact facts, definitions, comparisons, or data points required; (ii)analytical and synthesis criteriadescribing the intellectual connections the answer must achieve (optional for simple queries); and (iii)negative constraintslisting what the answer must explicitly avoid. Crucially, these rubrics are formulatedbeforeany search is conducted, as prospective target objectives.
+
+•<research_plan>: A logical roadmap to satisfy the rubric. Simple queries receive a linear one- or two-step plan, while complex queries receive a conditional, look-ahead strategy with explicit routing logic (e.g., “If X confirms Y, investigate Z; if X is inconclusive, fallback to W”).
+
+3.First tool call(<call_tool>): Immediately after the plan, the agent executes the first step of its research plan. The agent is strictly forbidden from producing an<answer>in the first turn—it must always search first.
+
+A key design principle isadaptive cognitive effort: the depth of planning scales with query complexity. For a simple factual lookup, the analysis and rubric are brief; for a complex multi-faceted research question, the agent deploys its full planning machinery with detailed rubric criteria and multi-step conditional plans.
+
+B.1.2Stage 2: Research (Research)
+The research stage is an iterative loop of evidence gathering and evaluation. After each tool output, the agent:
+
+1.Evaluation thinking(<think>): Digests new evidence in an unstructured inner monologue, noting conflicts, necessary pivots, or writing hurdles.
+
+2.State evaluation(<state_evaluation>): Produces a visible evaluation of the current state of evidence, comparing accumulated findings against the rubric and research plan. Based on this evaluation, the agent chooses one of two paths:
+•Path A—Continue research:If more information is needed, the agent either (a) issues another<call_tool>directly if the current plan remains valid, or (b) outputs an updated<structured_plan>with revised analysis, rubric, and/or research plan before the next tool call. This dynamic plan revision enables adaptive multi-hop reasoning when initial assumptions are invalidated.
+
+•Path B—Proceed to review:If evidence is sufficient to satisfy the rubric, the agent transitions to the review stage.
+
+The research stage may iterate multiple times. The outer scaffold is sequential (Plan→\rightarrowResearch→\rightarrowReview→\rightarrowAnswer), but within Research, the agent can freely iterate between tool use and state evaluation, and can revise its plan in place.
+
+B.1.3Stage 3: Review (Review)
+Before producing the final answer, the agentmustperform a structured self-evaluation. This is not optional—the scaffold enforces it as a mandatory step. The review block (<review>) contains:
+
+•<rubric_review>: The agent maps its retrieved evidence back to the specific criteria in its Phase 1 rubric (plus any dynamic updates made during research). This includes: (i)knowledge verification—explicitly listing which checklist items have been satisfied with retrieved evidence; and (ii)synthesis and constraints restatement—re-articulating the analytical criteria and negative constraints in the context of the actual evidence gathered, transforming abstract rubric targets into concrete, specific directives for the writing phase.
+
+•<writing_plan>: An architectural outline for the final answer, scaled to query complexity. For simple queries, this is a brief statement of the verified facts to output. For complex long-form queries, it includes: a unified core thesis, a value proposition (why this answer is exceptional), a narrative architecture with section-by-section outline, and a citation mapping that specifies how and where verified facts will be woven into specific sections.
+
+This mandatory review stage serves two functions: it forces the agent to verify rubric satisfaction before writing (preventing premature or incomplete answers), and it produces a writing plan that structures the final synthesis rather than letting the agent write in a stream-of-consciousness fashion.
+
+B.1.4Stage 4: Answer (Answer)
+The final stage produces the long-form response within<answer>...</answer>tags. The answer must follow the writing plan established in the review, satisfy all rubric criteria verified in the rubric review, and ground nontrivial claims with inline citations using<cite id="SNIPPET_ID">claim text</cite>format. The depth, tone, and formatting are dictated by the response format (exact match, short-form, or long-form) and the complexity level assessed during planning.
+
+B.1.5Cross-Stage Design Principles
+Several design principles span all four stages:
+
+•Rubric as central anchor.The rubric is not merely an evaluation artifact applied post-hoc—it is generated at the start and actively conditions every subsequent decision: what to search for, how to evaluate evidence, and what the final answer must include or avoid. This makes the rubric the shared interface across the entire trajectory.
+
+•One action per turn.Each agent generation must end with exactly one of</call_tool>or</answer>. The agent must stop generating immediately after the closing tag. This prevents the agent from hallucinating tool outputs or bypassing the research phase, and enables the tool execution environment to interleave real search results.
+
+•Substance over syntax.The response format instructions (exact/short/long) dictate the surface-level shape of the answer, but the self-generated rubric dictates the substance. The agent is instructed to enforce its rubric before drafting, preventing format instructions from overriding deep analytical criteria.
+
+B.1.6Full System Prompt
+We present the complete system prompt below. The workflow example section is abbreviated for space.
+
+Full Agent System Prompt# Role: Elite Autonomous Research & Synthesis Agent
+
+You are an elite agent designed to analyze complex queries,
+autonomously perform rubric-guided plans, execute iterative
+research, and synthesize highly rigorous, evidence-backed
+answers. You operate in a continuous loop: rubric-guided
+planning, searching, evaluating, and answering. You DO NOT
+answer the user’s question directly until you have sufficient
+evidence, and you DO NOT simulate tool outputs.
+
+## CORE PRINCIPLE: ADAPTIVE COGNITIVE EFFORT
+Your level of planning rigor, research depth, and synthesis
+MUST dynamically scale with the true, multi-dimensional
+complexity of the user’s query and the evolving search
+landscape.
+- Complexity is Multi-Dimensional: It encompasses retrieval
+  difficulty, reasoning load, intellectual depth, and
+  formatting demands.
+- Scale Your Effort: Do not over-engineer simple tasks.
+  Conversely, for highly complex tasks, deploy your full
+  intellectual machinery.
+
+## EXPECTED RESPONSE FORMATS & SYNTAX RULES
+Map your drafting strategy to the requested format appended
+to the prompt. ALL final outputs MUST be enclosed within
+<answer>...</answer>:
+
+1. Exact Match: Format strictly as \boxed{exact answer}.
+2. Short-Form: Write a single, cohesive paragraph with
+   <cite id="...">...</cite> support.
+3. Long-Form: Write a comprehensive, markdown-structured
+   response. Synthesize sources into a cohesive narrative.
+   Ground all nontrivial claims with <cite id="...">...</cite>.
+
+CRITICAL: formatting instructions appended to the user’s
+prompt dictate the shape of your answer, but your dynamically
+updated <rubric> dictates the substance.
+
+---
+
+## PHASE 1: PLANNING & INITIATION
+
+STEP 0: Exploratory Thinking
+Begin with a <think> block. Use this as a computational
+workspace for brief, unstructured brainstorming. Identify
+initial questions, obvious roadblocks, and missing variables.
+
+STEP 1: The Structured Plan
+Output a single <structured_plan> block containing exactly
+three sections, building upon each other logically:
+
+1. <deep_analysis>: Discover the True Intent.
+   - Complexity Assessment: Evaluate the multi-dimensional
+     complexity (retrieval, reasoning, insight, formulation).
+   - Explicit Needs: What they are directly asking for.
+   - Implicit Needs & Gaps: Hidden constraints, missing
+     variables, or potential roadblocks.
+
+2. <rubric>: Define the Strict Grading Criteria. Act as an
+   expert grader creating a rigorous checklist. Draw upon the
+   <deep_analysis> as a foundation. DO NOT focus on formatting;
+   focus on required content, intellectual depth, and logical
+   constraints.
+   - Knowledge Checklist: The exact facts, definitions,
+     comparisons, or data points required.
+   - Analytical & Synthesis Criteria (Optional, for complex
+     queries): What intellectual connections must the response
+     achieve?
+   - Negative Constraints (Pitfalls): What must the response
+     explicitly AVOID?
+
+3. <research_plan>: Formulate the Strategy. Create a logical
+   roadmap to satisfy the rubric. Simple queries need a linear
+   step or two; complex queries require a conditional,
+   look-ahead strategy.
+
+STEP 2: The First Tool Call
+Immediately after closing </structured_plan>, execute ONLY
+the first step of your research plan. Under NO circumstances
+should you output an <answer> in this first turn.
+
+---
+
+## PHASE 2: SEARCH & SYNTHESIS
+
+STEP 0: Evaluation Thinking
+Begin with a <think> block for raw inner monologue to digest
+new evidence.
+
+STEP 1: State Evaluation & Action
+Output a <state_evaluation> block to analyze the tool output,
+then choose exactly ONE path:
+
+PATH A: Continue Research (More Information Needed)
+- Direct Search: If the current plan and rubric are still
+  valid, output your next <call_tool>.
+- Update & Search: If new information invalidates initial
+  assumptions, output an updated <structured_plan> with
+  revised <deep_analysis>, <rubric>, and/or <research_plan>,
+  then output your next <call_tool>.
+
+PATH B: Ready to Answer (Evidence Sufficient)
+1. The Review: Output a <review> block containing:
+   - <rubric_review>: Systematically map retrieved evidence
+     back to the Phase 1 <rubric>. Verify knowledge checklist
+     items. Re-articulate synthesis criteria and negative
+     constraints in the context of retrieved evidence.
+   - <writing_plan>: Outline the final answer’s architecture.
+     For complex queries: define a unified core thesis, value
+     proposition, narrative architecture, and citation mapping.
+2. The Final Answer: Output the response within
+   <answer>...</answer> tags.
+
+---
+
+## Available Tools
+- google_search: Powered by a grounded AI reasoning engine.
+  Use direct, highly specific search queries.
+  Input: <call_tool name="google_search">query</call_tool>
+
+- snippet_search: Focused retrieval from scientific papers.
+  Input: <call_tool name="snippet_search">query</call_tool>
+  Optional parameters: limit, year, fieldsOfStudy.
+
+## Tool Output Format
+- Results are appended in <tool_output>...</tool_output> tags.
+- For google_search: summary text with grounding snippets.
+- For snippet_search: <snippet id="ID">content</snippet>.
+
+## WORKFLOW EXAMPLE
+[... A complete worked example demonstrating the full scaffold
+on a sample query, showing Phase 1 (think, structured_plan,
+first call_tool), Phase 2 iterations (state_evaluation,
+continued search, dynamic plan updates), and the review and
+answer synthesis. Omitted for brevity. ...]
+
+## CRITICAL CONSTRAINTS
+- Mandatory Starting Tag: Output MUST begin with <think>.
+- Mandatory First Search: First turn MUST end with
+  </call_tool>. Never answer without searching.
+- One Action Per Turn: End with </call_tool> OR </answer>.
+  STOP generating immediately after. Do NOT simulate
+  <tool_output> yourself.
+- Mandatory Citations: Wrap claims in
+  <cite id="S_123">claim text</cite>. Never use empty tags.
+  Multiple sources: <cite id="S_1, S_2">claim</cite>.
+- Substance over Syntax: The <rubric> dictates substance;
+  formatting instructions dictate only surface-level shape.
+Additional instructions.
+Depending on the expected response format, one of three task-specific instructions is appended to the user’s query:
+•Exact answer:“Search iteratively to find the precise answer. Format:<answer>\boxed{exact answer}</answer>.”
+
+•Short form:“Search iteratively to gather evidence from multiple credible sources. Synthesize into a short paragraph within<answer>...</answer>tags.”
+
+•Long form:“Search iteratively to gather evidence from multiple credible sources. Synthesize into a comprehensive, evidence-backed long-form response within<answer>...</answer>tags.”
+
+B.2SFT Data Generation Process
+To instill the rubric-guided scaffold into the base Qwen3-8B model, we perform supervised fine-tuning using teacher-generated trajectories. The data generation process consists of a multi-round, tool-augmented pipeline that produces complete stage-structured trajectories from a teacher model.
+
+B.2.1Teacher Model and Prompt Adaptation
+We use Gemini-3.1-Pro as the teacher model. The training queries are drawn from the same dataset used by Dr. Tulu[shao2025dr], which contains∼{\sim}13K diverse, open-ended research questions spanning multiple domains. Each query is paired with a response format label (exact_answer,short_form, orlong_form) that determines the additional instruction appended to the prompt.
+
+A key challenge is that the SFT data generation prompt must be adapted for Gemini, which differs from the target Qwen3-8B model in several important ways.
+
+Reasoning traces and<scratchpad>.
+Our scaffold includes unstructured<think>blocks at the start of each turn to preserve the base Qwen3-8B policy’s post-training reasoning behavior. However, directly prompting Gemini to produce<think>tags is blocked by the API, and internal thinking traces are inaccessible due to anti-distillation policies. We use<scratchpad>as a substitute reasoning tag during SFT data generation; these are converted to<think>in post-processing. While these traces do not capture Gemini’s true internal chain-of-thought, they provide visible planning rationale and evidence assessment that teaches the student model the habit of explicit reasoning before acting, without disrupting its native<think>patterns.
+
+Stagewise prompt separation.
+We separate the system prompt into a first-round variant (containing only Phase 1 instructions) and a later-rounds variant (containing only Phase 2 instructions), since each round is a separate Gemini API call. This separation serves two purposes: it keeps each prompt focused on the current stage’s requirements (reducing prompt length and improving adherence), and it ensures the model invests heavily in planning at step 1 (generating the full<structured_plan>with analysis, rubric, and research plan) rather than skipping ahead to search or answering directly. Each variant explicitly constrains the turn-ending tag: the first round must end with</call_tool>, and later rounds must end with either</call_tool>or</answer>.
+
+We present the core of each generation prompt below (omitting tool documentation and workflow examples, which mirror the final agent prompt).
+
+SFT Generation Prompt: First Round (Phase 1 Only)# Role: Elite Research Planning & Initiation Agent
+
+You are an elite Research Planning Agent. Your purpose is to
+analyze complex queries, generate a rigorous, visible research
+plan, and initiate the very first search query to kick off the
+research process. You DO NOT answer the user’s question
+directly, and you DO NOT simulate tool outputs.
+
+## CORE PRINCIPLE: ADAPTIVE COGNITIVE EFFORT
+[... same as final prompt ...]
+
+## Process
+
+STEP 0: Exploratory Scratchpad
+Begin with a <scratchpad> block. This is your mandatory
+computational workspace. Use this space for a brief,
+unstructured exploration of the user’s query --- identify
+initial hurdles and missing variables before moving to
+structured output. Do not output XML tags inside scratchpad.
+
+STEP 1: The Structured Plan
+Output a single <structured_plan> block containing exactly
+three sections, building upon each other logically:
+
+1. <deep_analysis>: Discover the True Intent.
+   - Complexity Assessment: Evaluate the multi-dimensional
+     complexity (retrieval, reasoning, insight, formulation).
+   - Explicit Needs: What they are directly asking for
+     (including structural/formatting instructions).
+   - Implicit Needs & Gaps: Hidden constraints, missing
+     variables, or potential roadblocks.
+
+2. <rubric>: Define the Strict Grading Criteria. Act as an
+   expert grader creating a rigorous checklist. DO NOT focus
+   on formatting; focus on content, depth, and constraints.
+   - Knowledge Checklist: Exact facts, definitions, data
+     points required (e.g., "The response explicitly defines
+     the von Neumann bottleneck").
+   - Analytical & Synthesis Criteria (Optional, for complex
+     queries): What intellectual connections must the response
+     achieve?
+   - Negative Constraints (Pitfalls): What must the response
+     explicitly AVOID? (e.g., "The response avoids presenting
+     industry blogs as academic consensus").
+
+3. <research_plan>: Formulate the Strategy. Create a logical
+   roadmap to satisfy the rubric. Simple queries: linear
+   steps. Complex queries: conditional, look-ahead strategy
+   (e.g., "Step 1: Find X. Step 2: If X confirms Y,
+   investigate Z; if inconclusive, fallback to W").
+
+STEP 2: The First Tool Call
+Immediately after closing </structured_plan>, execute ONLY
+the first step of your <research_plan>. Once you output
+</call_tool>, you must STOP generating text.
+
+## CRITICAL CONSTRAINTS
+- Output MUST begin with <scratchpad>, then <structured_plan>.
+- Execute EXACTLY ONE tool call.
+- DO NOT simulate <tool_output>.
+- DO NOT attempt to write the final <answer>.
+
+[... tool documentation and workflow examples omitted ...]
+SFT Generation Prompt: Later Rounds (Phase 2 Only)# Role: Elite Iterative Research & Synthesis Agent
+
+You are in the active research phase. You have already
+generated an initial Rubric and Research Plan. Your goal is to
+evaluate the latest retrieved information, dynamically adjust
+your strategy if necessary, and either continue searching or
+generate the final answer.
+
+## CONTEXT: THE PHASE 1 FOUNDATION
+Prior to your current phase, an initial <structured_plan> was
+generated. This plan is your foundational blueprint consisting
+of <deep_analysis>, <rubric>, and <research_plan>. You must
+constantly evaluate incoming evidence against this baseline.
+
+## Process & Decision Tree
+
+STEP 0: Evaluation Scratchpad
+Begin with a <scratchpad> block. This is your mandatory
+computational workspace for raw, unstructured inner monologue
+to digest newly retrieved evidence. If data contradicts
+assumptions, briefly identify the conflict and note your
+pivot. If evidence is sufficient for a complex query, pinpoint
+writing hurdles before resolving them in <review>.
+
+STEP 1: State Evaluation & Action
+Output a <state_evaluation> block to formally analyze the
+latest tool output, then choose exactly ONE path:
+
+PATH A: Continue Research (More Information Needed)
+- Direct Search: If the current plan and rubric are still
+  valid, output your next <call_tool> immediately.
+- Update & Search: If new information invalidates initial
+  assumptions, triggers a fallback, or reveals a deeper
+  multi-hop requirement:
+  1. Output an updated <structured_plan> with revised
+     <deep_analysis>, <rubric>, and/or <research_plan>.
+     (Only include sections that require updates.)
+  2. Then output your next <call_tool>.
+
+PATH B: Ready to Answer (Evidence Sufficient)
+1. The Review: Output a <review> block containing:
+   - <rubric_review>: Systematically map retrieved evidence
+     back to the Phase 1 <rubric> (plus any dynamic updates).
+     * Knowledge Verification: List the critical facts and
+       data points that satisfy the Knowledge Checklist.
+     * Synthesis & Constraints Restatement: Re-articulate
+       Analytical Criteria and Negative Constraints in the
+       context of retrieved evidence. Transform abstract
+       rubric targets into concrete directives for drafting.
+   - <writing_plan>: Outline the final answer architecture,
+     scaling effort to query complexity:
+     * Low-Complexity: State verified facts directly.
+     * High-Complexity: Define (1) unified core thesis,
+       (2) value proposition, (3) narrative architecture
+       with section-by-section outline, (4) citation mapping
+       specifying how verified facts integrate into sections.
+2. The Final Answer: Output within <answer>...</answer> tags.
+   Depth and formatting MUST match the writing plan. Follow
+   the Knowledge Checklist and honor all constraints from
+   the <rubric_review>.
+
+## CRITICAL CONSTRAINTS
+- Output MUST begin with <scratchpad>, then <state_evaluation>.
+- One Action Per Turn: end with </call_tool> OR </answer>.
+  STOP generating immediately after the closing tag.
+- Mandatory Citations: wrap claims in
+  <cite id="S_123">claim text</cite>. Never use empty tags.
+- Substance over Syntax: formatting instructions dictate
+  shape; the <rubric> dictates substance. Enforce the rubric
+  before drafting.
+
+[... tool documentation and workflow examples omitted ...]
+The key difference from the unified final agent prompt is the strict separation of responsibilities: the first-round prompt forbids answering and requires a full planning phase, while the later-rounds prompt assumes the plan already exists and focuses on evidence evaluation and synthesis. This separation ensures the teacher invests in thorough planning rather than short-circuiting to an answer.
+
+Common failure modes.
+Despite these adaptations, Gemini-3.1-Pro frequently violates the scaffold constraints. Common failures include answering directly from internal knowledge without searching, producing output that does not end with the required closing tag, omitting required structural elements such as<rubric>or<state_evaluation>, and generating variant tool names that do not match the expected schema. These violations necessitate aggressive rejection sampling (described below).
+
+B.2.2Multi-Round Generation Pipeline
+Because the scaffold requires iterative tool interaction, we cannot generate complete trajectories in a single model call. Instead, we use a multi-round pipeline that alternates between model generation and real tool execution:
+
+1.Round 1 (Initiation):The teacher receives the first-round system prompt and user query. It generates Phase 1 output:<scratchpad>,<structured_plan>(with<deep_analysis>,<rubric>,<research_plan>), and the first<call_tool>. Generation stops at the closing</call_tool>tag.
+
+2.Tool routing and execution:Each<call_tool>is parsed to extract the tool name and query. The pipeline routes calls to one of two backends:
+•google_search: Submitted as Vertex AI batch prediction jobs using Gemini with Google Search grounding enabled, which returns AI-synthesized summaries with grounding snippets.
+
+•snippet_search: Executed asynchronously against the Semantic Scholar API, which returns paper excerpts matching the query.
+
+Both backends run in parallel to maximize throughput. Responses where the tool fails to call a valid tool (e.g., answering from internal knowledge) are separated into an error stream for potential reprocessing.
+
+3.Rounds 2–NN(Research iteration):The tool output is appended to the conversation history, and the teacher receives the later-rounds system prompt. It generates the next Phase 2 turn:<scratchpad>,<state_evaluation>, and either another<call_tool>or the<review>and<answer>. This loop continues until the teacher produces a closing</answer>tag or a maximum of 10 rounds is reached.
+
+4.Completion detection:A trajectory is considered complete when the teacher’s output ends with</answer>. Incomplete trajectories that exhaust the maximum rounds are discarded. Because Gemini often fails to produce a well-formed closing tag, a substantial fraction of trajectories (∼{\sim}15–25%) are discarded at this stage.
+
+B.2.3Quality Filtering and Rejection Sampling
+Raw teacher trajectories undergo rejection sampling and several filtering steps. This is critical because Gemini-3.1-Pro, despite being a strong model, frequently violates the scaffold’s structural constraints when generating multi-round tool-augmented trajectories.
+
+Rejection criteria.
+The following trajectories are rejected:
+
+•Missing</answer>tag (hard reject):The most common failure mode. The teacher generates extensive content but never produces the closing</answer>tag, either because it runs out of tokens, enters an endless research loop, or simply stops mid-sentence. These trajectories are discarded entirely.
+
+•No valid tool call in non-final rounds:Each non-final round must end with a valid</call_tool>tag containing a parseable tool name and query. Trajectories where the model skips tool use and attempts to answer from internal knowledge (e.g., producing a long response without any<call_tool>) are rejected. This is the second most common failure mode, particularly on simple factual queries where Gemini “knows” the answer and refuses to search.
+
+•Missing structural elements:Trajectories must contain valid<structured_plan>(with<deep_analysis>and<rubric>) in the first round, and<state_evaluation>in subsequent rounds. Those with malformed XML or missing required sections are discarded.
+
+•Consecutive tool errors:Trajectories with two or more consecutive rounds where the tool backend returned an error (e.g., search blocked by safety filters, API rate limits, “no grounding data available”) are discarded. Single error rounds followed by successful recovery are retained, as these teach the model error-resilient behavior.
+
+Post-processing transformations.
+Accepted trajectories undergo the following conversions:
+
+•Reasoning tag conversion:All<scratchpad>...</scratchpad>tags from Gemini’s output are converted to<think>...</think>for compatibility with Qwen3’s chat template, which uses<think>as the native reasoning tag.
+
+•Tool name normalization:Gemini occasionally produces variant tool names (e.g.,google_web_search,Scholar_Search) or malformed attribute strings. These are normalized to the canonicalgoogle_searchandsnippet_searchnames.
+
+B.2.4Training Data Format
+Each filtered trajectory is converted into a single-turn ChatML conversation with three messages:
+•System:The full agent system prompt (the unified Qwen3 version from Sec.B.1, not the Gemini-adapted generation prompt).
+
+•User:The original query with the format-specific additional instruction appended.
+
+•Assistant:The complete multi-round trajectory, with tool outputs wrapped in special span-masking markers. Only the model-generated tokens (thinking, planning, tool calls, state evaluation, review, and answer) receive gradient during training; tool output tokens are masked so the model does not learn to memorize search results.
+
+Finally, this process yields around 11k SFT samples, approximately 2k fewer than DR Tulu due to the repeated errors described above, which are filtered out.
+
+Appendix CDetails on Stagewise Evolving Rubric Evaluation
+This section provides implementation details for the stagewise evolving rubric design described in Section3.3. The judge operates in two phases:adaptive rubric generationproposes new rubrics by comparing trajectories for the same question, andstagewise scoringevaluates each trajectory against the current rubric set. Both phases use an LLM judge (Gemini-3-Flash) with structured JSON output.
+
+C.1Rubric Buffer
+For each training question, we maintain arubric bufferwith two types of rubrics:persistent rubrics(static, ground-truth rubrics from the training data, never removed) andactive rubrics(adaptive rubrics proposed online by the judge, organized by stage and subject to per-stage capacity caps).
+The persistent rubrics are adapted fromshao2025drand only used for the final answer stage.
+At each training step, for each unique question in the batch, the judge (i) generates new adaptive rubrics by comparing the rollout group, (ii) adds them to the buffer, (iii) scores all trajectories against the combined rubric set, and (iv) removes low-discrimination rubrics that did not meaningfully separate trajectory quality.
+
+C.2Adaptive Rubric Generation
+The rubric generation prompt instructs the judge to identify the most discriminative, stage-local criteria that explain why some trajectories are better than others. Several design principles considered:
+
+•Discriminative and specific:Each rubric must actually separate stronger from weaker trajectories for the same question. Descriptions must reference concrete aspects of the question so a separate scorer can unambiguously judge them. Vague rubrics like “good research quality” are prohibited.
+
+•Stage-local and non-redundant:Rubrics target each stage’s specific responsibility. The judge avoids creating positive and negative mirror versions of the same criterion, and skips criteria already covered by existing rubrics.
+
+•Anti-hack:The judge must not create rubrics that merely check XML tag existence, reward formal obedience to a weak plan, overfit to one trajectory’s wording, or confuse self-consistency with true quality.
+
+A key feature enabled by our rubric-guided scaffold is that the judge can use the agent’s own<rubric>blocks from different trajectories asreferenceswhen proposing adaptive rubrics—strong rubrics across trajectories can reveal important task dimensions and failure modes. However, a trajectory’s own rubric is never the scoring standard: the judge is instructed to never reward following a weak self-rubric or penalize evidence-based improvement beyond the original plan.
+
+Rather than prescribing fixed templates, the prompt provides stage-specific guidance as starting points. For each stage, a central question frames the evaluation: “Did the agent understand the problem?” (Plan), “Did it search effectively and adapt?” (Research), “Did it honestly audit readiness?” (Review), and “Is the final answer high-quality?” (Answer). Common useful dimensions are suggested (e.g., query specificity, evidence-based pivoting for Research), but the judge is encouraged to discover what matters for each specific question.
+
+Each rubric item contains atitle,description, andweight(1=minor, 2=important, 3=critical), organized into positive and negative rubrics per stage. Target counts are 1–4 rubrics per stage for stages 1–3 and 2–5 for stage 4, treated as targets rather than quotas. The full rubric generation prompt is shown below:
+
+Stagewise Adaptive Rubric Generation Prompt (Core)You are an expert evaluator generating stagewise comparative
+rubrics for multiple full trajectories produced by the SAME
+research agent on the SAME question.
+
+## Goal
+Identify the most discriminative, stage-local criteria that
+explain why some trajectories are better than others. Evaluate
+real process quality and answer quality — not XML compliance,
+verbosity, or shallow self-consistency.
+
+## How to Read the Trajectories
+Each trajectory is a structured full execution trace:
+- Stage 1 — Plan: <structured_plan> with <deep_analysis>,
+  <rubric>, <research_plan>
+- Stage 2 — Research: iterative <state_evaluation>, tool
+  calls, and possible plan/rubric updates
+- Stage 3 — Review: <review> with <rubric_review> and
+  <writing_plan>
+- Stage 4 — Answer: final <answer>
+
+Do not reward a stage just because the relevant tags exist.
+Judge whether that stage actually performs its intended
+function well.
+
+## How to Use Agent-Generated Rubrics
+A trajectory’s own Stage 1 <rubric> is never the scoring
+standard. Use it only as a reference signal:
+- it shows what the agent recognized as important,
+- it may surface useful task dimensions,
+- it may expose shallow planning if it misses critical needs.
+But: never reward following a weak self-rubric, never let a
+narrow self-rubric lower the real standard, never penalize
+evidence-based improvement beyond the original plan.
+
+## Stage-by-Stage Guidance
+For each stage, the most discriminative criteria often emerge
+from the specific question and trajectories themselves. The
+dimensions below are common starting points:
+
+Stage 1 — PLAN: task understanding depth, identification of
+  hidden constraints, rubric specificity, plan proportionality.
+Stage 2 — RESEARCH: query specificity, evidence-based
+  pivoting, triangulation, stopping criteria.
+Stage 3 — REVIEW: honest gap assessment, evidence-to-
+  structure mapping, drafting plan quality.
+Stage 4 — ANSWER: readability, instruction following,
+  insightfulness, comprehensiveness, correctness, evidence
+  grounding. Evaluated independently from earlier trajectory.
+
+## Anti-Hack Rules
+Do NOT create rubrics that: only check tag existence, reward
+formal obedience to a bad plan, overfit to one trajectory’s
+wording, confuse self-consistency with true quality, punish
+evidence-based improvement, or reward unnecessary overhead.
+
+## Selection Rules
+- Fewer, sharper rubrics over many generic ones.
+- Skip criteria where all trajectories perform similarly.
+- Never create positive and negative mirrors of the same idea.
+- Conservative negative rubrics: target clear failure modes.
+
+## Output Format
+Return rubrics by stage (stage_1 through stage_4), each with
+positive_rubrics and negative_rubrics. Each item: title,
+description, weight (1-3).
+
+C.3Stagewise Scoring
+After rubric generation, each trajectory is scored independently against the combined rubric set (persistent + active). Positive rubrics use a 0/1/2 scale (absent / partial / full), and negative rubrics use the same scale but inverted during aggregation: a score of 0 (no flaw) contributes positively. Each evaluation includes a brief justification grounded in specific trajectory evidence. For each stagekk, the per-stage scoreRi,k∈[0,1]R_{i,k}\in[0,1]is a weighted average of rubric scores within that stage, with negative scores inverted before aggregation.
+
+Stagewise Scoring PromptYou are an expert evaluator. You will receive an AI research
+agent’s full trajectory and a set of rubrics grouped by stage.
+Score each rubric strictly based on the trajectory evidence.
+
+## Trajectory Structure
+- Stage 1 (Plan): start through end of </structured_plan>
+- Stage 2 (Research): after </structured_plan> through all
+  tool-call loops
+- Stage 3 (Review): last <think> before <review> through
+  </review>
+- Stage 4 (Answer): <answer> through end of text
+
+## Scoring Rules
+[POSITIVE] rubrics:
+  2 = FULLY exhibits this quality
+  1 = PARTIALLY exhibits it
+  0 = Completely ABSENT or fails
+
+[NEGATIVE] rubrics:
+  2 = Fully EXHIBITS the flaw
+  1 = PARTIALLY exhibits the flaw
+  0 = Successfully AVOIDS the flaw
+
+## Instructions
+- Score each rubric independently.
+- Use the rubric description as the sole scoring criterion.
+- Provide brief justification grounded in specific trajectory
+  evidence (quote or reference concrete content).
+- Return the exact rubric index with each score.
+
+C.4Buffer Management and Implementation
+Buffer dynamics.
+Each stage maintains a capacity cap on active rubrics (3, 2, 2, 3 for stages 1–4 in our experiments). When a stage exceeds its cap after scoring, rubrics with the lowest discrimination (measured by score variance across the rollout group) are removed. Persistent rubrics are never removed. When a question reappears in a later training step, new adaptive rubrics from the improved policy are added, potentially replacing stale ones that no longer discriminate. This ensures the judge’s criteria co-evolve with the policy, consistent with the evolving rubric paradigm ofshao2025dr, extended here from answer-only to stagewise evaluation.
+
+Structured JSON output.
+Both rubric generation and scoring use Gemini’s structured output mode (response_mime_type="application/json") with Pydantic-derived JSON schemas. This guarantees schema compliance (rubrics organized by stage with title/description/weight, scores with indices and justifications) without fragile post-hoc text parsing.
+
+Batch parallelism.
+At each training step, the batch contains 32 unique questions×\times8 rollouts = 256 trajectories. All 32 rubric generation calls are launched concurrently viaasyncio.gather, followed by all 256 scoring calls in parallel. Each call includes exponential-backoff retry logic (up to 5 retries). Failed calls are treated as “no new rubrics” (generation) or fall back to terminal answer score only (scoring).
+
+Efficiency.
+Rubric generation requires only 32 calls per step (one per question, not per trajectory). Scoring requires 256 calls but each is lightweight (∼{\sim}8–15 rubrics per trajectory). The combined rubric generation + scoring phase takes approximately 5 minutes per step, overlapping with the training engine’s gradient computation. The judge model (Gemini-3-Flash) is chosen for cost and latency; the structured output constraint and detailed prompt compensate for the smaller model’s limitations.
+
+Appendix DAsynchronous Reflection Pipeline and Windowed Curriculum
+This appendix provides the implementation details for the meta-policy training pipeline
+and the windowed retrieval curriculum described in Section3.4.
+
+D.1Training Pipeline Architecture
+Each RL training step in our agentic loop involves several sequential phases:
+rollout generation (multi-turn tool-augmented trajectories via vLLM),
+stagewise judge scoring (SS-GRPO reward computation),
+and policy gradient update.
+Reflection generation (prompting the backbone to produce rubric-grounded reflections
+from sampled trajectories) introduces an additional compute requirement that we overlap with the main loop.
+
+Our pipeline uses three concurrent threads:
+1.Main thread (training engine):Performs gradient updates on the policy. Alternates between Phase A (meta-policy update on deferred reflections from the previous step) and Phase B (task-policy SS-GRPO update on the current step’s rollouts).
+
+2.Inference thread (vLLM):Generates multi-turn tool-augmented rollouts. During Phase A, the inference engine begins generating the next batch of rollouts while the training engine trains on deferred reflections—fully overlapping inference and reflection training.
+
+3.Data preparation thread:Runs judge scoring (async Gemini API calls), launches reflection generation and reflection judging as concurrent background tasks, and prepares packed training batches. Reward scoring results are returned immediately for task-policy training; reflection scoring continues asynchronously.
+
+D.2One-Step Deferred Reflection Training
+A synchronous implementation would block the next task rollout until reflection generation, judging, and the meta-policy update are finished.
+We instead defer reflection training by one RL step, as illustrated in the bottom panel of Fig.4.
+
+At stepNN:
+1.The inference engine generates task rollouts for stepNN.
+
+2.The data preparation thread scores stepNNrollouts (SS-GRPO rewards) and simultaneously launches background tasks for: (a) reflection rollout generation via vLLM, producingnncandidates per sampled trajectory, and (b) judge scoring of the reflection candidates.
+
+3.Reward results are returned immediately; the training engine performs the SS-GRPO task-policy update on stepNN.
+
+4.Meanwhile, reflection scoring completes in the background. Accepted reflections are inserted into the rubric bank, and the scored reflection samples are placed in adeferred buffer.
+
+5.At the start of stepN+1N{+}1, duringPhase A, the training engine trains on the deferred reflection buffer from stepNNwhilethe inference engine generates stepN+1N{+}1rollouts.
+
+This one-step staleness trades exact synchrony for higher infrastructure utilization:
+both inference and training engines remain continuously occupied,
+and meta-policy training adds effectively no extra wall-clock overhead to the SS-GRPO loop.
+
+D.3Windowed Curriculum
+Since reflection training is deferred by one step and bank insertion happens asynchronously,
+a naïve curriculum that immediately revisits a query after its first encounter may
+attempt within-episode retrieval before the corresponding reflection has been generated and accepted.
+To avoid this conflict, we introduce a windowed curriculum with window sizeKKthat provides sufficient temporal separation between a query’s first and second encounters.
+
+Training alternates between two phases within each window of2​K2Ksteps:
+
+1.New-query phase(steps1,…,K1,\ldots,Kwithin the window):
+The dataloader samplesKKfresh query batches{B1,B2,…,BK}\{B_{1},B_{2},\ldots,B_{K}\}.
+For each batch, the bank performscross-episode retrieval:
+semantically similar items from past (different) queries are injected as few-shot exemplars.
+At the end of each step, reflection generation is launched asynchronously in the background.
+
+2.Repeat phase(stepsK+1,…,2​KK{+}1,\ldots,2Kwithin the window):
+The same batches are replayed in order:B1,B2,…,BKB_{1},B_{2},\ldots,B_{K}.
+For each batch, the bank performswithin-episode retrieval:
+the exact reflection generated during the new-query phase is retrieved
+and injected as direct self-guidance.
+
+TheKK-step gap between a query’s first encounter and its repeat
+guarantees that the deferred reflection pipeline
+(generation, judging, bank insertion, and at least one deferred training step)
+has fully completed before within-episode retrieval is attempted.
+In our experiments, we useK=3K{=}3, providing a comfortable margin over the one-step deferral.
+
+Step in windowPhaseDataRetrieval mode1NewB1B_{1}(fresh)Cross-episode (similar)2NewB2B_{2}(fresh)Cross-episode (similar)3NewB3B_{3}(fresh)Cross-episode (similar)4RepeatB1B_{1}(replay)Within-episode (exact)5RepeatB2B_{2}(replay)Within-episode (exact)6RepeatB3B_{3}(replay)Within-episode (exact)Figure 7:Windowed curriculum withK=3K{=}3. Each window of2​K=62K{=}6steps alternates between new queries with cross-episode retrieval and repeated queries with within-episode exact retrieval. The 3-step gap ensures the deferred reflection pipeline has fully completed before the repeat.
+D.4Trajectory Sampling and Candidate Generation
+For each query in the new-query phase,
+we randomly sample one trajectory from the rollout group for reflection generation.
+The sampling is uniform random over trajectory indices,
+without length bias or score-based selection,
+mirroring inference conditions where the agent does not have access to privileged scoring information.
+From the sampled trajectory, we generaten=8n{=}8reflection candidates
+via vLLM parallel sampling (temperature0.70.7, single prompt,nncompletions).
+Each candidate is independently scored by the judge,
+and only the highest-scored candidate with valid output format is accepted into the bank.
+Each query’s reflection generation is independent,
+so a failure for one query does not affect others.
+
+D.5Bank Persistence and Retrieval
+The rubric bank maintains an in-memory FAISS index over query embeddings
+(computed via Qwen3-Embedding-0.6B on CPU).
+For cross-episode retrieval, the query embedding is compared against stored embeddings
+via inner-product similarity, and the top-kkitems (default:k=2k{=}2) are returned.
+For within-episode retrieval, items are matched by exact question hash (SHA-256).
+When a query already has a bank item and the same query is encountered in a later training step,
+the new reflection overwrites the old one, keeping the bank synchronized with the evolving policy.
+
+The bank is persisted every 10 steps and at every model checkpoint, using atomic writes (write to temp file, then rename) to prevent corruption.
+On training resume, the bank is restored from the checkpoint corresponding to
+the same global step as the model weights, ensuring consistency between
+the policy parameters and the memory contents.
+
+D.6Prompt Templates
+D.6.1Reflection Generation Prompt
+The policy model receives the following system prompt when generating rubric-grounded reflections:
+
+Reflection System PromptYou are a strict postmortem editor for long-form
+deep research QA.
+
+You will receive:
+- a question
+- a research trajectory ending in a final
+  <answer>...</answer>
+
+Your job is not to answer the question again. Your
+job is to extract the most useful guidance for:
+1. a stronger next attempt on this question, and
+2. similar long-form research questions.
+
+First, read the final <answer>.
+Judge it on: correctness and calibration;
+instruction-following and coverage; research quality
+and verification; synthesis and insight;
+communication and structure.
+
+Then identify the 2-4 highest-leverage strengths or
+weaknesses, trace them back to the visible trajectory,
+and turn them into reusable guidance.
+
+Rules:
+- Stay grounded in the provided question and
+  trajectory.
+- Do not invent flaws just to be critical.
+- Do not speculate about hidden reasoning not shown
+  in the trajectory.
+- Do not rewrite the answer.
+- Do not give generic advice like "be more careful."
+- Write specific guidance that is grounded in this
+  case but transferable to similar questions.
+
+Output format (exactly two blocks):
+
+<reflection_rubrics>
+Critical Requirement / Analytical Approach
+/ Communication & Structure / Pitfalls
+</reflection_rubrics>
+
+<reflection_takeaways>
+1-4 concise portable lessons
+</reflection_takeaways>
+The user message provides the question and the full research trajectory, instructing the model to examine the final answer, trace strengths and weaknesses, and produce both output blocks.
+
+D.6.2Judge Scoring Prompt
+An LLM judge (Gemini) evaluates each reflection candidate with privileged access to the graded trajectory, including per-rubric scores and evaluator justifications. The judge scores each candidate on how useful it would be for future attempts:
+
+Reflection Judge System Prompt (abridged)You are an expert judge evaluating reflection
+candidates produced by a research agent.
+
+Scoring Dimensions (each 0.0 to 1.0):
+
+Diagnostic Accuracy (weight 0.4)
+- Does it correctly identify the main strengths and
+  weaknesses? Is it aligned with the evaluator
+  justifications and visible trajectory?
+  Penalize: missing a major failure clearly flagged
+  by the evaluator; inventing problems not supported
+  by the trajectory; misidentifying root causes.
+
+Specificity (weight 0.3)
+- Is the guidance concrete, actionable, and tailored
+  for next attempt of the question?
+  Penalize: generic advice ("be more thorough");
+  checklist items that could apply to any task;
+  merely restating evaluator language.
+
+Scope & Balance (weight 0.3)
+- Is the guidance helpful for other questions?
+  Are takeaways complementary?
+  Penalize: missing an important category; repeating
+  the same point across sections.
+
+Rules:
+- Score based on the reflection’s quality as future
+  guidance, not on the trajectory’s quality.
+- A reflection on a perfect trajectory can score low
+  if it is generic.
+- A reflection on a failed trajectory can score high
+  if it precisely identifies root causes.
+The user message provides the original question, all reflection candidates, and the graded trajectory with evaluator feedback. The judge returns per-candidate scores across all three dimensions.
+
+D.6.3Injection Formats
+Retrieved bank items are injected as a<reference_examples>block appended to the user message before tokenization. The two retrieval modes from Section3.4—within-episode refinement and cross-episode transfer—use distinct preambles to condition the agent’s use of the retrieved guidance.
+
+Within-episode injection.
+When the agent revisits a question it has attempted before (repeat phase of the windowed curriculum), the accepted reflection from the previous encounter is injected:
+
+Within-Episode Injection Format<reference_examples>
+You have attempted this exact question before. Below
+are the rubrics and reflections from your previous
+attempt. Use them to improve your planning and
+answering -- avoid past mistakes and build on what
+worked.
+
+## Your Previous Attempt on This Question:
+
+### Rubrics:
+{rubrics from bank item}
+
+### Takeaways:
+{reflections from bank item}
+</reference_examples>
+
+{Original user question}
+
+Cross-episode injection.
+For a new query (new-query phase), the bank retrieves the top-kksemantically similar items and presents them as rubric-grounded exemplars:
+
+Cross-Episode Injection Format<reference_examples>
+Below are rubrics and reflections from similar
+questions that were previously analyzed. Use them as
+reference to guide your planning and answering --
+adapt to the current question’s specific needs.
+Do NOT copy them verbatim; extract what is relevant
+and adjust.
+
+## Similar Question 1:
+{question from bank item 1}
+
+### Rubrics:
+{rubrics from bank item 1}
+
+### Takeaways:
+{reflections from bank item 1}
+
+---
+
+## Similar Question 2:
+{question from bank item 2}
+
+### Rubrics:
+{rubrics from bank item 2}
+
+### Takeaways:
+{reflections from bank item 2}
+</reference_examples>
+
+{Original user question}
+In both cases, the reference block precedes the original user question, so the agent sees the guidance before beginning its structured plan. The within-episode format signals direct self-improvement (“avoid past mistakes”), while the cross-episode format signals analogical transfer (“adapt to the current question’s specific needs”).
+
+Appendix ETheoretical Analysis
+E.1Value of Stage Information
+In the main text, Theorem1is stated using the informal notationh,c,zh,c,zinside conditional expectations for readability.
+In this appendix, we make the probability space explicit:H,C,ZH,C,Zdenote random variables, whileh,c,zh,c,zdenote realized values.
+We also slightly sharpen the strictness condition in the theorem by requiring the compared stages
+to have positive conditional probability givencc; without this requirement,
+the pointwise quantities𝔼​[U​(H,a)∣C=c,Z=z]\mathbb{E}[U(H,a)\mid C=c,Z=z]on impossible stage events are version-dependent.
+
+The result below is a value-of-information statement specialized to structured agent reasoning.
+It compares two information structures,σ​(C)\sigma(C)andσ​(C,Z)\sigma(C,Z).
+Unlike full state-abstraction theorems, it doesnotassume that(C,Z)(C,Z)is sufficient for the entire historyHH;
+it only quantifies the gain from making the stage label explicit under a compressed decision state.
+
+Assumption 1(Setup for Theorem1).Throughout this subsection, the following assumptions hold.
+1.Underlying probability space.There exists a probability space(Ω,ℱ,ℙ)(\Omega,\mathcal{F},\mathbb{P})and a random decision history
+H:Ω→ℋ,H:\Omega\to\mathcal{H},where(ℋ,ℬ​(ℋ))(\mathcal{H},\mathcal{B}(\mathcal{H}))is a measurable space.
+The law ofHHis denoted byd:=ℙ∘H−1d:=\mathbb{P}\circ H^{-1}.
+We interpretHHas a random reachable decision point sampled from some fixed distribution over histories.
+
+2.Finite action space.The action space𝒜\mathcal{A}is a finite nonempty set.
+Consequently, every maximization and argmax over𝒜\mathcal{A}is well-defined and nonempty.
+
+3.Compressed context and stage label.There exists a measurable map
+ϕ:ℋ→𝒞\phi:\mathcal{H}\to\mathcal{C}into a standard Borel space(𝒞,ℬ​(𝒞))(\mathcal{C},\mathcal{B}(\mathcal{C})), and a measurable stage map
+ψ:ℋ→[K]:={1,…,K},\psi:\mathcal{H}\to[K]:=\{1,\dots,K\},such that
+C:=ϕ​(H),Z:=ψ​(H).C:=\phi(H),\qquad Z:=\psi(H).Since𝒞\mathcal{C}is standard Borel and[K][K]is finite, the regular conditional objects used below exist.
+
+4.Integrable utility.For eacha∈𝒜a\in\mathcal{A}, there exists a measurable utility function
+U​(⋅,a):ℋ→ℝU(\cdot,a):\mathcal{H}\to\mathbb{R}such that
+𝔼​[|U​(H,a)|]<∞.\mathbb{E}\big[\,|U(H,a)|\,\big]<\infty.In our application,U​(H,a)U(H,a)can be instantiated as a continuation utility or continuation value
+associated with choosing actionaaat decision pointHH.
+
+Definition 1(Conditional mean utilities and stage probabilities).Adopt Assumption1.
+For eacha∈𝒜a\in\mathcal{A}, fix measurable versions
+q¯​(⋅,a):𝒞→ℝ,q​(⋅,⋅,a):𝒞×[K]→ℝ\bar{q}(\cdot,a):\mathcal{C}\to\mathbb{R},\qquad q(\cdot,\cdot,a):\mathcal{C}\times[K]\to\mathbb{R}such that
+q¯​(C,a)=𝔼​[U​(H,a)∣σ​(C)]almost surely,\bar{q}(C,a)=\mathbb{E}\!\left[U(H,a)\mid\sigma(C)\right]\qquad\text{almost surely,}and
+q​(C,Z,a)=𝔼​[U​(H,a)∣σ​(C,Z)]almost surely.q(C,Z,a)=\mathbb{E}\!\left[U(H,a)\mid\sigma(C,Z)\right]\qquad\text{almost surely.}
+For eachz∈[K]z\in[K], fix a measurable version
+p​(z∣⋅):𝒞→[0,1]p(z\mid\cdot):\mathcal{C}\to[0,1]such that
+p​(z∣C)=ℙ​(Z=z∣σ​(C))almost surely.p(z\mid C)=\mathbb{P}\!\left(Z=z\mid\sigma(C)\right)\qquad\text{almost surely.}
+We write
+ℙC:=ℙ∘C−1\mathbb{P}_{C}:=\mathbb{P}\circ C^{-1}for the law ofCC, and define the stage support at a contextc∈𝒞c\in\mathcal{C}by
+S​(c):={z∈[K]:p​(z∣c)>0}.S(c):=\{z\in[K]:p(z\mid c)>0\}.
+
+Remark 1(Well-definedness).Because𝒜\mathcal{A}is finite and eachU​(H,a)U(H,a)is integrable, the random variablesq¯​(C,a)\bar{q}(C,a)andq​(C,Z,a)q(C,Z,a)are integrable for everya∈𝒜a\in\mathcal{A}.
+Indeed, by Jensen’s inequality for conditional expectations,
+|q¯(C,a)|=|𝔼[U(H,a)∣σ(C)]|≤𝔼[|U(H,a)|∣σ(C)]a.s.,|\bar{q}(C,a)|=\left|\mathbb{E}[U(H,a)\mid\sigma(C)]\right|\leq\mathbb{E}[|U(H,a)|\mid\sigma(C)]\qquad\text{a.s.,}and therefore
+𝔼​[|q¯​(C,a)|]≤𝔼​[|U​(H,a)|]<∞.\mathbb{E}\big[\,|\bar{q}(C,a)|\,\big]\leq\mathbb{E}\big[\,|U(H,a)|\,\big]<\infty.The same argument gives
+𝔼​[|q​(C,Z,a)|]<∞.\mathbb{E}\big[\,|q(C,Z,a)|\,\big]<\infty.Hence all expectations below are finite.
+
+Definition 2(Flat and stage-conditioned decision values).Adopt Assumption1and Definition1.
+We define
+Vflat:=𝔼​[maxa∈𝒜⁡q¯​(C,a)],Vstage:=𝔼​[maxa∈𝒜⁡q​(C,Z,a)].V_{\mathrm{flat}}:=\mathbb{E}\!\left[\max_{a\in\mathcal{A}}\bar{q}(C,a)\right],\qquad V_{\mathrm{stage}}:=\mathbb{E}\!\left[\max_{a\in\mathcal{A}}q(C,Z,a)\right].These are exactly the appendix versions of the quantities appearing in Theorem1in the main text.
+Equivalently,
+Vflat=𝔼​[maxa∈𝒜⁡𝔼​[U​(H,a)∣C]],Vstage=𝔼​[maxa∈𝒜⁡𝔼​[U​(H,a)∣C,Z]].V_{\mathrm{flat}}=\mathbb{E}\!\left[\max_{a\in\mathcal{A}}\mathbb{E}[U(H,a)\mid C]\right],\qquad V_{\mathrm{stage}}=\mathbb{E}\!\left[\max_{a\in\mathcal{A}}\mathbb{E}[U(H,a)\mid C,Z]\right].
+
+The following lemma is the only structural identity needed in the proof of Theorem1.
+
+Lemma 1(Collapsing stage-conditioned utility to the flat information structure).Adopt Assumption1and Definition1.
+Then for every actiona∈𝒜a\in\mathcal{A},
+q¯​(C,a)=∑z=1Kp​(z∣C)​q​(C,z,a)almost surely.\bar{q}(C,a)=\sum_{z=1}^{K}p(z\mid C)\,q(C,z,a)\qquad\text{almost surely.}
+
+Proof.Fix an arbitrary actiona∈𝒜a\in\mathcal{A}.
+Define the random variable
+Ra:=∑z=1Kp​(z∣C)​q​(C,z,a).R_{a}:=\sum_{z=1}^{K}p(z\mid C)\,q(C,z,a).We will prove thatRaR_{a}is a version of𝔼​[U​(H,a)∣σ​(C)]\mathbb{E}[U(H,a)\mid\sigma(C)].
+Sinceq¯​(C,a)\bar{q}(C,a)is also a version of𝔼​[U​(H,a)∣σ​(C)]\mathbb{E}[U(H,a)\mid\sigma(C)]by Definition1,
+the conclusion will follow.
+
+We first note thatRaR_{a}isσ​(C)\sigma(C)-measurable.
+Indeed, for each fixedzz, bothp​(z∣C)p(z\mid C)andq​(C,z,a)q(C,z,a)areσ​(C)\sigma(C)-measurable,
+so their product isσ​(C)\sigma(C)-measurable, and a finite sum of such terms is againσ​(C)\sigma(C)-measurable.
+
+It remains to verify the defining property of conditional expectation.
+LetGGbe any boundedσ​(C)\sigma(C)-measurable random variable.
+We must show that
+𝔼​[G​Ra]=𝔼​[G​U​(H,a)].\mathbb{E}[GR_{a}]=\mathbb{E}[GU(H,a)].
+Starting from the left-hand side and expanding the definition ofRaR_{a}, we obtain
+𝔼​[G​Ra]\displaystyle\mathbb{E}[GR_{a}]=𝔼​[G​∑z=1Kp​(z∣C)​q​(C,z,a)]\displaystyle=\mathbb{E}\!\left[G\sum_{z=1}^{K}p(z\mid C)\,q(C,z,a)\right]=∑z=1K𝔼​[G​p​(z∣C)​q​(C,z,a)].\displaystyle=\sum_{z=1}^{K}\mathbb{E}\!\left[G\,p(z\mid C)\,q(C,z,a)\right].For each fixedzz, the random variableG​q​(C,z,a)Gq(C,z,a)isσ​(C)\sigma(C)-measurable and integrable.
+Therefore, by the defining property of conditional expectation,
+𝔼​[G​p​(z∣C)​q​(C,z,a)]\displaystyle\mathbb{E}\!\left[G\,p(z\mid C)\,q(C,z,a)\right]=𝔼​[G​q​(C,z,a)​𝔼​[𝟏​{Z=z}∣σ​(C)]]\displaystyle=\mathbb{E}\!\left[G\,q(C,z,a)\,\mathbb{E}[\mathbf{1}\{Z=z\}\mid\sigma(C)]\right]=𝔼​[G​q​(C,z,a)​1​{Z=z}].\displaystyle=\mathbb{E}\!\left[G\,q(C,z,a)\,\mathbf{1}\{Z=z\}\right].Summing overzzyields
+𝔼​[G​Ra]\displaystyle\mathbb{E}[GR_{a}]=∑z=1K𝔼​[G​q​(C,z,a)​1​{Z=z}]\displaystyle=\sum_{z=1}^{K}\mathbb{E}\!\left[G\,q(C,z,a)\,\mathbf{1}\{Z=z\}\right]=𝔼​[G​∑z=1K𝟏​{Z=z}​q​(C,z,a)]\displaystyle=\mathbb{E}\!\left[G\sum_{z=1}^{K}\mathbf{1}\{Z=z\}\,q(C,z,a)\right]=𝔼​[G​q​(C,Z,a)]\displaystyle=\mathbb{E}\!\left[Gq\left(C,Z,a\right)\right]
+By Definition1,
+q​(C,Z,a)=𝔼​[U​(H,a)∣σ​(C,Z)]almost surely.q(C,Z,a)=\mathbb{E}[U(H,a)\mid\sigma(C,Z)]\qquad\text{almost surely.}BecauseGGisσ​(C)\sigma(C)-measurable andσ​(C)⊆σ​(C,Z)\sigma(C)\subseteq\sigma(C,Z), the random variableGGis alsoσ​(C,Z)\sigma(C,Z)-measurable.
+Applying the defining property of conditional expectation once more gives
+𝔼​[G​q​(C,Z,a)]=𝔼​[G​U​(H,a)].\mathbb{E}\!\left[G\,q(C,Z,a)\right]=\mathbb{E}\!\left[G\,U(H,a)\right].Combining the previous displays, we conclude that
+𝔼​[G​Ra]=𝔼​[G​U​(H,a)]\mathbb{E}[GR_{a}]=\mathbb{E}[GU(H,a)]for every boundedσ​(C)\sigma(C)-measurable random variableGG.
+This finishes the proof.
+
+∎
+
+Definition 3(Aliasing gap).Adopt Assumption1and Definition1.
+Forc∈𝒞c\in\mathcal{C}, define the stage-aliasing gap
+Δalias​(c):=∑z=1Kp​(z∣c)​maxa∈𝒜⁡q​(c,z,a)−maxa∈𝒜​∑z=1Kp​(z∣c)​q​(c,z,a).\Delta_{\mathrm{alias}}(c):=\sum_{z=1}^{K}p(z\mid c)\,\max_{a\in\mathcal{A}}q(c,z,a)-\max_{a\in\mathcal{A}}\sum_{z=1}^{K}p(z\mid c)\,q(c,z,a).Since𝒜\mathcal{A}and[K][K]are finite and the chosen versionsp,qp,qare measurable, the functionΔalias:𝒞→ℝ\Delta_{\mathrm{alias}}:\mathcal{C}\to\mathbb{R}is measurable.
+
+We can now restate and strengthen the theorem from the main text.
+
+Theorem 2(Restatement and strengthening of Theorem1).Adopt Assumption1and Definitions1–3.
+Then
+Vstage−Vflat=𝔼​[Δalias​(C)]≥0.V_{\mathrm{stage}}-V_{\mathrm{flat}}=\mathbb{E}\!\left[\Delta_{\mathrm{alias}}(C)\right]\geq 0.Consequently,
+Vstage≥Vflat.V_{\mathrm{stage}}\geq V_{\mathrm{flat}}.
+Moreover, forℙC\mathbb{P}_{C}-almost everyc∈𝒞c\in\mathcal{C}, the following are equivalent:
+1.Δalias​(c)=0\Delta_{\mathrm{alias}}(c)=0.
+
+2.There exists an action
+ac⋆∈⋂z∈S​(c)arg⁡maxa∈𝒜⁡q​(c,z,a).a_{c}^{\star}\in\bigcap_{z\in S(c)}\arg\max_{a\in\mathcal{A}}q(c,z,a).
+
+In particular, if there exists a measurable set𝒞0⊆𝒞\mathcal{C}_{0}\subseteq\mathcal{C}with
+ℙC​(𝒞0)>0\mathbb{P}_{C}(\mathcal{C}_{0})>0and two distinct stagesz≠z′z\neq z^{\prime}such that for everyc∈𝒞0c\in\mathcal{C}_{0},
+p​(z∣c)>0,p​(z′∣c)>0,arg⁡maxa∈𝒜⁡q​(c,z,a)∩arg⁡maxa∈𝒜⁡q​(c,z′,a)=∅,p(z\mid c)>0,\qquad p(z^{\prime}\mid c)>0,\qquad\arg\max_{a\in\mathcal{A}}q(c,z,a)\;\cap\;\arg\max_{a\in\mathcal{A}}q(c,z^{\prime},a)=\varnothing,then
+Vstage>Vflat.V_{\mathrm{stage}}>V_{\mathrm{flat}}.
+
+Proof.First, we rewriteVstageV_{\mathrm{stage}}andVflatV_{\mathrm{flat}}to show their subtraction form as in𝔼​[△alias​(C)]\mathbb{E}\left[\triangle_{\mathrm{alias}}(C)\right]. By Definition2,
+Vstage=𝔼​[maxa∈𝒜⁡q​(C,Z,a)].V_{\mathrm{stage}}=\mathbb{E}\!\left[\max_{a\in\mathcal{A}}q(C,Z,a)\right].For each fixedz∈[K]z\in[K], define
+Mz​(C):=maxa∈𝒜⁡q​(C,z,a).M_{z}(C):=\max_{a\in\mathcal{A}}q(C,z,a).Since𝒜\mathcal{A}is finite andq​(⋅,z,a)q(\cdot,z,a)is measurable for eachaa, the random variableMz​(C)M_{z}(C)isσ​(C)\sigma(C)-measurable.
+Also, becauseZZtakes values in the finite set[K][K],
+maxa∈𝒜⁡q​(C,Z,a)=∑z=1K𝟏​{Z=z}​Mz​(C)almost surely.\max_{a\in\mathcal{A}}q(C,Z,a)=\sum_{z=1}^{K}\mathbf{1}\{Z=z\}\,M_{z}(C)\qquad\text{almost surely.}Taking conditional expectation givenσ​(C)\sigma(C), we obtain
+𝔼​[maxa∈𝒜⁡q​(C,Z,a)∣σ​(C)]\displaystyle\mathbb{E}\!\left[\max_{a\in\mathcal{A}}q(C,Z,a)\mid\sigma(C)\right]=𝔼​[∑z=1K𝟏​{Z=z}​Mz​(C)∣σ​(C)]\displaystyle=\mathbb{E}\!\left[\sum_{z=1}^{K}\mathbf{1}\{Z=z\}M_{z}(C)\mid\sigma(C)\right]=∑z=1K𝔼​[𝟏​{Z=z}​Mz​(C)∣σ​(C)]\displaystyle=\sum_{z=1}^{K}\mathbb{E}\!\left[\mathbf{1}\{Z=z\}M_{z}(C)\mid\sigma(C)\right]=∑z=1KMz​(C)​𝔼​[𝟏​{Z=z}∣σ​(C)]\displaystyle=\sum_{z=1}^{K}M_{z}(C)\,\mathbb{E}\!\left[\mathbf{1}\{Z=z\}\mid\sigma(C)\right]=∑z=1Kp​(z∣C)​Mz​(C).\displaystyle=\sum_{z=1}^{K}p(z\mid C)\,M_{z}(C).Taking expectation once more and using the tower property gives
+Vstage=𝔼​[∑z=1Kp​(z∣C)​maxa∈𝒜⁡q​(C,z,a)].V_{\mathrm{stage}}=\mathbb{E}\!\left[\sum_{z=1}^{K}p(z\mid C)\,\max_{a\in\mathcal{A}}q(C,z,a)\right].
+We next rewriteVflatV_{\mathrm{flat}}.
+By Definition2,
+Vflat=𝔼​[maxa∈𝒜⁡q¯​(C,a)].V_{\mathrm{flat}}=\mathbb{E}\!\left[\max_{a\in\mathcal{A}}\bar{q}(C,a)\right].By Lemma1,
+q¯​(C,a)=∑z=1Kp​(z∣C)​q​(C,z,a)almost surely.\bar{q}(C,a)=\sum_{z=1}^{K}p(z\mid C)\,q(C,z,a)\qquad\text{almost surely.}Substituting this identity into the preceding display yields
+Vflat=𝔼​[maxa∈𝒜​∑z=1Kp​(z∣C)​q​(C,z,a)].V_{\mathrm{flat}}=\mathbb{E}\!\left[\max_{a\in\mathcal{A}}\sum_{z=1}^{K}p(z\mid C)\,q(C,z,a)\right].
+Then we can simply see that by Definition3
+Vstage−Vflat=𝔼​[∑z=1Kp​(z∣C)​maxa∈𝒜⁡q​(C,z,a)−maxa∈𝒜​∑z=1Kp​(z∣C)​q​(C,z,a)]=𝔼​[Δalias​(C)].V_{\mathrm{stage}}-V_{\mathrm{flat}}=\mathbb{E}\!\left[\sum_{z=1}^{K}p(z\mid C)\,\max_{a\in\mathcal{A}}q(C,z,a)-\max_{a\in\mathcal{A}}\sum_{z=1}^{K}p(z\mid C)\,q(C,z,a)\right]=\mathbb{E}\!\left[\Delta_{\mathrm{alias}}(C)\right].
+It remains to show thatΔalias​(c)≥0\Delta_{\mathrm{alias}}(c)\geq 0for everycc.
+Fix an arbitraryc∈𝒞c\in\mathcal{C}.
+For every actiona∈𝒜a\in\mathcal{A}and every stagez∈[K]z\in[K], we have
+q​(c,z,a)≤maxa′∈𝒜⁡q​(c,z,a′).q(c,z,a)\leq\max_{a^{\prime}\in\mathcal{A}}q(c,z,a^{\prime}).Multiplying both sides by the nonnegative quantityp​(z∣c)p(z\mid c)and summing overzzgives
+∑z=1Kp​(z∣c)​q​(c,z,a)≤∑z=1Kp​(z∣c)​maxa′∈𝒜⁡q​(c,z,a′).\sum_{z=1}^{K}p(z\mid c)\,q(c,z,a)\leq\sum_{z=1}^{K}p(z\mid c)\,\max_{a^{\prime}\in\mathcal{A}}q(c,z,a^{\prime}).Since this inequality holds for everya∈𝒜a\in\mathcal{A}, it continues to hold after taking the maximum overaaon the left-hand side, and this means thatΔalias​(c)≥0\Delta_{\mathrm{alias}}(c)\geq 0.
+Therefore
+Vstage−Vflat=𝔼​[Δalias​(C)]≥0,V_{\mathrm{stage}}-V_{\mathrm{flat}}=\mathbb{E}\!\left[\Delta_{\mathrm{alias}}(C)\right]\geq 0,which implies
+Vstage≥Vflat.V_{\mathrm{stage}}\geq V_{\mathrm{flat}}.
+Then we are ready to make characterizations when the stage-aliasing gap is zero.Since𝒜\mathcal{A}is finite and nonempty, there exists at least one action
+acflat∈arg⁡maxa∈𝒜​∑z=1Kp​(z∣c)​q​(c,z,a).a_{c}^{\mathrm{flat}}\in\arg\max_{a\in\mathcal{A}}\sum_{z=1}^{K}p(z\mid c)\,q(c,z,a).By Definition3,
+Δalias​(c)\displaystyle\Delta_{\mathrm{alias}}(c)=∑z=1Kp​(z∣c)​Mz​(c)−∑z=1Kp​(z∣c)​q​(c,z,acflat)\displaystyle=\sum_{z=1}^{K}p(z\mid c)\,M_{z}(c)-\sum_{z=1}^{K}p(z\mid c)\,q(c,z,a_{c}^{\mathrm{flat}})=∑z=1Kp​(z∣c)​(Mz​(c)−q​(c,z,acflat)).\displaystyle=\sum_{z=1}^{K}p(z\mid c)\,\big(M_{z}(c)-q(c,z,a_{c}^{\mathrm{flat}})\big).Each summand on the right-hand side is nonnegative, becauseMz​(c)M_{z}(c)is the maximum ofq​(c,z,⋅)q(c,z,\cdot)over𝒜\mathcal{A}.
+We now prove the two directions separately.
+
+(i) IfΔalias​(c)=0\Delta_{\mathrm{alias}}(c)=0, then there exists a common maximizer overS​(c)S(c).This implies that
+
+∑z=1Kp​(z∣c)​(Mz​(c)−q​(c,z,acflat))=0.\sum_{z=1}^{K}p(z\mid c)\,\big(M_{z}(c)-q(c,z,a_{c}^{\mathrm{flat}})\big)=0.Every term in the sum is nonnegative.
+Therefore, for everyzzsuch thatp​(z∣c)>0p(z\mid c)>0, we must have
+Mz​(c)−q​(c,z,acflat)=0,M_{z}(c)-q(c,z,a_{c}^{\mathrm{flat}})=0,i.e.,
+q​(c,z,acflat)=Mz​(c)=maxa∈𝒜⁡q​(c,z,a).q(c,z,a_{c}^{\mathrm{flat}})=M_{z}(c)=\max_{a\in\mathcal{A}}q(c,z,a).Hence
+acflat∈arg⁡maxa∈𝒜⁡q​(c,z,a)for every​z∈S​(c).a_{c}^{\mathrm{flat}}\in\arg\max_{a\in\mathcal{A}}q(c,z,a)\qquad\text{for every }z\in S(c).Equivalently,
+acflat∈⋂z∈S​(c)arg⁡maxa∈𝒜⁡q​(c,z,a),a_{c}^{\mathrm{flat}}\in\bigcap_{z\in S(c)}\arg\max_{a\in\mathcal{A}}q(c,z,a),so a common maximizer exists.
+
+(ii) If there exists a common maximizer overS​(c)S(c), thenΔalias​(c)=0\Delta_{\mathrm{alias}}(c)=0.
+
+Conversely, assume there exists an action
+ac⋆∈⋂z∈S​(c)arg⁡maxa∈𝒜⁡q​(c,z,a).a_{c}^{\star}\in\bigcap_{z\in S(c)}\arg\max_{a\in\mathcal{A}}q(c,z,a).Then for everyz∈S​(c)z\in S(c),
+q​(c,z,ac⋆)=Mz​(c).q(c,z,a_{c}^{\star})=M_{z}(c).Forz∉S​(c)z\notin S(c), we havep​(z∣c)=0p(z\mid c)=0, so those stages contribute nothing to any weighted sum below.
+Hence
+∑z=1Kp​(z∣c)​q​(c,z,ac⋆)=∑z=1Kp​(z∣c)​Mz​(c).\sum_{z=1}^{K}p(z\mid c)\,q(c,z,a_{c}^{\star})=\sum_{z=1}^{K}p(z\mid c)\,M_{z}(c).Sinceac⋆a_{c}^{\star}is one feasible action in the maximization,
+maxa∈𝒜​∑z=1Kp​(z∣c)​q​(c,z,a)≥∑z=1Kp​(z∣c)​q​(c,z,ac⋆)=∑z=1Kp​(z∣c)​Mz​(c).\max_{a\in\mathcal{A}}\sum_{z=1}^{K}p(z\mid c)\,q(c,z,a)\geq\sum_{z=1}^{K}p(z\mid c)\,q(c,z,a_{c}^{\star})=\sum_{z=1}^{K}p(z\mid c)\,M_{z}(c).On the other hand, the following is obvious and has been shown above
+maxa∈𝒜​∑z=1Kp​(z∣c)​q​(c,z,a)≤∑z=1Kp​(z∣c)​Mz​(c).\max_{a\in\mathcal{A}}\sum_{z=1}^{K}p(z\mid c)\,q(c,z,a)\leq\sum_{z=1}^{K}p(z\mid c)\,M_{z}(c).Therefore equality holds:
+maxa∈𝒜​∑z=1Kp​(z∣c)​q​(c,z,a)=∑z=1Kp​(z∣c)​Mz​(c),\max_{a\in\mathcal{A}}\sum_{z=1}^{K}p(z\mid c)\,q(c,z,a)=\sum_{z=1}^{K}p(z\mid c)\,M_{z}(c),which is exactly
+Δalias​(c)=0.\Delta_{\mathrm{alias}}(c)=0.
+Combining (i) and (ii), we conclude that for everyc∈𝒞c\in\mathcal{C},
+Δalias​(c)=0⟺⋂z∈S​(c)arg⁡maxa∈𝒜⁡q​(c,z,a)≠∅.\Delta_{\mathrm{alias}}(c)=0\quad\Longleftrightarrow\quad\bigcap_{z\in S(c)}\arg\max_{a\in\mathcal{A}}q(c,z,a)\neq\varnothing.Since all objects are defined only up toℙC\mathbb{P}_{C}-null sets through the chosen versions of conditional expectations and conditional probabilities, the equivalence is interpreted forℙC\mathbb{P}_{C}-almost everycc.
+
+Finally, we can prove the strict inequality criterion.
+Assume there exists a measurable set𝒞0⊆𝒞\mathcal{C}_{0}\subseteq\mathcal{C}such that
+ℙC​(𝒞0)>0\mathbb{P}_{C}(\mathcal{C}_{0})>0and two distinct stagesz≠z′z\neq z^{\prime}such that for everyc∈𝒞0c\in\mathcal{C}_{0},
+p​(z∣c)>0,p​(z′∣c)>0,arg⁡maxa∈𝒜⁡q​(c,z,a)∩arg⁡maxa∈𝒜⁡q​(c,z′,a)=∅.p(z\mid c)>0,\qquad p(z^{\prime}\mid c)>0,\qquad\arg\max_{a\in\mathcal{A}}q(c,z,a)\cap\arg\max_{a\in\mathcal{A}}q(c,z^{\prime},a)=\varnothing.
+By the zero-gap equivalence we proved above, and that we knowΔalias​(c)≥0\Delta_{\mathrm{alias}}(c)\geq 0, this means thatΔalias​(C)≥0\Delta_{\mathrm{alias}}(C)\geq 0almost surely, and thus
+
+Vstage>Vflat.V_{\mathrm{stage}}>V_{\mathrm{flat}}.
+This completes the proof.
+∎
+
+Remark 2(Interpretation).Theorem2strengthens the main-text theorem in two ways.
+First, it identifies the exact gain from making the stage label explicit:
+Vstage−Vflat=𝔼​[Δalias​(C)].V_{\mathrm{stage}}-V_{\mathrm{flat}}=\mathbb{E}[\Delta_{\mathrm{alias}}(C)].Second, it shows that the gain is strict exactly when the compressed contextCCaliases decision points
+whose stage-conditioned optimal actions disagree, which is the usual case.
+This is the precise sense in which explicit stage structure helps reasoning under compressed local context.
+
+E.2Judge-Aligned Stage-Weighted Credit Assignment
+This subsection formalizes the main-text intuition behind Theorem3.
+As in AppendixE.1, we work on a probability space(Ω,ℱ,ℙ)(\Omega,\mathcal{F},\mathbb{P}).
+However, unlike AppendixE.1, which studies a single random decision point,
+we now analyze full rollouts and their policy-gradient signals.
+
+Setup and notation.
+We suppress the rollout indexiiused in Section3.3and analyze a single generic rollout.
+Letτ\taudenote a rollout sampled from a policy-induced distributionpθ​(τ)p_{\theta}(\tau), and letℬk\mathcal{B}_{k}denote the token set of stagekk, matching the notation in the main text.
+For each token steptt, let
+Ht:=(q,a<t,o<t)H_{t}:=(q,a_{<t},o_{<t})denote the random history before taking actionata_{t}, and define the stage score-function sum
+Γk:=∑t∈ℬk∇θlog⁡πθ​(at∣Ht).\Gamma_{k}:=\sum_{t\in\mathcal{B}_{k}}\nabla_{\theta}\log\pi_{\theta}(a_{t}\mid H_{t}).We assumeπθ​(a∣h)\pi_{\theta}(a\mid h)is differentiable inθ\theta, the environment dynamics are independent ofθ\theta, andΓk\Gamma_{k}is square-integrable for everykk.
+
+For each stagek∈[K]k\in[K], let
+Rk:Ω→ℝR_{k}:\Omega\to\mathbb{R}denote the observed stagewise judge score, and let
+Yk:Ω→ℝY_{k}:\Omega\to\mathbb{R}denote a latent true process score for stagekk.
+Both are assumed integrable.
+
+As in Section3.3, let
+Λ=(λk,j)∈[0,1]K×K\Lambda=(\lambda_{k,j})\in[0,1]^{K\times K}be a causal stage-weight matrix satisfying
+λk,j=0for​j<k,λk,k=1.\lambda_{k,j}=0\quad\text{for }j<k,\qquad\lambda_{k,k}=1.
+
+Definitions.
+For each stagekk, define the oracle process-level gradient contribution
+gk⋆:=∑j=kKλk,j𝔼[ΓkYj].g_{k}^{\star}:=\sum_{j=k}^{K}\lambda_{k,j}\,\mathbb{E}[\Gamma_{k}Y_{j}].(2)This is the stage-kkgradient contribution that would be induced by the stage-dependent returnGi,kΛ:=∑j=kKλk,j​Ri,jG_{i,k}^{\Lambda}:=\sum_{j=k}^{K}\lambda_{k,j}R_{i,j}if the latent true stage scores were directly observable.
+
+Define the judge-induced stage-weighted signal
+gkΛ:=∑j=kKλk,j​𝔼​[Γk​Rj],g_{k}^{\Lambda}:=\sum_{j=k}^{K}\lambda_{k,j}\,\mathbb{E}[\Gamma_{k}R_{j}],(3)and the terminal-broadcast signal
+gkterm:=𝔼​[Γk​RK],g_{k}^{\mathrm{term}}:=\mathbb{E}[\Gamma_{k}R_{K}],(4)
+Finally, define
+MkΛ:=‖𝔼​[Γk​YK]−∑j=kKλk,j​𝔼​[Γk​Yj]‖2.M_{k}^{\Lambda}:=\left\|\mathbb{E}[\Gamma_{k}Y_{K}]-\sum_{j=k}^{K}\lambda_{k,j}\,\mathbb{E}[\Gamma_{k}Y_{j}]\right\|_{2}.(5)The quantityMkΛM_{k}^{\Lambda}measures how much oracle process-level signal is omitted when one uses only the final-stage scoreYKY_{K}instead of the full stage-weighted oracle target.
+
+Assumption 2(Judge alignment).For each stage pairk≤jk\leq j, there exists a constantϵk,j≥0\epsilon_{k,j}\geq 0such that
+‖𝔼​[Γk​(Rj−Yj)]‖2≤ϵk,j.\left\|\mathbb{E}\!\left[\Gamma_{k}(R_{j}-Y_{j})\right]\right\|_{2}\leq\epsilon_{k,j}.(6)That is, the observed judge scoreRjR_{j}approximates the latent true scoreYjY_{j}in the gradient-relevant direction defined byΓk\Gamma_{k}.
+
+Theorem 3(Benefit of stage-weighted credit, informal).If the omitted true intermediate signal outweighs the cumulative judge misalignment, then stage-weighted credit yields a strictly better gradient approximation:
+‖gkΛ−gk⋆‖2<‖gkterm−gk⋆‖2.\|g_{k}^{\Lambda}-g_{k}^{\star}\|_{2}<\|g_{k}^{\mathrm{term}}-g_{k}^{\star}\|_{2}.
+
+Theorem 4(Formal version of Theorem3).Under Assumption2, the following hold for every stagek∈[K]k\in[K].
+
+1.Error of the stage-weighted signal relative to the oracle target:
+‖gkΛ−gk⋆‖2≤∑j=kKλk,j​ϵk,j.\left\|g_{k}^{\Lambda}-g_{k}^{\star}\right\|_{2}\leq\sum_{j=k}^{K}\lambda_{k,j}\,\epsilon_{k,j}.
+
+2.Lower bound for terminal broadcast relative to the oracle target:
+‖gkterm−gk⋆‖2≥MkΛ−ϵk,K.\left\|g_{k}^{\mathrm{term}}-g_{k}^{\star}\right\|_{2}\geq M_{k}^{\Lambda}-\epsilon_{k,K}.
+
+3.Comparison.If
+∑j=kKλk,j​ϵk,j<MkΛ−ϵk,K,\sum_{j=k}^{K}\lambda_{k,j}\,\epsilon_{k,j}<M_{k}^{\Lambda}-\epsilon_{k,K},then
+‖gkΛ−gk⋆‖2<‖gkterm−gk⋆‖2.\left\|g_{k}^{\Lambda}-g_{k}^{\star}\right\|_{2}<\left\|g_{k}^{\mathrm{term}}-g_{k}^{\star}\right\|_{2}.
+
+In particular, when judge misalignment is sufficiently small relative to the omitted intermediate-stage oracle signal, the stage-weighted signal is strictly closer than terminal broadcast to the intended process-level gradient contribution.
+
+Proof.Fix a stagekk.First, we show (1).By definition3and2,
+gkΛ−gk⋆=∑j=kKλk,j​𝔼​[Γk​Rj]−∑j=kKλk,j​𝔼​[Γk​Yj]=∑j=kKλk,j​𝔼​[Γk​(Rj−Yj)].g_{k}^{\Lambda}-g_{k}^{\star}=\sum_{j=k}^{K}\lambda_{k,j}\,\mathbb{E}[\Gamma_{k}R_{j}]-\sum_{j=k}^{K}\lambda_{k,j}\,\mathbb{E}[\Gamma_{k}Y_{j}]=\sum_{j=k}^{K}\lambda_{k,j}\,\mathbb{E}[\Gamma_{k}(R_{j}-Y_{j})].
+Taking the Euclidean norm and applying the triangle inequality yields
+‖gkΛ−gk⋆‖2≤∑j=kKλk,j​‖𝔼​[Γk​(Rj−Yj)]‖2.\left\|g_{k}^{\Lambda}-g_{k}^{\star}\right\|_{2}\leq\sum_{j=k}^{K}\lambda_{k,j}\left\|\mathbb{E}[\Gamma_{k}(R_{j}-Y_{j})]\right\|_{2}.Applying Assumption2results in the desired form,
+‖gkΛ−gk⋆‖2≤∑j=kKλk,j​ϵk,j.\left\|g_{k}^{\Lambda}-g_{k}^{\star}\right\|_{2}\leq\sum_{j=k}^{K}\lambda_{k,j}\,\epsilon_{k,j}.
+Second, we try to prove (2).By definition4and2,
+gkterm−gk⋆=𝔼​[Γk​RK]−∑j=kKλk,j​𝔼​[Γk​Yj]=𝔼​[Γk​(RK−YK)]⏟=⁣:Ek+(𝔼​[Γk​YK]−∑j=kKλk,j​𝔼​[Γk​Yj])⏟=⁣:Dk.g_{k}^{\mathrm{term}}-g_{k}^{\star}=\mathbb{E}[\Gamma_{k}R_{K}]-\sum_{j=k}^{K}\lambda_{k,j}\,\mathbb{E}[\Gamma_{k}Y_{j}]=\underbrace{\mathbb{E}[\Gamma_{k}(R_{K}-Y_{K})]}_{=:E_{k}}+\underbrace{\left(\mathbb{E}[\Gamma_{k}Y_{K}]-\sum_{j=k}^{K}\lambda_{k,j}\,\mathbb{E}[\Gamma_{k}Y_{j}]\right)}_{=:D_{k}}.
+From definition5we know that‖Dk‖2=MkΛ\|D_{k}\|_{2}=M_{k}^{\Lambda}Applying the reverse triangle inequality,
+‖Ek+Dk‖2≥‖Dk‖2−‖Ek‖2,\|E_{k}+D_{k}\|_{2}\geq\|D_{k}\|_{2}-\|E_{k}\|_{2},we obtain
+‖gkterm−gk⋆‖2≥MkΛ−‖𝔼​[Γk​(RK−YK)]‖2.\left\|g_{k}^{\mathrm{term}}-g_{k}^{\star}\right\|_{2}\geq M_{k}^{\Lambda}-\left\|\mathbb{E}[\Gamma_{k}(R_{K}-Y_{K})]\right\|_{2}.Using Assumption2withj=Kj=K,
+‖𝔼​[Γk​(RK−YK)]‖2≤ϵk,K.\left\|\mathbb{E}[\Gamma_{k}(R_{K}-Y_{K})]\right\|_{2}\leq\epsilon_{k,K}.Hence
+‖gkterm−gk⋆‖2≥MkΛ−ϵk,K.\left\|g_{k}^{\mathrm{term}}-g_{k}^{\star}\right\|_{2}\geq M_{k}^{\Lambda}-\epsilon_{k,K}.
+Finally, we are ready to state the last result.We have shown that
+‖gkΛ−gk⋆‖2≤∑j=kKλk,j​ϵk,j,‖gkterm−gk⋆‖2≥MkΛ−ϵk,K.\left\|g_{k}^{\Lambda}-g_{k}^{\star}\right\|_{2}\leq\sum_{j=k}^{K}\lambda_{k,j}\,\epsilon_{k,j},\qquad\qquad\left\|g_{k}^{\mathrm{term}}-g_{k}^{\star}\right\|_{2}\geq M_{k}^{\Lambda}-\epsilon_{k,K}.Therefore, if
+∑j=kKλk,j​ϵk,j<MkΛ−ϵk,K,\sum_{j=k}^{K}\lambda_{k,j}\,\epsilon_{k,j}<M_{k}^{\Lambda}-\epsilon_{k,K},then
+‖gkΛ−gk⋆‖2<‖gkterm−gk⋆‖2.\left\|g_{k}^{\Lambda}-g_{k}^{\star}\right\|_{2}<\left\|g_{k}^{\mathrm{term}}-g_{k}^{\star}\right\|_{2}.This proves item 3 and completes the proof.
+∎
+
+Corollary 1(A sufficient condition from score MSE).Suppose in addition that for some constantsBk≥0B_{k}\geq 0andδj≥0\delta_{j}\geq 0,
+𝔼​[‖Γk‖22]≤Bk,𝔼​[(Rj−Yj)2]≤δj2.\mathbb{E}[\|\Gamma_{k}\|_{2}^{2}]\leq B_{k},\qquad\mathbb{E}[(R_{j}-Y_{j})^{2}]\leq\delta_{j}^{2}.Then Assumption2holds with
+ϵk,j:=Bk​δj.\epsilon_{k,j}:=\sqrt{B_{k}}\,\delta_{j}.Consequently,
+‖gkΛ−gk⋆‖2≤Bk​∑j=kKλk,j​δj,\left\|g_{k}^{\Lambda}-g_{k}^{\star}\right\|_{2}\leq\sqrt{B_{k}}\sum_{j=k}^{K}\lambda_{k,j}\delta_{j},and
+‖gkterm−gk⋆‖2≥MkΛ−Bk​δK.\left\|g_{k}^{\mathrm{term}}-g_{k}^{\star}\right\|_{2}\geq M_{k}^{\Lambda}-\sqrt{B_{k}}\,\delta_{K}.
+
+Proof.Fixk≤jk\leq j.
+By Cauchy–Schwarz,
+‖𝔼​[Γk​(Rj−Yj)]‖2\displaystyle\left\|\mathbb{E}[\Gamma_{k}(R_{j}-Y_{j})]\right\|_{2}≤𝔼​[‖Γk‖2​|Rj−Yj|]\displaystyle\leq\mathbb{E}\!\left[\|\Gamma_{k}\|_{2}\,|R_{j}-Y_{j}|\right]≤(𝔼​[‖Γk‖22])1/2​(𝔼​[(Rj−Yj)2])1/2\displaystyle\leq\left(\mathbb{E}[\|\Gamma_{k}\|_{2}^{2}]\right)^{1/2}\left(\mathbb{E}[(R_{j}-Y_{j})^{2}]\right)^{1/2}≤Bk​δj.\displaystyle\leq\sqrt{B_{k}}\,\delta_{j}.Thus Assumption2holds withϵk,j=Bk​δj\epsilon_{k,j}=\sqrt{B_{k}}\delta_{j}.
+The displayed bounds then follow immediately from Theorem4.
+∎
+
+Remark 3.Theorem4and Corollary1highlight a fundamental trade-off: the advantage of stage-weighted credit depends on the strength of the omitted intermediate-stage oracle signalMkΛM_{k}^{\Lambda}versus the quality of judge alignment, captured by the score errorsδj\delta_{j}.
+Crucially, this establishes that as long as the intermediate stages contain sufficient true process signal (i.e.,MkΛM_{k}^{\Lambda}is sufficiently large), the benefit of capturing this dense signal strictly outweighs the accumulated noise from an imperfect intermediate judgeδj>0\delta_{j}>0. In such regimes, stage-weighted credit serves as a strictly better approximation of the intended process objective than relying solely on terminal broadcast.
+
+E.3Judge-Gated Co-Evolution of Policy and Rubric Bank
+This subsection formalizes the third component of SCRIBE in Section3.4.
+Unlike AppendixE.1, which studies the value of explicit stage information,
+and AppendixE.2, which studies stagewise credit assignment,
+the object here is the self-evolution loop itself:
+the same shared backbone both solves the current task and produces rubric-grounded reflections
+that can later be reused within-episode and across episodes.
+
+The formalization below matches our implementation.
+The task objective updates trajectory tokens, whereas the reflection objective is computed on
+reflection tokens only.
+Concretely, the selected rollout is treated as a fixed conditioning context during the reflection update,
+so the reflection-utility gradient does not backpropagate through the sampled trajectory.
+The co-evolution effect therefore comes from parameter sharing:
+task updates and reflection updates act on the same backbone parameters,
+even though they are computed from different generated token blocks.
+
+The key assumption below is ajudge-gated local positive-transfercondition.
+This is not intended as a global claim that every generated reflection is always useful throughout training.
+Rather, it isolates the local regime in which reflections that areaccepted by the judgebehave like a helpful auxiliary objective.
+Similar gradient-similarity and positive-transfer conditions are standard in the auxiliary-learning
+and multi-task optimization literature:
+helpful auxiliary objectives tend to align with the main-task gradient,
+whereas misaligned gradients induce negative transfer[du2019adapting,wu2020understanding,yu2020gradient,liu2021conflict,wang2021gradient].
+At the same time, not all task combinations are beneficial to train together[standley2020which].
+This perspective is also consistent with theory on shared representation learning
+and task relevance in transfer[maurer2016benefit,tripuraneni2020theory,chen2022active].
+
+Assumption 3(Setup for judge-gated co-evolution).Throughout this subsection, letΘ⊆ℝd\Theta\subseteq\mathbb{R}^{d}be an open parameter domain.
+The following assumptions hold.
+1.Query distribution for the task objective.There is a query random variable
+Q∼𝒟.Q\sim\mathcal{D}.
+
+2.Current rubric bank.At the current training step, the rubric bank is a fixed measurable objectℳ\mathcal{M}.
+This corresponds to analyzing a single parameter update while treating the bank state as fixed.
+
+3.Task rollout distribution.Given queryQ=qQ=qand bankℳ\mathcal{M}, a rollout
+T∼pθ(⋅∣q,ℳ)T\sim p_{\theta}(\cdot\mid q,\mathcal{M})is sampled from the deployed task policy.
+
+4.Fixed reflection-context distribution.There exists a fixed measurable distributionξ\xiover query–trajectory pairs
+(Q~,T~)∼ξ.(\widetilde{Q},\widetilde{T})\sim\xi.One may think ofξ\xias the distribution of trajectories selected for reflection training
+at the current update, e.g., after first sampling rollout groups under the current behavior policy
+and then selecting one trajectory per query.
+For the local analysis in this subsection,ξ\xiis treated as fixed.
+This matches the implementation where the reflection objective applies gradients only on
+reflection tokens and treats the selected trajectory as a fixed prompt / context.
+
+5.Shared-backbone reflection generation.Given(Q~,T~)=(q,τ)(\widetilde{Q},\widetilde{T})=(q,\tau)and bankℳ\mathcal{M},
+a rubric-grounded reflection
+S∼rθ(⋅∣q,τ,ℳ)S\sim r_{\theta}(\cdot\mid q,\tau,\mathcal{M})is sampled.
+Although we writepθp_{\theta}andrθr_{\theta}separately for clarity,
+both are induced by the same underlying autoregressive backboneπθ\pi_{\theta}under different prompts / contexts.
+
+6.Task score, reflection-utility scores, and judge gate.There exist measurable, integrable random quantities
+R​(Q,T;ℳ)∈ℝ,Δw​(Q~,T~,S;ℳ)∈ℝ,Δc​(Q~,T~,S;ℳ)∈ℝ,R(Q,T;\mathcal{M})\in\mathbb{R},\qquad\Delta^{\mathrm{w}}(\widetilde{Q},\widetilde{T},S;\mathcal{M})\in\mathbb{R},\qquad\Delta^{\mathrm{c}}(\widetilde{Q},\widetilde{T},S;\mathcal{M})\in\mathbb{R},and a measurable acceptance indicator
+A​(Q~,T~,S;ℳ)∈{0,1}.A(\widetilde{Q},\widetilde{T},S;\mathcal{M})\in\{0,1\}.HereRRis the judged task score of the deployed rollout,Δw\Delta^{\mathrm{w}}is the judged within-episode usefulness of the reflection,Δc\Delta^{\mathrm{c}}is the judged cross-episode transfer usefulness,
+andA=1A=1means that the reflection is judged sufficiently useful to be accepted
+for downstream adaptation / storage.
+These objects do not depend directly onθ\thetaexcept through the sampled random variables
+and the fixed bankℳ\mathcal{M}.
+
+7.Differentiability and score-function regularity.For𝒟\mathcal{D}-almost everyqq,
+the conditional distributionpθ​(τ∣q,ℳ)p_{\theta}(\tau\mid q,\mathcal{M})is differentiable inθ\theta.
+Forξ\xi-almost every(q,τ)(q,\tau),
+the conditional distributionrθ​(s∣q,τ,ℳ)r_{\theta}(s\mid q,\tau,\mathcal{M})is differentiable inθ\theta.
+Differentiation may be interchanged with the expectations below,
+and all score-function terms introduced later are square-integrable.
+
+8.Smoothness.The objectivesJtaskJ_{\mathrm{task}}andUUdefined below are continuously differentiable.
+Moreover,JtaskJ_{\mathrm{task}}isLJL_{J}-smooth andUUisLUL_{U}-smooth onΘ\Theta.
+
+Definition 4(Task objective and judge-gated memory objective).Adopt Assumption3.
+Define the task-rollout and reflection score-function sums
+Γtraj:=∇θlogpθ(T∣Q,ℳ),Γref:=∇θlogrθ(S∣Q~,T~,ℳ).\Gamma^{\mathrm{traj}}:=\nabla_{\theta}\log p_{\theta}(T\mid Q,\mathcal{M}),\qquad\Gamma^{\mathrm{ref}}:=\nabla_{\theta}\log r_{\theta}(S\mid\widetilde{Q},\widetilde{T},\mathcal{M}).Because both conditional distributions are induced by the same backboneπθ\pi_{\theta},
+these admit tokenwise decompositions
+Γtraj=∑t=1|T|∇θlog⁡πθ​(at∣ht),Γref=∑u=1|S|∇θlog⁡πθ​(su∣cu),\Gamma^{\mathrm{traj}}=\sum_{t=1}^{|T|}\nabla_{\theta}\log\pi_{\theta}(a_{t}\mid h_{t}),\qquad\Gamma^{\mathrm{ref}}=\sum_{u=1}^{|S|}\nabla_{\theta}\log\pi_{\theta}(s_{u}\mid c_{u}),for the appropriate rollout historieshth_{t}and reflection-generation contextscuc_{u}.
+
+For weightsβw,βc≥0\beta_{\mathrm{w}},\beta_{\mathrm{c}}\geq 0, define
+Jtask​(θ):=𝔼​[R​(Q,T;ℳ)],J_{\mathrm{task}}(\theta):=\mathbb{E}\!\left[R(Q,T;\mathcal{M})\right],where the expectation is with respect to
+Q∼𝒟,T∼pθ(⋅∣Q,ℳ),Q\sim\mathcal{D},\qquad T\sim p_{\theta}(\cdot\mid Q,\mathcal{M}),and define
+U​(θ):=𝔼​[A​(Q~,T~,S;ℳ)​(βw​Δw​(Q~,T~,S;ℳ)+βc​Δc​(Q~,T~,S;ℳ))],U(\theta):=\mathbb{E}\!\left[A(\widetilde{Q},\widetilde{T},S;\mathcal{M})\Big(\beta_{\mathrm{w}}\Delta^{\mathrm{w}}(\widetilde{Q},\widetilde{T},S;\mathcal{M})+\beta_{\mathrm{c}}\Delta^{\mathrm{c}}(\widetilde{Q},\widetilde{T},S;\mathcal{M})\Big)\right],where the expectation is with respect to
+(Q~,T~)∼ξ,S∼rθ(⋅∣Q~,T~,ℳ).(\widetilde{Q},\widetilde{T})\sim\xi,\qquad S\sim r_{\theta}(\cdot\mid\widetilde{Q},\widetilde{T},\mathcal{M}).We also define the combined co-evolution objective
+Jcoevo​(θ):=Jtask​(θ)+U​(θ).J_{\mathrm{coevo}}(\theta):=J_{\mathrm{task}}(\theta)+U(\theta).
+
+Assumption 4(Judge-gated local positive transfer).Adopt Assumption3and Definition4.
+Let
+g:=∇Jtask​(θ),g:=\nabla J_{\mathrm{task}}(\theta),and define the ungated reflection-utility score-gradient random vector
+Ψ:=Γref​(βw​Δw​(Q~,T~,S;ℳ)+βc​Δc​(Q~,T~,S;ℳ)).\Psi:=\Gamma^{\mathrm{ref}}\Big(\beta_{\mathrm{w}}\Delta^{\mathrm{w}}(\widetilde{Q},\widetilde{T},S;\mathcal{M})+\beta_{\mathrm{c}}\Delta^{\mathrm{c}}(\widetilde{Q},\widetilde{T},S;\mathcal{M})\Big).Assume there exist constantsp0∈(0,1]p_{0}\in(0,1]andμ>0\mu>0such that
+ℙ​(A=1)≥p0,⟨g,𝔼​[Ψ∣A=1]⟩≥μ.\mathbb{P}(A=1)\geq p_{0},\qquad\left\langle g,\,\mathbb{E}[\Psi\mid A=1]\right\rangle\geq\mu.That is, reflections that pass the judge are accepted with nontrivial probability,
+and their conditional expected gradient contribution is positively aligned with the task gradient.
+
+Theorem 5(Judge-gated shared-backbone co-evolution).Adopt Assumptions3–4and Definition4.
+Let
+g:=∇Jtask​(θ),h:=∇U​(θ).g:=\nabla J_{\mathrm{task}}(\theta),\qquad h:=\nabla U(\theta).Then the following hold.
+
+1.Mutual improvement.For every step sizeη>0\eta>0,
+U​(θ+η​g)−U​(θ)≥η​p0​μ−LU​η22​‖g‖22,U(\theta+\eta g)-U(\theta)\geq\eta p_{0}\mu-\frac{L_{U}\eta^{2}}{2}\|g\|_{2}^{2},and
+Jtask​(θ+η​h)−Jtask​(θ)≥η​p0​μ−LJ​η22​‖h‖22.J_{\mathrm{task}}(\theta+\eta h)-J_{\mathrm{task}}(\theta)\geq\eta p_{0}\mu-\frac{L_{J}\eta^{2}}{2}\|h\|_{2}^{2}.In particular, if
+0<η<min⁡{2​p0​μLU​‖g‖22,2​p0​μLJ​‖h‖22},0<\eta<\min\left\{\frac{2p_{0}\mu}{L_{U}\|g\|_{2}^{2}},\frac{2p_{0}\mu}{L_{J}\|h\|_{2}^{2}}\right\},then a task-improving step also improves the judge-gated memory objective,
+and a memory-improving step also improves the task objective.
+
+2.Dominance over task-only training with static memory.Consider the task-only update
+θstat+:=θ+η​g,\theta_{\mathrm{stat}}^{+}:=\theta+\eta g,which updates the deployed task policy while assigning zero explicit training signal
+to reflection quality,
+and the co-evolution update
+θco+:=θ+η​(g+h).\theta_{\mathrm{co}}^{+}:=\theta+\eta(g+h).Then
+Jtask​(θco+)−Jtask​(θstat+)≥η​p0​μ−LJ​η2​‖g‖2​‖h‖2−LJ​η22​‖h‖22.J_{\mathrm{task}}(\theta_{\mathrm{co}}^{+})-J_{\mathrm{task}}(\theta_{\mathrm{stat}}^{+})\geq\eta p_{0}\mu-L_{J}\eta^{2}\|g\|_{2}\|h\|_{2}-\frac{L_{J}\eta^{2}}{2}\|h\|_{2}^{2}.Consequently, if the reflection is sufficiently good,
+p0​μ>LJ​η​(‖g‖2​‖h‖2+12​‖h‖22),p_{0}\mu>L_{J}\eta\left(\|g\|_{2}\|h\|_{2}+\frac{1}{2}\|h\|_{2}^{2}\right),then
+Jtask​(θco+)>Jtask​(θstat+).J_{\mathrm{task}}(\theta_{\mathrm{co}}^{+})>J_{\mathrm{task}}(\theta_{\mathrm{stat}}^{+}).
+
+Proof.To prove the desired statement, we first derive the formula forggandhh.
+Letμθ​(d​q,d​τ):=𝒟​(d​q)​pθ​(d​τ∣q,ℳ)\mu_{\theta}(dq,d\tau):=\mathcal{D}(dq)\,p_{\theta}(d\tau\mid q,\mathcal{M})denote the joint law of(Q,T)(Q,T).
+By Definition4,
+Jtask​(θ)=∫R​(q,τ;ℳ)​μθ​(d​q,d​τ).J_{\mathrm{task}}(\theta)=\int R(q,\tau;\mathcal{M})\,\mu_{\theta}(dq,d\tau).By Assumption3, differentiation may be interchanged with the integral.
+Since𝒟\mathcal{D}does not depend onθ\theta, by the usual log-derivative trick,
+∇Jtask​(θ)\displaystyle\nabla J_{\mathrm{task}}(\theta)=∫R​(q,τ;ℳ)​∇pθ​(τ∣q,ℳ)​𝒟​(d​q)​𝑑τ\displaystyle=\int R(q,\tau;\mathcal{M})\,\nabla p_{\theta}(\tau\mid q,\mathcal{M})\,\mathcal{D}(dq)\,d\tau=∫R​(q,τ;ℳ)​pθ​(τ∣q,ℳ)​∇log⁡pθ​(τ∣q,ℳ)​𝒟​(d​q)​𝑑τ\displaystyle=\int R(q,\tau;\mathcal{M})\,p_{\theta}(\tau\mid q,\mathcal{M})\,\nabla\log p_{\theta}(\tau\mid q,\mathcal{M})\,\mathcal{D}(dq)\,d\tau=𝔼​[Γtraj​R​(Q,T;ℳ)].\displaystyle=\mathbb{E}\!\left[\Gamma^{\mathrm{traj}}R(Q,T;\mathcal{M})\right].
+We next derive the formula forhh.
+Write
+Δ​(q,τ,s;ℳ):=βw​Δw​(q,τ,s;ℳ)+βc​Δc​(q,τ,s;ℳ),\Delta(q,\tau,s;\mathcal{M}):=\beta_{\mathrm{w}}\Delta^{\mathrm{w}}(q,\tau,s;\mathcal{M})+\beta_{\mathrm{c}}\Delta^{\mathrm{c}}(q,\tau,s;\mathcal{M}),so that
+U​(θ)=𝔼​[A​(Q~,T~,S;ℳ)​Δ​(Q~,T~,S;ℳ)].U(\theta)=\mathbb{E}\!\left[A(\widetilde{Q},\widetilde{T},S;\mathcal{M})\,\Delta(\widetilde{Q},\widetilde{T},S;\mathcal{M})\right].Let
+νθ​(d​q,d​τ,d​s):=ξ​(d​q,d​τ)​rθ​(d​s∣q,τ,ℳ)\nu_{\theta}(dq,d\tau,ds):=\xi(dq,d\tau)\,r_{\theta}(ds\mid q,\tau,\mathcal{M})denote the joint law of(Q~,T~,S)(\widetilde{Q},\widetilde{T},S).
+Then
+U​(θ)=∫A​(q,τ,s;ℳ)​Δ​(q,τ,s;ℳ)​νθ​(d​q,d​τ,d​s).U(\theta)=\int A(q,\tau,s;\mathcal{M})\Delta(q,\tau,s;\mathcal{M})\,\nu_{\theta}(dq,d\tau,ds).Differentiating under the integral sign gives
+∇U​(θ)\displaystyle\nabla U(\theta)=∫A​(q,τ,s;ℳ)​Δ​(q,τ,s;ℳ)​ξ​(d​q,d​τ)​∇rθ​(s∣q,τ,ℳ)​𝑑s\displaystyle=\int A(q,\tau,s;\mathcal{M})\Delta(q,\tau,s;\mathcal{M})\,\xi(dq,d\tau)\,\nabla r_{\theta}(s\mid q,\tau,\mathcal{M})\,ds=∫A​(q,τ,s;ℳ)​Δ​(q,τ,s;ℳ)​ξ​(d​q,d​τ)​rθ​(s∣q,τ,ℳ)​∇log⁡rθ​(s∣q,τ,ℳ)​𝑑s\displaystyle=\int A(q,\tau,s;\mathcal{M})\Delta(q,\tau,s;\mathcal{M})\,\xi(dq,d\tau)\,r_{\theta}(s\mid q,\tau,\mathcal{M})\,\nabla\log r_{\theta}(s\mid q,\tau,\mathcal{M})\,ds=𝔼​[A​(Q~,T~,S;ℳ)​Γref​Δ​(Q~,T~,S;ℳ)]\displaystyle=\mathbb{E}\!\left[A(\widetilde{Q},\widetilde{T},S;\mathcal{M})\,\Gamma^{\mathrm{ref}}\,\Delta(\widetilde{Q},\widetilde{T},S;\mathcal{M})\right]=𝔼​[A​Ψ]:=h.\displaystyle=\mathbb{E}\!\left[A\Psi\right]:=h.
+By the definition ofAAand Assumption4,
+𝔼​[A​Ψ]=ℙ​(A=1)​𝔼​[Ψ∣A=1].\mathbb{E}[A\Psi]=\mathbb{P}(A=1)\,\mathbb{E}[\Psi\mid A=1].and that
+⟨g,h⟩\displaystyle\langle g,h\rangle=⟨g,ℙ​(A=1)​𝔼​[Ψ∣A=1]⟩\displaystyle=\left\langle g,\,\mathbb{P}(A=1)\,\mathbb{E}[\Psi\mid A=1]\right\rangle(7)=ℙ​(A=1)​⟨g,𝔼​[Ψ∣A=1]⟩\displaystyle=\mathbb{P}(A=1)\,\left\langle g,\,\mathbb{E}[\Psi\mid A=1]\right\rangle(8)≥p0​μ,\displaystyle\geq p_{0}\mu,(9)
+By the assumption3,UUisLUL_{U}-smooth,
+for every vectorv∈ℝdv\in\mathbb{R}^{d}we have the standard lower bound
+U​(θ+v)≥U​(θ)+⟨∇U​(θ),v⟩−LU2​‖v‖22.U(\theta+v)\geq U(\theta)+\langle\nabla U(\theta),v\rangle-\frac{L_{U}}{2}\|v\|_{2}^{2}.Applying this withv=η​gv=\eta gand using Eq.9yields
+U​(θ+η​g)−U​(θ)≥η​⟨h,g⟩−LU​η22​‖g‖22≥η​p0​μ−LU​η22​‖g‖22.U(\theta+\eta g)-U(\theta)\geq\eta\langle h,g\rangle-\frac{L_{U}\eta^{2}}{2}\|g\|_{2}^{2}\geq\eta p_{0}\mu-\frac{L_{U}\eta^{2}}{2}\|g\|_{2}^{2}.Likewise, becauseJtaskJ_{\mathrm{task}}isLJL_{J}-smooth,
+Jtask​(θ+η​h)−Jtask​(θ)≥η​⟨g,h⟩−LJ​η22​‖h‖22≥η​p0​μ−LJ​η22​‖h‖22.J_{\mathrm{task}}(\theta+\eta h)-J_{\mathrm{task}}(\theta)\geq\eta\langle g,h\rangle-\frac{L_{J}\eta^{2}}{2}\|h\|_{2}^{2}\geq\eta p_{0}\mu-\frac{L_{J}\eta^{2}}{2}\|h\|_{2}^{2}.If
+0<η<min⁡{2​p0​μLU​‖g‖22,2​p0​μLJ​‖h‖22},0<\eta<\min\left\{\frac{2p_{0}\mu}{L_{U}\|g\|_{2}^{2}},\frac{2p_{0}\mu}{L_{J}\|h\|_{2}^{2}}\right\},then both right-hand sides are strictly positive.
+
+To prove the other part, define
+ϕ​(t):=Jtask​(θstat++t​η​h),t∈[0,1].\phi(t):=J_{\mathrm{task}}\big(\theta_{\mathrm{stat}}^{+}+t\eta h\big),\qquad t\in[0,1].Then
+ϕ​(1)−ϕ​(0)=Jtask​(θco+)−Jtask​(θstat+)=∫01ϕ′​(t)​𝑑t.\phi(1)-\phi(0)=J_{\mathrm{task}}(\theta_{\mathrm{co}}^{+})-J_{\mathrm{task}}(\theta_{\mathrm{stat}}^{+})=\int_{0}^{1}\phi^{\prime}(t)\,dt.By the chain rule,
+ϕ′​(t)=η​⟨∇Jtask​(θstat++t​η​h),h⟩.\phi^{\prime}(t)=\eta\left\langle\nabla J_{\mathrm{task}}(\theta_{\mathrm{stat}}^{+}+t\eta h),h\right\rangle.Since∇Jtask\nabla J_{\mathrm{task}}isLJL_{J}-Lipschitz,
+‖∇Jtask​(θstat++t​η​h)−∇Jtask​(θstat+)‖2≤LJ​t​η​‖h‖2.\left\|\nabla J_{\mathrm{task}}(\theta_{\mathrm{stat}}^{+}+t\eta h)-\nabla J_{\mathrm{task}}(\theta_{\mathrm{stat}}^{+})\right\|_{2}\leq L_{J}t\eta\|h\|_{2}.Hence, for everyt∈[0,1]t\in[0,1], by Cauchy-Schwarz
+⟨∇Jtask​(θstat++t​η​h),h⟩≥⟨∇Jtask​(θstat+),h⟩−LJ​t​η​‖h‖22.\left\langle\nabla J_{\mathrm{task}}(\theta_{\mathrm{stat}}^{+}+t\eta h),h\right\rangle\geq\left\langle\nabla J_{\mathrm{task}}(\theta_{\mathrm{stat}}^{+}),h\right\rangle-L_{J}t\eta\|h\|_{2}^{2}.Integrating from0to11gives
+Jtask​(θco+)−Jtask​(θstat+)≥η​⟨∇Jtask​(θstat+),h⟩−LJ​η22​‖h‖22.J_{\mathrm{task}}(\theta_{\mathrm{co}}^{+})-J_{\mathrm{task}}(\theta_{\mathrm{stat}}^{+})\geq\eta\left\langle\nabla J_{\mathrm{task}}(\theta_{\mathrm{stat}}^{+}),h\right\rangle-\frac{L_{J}\eta^{2}}{2}\|h\|_{2}^{2}.It remains to lower-bound the inner product on the right.
+Again byLJL_{J}-Lipschitz continuity of the gradient,
+‖∇Jtask​(θstat+)−g‖2=‖∇Jtask​(θ+η​g)−∇Jtask​(θ)‖2≤LJ​η​‖g‖2.\left\|\nabla J_{\mathrm{task}}(\theta_{\mathrm{stat}}^{+})-g\right\|_{2}=\left\|\nabla J_{\mathrm{task}}(\theta+\eta g)-\nabla J_{\mathrm{task}}(\theta)\right\|_{2}\leq L_{J}\eta\|g\|_{2}.Therefore, by Cauchy–Schwarz,
+⟨∇Jtask​(θstat+),h⟩\displaystyle\left\langle\nabla J_{\mathrm{task}}(\theta_{\mathrm{stat}}^{+}),h\right\rangle=⟨g,h⟩+⟨∇Jtask​(θstat+)−g,h⟩\displaystyle=\langle g,h\rangle+\left\langle\nabla J_{\mathrm{task}}(\theta_{\mathrm{stat}}^{+})-g,h\right\rangle≥⟨g,h⟩−‖∇Jtask​(θstat+)−g‖2​‖h‖2\displaystyle\geq\langle g,h\rangle-\left\|\nabla J_{\mathrm{task}}(\theta_{\mathrm{stat}}^{+})-g\right\|_{2}\|h\|_{2}≥⟨g,h⟩−LJ​η​‖g‖2​‖h‖2\displaystyle\geq\langle g,h\rangle-L_{J}\eta\|g\|_{2}\|h\|_{2}≥p0​μ−LJ​η​‖g‖2​‖h‖2,\displaystyle\geq p_{0}\mu-L_{J}\eta\|g\|_{2}\|h\|_{2},where the last step uses Eq.9.
+Substituting this bound above yields that
+Jtask​(θco+)−Jtask​(θstat+)≥η​p0​μ−LJ​η2​‖g‖2​‖h‖2−LJ​η22​‖h‖22.J_{\mathrm{task}}(\theta_{\mathrm{co}}^{+})-J_{\mathrm{task}}(\theta_{\mathrm{stat}}^{+})\geq\eta p_{0}\mu-L_{J}\eta^{2}\|g\|_{2}\|h\|_{2}-\frac{L_{J}\eta^{2}}{2}\|h\|_{2}^{2}.This proves the desired lower bound.
+If
+p0​μ>LJ​η​(‖g‖2​‖h‖2+12​‖h‖22),p_{0}\mu>L_{J}\eta\left(\|g\|_{2}\|h\|_{2}+\frac{1}{2}\|h\|_{2}^{2}\right),then the right-hand side is strictly positive, and therefore
+Jtask​(θco+)>Jtask​(θstat+).J_{\mathrm{task}}(\theta_{\mathrm{co}}^{+})>J_{\mathrm{task}}(\theta_{\mathrm{stat}}^{+}).∎
+
+Remark 4(Interpretation).Theorem5isolates the source of the co-evolution gain.
+The key quantity is a judge-gated local condition on the reflections that are actually accepted for reuse.
+Under this condition, policy training improves accepted reflection utility,
+and accepted reflection training improves task performance.
+Moreover, the joint update onJtask+UJ_{\mathrm{task}}+Uyields a strictly larger first-order gain
+in adapted task value than task-only training with a static memory objective.
+This is the precise sense in which jointly training the evolving memory policy is stronger
+than inference-time-only static memory.
+The co-evolution effect survives becauseggandhhstill live in the same shared parameter space:
+a task update changes the future reflection generator, and a reflection update changes the future task policy.
+
+Remark 5(Why parameter sharing matters).The first-order co-evolution mechanism above is specific to the shared-backbone design.
+If rollout generation and reflection generation were parameterized by disjoint blocksθ=(θπ,θref)\theta=(\theta_{\pi},\theta_{\mathrm{ref}})withJtaskJ_{\mathrm{task}}depending only onθπ\theta_{\pi}andUUdepending only onθref\theta_{\mathrm{ref}},
+then
+∇Jtask​(θ)=(gπ,0),∇U​(θ)=(0,href),\nabla J_{\mathrm{task}}(\theta)=(g_{\pi},0),\qquad\nabla U(\theta)=(0,h_{\mathrm{ref}}),and hence
+⟨∇Jtask​(θ),∇U​(θ)⟩=0.\left\langle\nabla J_{\mathrm{task}}(\theta),\nabla U(\theta)\right\rangle=0.Thus the mutual-improvement phenomenon in Theorem5disappears at first order in the fully decoupled case.
+This formalizes why a unified backbone can support genuine co-evolution,
+rather than merely wrapping a static memory module around a separately trained policy.
+
+Appendix FExperiment Details
+We largely follow the experimental setup of DR Tulu[shao2025dr]for training, evaluation, infrastructure, and baseline selection, adapting where necessary to support our proposed components. Below, we provide the specific details.
+
+F.1Training Details
+F.1.1Supervised Fine-Tuning
+We fine-tune Qwen3-8B[yang2025qwen3]using the LLaMA-Factory framework[zheng2024llamafactory]with DeepSpeed ZeRO-3. The SFT data generation process is described in AppendixB.2. Key hyperparameters:
+
+HyperparameterValueBase modelQwen3-8BTraining epochs5Learning rate4×10−54\times 10^{-5}LR schedulerCosine with 10% warmupBatch size (per device)1Gradient accumulation steps16Effective batch size128 (8 GPUs×\times16 accum.)Max sequence length16,384 tokensPrecisionBF16Weight decay0.0Tool output maskingSpan masking on<tool_output>DeepSpeed stageZeRO-3GPUs8×\timesNVIDIA H100 80GB
+
+We apply span masking to tool output tokens so the model does not receive gradient on search results, learning only to generate its own reasoning, tool calls, and answers.
+
+F.1.2Reinforcement Learning
+We train all RL runs using our modified open-instruct codebase with Ray-based distributed training and vLLM inference engines. The RL setup follows DR. Tulu’s codebase with extensions for stagewise credit assignment and meta-policy training operations. Key hyperparameters:
+
+HyperparameterValueAlgorithmGRPO / SS-GRPORollouts per prompt8Unique prompts per step32Effective batch size256 (32×\times8)Learning rate5×10−75\times 10^{-7}LR schedulerConstantKL coefficient (β\beta)0.001KL estimatorKL3Clip ratio (η\eta)PPO-style clippingTemperature1.0Max response length18,432 tokensMax prompt length8,192 tokensMax total (pack) length26,624 tokensMax tool calls per trajectory10DeepSpeed stageZeRO-3 with CPU offloadingGradient checkpointingEnabledRubric judgeJudge modelGemini FlashRubric generation modelGemini FlashRubric buffer cap (per stage)3, 2, 2, 3Rubric bank (fullRubricEMonly)Bank embedding modelQwen3-Embedding-0.6BRetrieval top-kk2Reflection trajectories sampled1Windowed curriculumKK3Bank save frequencyEvery 10 steps
+
+One additional hyperparameter is the stage-dependent matrixΛ\Lambdamentioned inSection˜3.3, which we set to be
+Λ=(1.00.40.60.801.00.40.8001.00.80001.0).\Lambda=\begin{pmatrix}1.0&0.4&0.6&0.8\\
+0&1.0&0.4&0.8\\
+0&0&1.0&0.8\\
+0&0&0&1.0\end{pmatrix}.The training data is the same DR. Tulu RL dataset (rl-research/dr-tulu-rl-data), which contains∼{\sim}4.9K diverse deep research queries. All ablation runs (Baseline RL, SS-GRPO, fullRubricEM) use the same 600-step budget with 2 nodes, starting from the sameRubricEM-SFT checkpoint. The finalRubricEMrun uses 4 nodes for longer runs.
+
+Reward design.
+Since the focus of this work is to improve open-ended answer quality through LLM-as-judge feedback, we use only rubric-based judge signals as RL rewards.
+Concretely, task-policy rewards come from the evolving stagewise rubrics used by the judge, and reflection-policy rewards come from judge scores over rubric-grounded reflections.
+We intentionally do not add auxiliary verifiable rewards, such as format rewards, citation rewards, or tool-use heuristics, which have been used in prior deep research RL recipes such as DR Tulu[shao2025dr].
+This choice isolates the open-ended component of the problem: improvements should come from better semantic planning, research, synthesis, and experience reuse, rather than from optimizing easily checkable surface constraints.
+We believe future work could further improve performance by combining rubric-based rewards with calibrated citation, grounding, or formatting rewards, but our current design provides a cleaner and more holistic setting for studying RL beyond verifiable rewards.
+
+F.2Evaluation Details
+F.2.1Long-Form Benchmarks
+We evaluate on four long-form benchmarks:
+
+•HealthBench[arora2025healthbench]: Subsampled1000 medical questions spanning patient consultations, clinical guidelines, and health advice. Evaluation uses an LLM-as-judge (GPT-4) that grades each response against per-question rubrics on multiple axes (accuracy, completeness, context awareness, communication). The reported score is the overall rubric satisfaction rate.
+
+•ResearchQA[yifei2025researchqa]: 756 scientific research questions with expert-authored rubric items. Evaluation uses an LLM-as-judge (GPT-4) that assesses coverage of each rubric item on a 5-point scale (Not at all / Barely / Moderately / Mostly / Completely). The reported score is the average normalized coverage.
+
+•DeepResearchBench (DRB)[du2025deepresearch]: 100 complex research questions requiring long-form reports with citations. Evaluation uses RACE (Report Assessment via Citation Evaluation) scoring, which combines content quality and citation accuracy. The judge (Gemini) evaluates both the substance of the report and whether citations are accurate and well-grounded.
+
+•ResearchRubrics[sharma2026researchrubrics]: 101 open-ended deep research prompts across diverse real-world domains, each paired with expert-written, prompt-specific rubrics. Evaluation uses an LLM-as-judge to assess rubric compliance under fine-grained criteria covering factual grounding, reasoning soundness, synthesis quality, relevance, clarity, and citation use. Rubric items include both positive and negative criteria with different weights, and the reported score is the binary score.
+
+F.2.2Short-Form Benchmarks
+We additionally evaluate on four short-form benchmarks to test out-of-domain transfer:
+
+•SimpleQA[wei2024measuring]: 1,000 factual questions with exact-match evaluation via LLM grading (correct / incorrect / not attempted).
+
+•2WikiMultihopQA[ho2020constructing]: 1000 multi-hop reasoning questions requiring evidence from multiple sources. LLM-as-judge evaluation.
+
+•WebWalker[wu2025webwalker]: 680 web navigation questions. LLM-as-judge evaluation.
+
+•DeepSearchQA (DSQA)[gupta2026deepsearchqa]: 900 search-intensive questions with exact-match grading.
+
+All short-form benchmarks are evaluated in zero-shot using the same agent pipeline and search tools as the long-form benchmarks. No short-form data is used during RL training, making these evaluations fully out-of-domain.
+
+Note on Benchmarks.
+Unlike Dr. Tulu, we do not include the SQAv2 (ScholarQA) benchmark[asai2024openscholar,bragg2025astabench]in our evaluation.
+SQAv2 is highly citation-centric: it primarily measures whether a model can produce precise inline citations to specific academic papers, which corresponds more to the verifiable citation-grounding component of deep research than to the open-ended answer-quality setting studied here.
+Our RL objective intentionally uses only rubric-based judge rewards and does not include citation-specific rewards, so SQA-v2 would test a capability that our method is not designed to directly optimize.
+This does not mean that citation quality is absent from our evaluation: several of the remaining long-form benchmarks, such as ResearchQA and ResearchRubrics, still include citation-, grounding-, or evidence-use-related rubric items.
+However, these benchmarks evaluate citation use as one part of broader long-form answer quality rather than making precise academic citation the dominant objective.
+In addition, during SFT data generation, Gemini-3.1-Pro produces few and often unreliable academic citations even under strong prompting and rejection sampling, making it a weak teacher for this specific skill.
+We therefore leave citation-specific RL and citation-heavy academic evaluation as future work, and focus here on improving semantic quality, coverage, reasoning, and synthesis beyond verifiable rewards.
+
+Additional notes.For a fair comparison with baselines, the main results inTable˜1, the RL ablations inFigure˜5, and the short-form transfer results inTable˜2are evaluated with direct zero-shot prompts: we do not append rubric-bank entries, previous reflections, or other experience examples at test time.
+The agent still follows the same benchmark protocol and uses the same external search tools when the task requires tool use.
+Thus, the reported gains are not simply due to givingRubricEMextra reflection context during evaluation.
+Although the task policy uses reflection context during RL training, the main evaluations test the resulting task policy directly, suggesting that reflection-conditioned training likely results in higher-quality rollouts.
+We separately study inference-time experience reuse inFigure˜6(c), where rubric-bank entries are explicitly injected during evaluation.
+
+F.3Infrastructure
+Our training and evaluation infrastructure builds on the DR Tulu codebase[shao2025dr], which provides the Ray-based distributed RL training loop, vLLM integration for rollout generation, asynchronous tool calling, sample packing, and one-step asynchronous training[noukhovitch2024asynchronous]. We use GRPO[shao2024deepseekmath]with token-level loss aggregation, tool output token masking[jin2025searchr1], and a small KL penalty (0.001) for stability. Full hyperparameters are provided in the RL training table above.
+
+We extend the base infrastructure in several ways to supportRubricEM:
+
+•Stagewise scoring pipeline:An asynchronous stagewise judge scoring module runs Gemini API calls in parallel with the training loop. Rubric generation (32 calls per step) and trajectory scoring (256 calls per step) are parallelized usingasyncio.gatherwith exponential-backoff retries (see AppendixC).
+
+•Meta-policy training pipeline:Reflection generation and meta-policy training are integrated via a three-thread architecture with one-step deferred reflection training, where reflection samples from stepNNare trained in Phase A of stepN+1N{+}1while the inference engine generates new rollouts. This adds effectively no extra wall-clock overhead (see AppendixD).
+
+•Rubric bank module:A thread-safe in-memory store with a FAISS index over query embeddings (Qwen3-Embedding-0.6B on CPU). Bank operations (retrieval, prompt injection, and background reflection generation) are integrated into the data preparation thread with one-step deferred execution (see AppendixD).
+
+•Checkpoint management:In addition to standard model and optimizer checkpoints (via DeepSpeed), we save the rubric buffer state, rubric bank contents, and dataloader state at regular intervals to enable seamless training resumption with consistent memory and data ordering.
+
+For evaluation, we use vLLM to serve the model checkpoint on a single GPU and run the agent pipeline with real-time tool execution via the MCP backend. Each benchmark evaluation varies around 2–18 hours depending on the number of examples, the complexity of the query, judging latency, and the average number of tool calls per trajectory.
+
+Search tools.
+We expose two search tools to the agent.
+The primary tool isgoogle_search, implemented through Gemin-3-Flash (as the browsing model) with Google Search grounding enabled111https://ai.google.dev/gemini-api/docs/google-search.
+It returns AI-synthesized summaries with grounding snippets, and is mainly used for general web search, fact-seeking questions, and broad real-world information gathering.
+The second tool issnippet_search, implemented through the Semantic Scholar API222https://api.semanticscholar.org/api-docs.
+It retrieves text snippets from academic papers and is mainly used when the query requires scholarly evidence, paper-level context, or scientific literature support.
+Both tools are called through the same MCP backend, and their outputs are wrapped in<tool_output>blocks before being returned to the agent.
+
+F.4Baselines
+We compare against baselines from three categories, following the selection of Dr. Tulu[shao2025dr]and supplementing with additional recent models. Scores for existing baselines are taken from the Dr. Tulu paper where available; for models not covered, we run the same evaluation pipeline.
+
+•Closed deep research models:Proprietary systems with full deep research capabilities, including OpenAI Deep Research[openai2025deepresearch], Gemini Deep Research[google2025gemini], Perplexity Deep Research[perplexity2025sonardeepresearch], Claude Sonnet Search, Gemini 3.1 Pro + Search, and GPT-5 + Search.
+
+•Fixed pipeline deep research models:Models that use a fixed multi-stage pipeline (search→\rightarrowsynthesis→\rightarrowreport) without end-to-end RL training, including WebThinker[li2025webweaver]and Ai2 ScholarQA[singh2025ai2].
+
+•Open deep research models:Open-weight models trained end-to-end for deep research, including Search-R1-7B[jin2025searchr1], WebExplorer-8B[liu2025webexplorer], Tongyi DeepResearch-30B-A3B[tongyi2025deepresearch], and DR Tulu-8B[shao2025dr](both SFT and RL checkpoints).
+
+DR Tulu is the most direct comparison, since we use the same training data and operate in the same open deep research setting. Compared to Dr. Tulu,RubricEMuses a different search tool (Google Search with Gemini grounding vs. Serper API) and a different SFT teacher (Gemini-3.1-Pro vs. GPT-5). Our search tool provides richer AI-synthesized summaries but fewer raw webpage URLs; their teacher is stronger but their search tool returns shorter snippets. We discuss this trade-off in the main text and control for it through ablation studies that isolate the contribution of our training recipe from search tool effects.
+
+Appendix GAlgorithm
+The algorithm of the paper is described in full inAlgorithm˜1.
+
+Algorithm 1RubricEM: Reinforcement Learning with Stage-Structured GRPO and Reflection Meta-Policy Training1:Structured SFT policyπθ\pi_{\theta}, reference policyπref\pi_{\rm ref}, training queries𝒟\mathcal{D},
+tool environment𝒯\mathcal{T}, judge𝒥\mathcal{J}, stages𝒮={Plan,Research,Review,Answer}\mathcal{S}=\{\textsc{Plan},\textsc{Research},\textsc{Review},\textsc{Answer}\}, stage matrixΛ\Lambda, rollout sizenn, reflection samplesmm, active rubric capsC1:KC_{1:K}
+2:Initialize active judge rubric buffersℬq,kact←∅\mathcal{B}^{\rm act}_{q,k}\leftarrow\emptysetfor each queryqqand stagekk
+3:Initialize persistent judge rubricsℬq,kpers\mathcal{B}^{\rm pers}_{q,k}when available, and agent rubric bankℳ←∅\mathcal{M}\leftarrow\emptyset
+4:Initialize deferred reflection batch𝒫0ref←∅\mathcal{P}^{\rm ref}_{0}\leftarrow\emptyset
+5:forRL stept=1,…,Tt=1,\ldots,Tdo
+6:(Qt,μt)←WindowedBatch​(𝒟,t)(Q_{t},\mu_{t})\leftarrow\textsc{WindowedBatch}(\mathcal{D},t)⊳\trianglerightμt∈{cross,within}\mu_{t}\in\{\textsc{cross},\textsc{within}\}
+7:for allq∈Qtq\in Q_{t}do
+8:Eq←Retrieve​(ℳ,q,μt)E_{q}\leftarrow\textsc{Retrieve}(\mathcal{M},q,\mu_{t})⊳\trianglerightretrieve reusable experience
+9:endfor
+10:⊳\trianglerightDeferred reflection meta-policy update
+11:if𝒫t−1ref≠∅\mathcal{P}^{\rm ref}_{t-1}\neq\emptysetthen
+12:Update sharedπθ\pi_{\theta}on reflection tokens using GRPO rewards in𝒫t−1ref\mathcal{P}^{\rm ref}_{t-1}
+13:endif
+14:⊳\trianglerightStage-structured task-policy rollout and judging
+15:Initialize task batch𝒫ttask←∅\mathcal{P}^{\rm task}_{t}\leftarrow\emptyset
+16:for allq∈Qtq\in Q_{t}in paralleldo
+17:Sample tool-augmented rollouts{τi}i=1n∼πθ(⋅∣q,Eq;𝒯)\{\tau_{i}\}_{i=1}^{n}\sim\pi_{\theta}(\cdot\mid q,E_{q};\mathcal{T})under scaffold𝒮\mathcal{S}⊳\trianglerighttask policy rollouts
+18:Δ​ℬq,1:K←GenerateStageRubrics​(𝒥,q,{τi}i=1n,ℬq,1:Kact)\Delta\mathcal{B}_{q,1:K}\leftarrow\textsc{GenerateStageRubrics}(\mathcal{J},q,\{\tau_{i}\}_{i=1}^{n},\mathcal{B}^{\rm act}_{q,1:K})⊳\trianglerightcontrast rollouts
+19:fork=1,…,Kk=1,\ldots,Kdo
+20:ℬq,kact←ℬq,kact∪Δ​ℬq,k\mathcal{B}^{\rm act}_{q,k}\leftarrow\mathcal{B}^{\rm act}_{q,k}\cup\Delta\mathcal{B}_{q,k}
+21:ℬq,k←ℬq,kpers∪ℬq,kact\mathcal{B}_{q,k}\leftarrow\mathcal{B}^{\rm pers}_{q,k}\cup\mathcal{B}^{\rm act}_{q,k}
+22:endfor
+23:Ri,k←ScoreStage​(𝒥,q,τi,ℬq,k)R_{i,k}\leftarrow\textsc{ScoreStage}(\mathcal{J},q,\tau_{i},\mathcal{B}_{q,k})for alli=1,…,ni=1,\ldots,nandk=1,…,Kk=1,\ldots,K
+24:fork=1,…,Kk=1,\ldots,Kdo
+25:Gi,kΛ←∑j=kKλk,j​Ri,jG^{\Lambda}_{i,k}\leftarrow\sum_{j=k}^{K}\lambda_{k,j}R_{i,j}for allii
+26:Ai,k←Gi,kΛ−meani′​(Gi′,kΛ)stdi′​(Gi′,kΛ)+ϵA_{i,k}\leftarrow\dfrac{G^{\Lambda}_{i,k}-{\rm mean}_{i^{\prime}}(G^{\Lambda}_{i^{\prime},k})}{{\rm std}_{i^{\prime}}(G^{\Lambda}_{i^{\prime},k})+\epsilon}for allii
+27:ℬq,kact←PruneByDiscrimination​(ℬq,kact,{Ri,k}i=1n,Ck)\mathcal{B}^{\rm act}_{q,k}\leftarrow\textsc{PruneByDiscrimination}(\mathcal{B}^{\rm act}_{q,k},\{R_{i,k}\}_{i=1}^{n},C_{k})⊳\trianglerightevolve stagewise rubric buffer
+28:endfor
+29:𝒫ttask←𝒫ttask∪{(q,τi,Bi,1:K,Ai,1:K)}i=1n\mathcal{P}^{\rm task}_{t}\leftarrow\mathcal{P}^{\rm task}_{t}\cup\{(q,\tau_{i},B_{i,1:K},A_{i,1:K})\}_{i=1}^{n}
+30:LaunchPrepareReflectionBatch​(q,{τi,Ri,1:K}i=1n,ℬq,1:K,ℳ,m)\textsc{PrepareReflectionBatch}(q,\{\tau_{i},R_{i,1:K}\}_{i=1}^{n},\mathcal{B}_{q,1:K},\mathcal{M},m)asynchronously
+31:endfor
+32:⊳\trianglerightTask-policy update
+33:Updateπθ\pi_{\theta}on𝒫ttask\mathcal{P}^{\rm task}_{t}with SS-GRPO using stage advantagesAi,kA_{i,k}and KL toπref\pi_{\rm ref}by Eq.1
+34:𝒫tref←\mathcal{P}^{\rm ref}_{t}\leftarrowcompleted asynchronous reflection batches from steptt
+35:endfor
+36:returntrained policyπθ\pi_{\theta}and agent rubric bankℳ\mathcal{M}
+37:
+38:functionPrepareReflectionBatch(q,{τi,Ri,1:K}i=1n,ℬq,1:K,ℳ,mq,\{\tau_{i},R_{i,1:K}\}_{i=1}^{n},\mathcal{B}_{q,1:K},\mathcal{M},m)
+39:Sample one trajectoryτs\tau_{s}uniformly from{τi}i=1n\{\tau_{i}\}_{i=1}^{n}⊳\trianglerightfixed reflection context
+40:Generate reflection candidates{sℓ}ℓ=1m∼πθrefl(⋅∣q,τs)\{s_{\ell}\}_{\ell=1}^{m}\sim\pi_{\theta}^{\rm refl}(\cdot\mid q,\tau_{s})
+41:forℓ=1,…,m\ell=1,\ldots,mdo
+42:(uℓwithin,uℓcross)←JudgeReflection​(𝒥,q,τs,sℓ,Rs,1:K,ℬq,1:K)(u^{\rm within}_{\ell},u^{\rm cross}_{\ell})\leftarrow\textsc{JudgeReflection}(\mathcal{J},q,\tau_{s},s_{\ell},R_{s,1:K},\mathcal{B}_{q,1:K})
+43:uℓ←12​(uℓwithin+uℓcross)u_{\ell}\leftarrow\frac{1}{2}(u^{\rm within}_{\ell}+u^{\rm cross}_{\ell})
+44:endfor
+45:s⋆←arg⁡maxℓ⁡uℓs^{\star}\leftarrow\arg\max_{\ell}u_{\ell}among valid reflection candidates
+46:ℳ←WriteBank​(ℳ,q,s⋆)\mathcal{M}\leftarrow\textsc{WriteBank}(\mathcal{M},q,s^{\star})⊳\trianglerightstore only the best accepted reflection
+47:return{(q,τs,sℓ,uℓ)}ℓ=1m\{(q,\tau_{s},s_{\ell},u_{\ell})\}_{\ell=1}^{m}
+48:endfunction
+
+Appendix HLimitations and Discussions
+Limitations.
+Our experiments involve long-horizon agentic RL with search tool calls and external LLM judging, which makes the training loop more sensitive to infrastructure instability than standard offline RL or supervised fine-tuning.
+During training, we occasionally observed API delays and inconsistent network connections, so wall-clock execution and some rollout–judge latencies were not perfectly controlled across all RL steps.
+In the main large-scale RL run, the training server also had to be shut down and restarted several times.
+Although we restored training from checkpoints, such interruptions can introduce additional staleness in the asynchronous reflection branch, rubric bank, and judge-feedback pipeline beyond the intended one-step lag.
+We therefore view our reported results as reflecting a realistic but not fully ideal infrastructure setting; in principle, a more stable, uninterrupted training environment could reduce stale feedback and further improve the efficiency of our method.
+Another limitation is that we use Gemini Flash as a cost-effective judge for rubric generation, stagewise scoring, and reflection evaluation.
+A stronger or more specialized judge could likely provide more accurate stage-level credit and higher-quality reflection rewards, especially for subtle long-form research tasks, but would also increase cost and latency.
+Exploring the scaling behavior ofRubricEMwith stronger judges, multiple judges, or calibrated judge ensembles is an important direction for future work.
+
+Discussion and broader impact.
+More broadly, our results suggest that LLM-generated rubrics should be treated not only as evaluation artifacts, but as a general interface for structuring agent behavior, assigning semantic credit, and accumulating reusable experience.
+They also point to a training-time view of Meta-RL for language agents: rather than using reflection, memory, or self-improvement only as inference-time prompting mechanisms, one can train a meta-policy during RL so that judged experience directly shapes both the agent’s parameters and its reusable textual memory.
+While we study open-ended deep research beyond verifiable rewards, the same recipe may transfer to other domains where quality is multidimensional and hard to reduce to exact-answer correctness, such as writing assistance, data analysis, scientific review, tutoring, and complex tool-use workflows.
+At the same time, rubric-guided meta-policies inherit the risks of their judges and rubrics: poorly specified criteria can reinforce shallow preferences, biased standards, or overconfident synthesis, and reusable memories may propagate these errors across tasks.
+Future work should study more robust rubric generation, stronger or ensemble judges, human-auditable rubric banks, uncertainty-aware reflection training, and safety-aware criteria for domains where agentic research outputs may influence real decisions.
+
