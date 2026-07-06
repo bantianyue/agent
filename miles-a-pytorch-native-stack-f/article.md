@@ -135,6 +135,46 @@ Miles最重要的设计选择之一是让核心trainer保持小。
 ![](img3_architecture.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">Small Core, Many Extension Points：Miles的核心设计哲学架构图</span>
 
+## 与其他RL框架的差异
+
+要理解Miles的独特之处，把它放在现有的RL后训练框架生态中看会更清楚。目前主流的开源方案大致分三类：
+
+**veRL（HybridFlow）**是字节跳动开源的RL框架，Ray混合控制器架构，支持FSDP/Megatron双训练后端、vLLM/SGLang双推理引擎，算法丰富（PPO、GRPO、DAPO等），是目前社区成熟度最高的方案之一。但其"混合控制器"设计虽然灵活，学习曲线也陡峭，高度依赖Ray的复杂编排逻辑，定制化门槛较高。
+
+**OpenRLHF**是最早一批用Ray+vLLM搭建的高性能RLHF框架之一，强调易用性和Agentic RL的统一agent范式。它架构简洁、文档清晰，但深度使用的用户反馈API稳定性不足、频繁breaking changes。其训练后端主要基于DeepSpeed而非Megatron，在大规模MoE训练场景下性能和成熟度不及Megatron方案。
+
+**TRL（Hugging Face）**生态集成最好，与Transformers、Datasets、Accelerate无缝衔接，上手极快，适合快速原型验证和中小规模实验。但分布式扩展能力仍在完善中，在处理千卡级别MoE训练时力不从心。
+
+**slime**是Miles的直接母体——清华THUDM团队开发的轻量级SGLang原生RL框架，Miles正是从slime fork而来。slime的核心设计原则（SGLang+Megatron双引擎、模块化解耦、对研究员友好）直接继承到了Miles中。两者的关系是：slime专注于轻量、灵活和研究迭代效率，Miles在此基础上增加了企业级稳定性、新硬件（如GB300）支持和生产级MoE训练保障。
+
+Miles在这些方案中的定位，差异在于几个关键设计选择：
+
+### 全线"不拣选"的系统集成
+
+veRL和OpenRLHF都选择了Ray+vLLM这条技术路径，训练后端在FSDP/DeepSpeed和Megatron之间可切换。Miles做出了不同的选择：**不搞可插拔训练后端，直接深度绑定SGLang（推理）+ Megatron-LM（训练）**，并将PyTorch作为贯穿全栈的统一编程层。这看起来限制了选择，但实际上带来了关键收益：端到端低精度方案（BF16/FP8/MXFP8/INT4-QAT）能在整个流水线中一致工作，MoE路由对齐（Rollout Routing Replay）能在两个边界精确控制，权重同步能走专用NCCL/RDMA通道绕开Python数据路径。这些优化在"随便切换后端"的方案里很难统一实现。
+
+也就是说，veRL和OpenRLHF给了你选择权，换来的是一致性代价要在用户侧自己处理。Miles帮用户选择了最优组合，换来了跨边界的一致性和深层系统集成。
+
+### PyTorch Native，不引入新抽象层
+
+大多数RL框架在自己的编排层之上又叠加了一层抽象（veRL的hybrid-controller、OpenRLHF的agent paradigm），用户要搞清楚这套抽象才能定制。Miles的做法是"不发明抽象"：rollout函数是Python函数，reward是Python函数，loss是PyTorch autograd图，model spec是torch.nn.Module。用户定制的每一项东西，都直接对接PyTorch已有的语义，不需要学习另一套框架特定的API。这一点和slime一脉相承，也是Miles强调"PyTorch Native"的真正含义。
+
+对比来看，TRL的集成度高但牺牲了定制深度；veRL的定制能力强但学习成本高；Miles选择了"定制能力等同于PyTorch能力"这条路径——如果你会写PyTorch，你就会用Miles。
+
+### 以MoE为核心设计目标
+
+很多RL框架是从dense模型起步，后来才兼容MoE。Miles（及其母体slime）从一开始就以MoE为目标架构设计。Rollout Routing Replay、Megatron原生并行感知checkpoint（支持Tensor/Pipeline/Context/Expert并行独立配置）、LoRA在rollout和training两端的统一支持——这些能力在非MoE框架里要么不存在，要么是事后打补丁。
+
+特别是在MoE路由对齐问题上，veRL和OpenRLHF的架构中，rollout（SGLang/vLLM）和training（FSDP/DeepSpeed）之间缺乏路由决策的显式传递机制，rollout和trainer的路由不匹配是生产环境中MoE RL不稳定的常见根因。Miles的Rollout Routing Replay是一个工程实践经验驱动的解决方案，现有的开源框架中还没有对等的设计。
+
+### 异步RL的原生支持
+
+异步RL（rollout和训练解耦、不互相阻塞）在大规模部署中是刚需，因为rollout和训练的计算特征差异太大，强行同步会导致大量GPU空闲。Miles通过Ray actor的持久化和独立调度特性，让异步模式成为一等公民。这一能力在veRL中也有（通过hybrid-controller的dataflow抽象），但OpenRLHF和TRL的同步主循环在规模上去之后会成为瓶颈。
+
+### "小核心"哲学的开箱收益
+
+Miles不强迫用户为每种新算法或新模型fork框架，而是通过明确的扩展点（rollout、reward、loss、样本过滤、训练hook、model spec）来解耦用户代码和框架代码。这意味着研究团队可以拿Miles跑RLHF，同一个框架不做任何修改就能切到GRPO或自定义算法；基础设施团队可以在不动用户代码的前提下升级Megatron版本或切换硬件拓扑。这个级别的关注点分离，在veRL里需要理解hybrid-controller，在OpenRLHF里需要理解其agent paradigm，在TRL里则基本没有——而Miles用最朴素的Python模块注入实现了。
+
 ## 展望
 
 LLM后训练正在快速演进：更大的模型、更长的上下文、更多的MoE、更异步和Agentic的RL流水线：Miles正是为这个轨迹而构建的：通过将SGLang、Ray、Megatron-LM和PyTorch组合在一个可插拔的小型trainer背后，它为研究者和基础设施团队提供了一条从算法实验到大规模RL运行的PyTorch原生路径。这也是为什么RadixArk选择开源Miles：让前沿规模的LLM RL后训练更容易复现、扩展和运营。
