@@ -1,1 +1,0 @@
-bash publish.sh long-sequence-moe "Dockerless：无需Docker环境的代码补丁验证器，编码Agent训练不再卡在跑测试" --author "AI圈的9527"
