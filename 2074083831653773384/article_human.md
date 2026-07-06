@@ -35,7 +35,10 @@ NVIDIA刚刚发布的Vera Rubin平台，可以说是英伟达历史上架构变�
 | 供电 | 48V | 800V DC | 800V DC |
 | 出货时间 | 已出货 | 2026 H2 | 2027 |
 
-一个最直观的数字：单芯片显存带宽从Blackwell的8 TB/s跃升到Rubin的22 TB/s，接近3倍增长。这背后是HBM4总线位宽从1024-bit直接翻倍到2048-bit。
+![](img2.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">Blackwell Ultra (GB300 NVL72) 与Vera Rubin平台对比示意图</span>
+
+一个最直观的数字：
 
 ## 五大核心升级详解
 
@@ -44,6 +47,9 @@ NVIDIA刚刚发布的Vera Rubin平台，可以说是英伟达历史上架构变�
 Blackwell用的是HBM3e，在位宽和频率上都已接近极限。当万亿参数的MoE模型需要在GPU之间高频路由token时，显存带宽率先成为瓶颈。
 
 Vera Rubin引入HBM4，总线位宽直接翻倍到2048-bit，单芯片带宽达到22 TB/s。这还不算完：2027年的Rubin Ultra更进一步，单颗GPU的HBM4e显存飙升至1TB，理论上彻底消除了显存容量对万亿参数模型推理的限制。
+
+![](img3.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">HBM4显存架构与带宽对比</span>
 
 ### 2. Vera CPU：英伟达第一次完全自研的服务器CPU
 
@@ -63,11 +69,17 @@ Blackwell机柜最大的痛点之一是布线。计算托盘、交换机、电�
 
 Vera Rubin NVL72的全新Compute Tray内集成了两颗Vera CPU和四颗Rubin GPU，采用无电缆、无软管、无风扇的全液冷设计。六颗芯片都出自英伟达自己：Rubin GPU、Vera CPU、NVLink 6交换机、ConnectX-9超级网卡、BlueField-4 DPU、Spectrum-6以太网交换机。整个机柜约130万个元件，像一台插上电源就能运转的巨型计算机，而不是一堆需要拼装的零件。
 
+![](img4.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">Vera Rubin NVL72六芯片架构协同示意</span>
+
 ### 5. 供电革命：800V高压直流
 
 单颗Rubin GPU的功耗可能直奔1800W-2300W，整个NVL72机柜突破200kW。2027年的Rubin Ultra搭载576颗GPU，功耗会突破600kW。
 
 48V供电在这个量级下，线缆发热和配电损耗已经不可接受。英伟达在Rubin世代全面转向 **800V高压直流供电**：这是数据中心供电架构的根本性变革，不仅影响英伟达自己的机柜，也会倒逼整个数据中心基础设施升级。
+
+![](img5.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">Rubin Ultra (Kyber NVL576) 渲染图</span>
 
 ## 实际应用：什么时候需要Rubin？
 
