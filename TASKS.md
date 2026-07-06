@@ -8,6 +8,7 @@
 | 3 | 2026-07-05 | https://dev.classmethod.jp/articles/nvidia-nemo-switchyard-first-touch/ | nvidia-nemo-switchyard-first-t | nemo-switchyard-first-touch | NVIDIA NeMo Switchyard 上手：pip安装、无GPU、Claude Code一键连接的LLM路由 | cover.png | ✅ 已推送 |
 | 4 | 2026-07-05 | https://openrouter.ai/blog/announcements/fusion-beats-frontier/ | fusion-beats-frontier | openrouter-fusion | OpenRouter Fusion：多模型融合超越前沿，廉价小组64.7%逼近顶配性能 | cover.png | ✅ 已推送 |
 | 5 | 2026-07-06 | https://x.com/tanayj/status/2072766211256119475 | 2072766211256119475 | rl-beyond-verifiable | TBD | TBD | 📥 进行中 |
+| 6 | 2026-07-06 | https://moondream.ai/blog/popping-the-gpu-bubble | popping-the-gpu-bubble | popping-the-gpu-bubble | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -50,3 +51,10 @@
 |--------|------|------|
 | 2026-07-06 11:46 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-06 11:46 | 📥 | 进行中 |
+
+### #6 - popping-the-gpu-bubble
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-06 11:46 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-06 11:47 | 📥 | 查看状态 |
