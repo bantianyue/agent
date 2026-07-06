@@ -1,0 +1,194 @@
+Akshay 
+@akshay_pachaar
+订阅
+How to Build an RL Environment
+3
+6
+69
+7,896
+Andrej Karpathy summarized the entire history of LLM training in three nouns:
+
+- text 
+- conversations
+- and environments
+Pretraining ran on internet text, supervised fine-tuning ran on curated conversations, and the current era of reinforcement learning runs on environments.
+OpenAI's o1 proved that framing by training on math and coding problems with verifiable answers, and DeepSeek-R1 published the recipe openly.
+The industry now treats environments as the scarce resource. Anthropic reportedly discussed spending over $1 billion on them in a single year.
+Meanwhile, someone is giving them away for free through a Hugging Face-style hub hosting 2,500+ open-source environments.
+And today, we'll use their framework to build one of our own from the ground up.
+Before we build anything, let's understand what an environment actually is. Every RL setup is a loop with four moving parts, and they map onto anything the model interacts with:
+State: what the model sees right now
+Action: the choice it makes from that state
+Reward: a number that says how good that choice was
+Environment: the thing that holds the state, accepts the action, and returns the reward
+RL loop diagram, state → action → reward → environment wired in a circle
+The hard part of this loop was always the reward, which traditionally required training a separate model on human preferences.
+DeepSeek-R1 replaced that entire model with a plain Python function through GRPO (Group Relative Policy Optimization). Score several answers to the same prompt and push the model toward the ones that beat the group average.
+Here is an illustration of how GRPO works:
+Build Reasoning LLMs using GRPO
+That leaves the environment as the barrier still standing. A reward function can score a final state, but something has to present the task, accept the model's actions, enforce the rules, and produce that final state in the first place.
+Frontier labs guard this part as a proprietary asset, which is why few practitioners have ever seen a working environment from the inside.
+That team giving environments away is Prime Intellect, and their library, Verifiers, is the framework we'll build with. (100% open-source)
+The design is model-agnostic, the rewards are fully verifiable, and the same skeleton works for any turn-based task you want to train on.
+How to read this article
+The goal here is simple. We're building a complete RL environment, and we're covering it in a way that stays easy to digest even if this is your first one.
+Every idea comes with the code that implements it, kept short enough to read in the flow of the article. The complete, runnable version is shared at the end.
+And the game we'll build around is just the working example. By the time you finish, you'll be able to take this exact structure and adapt it to your own use case.
+The Othello RL env: Why a board game
+Othello is a two-player game on an 8x8 grid. You place a disc so it traps opponent discs in a straight line, every trapped disc flips to your color, and whoever owns more discs when the board fills up wins.
+That flipping rule is why a single move can swing the score hard, and why corners matter so much (a corner disc can never be flipped back).
+An Othello board
+Every RL part has a home here. The board is the state, the disc placement is the action, the final result feeds the reward, and the game engine that validates moves, flips discs, and plays the other side is the environment.
+The LLM plays Black and a built-in engine plays White. After each Black move, White responds, the updated board goes back to the model, and this repeats until the game ends.
+RL loop diagram showing LLM, Environment, Opponent engine, and Reward components
+Tech stack
+Three tools make this work, each handling one layer:
+Verifiers: the RL framework. It defines the environment, runs the turn loop, and handles evals.
+Lightning AI: an OpenAI-compatible inference API, so the same code calls hosted models like Claude or DeepSeek without provider-specific rewrites.
+vLLM: serves open-weight models locally behind that same OpenAI-compatible endpoint.
+The shared interface is what makes the environment model-agnostic. A local Ministral-3B and a hosted GPT-4.1 swap in one line and you change the model name, nothing else.
+The game loop
+Here's what the model sees on each turn:
+State the model see at each turn
+The board, the score, and the list of valid moves are the entire state. Everything the model knows about the game comes from this text.
+It must respond with a <think> section followed by a <move> tag, which forces it to reason through the position before committing to a move.
+5-step turn flow from starting position through LLM response, validation, White engine move, and updated board
+The environment validates the move against the valid list, applies it to the board, lets White respond, and sends the updated board back. An invalid move gets an error message and a retry, with a penalty applied to the reward.
+All of that lives in one method. OthelloEnv inherits from MultiTurnEnv in Verifiers, which handles the loop, turn tracking, and termination, and the base class calls your env_response every time the model sends a move:
+python
+class OthelloEnv(MultiTurnEnv):
+    def env_response(self, model_output, state):
+        move = parse_move(model_output)
+
+        if not is_valid(move, state.board):
+            state.penalty += INVALID_MOVE_PENALTY
+            return error_message(move), state          # same turn, retry
+
+        state.board = apply_move(state.board, move, player="black")
+
+        if not game_over(state.board):
+            white_move = opponent_engine(state.board, state.difficulty)
+            state.board = apply_move(state.board, white_move, player="white")
+
+        return render_board(state.board), state
+This is the shape of the logic; the real version also handles board parsing and edge cases the snippet skips. I'll share the full working code later once we understand the setup end-to-end.
+The built-in opponent engine
+The builtin engine plays white and has two modes:
+Random vs MiniMax opponent modes 
+Random picks any legal move. Useful for early training, since the model can win just by making reasonable decisions.
+Minimax simulates future moves, scores each resulting position by corner control, board position, and available moves, and picks the move with the best worst-case outcome. Depth-3 means it looks three moves ahead, enough to set traps and avoid obvious blunders.
+A randomness parameter controls how often White ignores its strategy and picks randomly instead. Lower randomness means more consistent, punishing play.
+White's moves are generated from the current board state and a fixed game seed, so the same position always produces the same response. That determinism is what lets you compare different models under identical conditions.
+Here's how the code for the same looks like:
+python
+def opponent_engine(board, randomness, depth):
+    if random.random() < randomness:               # random mode
+        return random.choice(legal_moves(board))
+    best_move = None                                 # minimax mode: try every move,
+    best_score = float("-inf")                       # keep the one with the best score
+    for move in legal_moves(board):
+        score = minimax(apply_move(board, move), depth - 1, my_turn=False)
+        if score > best_score:
+            best_move, best_score = move, score
+    return best_move
+The reward functions
+At game end, four signals combine into a single reward:
+Reward components table with what each measures and its weight
+Each one is a function that reads something off the final state and returns a number, and the win signal is the simplest:
+python
+def win_reward_func(state):
+    result = state.get("result")
+    if result == "black":   # the model's color
+        return 1.0
+    if result == "draw":
+        return 0.5
+    return 0.0              # loss, or game never finished
+
+The other three follow the same shape, and all four combine into one score:
+python
+def total_reward(state):
+    return (
+        win_loss_score(state)
+        + piece_advantage(state)
+        + format_compliance(state)
+        - invalid_move_penalty(state)
+    )
+
+The reason for four signals instead of a single win/loss bit is resolution. Early in training most games are losses, and to a pure win/loss reward they all look identical, so the model has nothing to climb.
+Piece advantage separates a close loss from a blowout, giving the model gradient before it starts winning.
+Format compliance carries a low weight so clean formatting never outweighs good play.
+The invalid move penalty is capped so one broken game can't drown out everything the model did right.
+Every score comes directly from the game state and rules, with no judge model or LLM evaluator involved, so the reward is fully deterministic and reproducible.
+Wiring it together
+Full Othello system diagram with game loop, reward functions, and prime eval
+The environment generates games across different starting positions and opponent difficulties, the model plays each one through the loop above, and at game end the four rewards are computed and combined. During evaluation, rewards, token usage, and turn counts are aggregated across all games into a results table.
+One function wires everything up, and it's what the prime eval command calls behind the scenes:
+python
+def load_environment(min_random_move_prob, max_random_move_prob, parse_think):
+    dataset = generate_games(min_random_move_prob, max_random_move_prob)
+    parser = XMLParser(fields=["think", "move"])
+    rubric = Rubric(funcs=[...], weights=[1.0, 1.0, 0.2, 1.0])
+    return OthelloEnv(dataset, parser, rubric)
+What the numbers show
+Running an evaluation is one command, with the opponent settings passed as arguments:
+bash
+prime eval run othello -m openai/gpt-4.1 -n 100 \
+  -a '{"min_random_move_prob": 0.0, "max_random_move_prob": 0.0, "minimax_depth": 3}'
+Swap the model name to test something else, whether it's hosted through Lightning AI or running on a local vLLM server. Here's how two models fared against two opponents:
+Evaluation results tables for gpt-4.1 and Ministral-3B against random and depth-3 minimax opponents
+From evaluation to training
+Evaluation tells you where the model struggles, and training fixes it in three stages. The same environment supports all of them:
+Three-stage pipeline of data generation, SFT, and RL training sharing the same environment and rewards
+Data generation: have your strongest model play a few hundred games and save the results. The same eval command writes straight to a dataset:
+bash
+prime eval run othello -m openai/gpt-4.1 -n 200 \
+  --save-to-hf-hub --hf-hub-dataset-name your-username/othello-data
+Filter it down to wins and draws before training on it, so you're not teaching the model your strongest player's mistakes alongside its format.
+Supervised fine-tuning: teach format and valid moves first. The Ministral-3B turn counts make the point directly, since unreliable formatting and illegal moves are noise RL can't train through.
+RL training: this is where strategy improves. Multiple games are played from the same starting position, each is scored with the same reward functions from evaluation, and the model is updated toward the higher-scoring rollouts.
+Stripped to its core, that's the GRPO loop from the top of the article:
+python
+for prompt in batch:
+    rollouts = [play_game(model, prompt) for _ in range(group_size)]
+    rewards = [total_reward(r.final_state) for r in rollouts]
+    advantage = rewards - mean(rewards)     # relative to the group
+    update_model(model, rollouts, advantage)
+Each rollout is scored against the average of its own group, so a move that wins 6 of 10 games from a given position is rewarded more than the weaker attempts beside it.
+Adapting this to your own task
+Once you remove the Othello specifics and the same MultiTurnEnv gives you a skeleton that fits any turn-based task:
+python
+class TaskEnv(MultiTurnEnv):
+    def env_response(self, model_output, state):
+        action = parse_action(model_output)          # your task's syntax
+        if not is_valid(action, state):
+            return error_message(action), penalize(state)
+        state = apply_action(state, action)          # your task's rules
+        if not task_complete(state):
+            state = environment_step(state)          # tool, API call, or opponent
+        return render_state(state), state            # your task's display
+
+This isn't specific to games. A coding agent swaps apply_action for running a test suite against generated code, a support agent swaps it for checking whether a tool call retrieved the right record, and a research task swaps it for verifying a claim against a cited source.
+Adapting it comes down to four swaps:
+Task logic: your domain's rules for what counts as a valid action and how the state changes
+Response engine: whatever the model reacts to, from a rule-based simulator to a live API to another model
+Reward functions: keep the pattern (outcome signal, partial credit, format, penalty) and replace the domain logic
+State rendering: whatever the model needs to see, whether that's a file diff, a conversation transcript, or a tool's response
+The structure underneath stays the same regardless of domain: parse, validate, apply, respond, score. The rubric is the design, and if you get the components right, the training signal takes care of itself.
+Try it yourself
+All the code, setup instructions, and ready-to-use GPUs to reproduce these results are in the Lightning AI Studio template:
+Build a Custom RL Environment →
+Check out Lightning AI Inference →
+Lightning AI Inference dashboard listing models with cost, latency, throughput, and context length
+Thanks for reading!
+Cheers! :)
+想发布自己的文章？
+升级为 Premium
+上午2:35 · 2026年7月7日
+·
+7,896
+ 查看
+3
+6
+69
+123
+相关
