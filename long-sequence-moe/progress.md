@@ -19,3 +19,4 @@
 | Step 4g: 文本格式修复 | pending |
 | Step 5: 预发布检查 | pending |
 | Step 6: 推送草稿 | pending |
+| Step 4d-i: 传送门 | completed |
