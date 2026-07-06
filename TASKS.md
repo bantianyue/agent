@@ -67,3 +67,5 @@
 |--------|------|------|
 | 2026-07-06 13:54 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-06 13:57 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0eXpxlmLETRTcQ_Y9A1ig5htLBhX2pSYJin3S2SmY8aL |
+| 2026-07-06 15:14 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0Wt9QA1jJdUWJtZeq0_lAB5YcvdSW2QZh8qEpUUxWCRD |
+| 2026-07-06 15:14 | 🔄 | 章节格式修复后重新推送 |
