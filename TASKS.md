@@ -12,6 +12,7 @@
 | 7 | 2026-07-06 | https://x.com/tanayj/status/2072766211256119475 | 2072766211256119475 | 2072766211256119475 | TBD | TBD | 📥 进行中 |
 | 8 | 2026-07-06 | https://arxiv.org/html/2606.28436v1 | 2606-28436 | long-sequence-moe | Dockerless：无需Docker环境的代码补丁验证器，编码Agent训练不再卡在跑测试 | cover.png | ✅ 已推送 |
 | 9 | 2026-07-06 | https://arxiv.org/html/2605.10899v1 | 2605-10899 | rubricem-meta-rl | RubricEM：评分标准引导的深度研究Agent训练框架 | cover.png | ✅ 已推送 |
+| 10 | 2026-07-06 | https://mimo.xiaomi.com/zh/blog/mimo-tilert-1000tps | mimo-tilert-1000tps | mimo-1000tps | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -86,3 +87,9 @@
 | 2026-07-06 18:53 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-06 18:53 | 📝 | Meta-RL + 评分标准引导（Rubric）策略分解 |
 | 2026-07-06 18:57 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0c4NbUOPTpzBVTc9FiCp3ytSPID0SRb4TSEJpbA29pWt |
+
+### #10 - mimo-1000tps
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-06 19:59 | 📥 开始 | 收到 URL，开始提取内容 |
