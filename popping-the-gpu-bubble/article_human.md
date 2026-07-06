@@ -1,8 +1,14 @@
-**要点速览**
-- **GPU Bubble的定义**：AI推理中，GPU经常不是因为没有计算任务而闲置，而是因为CPU还没准备好告诉它下一步要做什么，这个空闲窗口被称为GPU bubble
-- **Pipelined decoding的核心思路**：Photon引擎将CPU的提交/计划/启动工作与GPU的forward计算重叠，使GPU几乎100%繁忙，消除idle时间
-- **三项支撑机制**：Ping-pong slots（两个缓冲区交替使用，防止步骤冲突）、Forward now/sample later（forward不需要mask可以先跑）、Zombie refcounting（已结束序列干净拆除）
-- **实测收益**：B200上32流场景，blocking 5.55ms → pipelined 3.98ms，吞吐提升35.4%
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+- <strong>GPU Bubble的定义</strong>：AI推理中，GPU经常不是因为没有计算任务而闲置，而是因为CPU还没准备好告诉它下一步要做什么，这个空闲窗口被称为GPU bubble<br><br>
+- <strong>Pipelined decoding的核心思路</strong>：Photon引擎将CPU的提交/计划/启动工作与GPU的forward计算重叠，使GPU几乎100%繁忙，消除idle时间<br><br>
+- <strong>三项支撑机制</strong>：Ping-pong slots（两个缓冲区交替使用，防止步骤冲突）、Forward now/sample later（forward不需要mask可以先跑）、Zombie refcounting（已结束序列干净拆除）<br><br>
+- <strong>实测收益</strong>：B200上32流场景，blocking 5.55ms → pipelined 3.98ms，吞吐提升35.4%
+</div>
+</div>
 
 ---
 
@@ -128,13 +134,16 @@ Moondream团队表示会继续拆解这些内容，一次一个栈的角落，�
 
 ---
 
-**结语**
-
-Photon的技术本身不算颠覆性：pipelining是计算机体系结构中的经典思路，在CPU流水线设计里已经用了五十年。但它在AI推理引擎中的具体落地方式，尤其是zombie和forward/sampling拆分的工程设计，值得关注。
-
-更加值得关注的是Moondream的工程哲学：Photon是一个为单一模型（Moondream）专建的推理引擎。它不需要兼容成千上万个模型，因此可以在调度器、内存管理、kernel启动等层面做出通用的vLLM/TGI不敢做的激进优化。这种"为特定模型建专用引擎"的思路，在边缘部署和垂直场景中可能是比通用推理框架更务实的方向。
-
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+Photon的技术本身不算颠覆性：pipelining是计算机体系结构中的经典思路，在CPU流水线设计里已经用了五十年。但它在AI推理引擎中的具体落地方式，尤其是zombie和forward/sampling拆分的工程设计，值得关注。<br><br>
+更加值得关注的是Moondream的工程哲学：Photon是一个为单一模型（Moondream）专建的推理引擎。它不需要兼容成千上万个模型，因此可以在调度器、内存管理、kernel启动等层面做出通用的vLLM/TGI不敢做的激进优化。这种"为特定模型建专用引擎"的思路，在边缘部署和垂直场景中可能是比通用推理框架更务实的方向。<br><br>
 最后，文章末尾提到Photon 2.0 "coming soon"：对一个刚开源不到一年的VLM项目来说，2.0级别的更新意味着他们在这个方向上还有更大的棋没下。
+</div>
+</div>
 
 **原文：https://moondream.ai/blog/popping-the-gpu-bubble**
 
