@@ -3,7 +3,7 @@
 <strong style="font-size:16px;color:#1a6ba0;">要点速览</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-- <strong>1000 TPS</strong>：小米MiMo与TileRT联合发布UltraSpeed模式，在8卡通用GPU节点上让1T参数的MoE模型首次突破千token每秒的生成速度<br><br>
+- <strong>1000 TPS</strong>：小米MiMo与TileRT联合发布UltraSpeed模式，8卡GPU让1T参数的MoE模型首次突破1000Tokens/s的生成速度<br><br>
 - <strong>FP4混合量化</strong>：只对MoE Expert做FP4量化（MXFP4），其余模块保持原精度，大幅降低带宽压力的同时基本无损<br><br>
 - <strong>DFlash投机解码</strong>：块级masked并行预测，Coding场景接受长度平均6.30（每轮8个draft token中吞下6-7个），端到端收益显著<br><br>
 - <strong>TileRT执行模型革新</strong>：常驻内核 + Tile流水线 + 异构协同，从根上消灭算子边界带来的执行间隙，将通用GPU推向微秒级执行极限
