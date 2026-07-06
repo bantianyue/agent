@@ -15,8 +15,8 @@
 | Step 4d-i: 写传送门（published_articles.json选4-8篇） | in_progress |
 | Step 4f: Humanizer 润色 | pending |
 | Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
-| Step 6: 推送草稿 | pending |
+| Step 5: 预发布检查 | completed |
+| Step 6: 推送草稿 | completed |
 
 创建时间: 2026-07-06
 来源: https://x.com/tanayj/status/2072766211256119475

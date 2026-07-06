@@ -7,7 +7,7 @@
 | 2 | 2026-07-05 | https://blogs.microsoft.com/blog/2026/07/02/microsoft-frontier-company-ai-engineering-that-amplifies-and-protects-your-intelligence/ | microsoft-frontier-company-ai | microsoft-frontier-company | 微软 Frontier Company 成立：25亿美元、6000人，从平台商到转型服务商 | cover.png | ✅ 已推送 |
 | 3 | 2026-07-05 | https://dev.classmethod.jp/articles/nvidia-nemo-switchyard-first-touch/ | nvidia-nemo-switchyard-first-t | nemo-switchyard-first-touch | NVIDIA NeMo Switchyard 上手：pip安装、无GPU、Claude Code一键连接的LLM路由 | cover.png | ✅ 已推送 |
 | 4 | 2026-07-05 | https://openrouter.ai/blog/announcements/fusion-beats-frontier/ | fusion-beats-frontier | openrouter-fusion | OpenRouter Fusion：多模型融合超越前沿，廉价小组64.7%逼近顶配性能 | cover.png | ✅ 已推送 |
-| 5 | 2026-07-06 | https://x.com/tanayj/status/2072766211256119475 | 2072766211256119475 | rl-beyond-verifiable | TBD | TBD | 📥 进行中 |
+| 5 | 2026-07-06 | https://x.com/tanayj/status/2072766211256119475 | 2072766211256119475 | rl-beyond-verifiable | RL Beyond the Verifiable：当RL的奖励信号不可验证时 | cover.png | ✅ 已推送 |
 | 6 | 2026-07-06 | https://moondream.ai/blog/popping-the-gpu-bubble | popping-the-gpu-bubble | popping-the-gpu-bubble | Popping the GPU Bubble：Moondream 如何用流水线解码消除 GPU 闲置 | cover.png | ✅ 已推送 |
 | 7 | 2026-07-06 | https://x.com/tanayj/status/2072766211256119475 | 2072766211256119475 | 2072766211256119475 | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
@@ -66,3 +66,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-06 13:54 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-06 13:57 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0eXpxlmLETRTcQ_Y9A1ig5htLBhX2pSYJin3S2SmY8aL |

@@ -56,7 +56,7 @@ Scale AI在2025年中发表的方法最具代表性。不再问一个LLM评判�
 
 当前应对「不可验证领域」的公司大致分为三组：
 
-**第一类：卖验证器和数据给实验室（Mercor、Surge、@micro1_ai、@taste_ai_）。** 它们的配方是让人类专家编写足够具体的rubrics，把模糊判断变成可编程评分。@taste_ai_ 明确瞄准「品味」这类最主观的领域：他们认为RLHF之所以停滞，正是因为平均所有人的偏好最终让你连品味都没有了。
+**第一类：卖验证器和数据给实验室（Mercor、Surge、micro1_ai、taste_ai）。** 它们的配方是让人类专家编写足够具体的rubrics，把模糊判断变成可编程评分。taste_ai明确瞄准「品味」这类最主观的领域：他们认为RLHF之所以停滞，正是因为平均所有人的偏好最终让你连品味都没有了。
 
 **第二类：形式化领域，然后卖端到端方案（Pramaana Labs）。** 在数学层面展示过的范式：形式化证明自行验证：正在向法律文书、税务合规、医疗诊断扩展。
 
@@ -88,14 +88,14 @@ RLVR在数学和代码上的成功说明了一个简单的真理：当你拥有�
 ---
 
 <span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/-JYim8I-W-hWWNwkxWTWUg" target="_blank" data-linktype="2">Anthropic Harness实践：Claude Code 如何征服百万行级代码库?</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/-JYim8I-W-hWWNwkxWTWUg" target="_blank" data-linktype="2">Anthropic Harness实践：Claude Code如何征服百万行级代码库?</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nj70nxJzUiUETW3SLvpA9Q" target="_blank" data-linktype="2">Agent Loop工程兴起：从Prompter到Loop Designer</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/orPguOPILj08E329SHculw" target="_blank" data-linktype="2">Claude Code 动态工作流Dynamic Workflows深入拆解：编排逻辑从对话变成代码</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/orPguOPILj08E329SHculw" target="_blank" data-linktype="2">Claude Code动态工作流Dynamic Workflows深入拆解：编排逻辑从对话变成代码</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/ITKFJzvnIqibXmvpeucwFA" target="_blank" data-linktype="2">2026 AI行业解读: ChatGPT份额跌破50%, AgenticShopping重构电商,</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/_4vgKCTSir14mhtdvs7_HA" target="_blank" data-linktype="2">美团开源LongCat-2.0 (OpenRouter原Owl Alpha)解读：1.6T 参数，...</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/hIab8mXanh0rdpEq_aHo7Q" target="_blank" data-linktype="2">Hermes Desktop 来了：从 CLI 到原生桌面应用，黄仁勋GTC首秀的产品正式公开</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/_4vgKCTSir14mhtdvs7_HA" target="_blank" data-linktype="2">美团开源LongCat-2.0 (OpenRouter原Owl Alpha)解读：1.6T参数，...</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/hIab8mXanh0rdpEq_aHo7Q" target="_blank" data-linktype="2">Hermes Desktop来了：从CLI到原生桌面应用，黄仁勋GTC首秀的产品正式公开</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4Iz5SjE4D240EL4MmKrWZQ" target="_blank" data-linktype="2">OpenAI Dreaming记忆系统：从记住你到理解你</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0zKdjRmWg3TbL5Y3HGO3fA" target="_blank" data-linktype="2">从 P/D 分离到 A/F 分离：从学术原型变成行业标准</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0zKdjRmWg3TbL5Y3HGO3fA" target="_blank" data-linktype="2">从P/D分离到A/F分离：从学术原型变成行业标准</a><br>
 </span>
 
 ---
