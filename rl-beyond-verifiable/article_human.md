@@ -3,38 +3,38 @@
 <strong style="font-size:15px;color:#2c6a9e;">要点速览</strong>
 </div>
 <div style="font-size:14px;color:#1a3a5c;line-height:1.75;">
-<strong>RLVR 验证者定律</strong>：任务的训练难度与可验证程度成正比，数学和代码的 RL 成功正在验证这一规律。<br><br>
-<strong>不可验证的困局</strong>：Dario Amodei 认为，无法验证的任务（科学发现、火星计划、写小说）是实现「天才数据中心」的最后 10% 不确定性。<br><br>
-<strong>三种突破路径</strong>：Rubrics 分解法（Scale AI HealthBench 提升 31%）、形式化转化（Lean/AlphaProof 范式）、物理闭环（自驱动实验室）。<br><br>
+<strong>RLVR验证者定律</strong>：任务的训练难度与可验证程度成正比：数学和代码的RL成功正在验证这一规律。<br><br>
+<strong>不可验证的困局</strong>：Dario Amodei认为，无法验证的任务（科学发现、火星计划、写小说）是实现「天才数据中心」的最后10% 不确定性。<br><br>
+<strong>三种突破路径</strong>：Rubrics分解法（Scale AI HealthBench提升31%）、形式化转化（Lean/AlphaProof范式）、物理闭环（自驱动实验室）。<br><br>
 <strong>创业生态成型</strong>：从卖验证器和数据给实验室（Mercor/Surge）到拥有完整实验闭环（Periodic Labs/Isomorphic Labs），对齐问题正在变成商业机会。
 </div>
 </div>
 
 ---
 
-Anthropic CEO Dario Amodei 说，他 90% 确信十年内会出现「数据中心里的天才国度」。剩下的 10% 不确定性来自一个简单却根本的问题：当你无法客观验证一项任务时，RL 的奖励从哪来？
+Anthropic CEO Dario Amodei说，他90% 确信十年内会出现「数据中心里的天才国度」。剩下的10% 不确定性来自一个简单却根本的问题：当你无法客观验证一项任务时，RL的奖励从哪来？
 
-在数学和代码领域，RL 已经证明了自己，OpenAI 和 DeepMind 在 2025 年 IMO 都拿了金牌，SWE-bench 上的进步实实在在。但这些领域的共同特征是，答案可被快速客观地检查。一份好备忘录、一个好设计、一个商业计划、一个新药分子，都没有测试套件。
+在数学和代码领域，RL已经证明了自己：OpenAI和DeepMind在2025年IMO都拿了金牌，SWE-bench上的进步实实在在。但这些领域的共同特征是，答案可被快速客观地检查。一份好备忘录、一个好设计、一个商业计划、一个新药分子，都没有测试套件。
 
 ![](img1.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">Tanay Jaipuria 的 X 推文文章「RL Beyond the Verifiable」标题卡片</span>
+<span style="font-size:12px;color:rgb(153,153,153);">Tanay Jaipuria的X推文文章「RL Beyond the Verifiable」标题卡片</span>
 
-这个问题比 RLVR 本身更古老。RLHF 和 Constitutional AI 本质上都是「没有检查者时怎么办」的答案。但它们带来的能力跃升远不及 RLVR 在数学和代码上实现的，它们优化的是对齐和参与度，不是能力。于是问题变成：能否把不可验证的领域变得可验证？
+这个问题比RLVR本身更古老。RLHF和Constitutional AI说到底都是「没有检查者时怎么办」的答案。但它们带来的能力跃升远不及RLVR在数学和代码上实现的：它们优化的是对齐和参与度，不是能力。于是问题变成：能否把不可验证的领域变得可验证？
 
-**Rubrics 分解法：把「好不好」拆成 20 个「有没有」**
+**Rubrics分解法：把「好不好」拆成20个「有没有」**
 
-Scale AI 在 2025 年中发表的方法最具代表性。不再问一个 LLM 评判者「这个答案好还是不好？」，这会得到有噪声的 1-10 分。而是先生成一个任务特定的评估清单（rubric），让人类专家定义「好答案应该怎样」，然后把清单拆成可检查的二元问题：「它提到了 X 吗？避免了 Y 吗？处理了 Z 吗？」
+Scale AI在2025年中发表的方法最具代表性。不再问一个LLM评判者「这个答案好还是不好？」：这会得到有噪声的1-10分。而是先生成一个任务特定的评估清单（rubric），让人类专家定义「好答案应该怎样」，然后把清单拆成可检查的二元问题：「它提到了X吗？避免了Y吗？处理了Z吗？」
 
 <div style="background:#f0f7fa;padding:16px 18px 14px 18px;border-radius:6px;margin:16px 0;border-left:4px solid #5b9bd5;">
 <div style="font-size:15px;color:#2c6a9e;line-height:1.7;">
-把「这个答案是否优秀」这种模糊判断，等价替换为 20 个「有没有」问题，每个都是接近可检查的。
+把「这个答案是否优秀」这种模糊判断，等价替换为20个「有没有」问题：每个都是接近可检查的。
 </div>
 </div>
 
-这种分解的效果相当显著：在医疗基准 HealthBench 上，Rubrics 方法相比简单 LLM 评判实现了 **31% 的相对提升**。后续的 OpenRubrics 等项目正在探索规模化生成此类评估清单。
+这种分解的效果相当显著：在医疗基准HealthBench上，Rubrics方法相比简单LLM评判实现了 **31% 的相对提升**。后续的OpenRubrics等项目正在探索规模化生成此类评估清单。
 
 ![](img2.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">RLVR 在可验证领域（数学和代码）的进步示意图</span>
+<span style="font-size:12px;color:rgb(153,153,153);">RLVR在可验证领域（数学和代码）的进步示意图</span>
 
 **生成式奖励模型和过程奖励模型**则走另一条路。生成式奖励模型不给黑箱数字，而是先推理再打分；过程奖励模型对推理的每一步评分而非只评价终局，对长周期任务更为关键。
 
@@ -43,24 +43,24 @@ Scale AI 在 2025 年中发表的方法最具代表性。不再问一个 LLM 评
 
 **形式化转化：把模糊领域变成机器可证明的**
 
-数学已经实现了这一点，用 Lean 等形式语言写的证明可以自我验证，DeepMind 的 AlphaProof 不需要人类介入就能获得奖励。Pramaana Labs 正在将此思路推向税务、法律、医疗等受监管领域，用形式化验证让那些原本模糊的答案变得可证明。每形式化一个领域，就从「不可验证」列中移除一个。
+数学已经实现了这一点：用Lean等形式语言写的证明可以自我验证，DeepMind的AlphaProof不需要人类介入就能获得奖励。Pramaana Labs正在将此思路推向税务、法律、医疗等受监管领域，用形式化验证让那些原本模糊的答案变得可证明。每形式化一个领域，就从「不可验证」列中移除一个。
 
-**物理闭环：AI 提议，实验室验证**
+**物理闭环：AI提议，实验室验证**
 
-有些事情无法在计算机上验证——你不能用评估清单检查一种新材料或一种新药。你必须真正运行实验。Periodic Labs（前 OpenAI 和 DeepMind 研究员创立）在运行机器人实验室发现新材料；Isomorphic Labs（DeepMind 分拆）将其预测建立在湿实验室和临床现实之上；Lila Sciences 在构建覆盖生命和材料科学的自动实验室。
+有些事情无法在计算机上验证：你不能用评估清单检查一种新材料或一种新药。你必须真正运行实验。Periodic Labs（前OpenAI和DeepMind研究员创立）在运行机器人实验室发现新材料；Isomorphic Labs（DeepMind分拆）将其预测建立在湿实验室和临床现实之上；Lila Sciences在构建覆盖生命和材料科学的自动实验室。
 
 ![](img4.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">物理闭环流程：AI 提出方案 → 物理实验室测试 → 结果作为奖励信号</span>
+<span style="font-size:12px;color:rgb(153,153,153);">物理闭环流程：AI提出方案 → 物理实验室测试 → 结果作为奖励信号</span>
 
 **创业生态中的三类玩家**
 
 当前应对「不可验证领域」的公司大致分为三组：
 
-**第一类：卖验证器和数据给实验室（Mercor、Surge、@micro1_ai、@taste_ai_）。** 它们的配方是让人类专家编写足够具体的 rubrics，把模糊判断变成可编程评分。@taste_ai_ 明确瞄准「品味」这类最主观的领域——他们认为 RLHF 之所以停滞，正是因为平均所有人的偏好最终让你连品味都没有了。
+**第一类：卖验证器和数据给实验室（Mercor、Surge、@micro1_ai、@taste_ai_）。** 它们的配方是让人类专家编写足够具体的rubrics，把模糊判断变成可编程评分。@taste_ai_ 明确瞄准「品味」这类最主观的领域：他们认为RLHF之所以停滞，正是因为平均所有人的偏好最终让你连品味都没有了。
 
-**第二类：形式化领域，然后卖端到端方案（Pramaana Labs）。** 在数学层面展示过的范式——形式化证明自行验证——正在向法律文书、税务合规、医疗诊断扩展。
+**第二类：形式化领域，然后卖端到端方案（Pramaana Labs）。** 在数学层面展示过的范式：形式化证明自行验证：正在向法律文书、税务合规、医疗诊断扩展。
 
-**第三类：拥有完整闭环（Periodic Labs、Isomorphic Labs、Lila Sciences）。** AI 提议，物理测试，结果成为奖励。慢但真实。
+**第三类：拥有完整闭环（Periodic Labs、Isomorphic Labs、Lila Sciences）。** AI提议，物理测试，结果成为奖励。慢但真实。
 
 ![](img5.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">不可验证领域应对公司的生态图谱：三类角色的差异化定位</span>
@@ -76,11 +76,27 @@ Scale AI 在 2025 年中发表的方法最具代表性。不再问一个 LLM 评
 
 ---
 
-**结语**
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+RLVR在数学和代码上的成功说明了一个简单的真理：当你拥有可靠的信号源时，RL的scaling几乎是自动的。但现实世界的决策大多缺乏这样的信号源。有趣的是，解决这个问题正在成为一门生意：从卖rubrics给实验室，到用形式化方法让法律条文变得可证明，再到自己建实验室跑物理实验。这本身就是一个信号：对齐验证的规模化可能比RL本身更有商业想象力。
+</div>
+</div>
 
-RLVR 在数学和代码上的成功说明了一个简单的真理：当你拥有可靠的信号源时，RL 的 scaling 几乎是自动的。但现实世界的决策大多缺乏这样的信号源。有趣的是，解决这个问题正在成为一门生意——从卖 rubrics 给实验室，到用形式化方法让法律条文变得可证明，再到自己建实验室跑物理实验。这本身就是一个信号：对齐验证的规模化可能比 RL 本身更有商业想象力。
+---
 
-**原文：https://x.com/tanayj/status/2072766211256119475**
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/-JYim8I-W-hWWNwkxWTWUg" target="_blank" data-linktype="2">Anthropic Harness实践：Claude Code 如何征服百万行级代码库?</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nj70nxJzUiUETW3SLvpA9Q" target="_blank" data-linktype="2">Agent Loop工程兴起：从Prompter到Loop Designer</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/orPguOPILj08E329SHculw" target="_blank" data-linktype="2">Claude Code 动态工作流Dynamic Workflows深入拆解：编排逻辑从对话变成代码</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/ITKFJzvnIqibXmvpeucwFA" target="_blank" data-linktype="2">2026 AI行业解读: ChatGPT份额跌破50%, AgenticShopping重构电商,</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/_4vgKCTSir14mhtdvs7_HA" target="_blank" data-linktype="2">美团开源LongCat-2.0 (OpenRouter原Owl Alpha)解读：1.6T 参数，...</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/hIab8mXanh0rdpEq_aHo7Q" target="_blank" data-linktype="2">Hermes Desktop 来了：从 CLI 到原生桌面应用，黄仁勋GTC首秀的产品正式公开</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4Iz5SjE4D240EL4MmKrWZQ" target="_blank" data-linktype="2">OpenAI Dreaming记忆系统：从记住你到理解你</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0zKdjRmWg3TbL5Y3HGO3fA" target="_blank" data-linktype="2">从 P/D 分离到 A/F 分离：从学术原型变成行业标准</a><br>
+</span>
 
 ---
 
