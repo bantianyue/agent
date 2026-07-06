@@ -55,7 +55,7 @@ Vera CPU搭载88个自研Olympus核心，支持176线程。单瓦性能是Grace�
 
 在NVL72架构中，72颗GPU通过36颗NVLink 6交换芯片实现了全对全互联。每颗GPU的双向带宽从Blackwell的1.8 TB/s翻倍到3.6 TB/s，整个机柜内部总带宽高达260 TB/s。
 
-为什么带宽翻倍这么重要？因为MoE模型的推理过程中，token需要在不同专家GPU之间高频路由。NVLink 5时代，这个路由过程有可感知的延迟：做多步推理时，通信延迟会叠加。NVLink 6的2倍多对多通信吞吐量，确保延迟完全可预测，这对agentic AI场景至关重要。
+为什么带宽翻倍这么重要？因为MoE模型的推理过程中，token需要在不同专家GPU之间高频路由。NVLink 5时代，这个路由过程有可感知的延迟：做多步推理时，通信延迟会叠加。NVLink 6的2倍多对多通信吞吐量，确保延迟完全可预测，这对agentic AI场景意义重大。
 
 ### 4. 六芯片极简协同：从线缆混乱到无缆化模块
 
@@ -95,10 +95,10 @@ Vera Rubin NVL72的全新Compute Tray内集成了两颗Vera CPU和四颗Rubin GP
 <span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/UPOlNSnSWBLnxgEFOmWbzg" target="_blank" data-linktype="2">Prompt Cache各厂商策略对比：结合Deep Agents看Cache策略未来的优化方向</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6bfcmJ5gHxv4vvqUvImS1g" target="_blank" data-linktype="2">Codebase Memory MCP: 给Claude Code装上代码地图，Token省50%</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/-JYim8I-W-hWWNwkxWTWUg" target="_blank" data-linktype="2">Anthropic Harness实践：Claude Code 如何征服百万行级代码库?</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/-JYim8I-W-hWWNwkxWTWUg" target="_blank" data-linktype="2">Anthropic Harness实践：Claude Code如何征服百万行级代码库?</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/olxLm3almopaba6J2JeFrA" target="_blank" data-linktype="2">Anthropic：如何用 Claude 实现 95%自动化数据化分析</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0zKdjRmWg3TbL5Y3HGO3fA" target="_blank" data-linktype="2">从 P/D 分离到 A/F 分离：从学术原型变成行业标准</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/olxLm3almopaba6J2JeFrA" target="_blank" data-linktype="2">Anthropic：如何用Claude实现95%自动化数据化分析</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0zKdjRmWg3TbL5Y3HGO3fA" target="_blank" data-linktype="2">从P/D分离到A/F分离：从学术原型变成行业标准</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4Iz5SjE4D240EL4MmKrWZQ" target="_blank" data-linktype="2">OpenAI Dreaming记忆系统：从记住你到理解你</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/M0qN4cXknU_CmZBQm5ChzA" target="_blank" data-linktype="2">你为什么离职？Top AI公司面试秘籍-一套框架从容应对15个套路问题</a><br>
 </span>
