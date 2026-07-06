@@ -3,12 +3,12 @@
 ## 任务列表
 
 | # | 日期 | 源 URL | 源标题 | 文章目录 | 生成标题 | 封面 | 当前状态 |
-| 1 | 2026-07-05 | https://moondream.ai/blog/popping-the-gpu-bubble | popping-the-gpu-bubble | popping-the-gpu-bubble | TBD | TBD | 📥 进行中 |
+| 1 | 2026-07-05 | https://moondream.ai/blog/popping-the-gpu-bubble | popping-the-gpu-bubble | popping-the-gpu-bubble | Popping the GPU Bubble：Moondream 如何用流水线解码消除 GPU 闲置 | cover.png | ✅ 已推送 |
 | 2 | 2026-07-05 | https://blogs.microsoft.com/blog/2026/07/02/microsoft-frontier-company-ai-engineering-that-amplifies-and-protects-your-intelligence/ | microsoft-frontier-company-ai | microsoft-frontier-company | 微软 Frontier Company 成立：25亿美元、6000人，从平台商到转型服务商 | cover.png | ✅ 已推送 |
 | 3 | 2026-07-05 | https://dev.classmethod.jp/articles/nvidia-nemo-switchyard-first-touch/ | nvidia-nemo-switchyard-first-t | nemo-switchyard-first-touch | NVIDIA NeMo Switchyard 上手：pip安装、无GPU、Claude Code一键连接的LLM路由 | cover.png | ✅ 已推送 |
 | 4 | 2026-07-05 | https://openrouter.ai/blog/announcements/fusion-beats-frontier/ | fusion-beats-frontier | openrouter-fusion | OpenRouter Fusion：多模型融合超越前沿，廉价小组64.7%逼近顶配性能 | cover.png | ✅ 已推送 |
 | 5 | 2026-07-06 | https://x.com/tanayj/status/2072766211256119475 | 2072766211256119475 | rl-beyond-verifiable | TBD | TBD | 📥 进行中 |
-| 6 | 2026-07-06 | https://moondream.ai/blog/popping-the-gpu-bubble | popping-the-gpu-bubble | popping-the-gpu-bubble | TBD | TBD | 📥 进行中 |
+| 6 | 2026-07-06 | https://moondream.ai/blog/popping-the-gpu-bubble | popping-the-gpu-bubble | popping-the-gpu-bubble | Popping the GPU Bubble：Moondream 如何用流水线解码消除 GPU 闲置 | cover.png | ✅ 已推送 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -58,3 +58,4 @@
 |--------|------|------|
 | 2026-07-06 11:46 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-06 11:47 | 📥 | 查看状态 |
+| 2026-07-06 12:01 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0Xz_D44XKNADotqKxLJ-7rZACvuXyA4CqGbaQVFWpAbK |
