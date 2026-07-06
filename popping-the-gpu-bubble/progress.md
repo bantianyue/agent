@@ -24,3 +24,4 @@
 来源: https://moondream.ai/blog/popping-the-gpu-bubble
 | Step 1: 内容提取 | completed |
 | Step 3: 封面生成 | completed |
+| Step 4c: 写正文（含结构对齐 + 补全章节） | completed |
