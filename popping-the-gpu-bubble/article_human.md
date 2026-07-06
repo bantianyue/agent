@@ -47,9 +47,9 @@ Moondream的VLM支持空间技能：`point` 返回坐标，`detect` 返回边界
 
 问题是这个依赖只在采样中存在，不在forward中。Photon因此将每个调度tick拆成三个阶段：
 
-1. **Launch** — 启动步t+1的forward（立即执行，不需要mask）
-2. **Commit** — 等待步t的结果拷贝，推进解码状态
-3. **Finalize** — 用更新后的状态构建mask，完成采样
+1. **Launch**：启动步t+1的forward（立即执行，不需要mask）
+2. **Commit**：等待步t的结果拷贝，推进解码状态
+3. **Finalize**：用更新后的状态构建mask，完成采样
 
 forward在commit期间已经在GPU上跑了，因此commit不再在关键路径上。
 
@@ -58,7 +58,7 @@ forward在commit期间已经在GPU上跑了，因此commit不再在关键路径�
 
 纯文本时因为没有mask，forward和采样都可以提前一步。约束序列时forward仍然提前，但采样等待commit，一个循环同时处理两种情况，不需要特殊分支。
 
-**Mechanism 3: Zombies — 尽早终止，延迟释放**
+**Mechanism 3: Zombies**：尽早终止，延迟释放
 
 到这里有个微妙的问题：启动步t+1时，**batch成员关系**也是基于步t的状态决定的。如果某个序列在t步刚好输出了停止token（EOS），但它已经被编入了t+1的forward计划，你无法撤销已经发出的GPU工作。
 
@@ -140,16 +140,14 @@ Photon的技术本身不算颠覆性：pipelining是计算机体系结构中的�
 
 ---
 
-
-
 <span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/u_H2C9KaHyzbBCI9DocEVQ" target="_blank" data-linktype="2">Claude Code动态工作流：把编排搬进代码中</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/xP1cEoO_plRpWItxhqeQnQ" target="_blank" data-linktype="2">Agent Harness Engineering：为什么Agent可靠性的天花板不是模型，而是基础</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FkaboLbPXA36kHkDgv8aSQ" target="_blank" data-linktype="2">Interpreter Skills：当Agent Skill从说明书变成可执行代码</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FkaboLbPXA36kHkDgv8aSQ" target="_blank" data-linktype="2">Interpreter Skills：当Agent Skill 从说明书变成可执行代码</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/VQILf7LfK6ug0QaokGe6Hw" target="_blank" data-linktype="2">Polar: 英伟达NVIDIA的开源Agentic RL框架支持任意Harness</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0zKdjRmWg3TbL5Y3HGO3fA" target="_blank" data-linktype="2">从P/D分离到A/F分离：从学术原型变成行业标准</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0zKdjRmWg3TbL5Y3HGO3fA" target="_blank" data-linktype="2">从 P/D 分离到 A/F 分离：从学术原型变成行业标准</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4Iz5SjE4D240EL4MmKrWZQ" target="_blank" data-linktype="2">OpenAI Dreaming记忆系统：从记住你到理解你</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/olxLm3almopaba6J2JeFrA" target="_blank" data-linktype="2">Anthropic：如何用Claude实现95%自动化数据化分析</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/olxLm3almopaba6J2JeFrA" target="_blank" data-linktype="2">Anthropic：如何用 Claude 实现 95%自动化数据化分析</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/qHscVKN06FEGTru80STlxA" target="_blank" data-linktype="2">M²A多模态双层混合记忆系统：记住你的每一次变化</a>
 </span>
 
