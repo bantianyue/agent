@@ -117,14 +117,14 @@ Dockerless打开了"无环境post-training"这个方向：在那些没有测试�
 ---
 
 <span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/Kw3EbPyjX0ixI6OYRY-FbA" target="_blank" data-linktype="2">OpenClaw之父新作Crabbox：为Agent分配云端沙箱，AI Coding瓶颈从写代码变...</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/ngZTD0_FCP7N8m-nVAwv5Q" target="_blank" data-linktype="2">Claude Code记忆系统Memory架构剖析</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6bfcmJ5gHxv4vvqUvImS1g" target="_blank" data-linktype="2">Codebase Memory MCP: 给Claude Code装上代码地图，Token省50%</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/US2wSIxUd4GrtFm1Ion1BA" target="_blank" data-linktype="2">MiniMax-M2.7解读: 9.8B激活参数硬刚GPT5.4/Opus4.6;逆势Full A...</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×...</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/mFuUJ79DRodIK6shVWOgpw" target="_blank" data-linktype="2">OpenAI GPT-5.6: 安全之外新增Prompt Cache断点+两种推理模式; 放弃版本号</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Inf...</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/_kjdbu__CbrkSkI9nDvLPA" target="_blank" data-linktype="2">【多模型系列三】 Devin Fusion双模编排-性能不变让Opus4.8 GPT5.5成本降低35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/hIab8mXanh0rdpEq_aHo7Q" target="_blank" data-linktype="2">Hermes Desktop 来了：从 CLI 到原生桌面应用，黄仁勋GTC首秀的产品正式公开</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/mqTab0qwrT95DVrxTllmcQ" target="_blank" data-linktype="2">Torch解析系列一：深入理解FX Graphs</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/YnMyg85RydYrJvk6C5cLdQ" target="_blank" data-linktype="2">微软$25亿砸向FDE，四巨头AI军备竞赛最后一公里的FDE之战</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/crfkhSIuMZJxjNA0Md8dXw" target="_blank" data-linktype="2">李飞飞：世界模型的功能分类</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/hIab8mXanh0rdpEq_aHo7Q" target="_blank" data-linktype="2">Hermes Desktop来了：从CLI到原生桌面应用，黄仁勋GTC首秀的产品正式公开</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/_4vgKCTSir14mhtdvs7_HA" target="_blank" data-linktype="2">美团开源LongCat-2.0 (OpenRouter原Owl Alpha)解读：1.6T参数，...</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/qHscVKN06FEGTru80STlxA" target="_blank" data-linktype="2">M²A多模态双层混合记忆系统：记住你的每一次变化</a><br>
 </span>
 
 ---
