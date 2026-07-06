@@ -28,3 +28,4 @@
 | Step 1: 内容提取 | completed |
 | Step 2: 图片下载 | completed |
 | Step 3: 封面生成 | completed |
+| Step 4a-i: 要点速览 | completed |
