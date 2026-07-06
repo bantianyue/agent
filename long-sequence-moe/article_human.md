@@ -74,6 +74,7 @@ Dockerless的最终目标是实现一个完全不依赖仓库级环境的post-tr
 | OpenHands Critic | 48.6 | 52.2 |
 | DeepSWE Verifier | 66.7 | 62.9 |
 | **Dockerless** | **81.0** | **72.1** |
+
 相比最强开源验证器DeepSWE Verifier，Dockerless在Verified上提升 **14.3点**，在Multi-SWE上提升 **9.2点**。即使对阵最强前沿LLM做零样本判决（GLM-5的73.2），也领先 **5.1和8.2点**。
 
 ### 端到端结果：无环境媲美有环境
@@ -84,6 +85,7 @@ Dockerless的最终目标是实现一个完全不依赖仓库级环境的post-tr
 | SWE-bench Verified | **62.0%** | 59.6% | +2.4 |
 | SWE-bench Multilingual | **50.0%** | 41.3% | +8.7 |
 | SWE-bench Pro | **35.2%** | 32.3% | +2.9 |
+
 与使用真实测试执行奖励的Test-Execution RL（62.4/51.3/35.7）相比，Dockerless的差距仅为 **0.4/1.3/0.5点**：几乎完全追平。这是首个证明无环境post-training可以匹敌有环境基准的工作。
 
 ### 验证问题数量的影响
