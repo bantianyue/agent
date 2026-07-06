@@ -10,6 +10,7 @@
 | 5 | 2026-07-06 | https://x.com/tanayj/status/2072766211256119475 | 2072766211256119475 | rl-beyond-verifiable | RL Beyond the Verifiable：当RL的奖励信号不可验证时 | cover.png | ✅ 已推送 |
 | 6 | 2026-07-06 | https://moondream.ai/blog/popping-the-gpu-bubble | popping-the-gpu-bubble | popping-the-gpu-bubble | Popping the GPU Bubble：Moondream 如何用流水线解码消除 GPU 闲置 | cover.png | ✅ 已推送 |
 | 7 | 2026-07-06 | https://x.com/tanayj/status/2072766211256119475 | 2072766211256119475 | 2072766211256119475 | TBD | TBD | 📥 进行中 |
+| 8 | 2026-07-06 | https://arxiv.org/html/2606.28436v1 | 2606-28436 | long-sequence-moe | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -69,3 +70,9 @@
 | 2026-07-06 13:57 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0eXpxlmLETRTcQ_Y9A1ig5htLBhX2pSYJin3S2SmY8aL |
 | 2026-07-06 15:14 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0Wt9QA1jJdUWJtZeq0_lAB5YcvdSW2QZh8qEpUUxWCRD |
 | 2026-07-06 15:14 | 🔄 | 章节格式修复后重新推送 |
+
+### #8 - long-sequence-moe
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-06 15:24 | 📥 开始 | 收到 URL，开始提取内容 |
