@@ -16,6 +16,6 @@
 | Step 4d-i: 写传送门（published_articles.json选4-8篇） | completed |
 | Step 4e: 写参考区 | completed |
 | Step 4f: Humanizer 润色 | completed |
-| Step 4g: 文本格式修复 | in_progress |
-| Step 5: 预发布检查 | pending |
-| Step 6: 推送草稿 | pending |
+| Step 4g: 文本格式修复 | completed |
+| Step 5: 预发布检查 | completed |
+| Step 6: 推送草稿 | in_progress |
