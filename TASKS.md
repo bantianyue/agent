@@ -11,7 +11,7 @@
 | 6 | 2026-07-06 | https://moondream.ai/blog/popping-the-gpu-bubble | popping-the-gpu-bubble | popping-the-gpu-bubble | Popping the GPU Bubble：Moondream 如何用流水线解码消除 GPU 闲置 | cover.png | ✅ 已推送 |
 | 7 | 2026-07-06 | https://x.com/tanayj/status/2072766211256119475 | 2072766211256119475 | 2072766211256119475 | TBD | TBD | 📥 进行中 |
 | 8 | 2026-07-06 | https://arxiv.org/html/2606.28436v1 | 2606-28436 | long-sequence-moe | Dockerless：无需Docker环境的代码补丁验证器，编码Agent训练不再卡在跑测试 | cover.png | ✅ 已推送 |
-| 9 | 2026-07-06 | https://arxiv.org/html/2605.10899v1 | 2605-10899 | rubricem-meta-rl | TBD | TBD | 📥 进行中 |
+| 9 | 2026-07-06 | https://arxiv.org/html/2605.10899v1 | 2605-10899 | rubricem-meta-rl | RubricEM：评分标准引导的深度研究Agent训练框架 | cover.png | ✅ 已推送 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -85,3 +85,4 @@
 |--------|------|------|
 | 2026-07-06 18:53 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-06 18:53 | 📝 | Meta-RL + 评分标准引导（Rubric）策略分解 |
+| 2026-07-06 18:57 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0c4NbUOPTpzBVTc9FiCp3ytSPID0SRb4TSEJpbA29pWt |
