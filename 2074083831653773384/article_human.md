@@ -14,7 +14,7 @@
 
 NVIDIA刚刚发布的Vera Rubin平台，可以说是英伟达历史上架构变化最大的一次迭代。从Blackwell到Rubin，不完全是一颗GPU芯片的升级，而是整个机柜六颗核心芯片的全面协同重构：CPU、GPU、NVLink交换机、网卡、DPU、以太网交换机，全部出自英伟达自己，装在一个无缆化的全液冷机柜里，插上电就是一台巨大的单一计算机。
 
-本文来自X上的独立分析师「老马投资研究」，以Vera Rubin NVL72为中心，和上一代Blackwell Ultra (GB300 NVL72) 以及2027年即将登场的Rubin Ultra (Kyber NVL576) 做了全面的横向对比。以下是核心内容梳理。
+本文来自X上的独立分析师「老马投资研究」，以Vera Rubin NVL72为中心，和上一代Blackwell Ultra (GB300 NVL72)以及2027年即将登场的Rubin Ultra (Kyber NVL576)做了全面的横向对比。以下是核心内容梳理。
 
 ## 核心规格：三代产品全景对比
 
@@ -73,7 +73,7 @@ Vera Rubin NVL72的全新Compute Tray内集成了两颗Vera CPU和四颗Rubin GP
 
 英伟达官方对Rubin和Blackwell的定位很清晰：
 
-- **70B参数以下的主流模型推理**：Blackwell (GB200/GB300) 依然是性价比极高的选择，不需要为用不到的能力付溢价
+- **70B参数以下的主流模型推理**：Blackwell (GB200/GB300)依然是性价比极高的选择，不需要为用不到的能力付溢价
 - **200B参数以上的深度推理**：涉及多步骤逻辑推理、超长上下文（32K输入/8K输出）、Agentic AI的场景，Vera Rubin的每百万Token推理成本降至Blackwell的十分之一
 - **万亿参数MoE训练**：Vera Rubin仅需Blackwell四分之一的GPU数量即可完成相同规模的训练
 
@@ -84,7 +84,7 @@ Vera Rubin NVL72的全新Compute Tray内集成了两颗Vera CPU和四颗Rubin GP
 <strong style="font-size:15px;color:#8b6f4c;">结语</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-与其说Rubin是Blackwell的换代产品，不如说英伟达在重新定义「一台计算机」的边界。Blackwell时代，「一台计算机」还是一颗芯片 + 一颗CPU；Rubin时代，「一台计算机」是一个装满72颗GPU、36颗CPU、6种不同芯片的完整机柜。<br><br>
+与其说Rubin是Blackwell的换代产品，不如说英伟达在重新定义「一台计算机」的边界。Blackwell时代，「一台计算机」还是一颗芯片+一颗CPU；Rubin时代，「一台计算机」是一个装满72颗GPU、36颗CPU、6种不同芯片的完整机柜。<br><br>
 这种变化意味着什么？AI基础设施的采购单位，将从「买了多少张卡」变成「买了多少个机柜」。对云厂和大型企业来说，资本支出的颗粒度变大了很多：但你买到的不是散件，而是一台能直接通电运转的巨型机器。<br><br>
 有意思的是，英伟达并没有抛弃上一代。70B以下的推理，Blackwell依然是性价比之王。Rubin的真正价值在大模型、深推理、超长上下文的场景：这些场景现在看起来占比不大，但Agentic AI和深度推理正在快速成为主流。
 </div>

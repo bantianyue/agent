@@ -13,8 +13,8 @@
 | 8 | 2026-07-06 | https://arxiv.org/html/2606.28436v1 | 2606-28436 | long-sequence-moe | Dockerless：无需Docker环境的代码补丁验证器，编码Agent训练不再卡在跑测试 | cover.png | ✅ 已推送 |
 | 9 | 2026-07-06 | https://arxiv.org/html/2605.10899v1 | 2605-10899 | rubricem-meta-rl | RubricEM：评分标准引导的深度研究Agent训练框架 | cover.png | ✅ 已推送 |
 | 10 | 2026-07-06 | https://mimo.xiaomi.com/zh/blog/mimo-tilert-1000tps | mimo-tilert-1000tps | mimo-1000tps | 小米MiMo x TileRT：8卡GPU让1T参数模型跑出1000 TPS，FP4+DFlash+TileRT全解读 | cover.png | ✅ 已推送 |
-| 11 | 2026-07-06 | https://x.com/LMDFinance/status/2074083831653773384 | 2074083831653773384 | 2074083831653773384 | TBD | TBD | 📥 进行中 |
-| 12 | 2026-07-06 | https://x.com/LMDFinance/status/2074083831653773384 | 英伟达Rubin Ultra / Vera Rubin NVL72全面对比 | 2074083831653773384 | TBD | TBD | 📥 进行中 |
+| 11 | 2026-07-06 | https://x.com/LMDFinance/status/2074083831653773384 | 2074083831653773384 | 2074083831653773384 | 英伟达Rubin全面碾压Blackwell？五大升级详解，从HBM4到自研CPU | cover.png | ✅ 已推送 |
+| 12 | 2026-07-06 | https://x.com/LMDFinance/status/2074083831653773384 | 英伟达Rubin Ultra / Vera Rubin NVL72全面对比 | 2074083831653773384 | 英伟达Rubin全面碾压Blackwell？五大升级详解，从HBM4到自研CPU | cover.png | ✅ 已推送 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -108,3 +108,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-06 22:15 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-06 22:21 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0Y0DRgVCsZZrLQkFLWTQmquY7BrXzOBej53jKcbC2ugs |
