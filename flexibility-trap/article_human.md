@@ -19,7 +19,7 @@
 
 并行解码的效率优势已经得到了充分验证，被广泛用于加速推理。而任意顺序生成的价值，通常被理论界视为一个更大的想象空间：如果把AR模型的固定路径看作一条线，那么任意顺序的解空间是一个面：理论上更大、更灵活，应该能解锁更高级的推理能力。受这一前景驱动，多个团队开始用强化学习（RL）为dLLMs激发推理能力，而这些方法的核心假设是：**必须保留任意顺序生成的灵活性。**
 
-LeapLab 研究团队提出了一个反直觉的声音。
+LeapLab研究团队提出了一个反直觉的声音。
 
 ## 灵活性陷阱：越灵活，推理越受限
 
@@ -30,7 +30,7 @@ LeapLab 研究团队提出了一个反直觉的声音。
 
 在LLaDA-Instruct、Dream-Instruct、LLaDA 1.5三个代表性dLLM上，团队对比了两种解码模式：任意顺序（标准扩散解码，按置信度自适应揭露token）和AR顺序（从左到右强制顺序）。结果是一致的反直觉模式：
 
-**任意顺序在单次生成（k=1）时往往表现不错，甚至有时更好；但随着采样次数k增加，AR顺序的扩展曲线越来越陡、持续发现新解，而任意顺序的曲线很快变平。**
+任意顺序在单次生成（k=1）时往往表现不错，甚至有时更好；但随着采样次数k增加，AR顺序的扩展曲线越来越陡、持续发现新解，而任意顺序的曲线很快变平。
 
 ![](img3.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图3：不同dLLM和基准上Pass@k对比。任意顺序在k=1时有竞争力，但扩展曲线显著比AR顺序平缓：一致性跨模型出现。</span>
@@ -75,7 +75,7 @@ AR顺序强制模型每一步都必须解决最左侧的未知token：模型**�
 
 ## JustGRPO：放弃灵活性，回归简洁
 
-LeapLab 团队提出了一个极简方案：JustGRPO。
+LeapLab团队提出了一个极简方案：JustGRPO。
 
 核心思路出奇简单：**在RL训练阶段，将dLLM当作一个AR策略来用。** 具体做法是：对于每个位置k，构造一个输入序列，其中前k-1个token为观测值，位置k及之后全为 [MASK]，然后将模型在位置k的logits通过Softmax得到概率 π(o_k|o_&lt;k)。
 
@@ -120,6 +120,19 @@ LeapLab 团队提出了一个极简方案：JustGRPO。
 当然，本文的结论有明确的适用范围：数学推理和代码生成这类"正确路径唯一、必须严格遵循逻辑链条"的任务。对创意写作、开放对话等更需要发散性的任务，任意顺序的灵活性可能仍然是优势。dLLMs的研究不应走向"AR好，任意顺序坏"的二元论，而是应该更精确地理解：什么任务适合什么顺序约束。
 </div>
 </div>
+
+---
+
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/O0gzjbgy3IhB9TolXUIBzA" target="_blank" data-linktype="2">Code as Agent Harness：可执行、可验证、有状态的Agent系统新范式</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/lcs_gT9vfs0eaW001g2dfg" target="_blank" data-linktype="2">SGLang用Waterfill+LPLB解决DeepEP MoE负载不均，吞吐提升7.3%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/TrDau7cG1M7kwsLQNwOpzA" target="_blank" data-linktype="2">揭秘最快的GLM-5.2推理优化技术：如何将吞吐推到 280 TPS</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0zKdjRmWg3TbL5Y3HGO3fA" target="_blank" data-linktype="2">从 P/D 分离到 A/F 分离：从学术原型变成行业标准</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/olxLm3almopaba6J2JeFrA" target="_blank" data-linktype="2">Anthropic：如何用 Claude 实现 95%自动化数据化分析</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/_4vgKCTSir14mhtdvs7_HA" target="_blank" data-linktype="2">美团开源LongCat-2.0 (OpenRouter原Owl Alpha)解读：1.6T 参数，...</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4Iz5SjE4D240EL4MmKrWZQ" target="_blank" data-linktype="2">OpenAI Dreaming记忆系统：从记住你到理解你</a><br>
+</span>
 
 ---
 
