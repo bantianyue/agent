@@ -3,10 +3,10 @@
 | Step | 状态 |
 |------|------|
 | Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
+| Step 0a: 语言类型判断（中/英） | completed (zh) |
+| Step 0b: 来源类型确认 | completed (X Article纯文本) |
+| Step 1: 内容提取（全文） | completed |
+| Step 2: 全部图片下载 | completed (纯文本文章，0张正文图片) |
 | Step 3: 封面生成（900×383 + 500×500） | pending |
 | Step 4a: 列出关键素材清单 | pending |
 | Step 4a-i: 写要点速览 | pending |
