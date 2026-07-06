@@ -18,7 +18,7 @@ Andrej Karpathy用三个名词总结了整部LLM训练史：**文本、对话、
 预训练跑在互联网文本上，监督微调跑在精心策划的对话上，而当前这一波强化学习跑在环境上。OpenAI的o1用有可验证答案的数学和编程题证明了这个框架，DeepSeek-R1则把这套配方公开发布。
 
 ![](img2.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar — LLM训练三阶段：预训练、SFT、RL</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar：LLM训练三阶段：预训练、SFT、RL</span>
 
 **整个行业现在把环境当作稀缺资源。据报道Anthropic曾讨论一年在环境上花超过10亿美元。** 与此同时，有人在通过一个类似Hugging Face的中心免费提供2500多个开源环境。
 
@@ -34,23 +34,21 @@ Andrej Karpathy用三个名词总结了整部LLM训练史：**文本、对话、
 - **Environment（环境）**：持有状态、接受动作、返回奖励的东西
 
 ![](img4.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar — RL循环示意图：state → action → reward → environment</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar：RL循环示意图：state → action → reward → environment</span>
 
 这个循环里最难的一环一直是奖励，传统上需要在人类偏好数据上再训练一个单独的模型。**DeepSeek-R1通过GRPO（Group Relative Policy Optimization）用一个普通的Python函数替掉了整个奖励模型。** 做法是对同一个提示的多个答案打分，然后把模型推向那些超过组平均值的答案。
 
 ![](img5.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar — 用GRPO构建推理型LLM</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar：用GRPO构建推理型LLM</span>
 
 ## 环境是最后一道壁垒
 
 奖励模型这道障碍被DeepSeek-R1拆掉之后，剩下的壁垒就是环境本身。奖励函数可以对最终状态打分，但必须有东西来呈现任务、接受模型的动作、执行规则，并首先把游戏推进到那个最终状态。
 
-**前沿实验室把环境这一块当作专有资产严密保护，这就是为什么很少有从业者见过一个真正的环境从内部是什么样子。**
-
-免费提供环境的团队叫Prime Intellect，他们的库叫Verifiers，就是我们要用的框架，100% 开源。设计与模型无关（model-agnostic），奖励完全可验证，同一套骨架适用于你想训练的任何回合制任务。
+**前沿实验室把环境这一块当作专有资产严密保护，这就是为什么很少有从业者见过一个真正的环境从内部是什么样子。** 免费提供环境的团队叫 Prime Intellect，他们的库叫 Verifiers，就是我们要用的框架，100% 开源。设计与模型无关（model-agnostic），奖励完全可验证，同一套骨架适用于你想训练的任何回合制任务。
 
 ![](img6.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Prime Intellect — Verifiers框架</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Prime Intellect：Verifiers框架</span>
 
 ## 怎么读这篇文章
 
@@ -65,14 +63,14 @@ Othello（黑白棋）是在8x8网格上进行的双人游戏。你放置一个�
 **那个翻转规则就是为什么单次落子可以大幅改变分数，也是为什么角落如此重要**：一个角落棋子永远不能被翻回来。
 
 ![](img3.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar — Othello棋盘</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar：Othello棋盘</span>
 
 每一个RL部件在这里都有归属。棋盘是State，落子是Action，最终结果喂给Reward，验证走法、翻转棋子、扮演另一方的游戏引擎是Environment。
 
 LLM执黑，内置引擎执白。每次黑棋落子后，白棋回应，更新的棋盘回到模型，如此重复直到游戏结束。
 
 ![](img8.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar — 完整RL循环：LLM、Environment、Opponent、Reward</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar：完整RL循环：LLM、Environment、Opponent、Reward</span>
 
 ## 技术栈
 
@@ -89,14 +87,14 @@ LLM执黑，内置引擎执白。每次黑棋落子后，白棋回应，更新�
 模型在每个回合看到的就是棋盘、分数、有效走法列表，这就是全部状态。它对游戏的所有认知都来自这段文本。
 
 ![](img7.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar — 模型每回合看到的状态</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar：模型每回合看到的状态</span>
 
 它必须以一个 `<think>` 段落回应，后跟一个 `<move>` 标签，**这迫使它在提交走法之前对局面进行推理**。
 
 环境根据有效走法列表验证移动，将其应用到棋盘上，让白棋回应，然后把更新的棋盘发回。无效走法收到错误信息和重试机会，并对奖励施加惩罚。
 
 ![](img9.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar — 5步回合流程：起始局面 → LLM响应 → 校验 → 白棋走 → 更新棋盘</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar：5步回合流程：起始局面 → LLM响应 → 校验 → 白棋走 → 更新棋盘</span>
 
 所有这些都在一个方法里。OthelloEnv继承自Verifiers中的MultiTurnEnv，后者处理循环、回合追踪和终止，基类每次模型发送一步走法时都调用你的env_response：
 
@@ -129,7 +127,7 @@ class OthelloEnv(MultiTurnEnv):
 **Minimax**：模拟未来走法，用角落控制、棋盘位置、可用走法给每个结果局面打分，选择最坏情况结果最好的走法。深度3意味着它向前看三步，足以设陷阱、避免明显失误。
 
 ![](img10.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar — Random与Minimax对手模式</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar：Random与Minimax对手模式</span>
 
 一个随机性参数控制白棋多长时间忽略其策略而随机选择。**更低的随机性意味着更一致、更惩罚性的对弈。**
 
@@ -153,7 +151,7 @@ def opponent_engine(board, randomness, depth):
 游戏结束时，四个信号合并成一个奖励。
 
 ![](img11.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar — 奖励组件表：每个组件测量什么，权重多少</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar：奖励组件表：每个组件测量什么，权重多少</span>
 
 每一个都是一个函数，从最终状态读取某些东西，返回一个数字。胜负信号是最简单的：
 
@@ -190,7 +188,7 @@ def total_reward(state):
 环境跨不同的起始位置和对手难度生成游戏，模型通过上面的循环玩每一个，游戏结束时四个奖励被计算并合并。评估期间，奖励、token使用和回合数在所有游戏中汇总到一个结果表中。
 
 ![](img12.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar — 完整Othello系统图：游戏循环、奖励函数、prime eval</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar：完整Othello系统图：游戏循环、奖励函数、prime eval</span>
 
 一个函数把所有东西连接起来，这就是prime eval命令在后台调用的东西：
 
@@ -218,7 +216,7 @@ prime eval run othello -m openai/gpt-4.1 -n 100 \
 评估告诉你模型在哪里挣扎，训练分三个阶段来修复。**同一个环境支持所有阶段**：
 
 ![](img13.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar — 三阶段流水线：数据生成、SFT、RL训练共享同一个环境和奖励</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Akshay Pachaar：三阶段流水线：数据生成、SFT、RL训练共享同一个环境和奖励</span>
 
 **数据生成**：让你最强的模型玩几百局并保存结果。同一个eval命令直接写入数据集：
 
@@ -284,7 +282,18 @@ Prime Intellect用开源库把这层壁垒撕出一道口子，是这一波里�
 </div>
 </div>
 
-**原文：** https://x.com/akshay_pachaar/status/2074200571834515574
+---
+
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FkaboLbPXA36kHkDgv8aSQ" target="_blank" data-linktype="2">Interpreter Skills：当Agent Skill从说明书变成可执行代码</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/orPguOPILj08E329SHculw" target="_blank" data-linktype="2">Claude Code动态工作流Dynamic Workflows深入拆解：编排逻辑从对话变成代码</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/ngZTD0_FCP7N8m-nVAwv5Q" target="_blank" data-linktype="2">Claude Code记忆系统Memory架构剖析</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/R12IIHds4qEXBgi8dGXT_g" target="_blank" data-linktype="2">Hermes发布MoA (Mixture-of-Agents)多模型协同超过Claude Opus...</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/oDZJbvskv_ocNgPUH1DHVA" target="_blank" data-linktype="2">AI暗输出：为何AI价值在GDP统计中失效了</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/VZRcpl6vL7riJp77ZmtSIg" target="_blank" data-linktype="2">Hermes vs OpenClaw创始人隔空互怼：假星标，抄袭，死亡威胁各种瓜</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/rsNxbqxha4UBoYtvNzpfEw" target="_blank" data-linktype="2">kv-caching_diff_hero_video_full</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4Iz5SjE4D240EL4MmKrWZQ" target="_blank" data-linktype="2">OpenAI Dreaming记忆系统：从记住你到理解你</a><br>
+</span>
 
 ---
 
