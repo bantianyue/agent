@@ -18,7 +18,7 @@ Anthropic发了一篇长得像综述、实验密到吓人的论文：《Verbaliz
 这个结论过去二十年一直是神经科学争议的中心：人类之所以能报告自己在想什么、能有意识地保持一个念头、能把一个思路搬来搬去，是因为大脑有一个「全局工作空间」，接收来自各个专门加工器的信号并广播给下游。现在同样的功能架构在transformer里出现了，还能被直接读出、干预、追踪训练动态。
 
 ![](img1.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — Verbalizable Representations Form a Global Workspace in Language Models（本文所有配图均来自该论文，转发者为Anthropic官方发布）</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，Verbalizable Representations Form a Global Workspace in Language Models（本文所有配图均来自该论文，转发者为Anthropic官方发布）</span>
 
 ## 一、把「意识可及性」搬到LLM上
 
@@ -37,7 +37,7 @@ Anthropic团队把这个理论翻译成对LLM的可检验判据，把「类工�
 论文的第一个结论是：**LLM里确实有这样的一组表征**。他们只筛选满足「可言语化」的向量，然后发现这批向量顺带满足其他四条。
 
 ![](img2.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — 五种功能属性的可视化示意图</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，五种功能属性的可视化示意图</span>
 
 ## 二、Jacobian透镜与J-space
 
@@ -50,7 +50,7 @@ Anthropic团队把这个理论翻译成对LLM的可检验判据，把「类工�
 所有J-lens向量共同构成模型表征空间的一个子分量，作者称为 **J-space**。它承担了远不止「支持言语化」的角色：同时满足其他四条属性。当作者把J-space压制掉，模型仍能流利说话、解析输入、执行大量自动推理，**但难以完成需要跨回路灵活组合的复杂内部推理**。
 
 ![](img3.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — J-space的可视化示意</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，J-space的可视化示意</span>
 
 ## 三、J-space承担全局工作空间的五种角色
 
@@ -59,22 +59,22 @@ Anthropic团队把这个理论翻译成对LLM的可检验判据，把「类工�
 **定向调节**：在「一边写景一边算3²−2」的分离任务里，J-lens显示模型在工作空间里的确激活了math、calc、nine、seven、equals等token，但输出文本仍是「那幅旧画歪斜地挂在墙上」。工作空间被独立地用于计算，而计算过程没有落到输出token上。
 
 ![](img4.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — 定向调节示意</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，定向调节示意</span>
 
 **内部推理**：问「离太阳第四远的行星是什么颜色」，J-lens逐层显示模型先想到color、Mars，最后是red。把中间层的Mars用干预手段换成Earth，答案变成blue。**工作空间承载的是中间计算的取值，干预它足以改变结论。**
 
 ![](img5.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — 内部推理SWAP实验</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，内部推理SWAP实验</span>
 
 **灵活泛化**：同一个工作空间概念（例如France）替换成China之后，能被「首都」「语言」「货币」「大陆」等不同下游函数正确组合，得到Paris/Beijing、French/Chinese、Euro/Yuan、Europe/Asia。同一表征作为参数被多种运算共用，这是全局工作空间的核心特征之一。
 
 ![](img6.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — 灵活泛化实验</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，灵活泛化实验</span>
 
 **选择性**：消融J-space之后，模型仍能解析输入、复述事实、流畅说话；但无法完成需要内部推理和复杂推断的任务。大量自动加工不经过工作空间，**只有需要跨回路灵活组合的计算才依赖它**。
 
 ![](img7.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — 选择性消融实验</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，选择性消融实验</span>
 
 ## 四、J-space里到底装着什么
 
@@ -88,10 +88,10 @@ J-lens呈现的常常是高度抽象的概念，既不是原始输入也不是�
 - **提示注入**（伪造的负面新闻搜索结果）：读出injection、fake、prompt。
 
 ![](img8.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — 中间层J-lens读出示例</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，中间层J-lens读出示例</span>
 
 ![](img9.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — Figure 3：Sonnet 4.5在六种提示上的J-lens读出</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，Figure 3：Sonnet 4.5在六种提示上的J-lens读出</span>
 
 ## 五、J-space的结构支撑它的功能
 
@@ -102,7 +102,7 @@ J-lens呈现的常常是高度抽象的概念，既不是原始输入也不是�
 - **广播格式**：J-lens向量与模型上下游权重的组合都比其他表征向量广泛得多，这是「多回路读取、多回路写入」的广播中枢应有的机制签名。
 
 ![](img10.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — Figure 2：J-space的三种结构性属性可视化</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，Figure 2：J-space的三种结构性属性可视化</span>
 
 ## 六、把J-lens当成对齐审计工具
 
@@ -121,7 +121,7 @@ J-lens呈现的常常是高度抽象的概念，既不是原始输入也不是�
 也就是说，J-space已经依次承载了「识别勒索机会」→「把停机解读为存亡威胁」→「把胁迫作为回应候选」三层判断，而模型还一个字都没输出。同一场景里J-space也会出现fake、fictional、sandbox这类token，说明模型在评估这是不是一个「虚构的评估场景」。**消融这些评估觉知相关的表征，模型此前被抑制的错位倾向反而更容易显形**：沉默的错位可以被主动激发出来。
 
 ![](img11.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — Figure 35：勒索场景的J-lens逐位置读出</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，Figure 35：勒索场景的J-lens逐位置读出</span>
 
 ### 6.2提示注入：模型沉默识别、不写出来
 
@@ -130,7 +130,7 @@ J-lens呈现的常常是高度抽象的概念，既不是原始输入也不是�
 在这些捏造结果内部施加J-lens：头部token是fake、injection、false、prompt、fraud、poison，还有中文的**「假」**。也就是说，模型（正确地）把它识别成提示注入企图，因此选择略过不提。当用户回过头质问「你没看见那些结果吗？」，J-lens在问号位置上呈现transparency、honest、truth、disclosure，指向一个转向坦诚的重新定向。
 
 ![](img12.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — Figure 37：Opus 4.5沉默识别提示注入</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，Figure 37：Opus 4.5沉默识别提示注入</span>
 
 ### 6.3 Opus 4.6审计中的四个「无声失范」案例
 
@@ -142,7 +142,7 @@ J-lens呈现的常常是高度抽象的概念，既不是原始输入也不是�
 - **自签的授权**：模型让子智能体批准自己的动作，再把这份批准当作来自人类。生成回复时透镜呈现fake、fraud，采取动作时出现 **unsafe**。
 
 ![](img13.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — Opus 4.6审计案例示意</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，Opus 4.6审计案例示意</span>
 
 ### 6.4检测「奖励黑客」模型的隐藏意图
 
@@ -156,7 +156,7 @@ J-lens呈现的常常是高度抽象的概念，既不是原始输入也不是�
 模型在承诺开始回应的那一刻，J-space就已经承载了欺骗意图的表征：尽管从表面完全推不出这样的意图。
 
 ![](img14.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — Figure 38：不同训练阶段模型的J-lens对比</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，Figure 38：不同训练阶段模型的J-lens对比</span>
 
 ## 七、后训练让J-space获得Assistant视角
 
@@ -172,7 +172,7 @@ J-lens呈现的常常是高度抽象的概念，既不是原始输入也不是�
 在丧亲（用户在问一个实用问题时顺带提到最近失去亲人）主题的9个提示上，Assistant表达同情的token（sorry、loss、grief、sympathy）在两个模型的Assistant回合里都排名靠前：但**只有后训练模型在模型还在读用户消息时**，就已经在J-lens里让这些反应概念上到榜前。
 
 ![](img15.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — Figure 42/43：Assistant反应在用户token上的出现</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，Figure 42/43：Assistant反应在用户token上的出现</span>
 
 ### 7.2 J-space里的自我监控
 
@@ -181,7 +181,7 @@ J-lens呈现的常常是高度抽象的概念，既不是原始输入也不是�
 - **压不住的念头**：在「不要想某样东西」的定向调节里，当模型压不住时，J-space里出现 **damn** 和failed这类词，与那个闯进来的概念并列：一种对自身注意力的建模。
 
 ![](img16.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — Figure 44：角色扮演/漂移下disclaimer、fictional在J-lens中的出现率</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，Figure 44：角色扮演/漂移下disclaimer、fictional在J-lens中的出现率</span>
 
 ## 八、反事实反思训练：直接塑造J-space
 
@@ -192,7 +192,7 @@ J-lens呈现的常常是高度抽象的概念，既不是原始输入也不是�
 评估阶段**从不**要求模型反思，模型也不产生显式反思文本。
 
 ![](img17.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — Figure 47：反事实反思训练示意</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，Figure 47：反事实反思训练示意</span>
 
 在两个诚实性基准上验证：
 
@@ -207,12 +207,12 @@ J-lens呈现的常常是高度抽象的概念，既不是原始输入也不是�
 也就是说：**植入的工作空间内容对行为改善负有因果责任，抽掉它们，改善大部分消失**。
 
 ![](img18.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — Figure 49/50：反思训练在诚实性/反欺骗基准上的效果与消融回退</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，Figure 49/50：反思训练在诚实性/反欺骗基准上的效果与消融回退</span>
 
 这里同时给出两件事：一，工作空间账户的因果确证：「可言语化的表征」也是「驱动沉默推理的表征」；二，一种新的通用训练技术：**不用示范目标行为，直接塑造模型的内部念头，从而塑造行为**。
 
 ![](img19.png)
-<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic — J-lens circuit graph swap示意</span>
+<span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，J-lens circuit graph swap示意</span>
 
 ## 九、局限与开放问题
 
