@@ -221,7 +221,16 @@ Trehan & Chopra（2026）测试LLM能否在极少脚手架下从想法走到论�
 
 ---
 
-<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】</span>
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2kSChMJR6gYdGxXIlCgmhw" target="_blank" data-linktype="2">GitHub Copilot突破Agent不确定性验证难题:基于编译理论的PTA完胜LLM-as-...</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/lIoX1-iyYAVYfnB6jaENPA" target="_blank" data-linktype="2">用Hermes Agent搭建Eval Loop，拒绝输出AI垃圾</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/k0cAijThQd4KBftkcEpz6A" target="_blank" data-linktype="2">Cursor的反攻：Coding牛马Composer 2.5诞生，价格只需Opus4的5%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/a0ZppQR7VpVc_xEDqgYY9w" target="_blank" data-linktype="2">Prompt →Context→Harness演变背后的逻辑：认知逐步外化，为模型减负</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4Iz5SjE4D240EL4MmKrWZQ" target="_blank" data-linktype="2">OpenAI Dreaming记忆系统：从记住你到理解你</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0zKdjRmWg3TbL5Y3HGO3fA" target="_blank" data-linktype="2">从P/D分离到A/F分离：从学术原型变成行业标准</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/_4vgKCTSir14mhtdvs7_HA" target="_blank" data-linktype="2">美团开源LongCat-2.0 (OpenRouter原Owl Alpha)解读：1.6T参数，...</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0dQ7pBJ0NmFt-bOwUCQ5ew" target="_blank" data-linktype="2">Torch解析系列二：Dynamo字节码级的计算图捕获</a><br>
+</span>
 
 ---
 
