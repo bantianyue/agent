@@ -16,7 +16,11 @@
 
 上下文学习（ICL）在单次前向传播中形成对演示样本的"记忆表征"，但表征是被动形成的，演示不足时无法改进。提示类方法（Prompt Tuning、Prefix Tuning）则独立初始化一段可训练前缀，完全没利用演示样本本身的信息。
 
-**Context Tuning要填的坑是：直接用ICL能力从演示初始化记忆表征，再去优化它，而不是两套机制各走各路。**
+<div style="background:#f0f7fa;padding:16px 18px 14px 18px;border-radius:6px;margin:16px 0;border-left:4px solid #5b9bd5;">
+<div style="font-size:15px;color:#2c6a9e;line-height:1.7;">
+Context Tuning要填的坑是：直接用ICL能力从演示初始化记忆表征，再去优化它，而不是两套机制各走各路。
+</div>
+</div>
 
 ![](img1.png)
 <span style="font-size:12px;color:rgb(153,153,153);">CT-KV整体概览：冻结LLM，将示例形成的KV缓存转化为可训练的记忆表征</span>
@@ -25,7 +29,7 @@
 
 CT-KV（KV版上下文调优）是主力变体，核心只有一句话：**保持LLM冻结，只优化由演示样本形成的键值（KV）缓存。**
 
-分两步。初始化时，模型用正常ICL流程处理演示，得到一个KV前缀，它已编码了"这些示例在教什么"。优化时引入两个设计：
+分两步。初始化时，模型用正常ICL流程处理演示，得到一个KV前缀，这个前缀已经编码了"这些示例在教什么"。优化时引入两个设计：
 
 Leave-One-Out Masking（留一掩码）：训练时遮掉某个示例，要求模型基于其余示例预测它的输出，迫使记忆表征学到通用映射而非死记。
 
