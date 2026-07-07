@@ -19,6 +19,7 @@
 | 14 | 2026-07-07 | https://x.com/akshay_pachaar/status/2074200571834515574 | 2074200571834515574 | 2074200571834515574 | 如何从零构建一个 RL 环境：拆掉最后一道壁垒 | cover.png | ✅ 已推送 |
 | 15 | 2026-07-07 | https://transformer-circuits.pub/2026/workspace/index.html | index-html | workspace-agent-brain | Anthropic 揭示 LLM 里的「意识可及性」：J-lens 与全局工作空间 | cover.png | ✅ 已推送 |
 | 16 | 2026-07-07 | https://mimo.xiaomi.com/zh/blog/mimo-code-long-horizon | mimo-code-long-horizon | mimo-code-long-horizon | 小米MiMo Code：让编码Agent跑完200步不崩的三条线 | cover.png | ✅ 已推送 |
+| 17 | 2026-07-07 | https://lilianweng.github.io/posts/2026-07-04-harness/ | 2026-07-04-harness | agent-harness-lilianweng | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -142,3 +143,9 @@
 |--------|------|------|
 | 2026-07-07 17:05 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-07 17:22 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0QMBi-kFvnaK07wJQkKy0sceZA31DDsZKvVRMQz0jDiM |
+
+### #17 - agent-harness-lilianweng
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-07 17:38 | 📥 开始 | 收到 URL，开始提取内容 |
