@@ -106,4 +106,17 @@ JustGRPO的启示是"做减法"：与其在难解的组合轨迹上硬做RL适�
 
 ---
 
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/sQTgsN529YAjXOQ0Y0bJuA" target="_blank" data-linktype="2">微软SkillOpt: 用Skill文件梯度下降法优化Agent技能，52项测试全胜</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/mjBLO4O4fHUFNk4DfR9Y-g" target="_blank" data-linktype="2">Anthropic/Claude多Agent协同五种模式详解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tQmHn4iCqUzh3_SVZtvgzQ" target="_blank" data-linktype="2">Agent记忆百家争鸣: 没有统一架构,取决于具体任务; 或许还缺理论突破</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/mHlrMsXRCrzZrN-GTODqug" target="_blank" data-linktype="2">四层Loop彻底告别Prompt：前两层卷疯了，后两层还是处女地</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/qHscVKN06FEGTru80STlxA" target="_blank" data-linktype="2">M²A多模态双层混合记忆系统：记住你的每一次变化</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/_4vgKCTSir14mhtdvs7_HA" target="_blank" data-linktype="2">美团开源LongCat-2.0 (OpenRouter原Owl Alpha)解读：1.6T 参数，...</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4Iz5SjE4D240EL4MmKrWZQ" target="_blank" data-linktype="2">OpenAI Dreaming记忆系统：从记住你到理解你</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/MLFtBJrXFoHn6IPj1Z_36Q" target="_blank" data-linktype="2">苹果Apple感知压缩新突破PICO：图像画质不降低，体积只有1/3</a><br>
+</span>
+
+---
+
 <span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://arxiv.org/html/2601.15165v4</span>
