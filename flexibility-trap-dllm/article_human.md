@@ -93,6 +93,11 @@ JustGRPO的思路异常简单：**RL训练期直接放弃任意顺序，把dLLM�
 ![](x11.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图9：GSM8K上训练效率，JustGRPO及JustGRPO-Fast的准确率/墙钟时间权衡优于近似基线ESPO</span>
 
+训练配置上JustGRPO极简：基座LLaDA 8B Instruct、标准GRPO、全参数微调、组大小16、训练125步、最大生成长度256、KL系数0，直接复用成熟AR训练栈即可，无需为扩散特性定制任何模块。
+
+![](x12.png)
+<span style="font-size:12px;color:rgb(153,153,153);">表：JustGRPO训练超参数配置（基座LLaDA 8B Instruct，标准GRPO，全参数微调）</span>
+
 <div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
 <div style="text-align:center;margin-bottom:8px;">
 <strong style="font-size:15px;color:#8b6f4c;">结语</strong>
