@@ -158,11 +158,11 @@ R3（Router Replay）把KL失配降一个数量级的思路值得整个RL社区�
 
 <span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/qkV_euWkUBjf_OrTSRCkWQ" target="_blank" data-linktype="2">阿里Head-Level混合Attention: 因果干预识别检索关键头，FA仅6.5%，内存降至...</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/Y4_H0d8O8-OwEgYk7ll_bA" target="_blank" data-linktype="2">从封神到封禁：回顾Claude Fable 5 的96小时整个事件始末</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/Y4_H0d8O8-OwEgYk7ll_bA" target="_blank" data-linktype="2">从封神到封禁：回顾Claude Fable 5的96小时整个事件始末</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/00mkoR8kdo_G9Xt2PLUevg" target="_blank" data-linktype="2">RLM：MIT提出递归语言模型，处理超长上下文不再是难题</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/Gjvh6axvYjjgRFDCNFwwew" target="_blank" data-linktype="2">国内用Claude Opus的秘密：美国田纳西-非洲吉布提-深圳写字楼,扒一扒灰产背后的经济学</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/_4vgKCTSir14mhtdvs7_HA" target="_blank" data-linktype="2">美团开源LongCat-2.0 (OpenRouter原Owl Alpha)解读：1.6T 参数，...</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/olxLm3almopaba6J2JeFrA" target="_blank" data-linktype="2">Anthropic：如何用 Claude 实现 95%自动化数据化分析</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/_4vgKCTSir14mhtdvs7_HA" target="_blank" data-linktype="2">美团开源LongCat-2.0 (OpenRouter原Owl Alpha)解读：1.6T参数，...</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/olxLm3almopaba6J2JeFrA" target="_blank" data-linktype="2">Anthropic：如何用Claude实现95%自动化数据化分析</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/MLFtBJrXFoHn6IPj1Z_36Q" target="_blank" data-linktype="2">苹果Apple感知压缩新突破PICO：图像画质不降低，体积只有1/3</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/oDZJbvskv_ocNgPUH1DHVA" target="_blank" data-linktype="2">AI暗输出：为何AI价值在GDP统计中失效了</a><br>
 </span>
