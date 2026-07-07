@@ -142,4 +142,17 @@ decode是另一类瓶颈：小批量受启动和路由限制，所以按批大�
 
 ---
 
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kJHYTWqIl2HwdUYNjG7_aw" target="_blank" data-linktype="2">Loop工程续篇：15 个高赞 Loop 一次性拆解——每一条你都能直接用</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/PLNx54PxO1A0oYc47hz99g" target="_blank" data-linktype="2">Anthropic三连：Claude Opus 4.8-更聪明+诚实；CC动态工作流+算力控制</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/-xmiwcQP--wVA2iihg28vg" target="_blank" data-linktype="2">Hermes Agent创始团队揭秘：会自我进化的AI智能体</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/RDycs9d7mvV3NkPkJeagxQ" target="_blank" data-linktype="2">Google Cloud发布OKF：一个让AI Agent真正「读懂」企业知识的开放格式</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/YnMyg85RydYrJvk6C5cLdQ" target="_blank" data-linktype="2">微软$25亿砸向FDE，四巨头AI军备竞赛最后一公里的FDE之战</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0dQ7pBJ0NmFt-bOwUCQ5ew" target="_blank" data-linktype="2">Torch解析系列二：Dynamo字节码级的计算图捕获</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/o6pnSWW01pahFQelJSbSPA" target="_blank" data-linktype="2">华为「韬定律」全解析：从 τ 常数到 4GHz 麒麟，一张时间表看清未来十年芯片路线</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0zKdjRmWg3TbL5Y3HGO3fA" target="_blank" data-linktype="2">从 P/D 分离到 A/F 分离：从学术原型变成行业标准</a><br>
+</span>
+
+---
+
 <span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://pytorch.org/blog/lightseek-tokenspeed-kernel/</span>
