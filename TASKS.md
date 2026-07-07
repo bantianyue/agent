@@ -20,7 +20,8 @@
 | 15 | 2026-07-07 | https://transformer-circuits.pub/2026/workspace/index.html | index-html | workspace-agent-brain | Anthropic 揭示 LLM 里的「意识可及性」：J-lens 与全局工作空间 | cover.png | ✅ 已推送 |
 | 16 | 2026-07-07 | https://mimo.xiaomi.com/zh/blog/mimo-code-long-horizon | mimo-code-long-horizon | mimo-code-long-horizon | 小米MiMo Code：让编码Agent跑完200步不崩的三条线 | cover.png | ✅ 已推送 |
 | 17 | 2026-07-07 | https://lilianweng.github.io/posts/2026-07-04-harness/ | 2026-07-04-harness | agent-harness-lilianweng | Harness工程：递归自我改进的主战场不在权重 | cover.png | ✅ 已推送 |
-| 18 | 2026-07-07 | https://agenticlearning.ai/context-tuning/ | context-tuning | context-tuning | TBD | TBD | 📥 进行中 |
+| 18 | 2026-07-07 | https://agenticlearning.ai/context-tuning/ | context-tuning | context-tuning | 把KV缓存变成可训练记忆：Context Tuning让LLM免权重微调 | cover.png | ✅ 已推送 |
+| 19 | 2026-07-07 | https://arxiv.org/html/2607.02512v1 | 2607-02512 | arxiv-context-tuning | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -158,3 +159,10 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-07 19:58 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-07 20:05 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0QS7hjad40_5-tzBMhMxmbalCL4Mj6ZLPGCm-dk-tteW |
+
+### #19 - arxiv-context-tuning
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-07 20:10 | 📥 开始 | 收到 URL，开始提取内容 |
