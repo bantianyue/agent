@@ -25,6 +25,7 @@
 | 20 | 2026-07-07 | https://arxiv.org/html/2601.15165v4 | 2601-15165 | flexibility-trap-dllm | 灵活性陷阱：dLLM任意顺序反而限制了推理潜力 | cover.png | ✅ 已推送 |
 | 21 | 2026-07-07 | https://arxiv.org/html/2607.02770v1 | 2607-02770 | arxiv-2607-02770 | Gemma 4 技术报告：无编码器与思考模式上车 | cover.png | ✅ 已推送 |
 | 22 | 2026-07-07 | https://pytorch.org/blog/lightseek-tokenspeed-kernel/ | lightseek-tokenspeed-kernel | lightseek-tokenspeed-kernel | TokenSpeed-kernel：把推理内核做成一等公民 | cover.png | ✅ 已推送 |
+| 23 | 2026-07-07 | https://www.primeintellect.ai/blog/rl-at-1t-scale | rl-at-1t-scale | rl-at-1t-scale | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -192,3 +193,9 @@
 |--------|------|------|
 | 2026-07-07 21:43 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-07 21:50 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0ZlRa1h8k2ucBsnkVUIs725QVDmcMgSgFs6u8PN05B3q |
+
+### #23 - rl-at-1t-scale
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-07 22:18 | 📥 开始 | 收到 URL，开始提取内容 |
