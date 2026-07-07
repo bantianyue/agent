@@ -22,3 +22,4 @@
 
 创建时间: 2026-07-07
 来源: https://mimo.xiaomi.com/zh/blog/mimo-code-long-horizon
+| Step 4d-i: 传送门 | completed |

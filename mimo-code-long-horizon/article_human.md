@@ -188,4 +188,17 @@ MiMo Code真正想解决的不是"模型够不够强"，而是"长任务里上�
 
 ---
 
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/n2y9guZa1CdjSbCsebvpWA" target="_blank" data-linktype="2">多模型路由Sakana Fugu：多模型协作打败Claude Opus4.8和OpenAI GPT5.5</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/TIqnnVEu6Oy3-wtKttGa0dtg2u9H4WNRXOfU6xdIiNas4kdmjNEmbQRPkqXIUWav" target="_blank" data-linktype="2">NVIDIA NeMo Switchyard 上手：pip安装、无GPU、Claude Code一...</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/VwQP-AZcHMYksmMLHOy_FQ" target="_blank" data-linktype="2">从 Token 流到 Agent 流：LangChain 全新流式架构深度解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/wuDbKjS9v8Srn-3C7d1WTA" target="_blank" data-linktype="2">Claude解耦大脑与双手：Anthropic Scaling Managed Agents解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/VZRcpl6vL7riJp77ZmtSIg" target="_blank" data-linktype="2">Hermes vs OpenClaw创始人隔空互怼：假星标，抄袭，死亡威胁各种瓜</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4Iz5SjE4D240EL4MmKrWZQ" target="_blank" data-linktype="2">OpenAI Dreaming记忆系统：从记住你到理解你</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0dQ7pBJ0NmFt-bOwUCQ5ew" target="_blank" data-linktype="2">Torch解析系列二：Dynamo字节码级的计算图捕获</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/pCRjhls1WFaiRglb2MtjBw" target="_blank" data-linktype="2">蚂蚁CausalMix: 将数据混合从超参搜索转换成因果推断</a><br>
+</span>
+
+---
+
 <span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://mimo.xiaomi.com/zh/blog/mimo-code-long-horizon</span>
