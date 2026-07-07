@@ -15,7 +15,7 @@
 
 ## 引言：开放权重的下一跳
 
-Google DeepMind推出Gemma 4，这是Gemma家族迄今最强、最省的一代。它的目标很明确：在端侧硬件上跑得动的前提下，把多模态理解、推理能力和计算效率同时推高。模型套件包含稠密架构（2.3B、4.5B、12B、31B）以及一个MoE变体（26B-A4B，激活3.8B、总参26B），全部以Apache 2.0许可证发布。
+Gemma 4是Gemma家族迄今最强、最省的一代。目标很直接：在端侧硬件能跑起来的前提下，把多模态理解、推理能力和计算效率一起推高。模型套件包含稠密架构（2.3B、4.5B、12B、31B）以及一个MoE变体（26B-A4B，激活3.8B、总参26B），全部以Apache 2.0许可证发布。
 
 **这一代的核心变化有五处。** 第一，思考模式（thinking mode）进入全系，模型先输出一条推理轨迹再作答，数学和编程这类重推理任务因此明显提升。第二，长上下文不再让KV缓存爆炸：本地滑动窗口与全局自注意力保持5:1配比（2.3B为4:1），配合p-RoPE位置编码，全局KV缓存占用最高降37.5%。第三，计算效率上放出多token预测（MTP）draft头，专为投机解码提速。第四，内存效率上提供量化感知训练（QAT）版本。第五，12B模型用统一无编码器架构替代独立编码器，减少内存碎片。
 
@@ -73,7 +73,7 @@ E2B这档最惊人：仅2.3B有效参数、量化后权重内存0.8GB，AIME 202
 
 ## 安全与责任
 
-Gemma 4接受了与Gemini同样严格的安全评估。安全策略对齐Google的AI原则，明确防范CSAM、危险内容、色情露骨内容、仇恨言论与骚扰。所有安全测试都在无过滤器下盲测，以暴露模型真实行为，各尺寸、各模态的策略违规都极少，同时无理由拒答保持在低位。
+Gemma 4接受了与旗舰模型同样严格的安全评估。安全策略对齐其一贯的AI原则，明确防范CSAM、危险内容、色情露骨内容、仇恨言论与骚扰。所有安全测试都在无过滤器下盲测，以暴露模型真实行为，各尺寸、各模态的策略违规都极少，同时无理由拒答保持在低位。
 
 团队也坦承开放模型的伦理权衡：AI的开放性应普惠社会，但必须持续与有害用途的风险相权衡，并在确信收益显著超过可预见风险时才发布。
 
@@ -87,6 +87,19 @@ Gemma 4把「开放权重」的性价比又往前推了一截：12B的无编码�
 值得留意的是，Gemma 4 31B在Arena稠密开放模型里排第一，但榜单前列几乎被MoE巨兽占据，Gemma用稠密架构挤进去，更像是给「不想碰MoE路由复杂度」的端侧场景一个干净选项，而非去争夺绝对性能王座。
 </div>
 </div>
+
+---
+
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/oq46CcmcBBTlfdCAzaOvhA" target="_blank" data-linktype="2">英伟达硬核4-bit量化: NVFP4将智能压缩到4比特</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/bM_48gTerwj3e03ChpaAYw" target="_blank" data-linktype="2">一张图说明Prompt → Context → Harness</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/5Zhi22fvKOPWLESfjvckew" target="_blank" data-linktype="2">阿里Qwen-AgentWorld环境模拟Model：RL成绩反超真实环境</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/SZC06ibLkUU_S2GL5wSPJQ" target="_blank" data-linktype="2">65 行 Prompt，把 AI 编程准确率从 65% 拉到 94%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/YnMyg85RydYrJvk6C5cLdQ" target="_blank" data-linktype="2">微软$25亿砸向FDE，四巨头AI军备竞赛最后一公里的FDE之战</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/oDZJbvskv_ocNgPUH1DHVA" target="_blank" data-linktype="2">AI暗输出：为何AI价值在GDP统计中失效了</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/qHscVKN06FEGTru80STlxA" target="_blank" data-linktype="2">M²A多模态双层混合记忆系统：记住你的每一次变化</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/olxLm3almopaba6J2JeFrA" target="_blank" data-linktype="2">Anthropic：如何用 Claude 实现 95%自动化数据化分析</a><br>
+</span>
 
 ---
 
