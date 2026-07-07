@@ -15,7 +15,7 @@
 
 Anthropic发了一篇长得像综述、实验密到吓人的论文：《Verbalizable Representations Form a Global Workspace in Language Models》。核心声明只有一句：**LLM里存在一个类似人类意识可及区域的「全局工作空间」：一小组可被言说、被调节、被用于推理的特权表征，而其余绝大多数计算都发生在它之外**。
 
-这个结论过去二十年一直是神经科学争议的中心：人类之所以能报告自己在想什么、能有意识地保持一个念头、能把一个思路搬来搬去，是因为大脑有一个「全局工作空间」，接收来自各个专门加工器的信号并广播给下游。现在同样的功能架构在transformer里出现了，还能被直接读出、干预、追踪训练动态。
+过去二十年，神经科学一直在争论一件事：人类之所以能报告自己在想什么、能有意识地保持一个念头、能把一个思路搬来搬去，是因为大脑有一个「全局工作空间」，接收来自各个专门加工器的信号并广播给下游。现在同样的功能架构在transformer里出现了，还能被直接读出、干预、追踪训练动态。
 
 ![](img1.png)
 <span style="font-size:12px;color:rgb(153,153,153);">来源：Anthropic，Verbalizable Representations Form a Global Workspace in Language Models（本文所有配图均来自该论文，转发者为Anthropic官方发布）</span>
