@@ -156,4 +156,17 @@ R3（Router Replay）把KL失配降一个数量级的思路值得整个RL社区�
 
 ---
 
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/TIqnnVEu6Oy3-wtKttGa0RLS-OlKDTB1t1NqfDXaVm9Rrgvooicf2SKrSiKhIe1j" target="_blank" data-linktype="2">微软 Frontier Company 成立：25亿美元、6000人，从平台商到转型服务商</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/GdwKP0NM6Qa-LiIKFNThCw" target="_blank" data-linktype="2">应对开源压力Anthropic发布Claude Sonnet 5：价格为Opus一半, 抢占中端市场</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/jUby-3eouB39b6LkzI1fCA" target="_blank" data-linktype="2">DeepSeek的10万亿美元棋局：7大杀手锏技术催生中国AI硬件生态</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/zAW0cPIvTYkAAAu0ryNm0w" target="_blank" data-linktype="2">5个最好用的 OpenClaw Skills</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/VZRcpl6vL7riJp77ZmtSIg" target="_blank" data-linktype="2">Hermes vs OpenClaw创始人隔空互怼：假星标，抄袭，死亡威胁各种瓜</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/YnMyg85RydYrJvk6C5cLdQ" target="_blank" data-linktype="2">微软$25亿砸向FDE，四巨头AI军备竞赛最后一公里的FDE之战</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/hIab8mXanh0rdpEq_aHo7Q" target="_blank" data-linktype="2">Hermes Desktop 来了：从 CLI 到原生桌面应用，黄仁勋GTC首秀的产品正式公开</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/crfkhSIuMZJxjNA0Md8dXw" target="_blank" data-linktype="2">李飞飞：世界模型的功能分类</a><br>
+</span>
+
+---
+
 <span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://www.primeintellect.ai/blog/rl-at-1t-scale</span>
