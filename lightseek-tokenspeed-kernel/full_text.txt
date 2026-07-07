@@ -1,0 +1,153 @@
+TL;DR
+
+The TokenSpeed-kernel is a standalone, open-source subsystem designed to solve backend complexity in LLM inference. It introduces a clean, layered API and registry system that decouples the high-level runtime from low-level, hardware-specific hardware code.
+
+In this blog, we provide a technical breakdown of the TokenSpeed-kernel and show how it helps developers work with high-performance kernels for multi-silicon LLM inference.
+
+Introduction
+
+LLM models and inference hardware are evolving at astonishing speed. Serving those models efficiently is no longer just a question of finding one fast attention or MoE kernel; modern inference engines need to move quickly across models, quantization formats, GPU generations, and vendor backends without turning the runtime into a maze of special cases. Those APIs are platform-agnostic and solution-agnostic.
+
+This is the motivation behind TokenSpeed-kernel: provide a clean layered API for maximal structured flexibility. The kernel-runtime interface stays generic, while kernel developers get enough structure to specialize deeply for each platform.
+
+We use GPT-OSS as a concrete example to showcase this design in practice. The runtime calls the same public TokenSpeed-kernel APIs regardless of platform; AMD and NVIDIA paths get their performance from pluggable kernels behind those APIs. For AMD GPT-OSS 120B, this approach reaches top-of-the-line performance using Gluon kernels, showing that the layering does not trade away backend performance.
+
+The result is a clear division of focus:
+
+TokenSpeed runtime owns model execution, scheduling metadata, page table, and routing state;
+TokenSpeed-kernel owns operator APIs, backend registration, selection, numerics, benchmarking, and profiling;
+platform-specific performance work stays localized in platform-specific kernels, not scattered through model code.
+
+The clean separation has also made it possible to publish TokenSpeed-kernel as standalone packages that can be installed and used on their own (either as a whole or separately for different kernels), not only as an intertwined TokenSpeed component. The goal is for the kernel packages to be useful to the broader ecosystem as well: a multi-silicon collection of portable and performant kernels with a generic public surface. This includes the Gluon kernels we will discuss later, as AMD supports everyone in the ecosystem–a healthy ecosystem is good for AMD and the community.
+
+Kernels in Modern Inference
+
+Kernels decide whether a serving stack is fast or slow. Attention, MoE routing, expert GEMMs, communication, quantization, and sampling all run on kernels, and those kernels set the latency, throughput, and hardware efficiency of the whole system.
+
+The hard part is that “the best kernel” is rarely a fixed answer. It depends on the model architecture, tensor shape, quantization format, GPU generation, vendor library availability, deployment constraints, and whether a call is serving decode or prefill traffic. Over time, engines accumulate paths to cover all of that: in-tree kernels, vendor library wrappers, experimental kernels, architecture-specific fast paths, and historical fallbacks. Without a clear kernel system and a hard boundary around it, backend selection logic leaks into model code and runtime code.
+
+That leakage is costly. Adding a new model can require touching unrelated runtime paths. Adding a new silicon target can mean threading device checks through model layers. Kernel development becomes harder because model behavior, runtime dispatch, backend selection, and kernel implementation details are intertwined behind an unclear boundary.
+
+TokenSpeed-kernel is designed to keep that complexity in one place.
+
+Design Principles
+
+The kernel system is built around three practical principles:
+
+First, multi-silicon support has to be fundamental. The kernel system should understand platform capabilities directly, instead of treating hardware checks as scattered conditionals. The same operation may have multiple solutions for different silicon targets; all should compete through one selection system.
+
+Second, portability and performance should coexist. A new model needs a portable path to run on different silicon targets as quickly as possible, then can gradually pick up more highly optimized kernels. TokenSpeed-kernel keeps portable Triton paths alongside performance-focused choices: Gluon for AMD, CuteDSL for NVIDIA, and vendor wrappers where they are the right tool.
+
+Third, fast kernel iteration needs guardrails. Kernel development moves quickly when the path from idea to adoption is short. TokenSpeed-kernel keeps that loop tight with lean dependencies, standalone benchmarks and profiling that makes selected kernels visible. The same structure gives kernel development for AI agents a clearer work boundary: try a kernel, verify it, benchmark it, and register it without reshaping model code. TokenSpeed-kernel also actively revisits dependencies that complicate builds or block iteration, trimming or isolating them when needed.
+
+These principles lead to a layered design.
+
+The Layered Kernel System
+
+At a high level, the layered kernel system is shown in the following diagram. From top to bottom, the stack separates what the runtime asks for from how each backend executes it. The runtime enters through a generic public API, the selector maps that request to a compatible kernel.
+
+TokenSpeed-kernel exposes public APIs for the operations that dominate LLM inference: attention, MoE, GEMM, communication, and so on. Runtime code preferably calls top-level APIs such as mha_prefill, mha_decode_with_kvcache and moe_apply. Those APIs are platform- and solution-agnostic. A runtime call does not directly name “the AMD kernel” or “the Triton kernel.” It describes the operator problem: the tensors, formats, model traits, and execution constraints. TokenSpeed-kernel then considers the current platform and registered kernel traits to select the implementation. 
+
+Under the hood, backend implementations register themselves with a shared registry through @register_kernel. A registration declares the operator family and mode, solution name, platform capability requirements, supported tensor signatures, traits, and priority. At runtime, the selector filters out incompatible kernels, ranks the remaining candidates, and returns the callable to execute. 
+
+This structure gives TokenSpeed two properties that are hard to get at the same time. First, the model and runtime remain portable: they do not need to know the details of each GPU backend. Second, the kernel layer remains highly specialized: a kernel can be gated to a precise architecture, data type, tensor shape. 
+
+The same layering also keeps development pragmatic. A model can use a specific solution when that is the fastest way to bring one platform online, then move to the public APIs as the path broadens across silicon targets. If a developer wants to test a specific path, they can still force a solution or kernel override for debugging and benchmarking.
+
+Registry and Selection Mechanism
+
+The mechanism behind this flexibility is the registry-selection loop. Public APIs give the runtime a stable way to describe an operator request. Kernel registrations give each backend a structured way to declare what it can safely and efficiently run. The selector connects the two.
+
+In practice, the registry is the single source of truth for available implementations. Each registered kernel is described by metadata: which operator family and mode it implements, which solution it belongs to, which platform capabilities it requires, which tensor format signatures it supports, which feature traits must match, and what priority it should have relative to other candidates.
+
+Selection then turns a runtime request into a callable. The public API builds the request from the operator inputs and options. For attention, that can include data type, head dimension, page size, sliding-window behavior, and attention sinks. For MoE, it can include weight format, activation type, internal activation data type, and expert-parallel constraints.
+
+The selector filters registered kernels by platform capability, format signature, and traits, then ranks the remaining candidates. For a fixed model, platform, data type, and set of traits, the selected implementation is usually stable, so TokenSpeed-kernel caches the resolved callable. Developers can still force a solution or exact kernel for debugging and benchmarking, but normal execution goes through the same registry path.
+
+The following simplified registration snippets show what this metadata looks like for GPT-OSS-relevant attention paths on NVIDIA and AMD:
+
+Numerics, Benchmarking, and Plugins
+
+The kernel system is not just dispatch. It also gives kernel authors a workflow for safe, fast iteration: numerics checks, standalone benchmarks, and profiling scopes. Reference implementations provide a shared correctness target, benchmarks give kernels a timing and reporting path outside the full server, and profiling makes selected kernel names and key parameters visible in end-to-end model traces.
+
+The same boundary supports out-of-tree plugins. A plugin registers kernels through the same decorator, assigns its own priority, and participates in normal selection alongside in-tree implementations. This keeps the core package clean while leaving room for hardware vendors, researchers, and deployment teams to bring specialized kernels without forking the entire system.
+
+For day-to-day kernel development, these ergonomics matter as much as dispatch. They are also why the package is kept pip-installable and dependency-conscious: specialized kernels should be easy to install, verify, benchmark, and replace.
+
+To make this workflow easy to use, TokenSpeed-kernel provides both CLIs and programmatic interfaces for the main development tasks, covering numerics verification and standalone benchmarking as shown below. They can be used in CI jobs, or custom tuning pipelines. These tools are not separate one-off harnesses: they reuse the same registry metadata that serving uses for kernel selection, so a registered kernel can be verified against a reference implementation, measured on standard or custom shapes, optionally profiled, and then selected automatically when its capabilities and traits match the runtime request.
+
+GPT-OSS 120B on AMD MI355X
+
+GPT-OSS 120B is a good initial target for validating this design given it is a modern LLM that can still be run on a single GPU. That keeps experimentation practical while still exercising the parts of the kernel system that matter for current inference workloads.
+
+GPT-OSS stresses both attention and MoE: its attention path uses regular MHA with attention sinks and a mix of sliding-window and full-attention layers, while its large AMD deployment uses MXFP4 expert weights and FP8 activation flow for MoE.
+
+Those are exactly the kinds of details that can leak into a runtime if the kernel boundary is too loose. TokenSpeed keeps them below the public API:
+
+The model code does not need to know MI355X architecture details, how MXFP4 scales should be arranged for CDNA4 (MI355X’s architecture), or which AMD kernel is fastest on a specific prefill/decode attention case. It only needs to pass the right tensors and metadata to the public API.
+
+Gluon as the AMD Kernel Path
+
+For the AMD path discussed in this post, the performance-critical attention and MoE kernels are implemented in Gluon, a Triton-family DSL exposing explicit controls for performance, yet still maintaining the simplicity of block-level programming. See the “Gluon Tile Based GPU Programming with Low level Control” Triton conference talk for details.
+
+For AMD MI355X, Gluon gives kernel authors direct access to CDNA4 features such as async copies, shared-memory layouts, and scaled MFMA (for AMD matrix core) operations for FP8/MXFP formats, and efficient buffer/global memory operations. All of those features are explicit programming primitives rather than hidden compiler optimizations: Kernel authors can choose layouts such as simple BlockedLayout, or generic DistributedLinearLayout to describe how to access memory; allocate shared memory with SwizzledSharedLayout or PaddedSharedLayout to avoid bank conflict in shared memory; select AMD matrix-core layouts through AMDMFMALayout. The AMD Gluon modules expose operations that map closely to the hardware, including mfma, mfma_scaled, buffer_load, buffer_store, and async global-or-buffer loads into shared memory.
+
+Gluon also makes software pipelining an explicit part of the kernel rather than an implicit compiler transformation. A kernel can allocate multiple shared-memory buffers, issue asynchronous loads for future tensor tiles, and use async_wait to control when those tiles become visible, and then rotate through the buffers for different schedules. This level of control is especially important for decode-phase kernels, where performance depends on hiding memory latency and keeping matrix cores busy without pushing pipeline details into the TokenSpeed runtime.
+
+Attention
+
+The AMD path registers CDNA4 Gluon kernels for attention variants GPT-OSS needs: prefill and paged decode, with extra options for different variants like whether using sliding-window, whether using attention sinks, etc. The registration traits make those choices explicit, so the runtime still asks for MHA while the kernel system chooses the matching Gluon implementation.
+
+The kernel implementation uses standard attention techniques such as tiled QK/PV and online softmax. It also uses CDNA4-specific features such as matrix cores for matrix multiply, packed math instructions for softmax, and buffer load instructions for loading K and V tiles.
+
+The kernel further exploits the workload characteristics of causal prefill in LLMs and designs a new persistent kernel with special scheduling logic to keep workload balanced across XCDs.
+
+The current Gluon attention implementation is the fastest evaluated MI355X backend on 14 of the 15 measured GPT-OSS prefill shapes. Across the full grid, it is 1.4-2.3x faster than the Triton baseline. We also evaluate the prefill kernel by integrating AITER as a vendor solution. In this environment, AITER dispatches the BF16 prefill case to its CK-backed MHA path, with an in-package Triton fallback. Compared to AITER, Gluon provides a 1.1-1.3x performance uplift.
+
+Attention prefill throughput for GPT-OSS 120B on one MI355X (CDNA4) GPU: Shapes use bf16 Q/K/V, head_dim = 64, 64 Q heads, 8 KV heads, full causal prefill with attention sinks enabled. Sequence lengths are 1K/4K/8K, same for Q/K/V and batch sizes are 1/2/4/8/16. Bars report TFLOP/s; higher is better. Timing uses HIP events around the attention kernel calls excluding extra wrapper transposes, repeat_interleave, output reshape etc. TFLOP/s counts causal QK+PV matmul FLOPs only and divided by 2 for causal masking. Measured at TokenSpeed commit 1492030 and AITER version 0.1.13 on ROCm 7.2.1.
+
+MoE
+
+MoE is where the layering becomes even more useful. A GPT-OSS MoE layer is not a single dense matrix multiply. It includes routing tokens to experts, gathering or dispatching token rows, running expert GEMMs, applying the activation, and combining top-k expert outputs with routing weights.
+
+The AMD Gluon MoE path is built around that full structure rather than treating MoE as two isolated GEMMs. The runtime sees one MoE layer behavior, while the kernel implementation is free to tune those stages together.
+
+For prefill, the key challenge is keeping CDNA4 Compute Unit (CU) busy when routed tokens are distributed unevenly across experts. The implementation uses ragged block schedules so work follows the actual expert distribution, then chooses tile shapes from both the logical token count and the per-expert slice size. Large prefill tiles can be split along M/N or N, and work is swizzled across tile groups and XCDs so scaled MFMA work is better interleaved. The weight path also uses CDNA4-friendly MXFP4 scale swizzling and host-preshuffled weights where it helps memory access.
+
+Decode has a different bottleneck: small batches are launch- and routing-bound, so we use two paths selected by batch size. At the smallest batch sizes, the warp-decode implementation, originally inspired by the “Better MoE model inference with warp decode” blog post, fuses top-k routing into the gate/up projection so routing and the first GEMM share a single launch. Here the limit is occupancy: too few tokens are in flight to fill the machine, so we run it as a cooperative multi-warp GEMM that stages tiles through shared memory with a multi-buffer software pipeline. For the medium batch, where enough tokens share an expert that a loaded weight tile is reused across them, we switch to a direct grouped GEMM for medium batch sizes. This path stages tiles through shared memory but uses a single-buffer direct-load schedule instead of a pipeline, trading pipeline depth for the lower register and shared memory pressure that keeps occupancy high; routing runs as its own small fused kernel.
+
+With the above, we are able to achieve great perf uplift against the Triton implementation. At the smallest batch sizes, the Gluon kernels deliver a large uplift over both the Triton and AITER MoE implementations: 1.7 – 2.1× faster than Triton and 1.1 – 1.6× faster than AITER. In the medium decode band, AITER pulls slightly ahead, but gluon stays within 0.9x of the fastest while remaining 1.3 – 1.4× faster than Triton. This is a place we will continue improving.
+
+MoE latency for GPT-OSS-120B (MXFP4 weights, FP8 activations) on one MI355 (CDNA4) GPU: Gluon vs AITER vs Triton. 128 experts, top-4, D = I = 2880, clamped SwiGLU. M is the MoE batch size (tokens per forward); “(N experts)” is the number of experts the routing activates at that M. Bars show full-MoE latency (routing + both GEMMs + SwiGLU + combine), as rocprofv3 GPU time on identical routing, all validated to cos = 1.0 vs a torch reference; lower is better. (a) Decode, M = 1 to 16 (4/8/15/31/53 experts active). (b) Prefill, M = 512 to 8192 (all 128 active). Measured at TokenSpeed commit 1492030 and AITER version 0.1.13 on ROCm 7.2.1.
+
+Across kernel variants, the important theme is the same: the backend can use CDNA4 scaled MFMA, software-pipelined loads and compute, fused SwiGLU, FP8-output quantization, bias handling, scale swizzling, weight preshuffling, and ragged scheduling without pushing those choices into model code.
+
+Multi-Silicon Support
+
+The above talks about GPT-OSS on AMD MI355X. The same kernel API also supports NVIDIA paths. In the current GPT-OSS Blackwell configuration, attention uses the trtllm MHA backend through FlashInfer-exposed TensorRT-LLM wrappers, and MXFP4 MoE uses the flashinfer_trtllm solution. The runtime still purely calls mha_prefill, mha_decode_with_kvcache and moe_apply.
+
+Multi-silicon support is therefore not two unrelated stacks. AMD and NVIDIA support are sibling implementations behind the same kernel API, registry, and selection model. Platform-specific kernels can use the best available backend for each silicon target, while the TokenSpeed runtime keeps a consistent execution path for the model.
+
+End-to-end performance
+
+The figure below shows the GPT-OSS 120B output throughput performance measured on AMD MI355X. It compares two TokenSpeed configurations: the original portable Triton-backed attention and MoE path, and the optimized Gluon-backed path. Across the 20 measured points, the Gluon-backed path improves output throughput at every input/output length and concurrency setting. The speedups range from 1.6x to 3.6x over the portable Triton path. Overall, these key Gluon kernels bring TokenSpeed to competitive performance for GPT-OSS 120B on AMD MI355X.
+
+End-to-end output throughput for GPT-OSS-120B on one MI355X (CDNA4) GPU: TokenSpeed Triton (attention and MoE) backend vs TokenSpeed Gluon backend. The benchmark serves amd/gpt-oss-120b-w-mxfp4-a-fp8 through the TokenSpeed OpenAI-compatible HTTP server with TP size 1 on a single GPU, with prefix caching disabled. All numbers are collected using random prompts and measured by EvalScope. Measured at TokenSpeed commit 1492030 on ROCm 7.2.1. For more detail, please refer to our performance CI job: perf-gpt-oss-120b-mxfp4-mi35x.
+
+The result highlights the role of the TokenSpeed-kernel design. These gains did not require a separate AMD-specific GPT-OSS serving path. Instead, AMD performance was acquired by implementing the same public attention and MoE contracts with specialized Gluon kernels, registering their platform and shape constraints, and letting the selector dispatch to them when a request matches. This layered design keeps a portable baseline in place while shortening the optimization cycle: developers can capture important production shapes, specialize kernels for those shapes, validate them with the same numerics and benchmark tools, and route the runtime to the optimized implementation through selection metadata.
+
+Moreover, benefit from this design, these optimized kernels on AMD can also be reused beyond TokenSpeed. We released the AMD-specific attention and MoE kernels as tokenspeed-kernel-amd, separate from the TokenSpeed runtime, so other inference engines can adopt them without taking a dependency on the full TokenSpeed serving stack. It has been adopted by vLLM.
+
+Conclusion
+
+TokenSpeed-kernel is designed to make kernels a first-class subsystem rather than a collection of hidden fast paths. Its high-level features include a clean public API, structured format and trait metadata, centralized registration and selection, portable and specialized implementation paths, and plugin support. Not all of them have been finalized; we are actively working on validating and improving them.
+
+The benefit is not only cleaner code. It changes how new hardware support can land. NVIDIA GPUs and AMD GPUs are both first-party targets in this design. GPT-OSS 120B on AMD demonstrates how this model works in practice. That matters as inference becomes more heterogeneous across models, formats, and GPU generations. As more TokenSpeed models move to the public TokenSpeed-kernel APIs, the same mechanism will make it easier to bring them up on AMD GPUs and keep improving them without duplicating/switching runtime logic.
+
+Acknowledgements
+
+This work builds on the broader open-source inference ecosystem, including PyTorch, Triton, and many other projects that continue to raise the bar for serving systems and GPU kernels.
+
+We thank the TokenSpeed team and the LightSeek Foundation for the runtime and systems work behind this effort. We also thank AMD for its collaboration and compute support, which made the GPT-OSS 120B on AMD optimization work possible that can extend benefits to the whole community.
+
+ 
