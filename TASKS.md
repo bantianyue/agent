@@ -23,7 +23,7 @@
 | 18 | 2026-07-07 | https://agenticlearning.ai/context-tuning/ | context-tuning | context-tuning | 把KV缓存变成可训练记忆：Context Tuning让LLM免权重微调 | cover.png | ✅ 已推送 |
 | 19 | 2026-07-07 | https://arxiv.org/html/2607.02512v1 | 2607-02512 | arxiv-context-tuning | PAW：把函数编译成权重，0.6B干翻32B | cover.png | ✅ 已推送 |
 | 20 | 2026-07-07 | https://arxiv.org/html/2601.15165v4 | 2601-15165 | flexibility-trap-dllm | 灵活性陷阱：dLLM任意顺序反而限制了推理潜力 | cover.png | ✅ 已推送 |
-| 21 | 2026-07-07 | https://arxiv.org/html/2607.02770v1 | 2607-02770 | arxiv-2607-02770 | TBD | TBD | 📥 进行中 |
+| 21 | 2026-07-07 | https://arxiv.org/html/2607.02770v1 | 2607-02770 | arxiv-2607-02770 | Gemma 4 技术报告：无编码器与思考模式上车 | cover.png | ✅ 已推送 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -183,3 +183,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-07 20:52 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-07 21:03 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0erzyBxu6y6_Pvc8ZKsXHHGDCjavTWFLoZtu-2KhVhPc |
