@@ -55,7 +55,7 @@
 等模型回头补这些连接词时，已生成的未来上下文把歧义消解了。结果如图7：AR顺序下这些分叉token保持高熵（多路径可行），任意顺序下熵急剧下降。模型不再在分支点做开放式导航，而是"回顾性对齐"去桥接已定结论。作者称此现象为**熵退化（entropy degradation）**。
 
 ![](x7.png)
-<span style="font-size:12px;color:rgb(153,153,153);">图7：全局平均熵两者相当，但逻辑分叉处的熵（蓝条）在任意顺序下显著下降</span>
+<span style="font-size:12px;color:rgb(153,153,153);">图7：全局平均熵两者接近，但逻辑分叉处的熵（蓝条）在任意顺序下显著下降</span>
 
 一句话总结：任意顺序偏好推理时的"利用"而非"探索"，提前把轨迹锚定到特定结果，牺牲了RL所需的广泛解覆盖。
 
@@ -67,7 +67,7 @@
 - **难解序列似然**：轨迹空间随O(N!)增长，精确似然不可计算，被迫依赖ELBO近似
 - **采样器-学习者错配**：基于置信度的rollout采样策略与ELBO瞄准的原始分布不一致，梯度被偏置
 
-JustGRPO的思路极其简单：**RL训练期直接放弃任意顺序，把dLLM当成一个AR策略**。构造输入x~_k（过去观测、未来掩码），只取位置k的logits作为下一token概率，在dLLM骨干上定义一个代理AR策略π_θ^AR。这样把对排列的难解边际化，转化为可精确计算的似然，标准GRPO无需任何修改即可直接套用。
+JustGRPO的思路异常简单：**RL训练期直接放弃任意顺序，把dLLM当成一个AR策略**。构造输入x~_k（过去观测、未来掩码），只取位置k的logits作为下一token概率，在dLLM骨干上定义一个代理AR策略π_θ^AR。这样把对排列的难解边际化，转化为可精确计算的似然，标准GRPO无需任何修改即可直接套用。
 
 关键是这个AR约束**只用于训练期的探索脚手架**：不加因果掩码、不改双向注意力、不动离散扩散架构。推理能力的激发（受益于顺序探索）与推理执行（受益于并行解码）被解耦。
 
@@ -112,7 +112,7 @@ JustGRPO的启示是"做减法"：与其在难解的组合轨迹上硬做RL适�
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tQmHn4iCqUzh3_SVZtvgzQ" target="_blank" data-linktype="2">Agent记忆百家争鸣: 没有统一架构,取决于具体任务; 或许还缺理论突破</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/mHlrMsXRCrzZrN-GTODqug" target="_blank" data-linktype="2">四层Loop彻底告别Prompt：前两层卷疯了，后两层还是处女地</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/qHscVKN06FEGTru80STlxA" target="_blank" data-linktype="2">M²A多模态双层混合记忆系统：记住你的每一次变化</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/_4vgKCTSir14mhtdvs7_HA" target="_blank" data-linktype="2">美团开源LongCat-2.0 (OpenRouter原Owl Alpha)解读：1.6T 参数，...</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/_4vgKCTSir14mhtdvs7_HA" target="_blank" data-linktype="2">美团开源LongCat-2.0 (OpenRouter原Owl Alpha)解读：1.6T参数，...</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4Iz5SjE4D240EL4MmKrWZQ" target="_blank" data-linktype="2">OpenAI Dreaming记忆系统：从记住你到理解你</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/MLFtBJrXFoHn6IPj1Z_36Q" target="_blank" data-linktype="2">苹果Apple感知压缩新突破PICO：图像画质不降低，体积只有1/3</a><br>
 </span>
