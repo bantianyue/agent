@@ -32,18 +32,17 @@ lower_tag_end = html.find('>', lower_start) + 1
 new_lower = '<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin:18px 0;"><div style="text-align:center;"><strong style="font-size:15px;color:#1a6ba0;">下半部分 · 论文核心技术点</strong></div></div>'
 html = html[:lower_tag_start] + new_lower + html[lower_tag_end:]
 
-# 4. 结语 → 暖色卡 + 增加A社内部掌握文案
+# 4. 结语 → 暖色卡 + 修改文案
 jieyu_span = '<span leaf="">结语</span>'
 jieyu_start = html.find(jieyu_span)
 jieyu_tag_start = html.rfind('<', jieyu_start - 30, jieyu_start)
 jieyu_tag_end = html.find('>', jieyu_start) + 1
-
 reference_start = html.find('参考：')
+
 jieyu_inner = html[jieyu_tag_end:reference_start]
 
-# Modify the 反事实反思训练 text inside jieyu_inner
-old_text = '&nbsp;反事实反思训练可能更值得盯：**它不训练目标行为，只训练模型在被追问时说什么，就能改变原始语境下不诚实分数从0.25到0.07。如果这种技术能被泛化到更抽象或更具体的倾向上，它就是一种直接在概念级别植入原则的路径**。'
-new_text = '&nbsp;反事实反思训练可能更值得盯——**这项内部技术如今已公开发表，意味着Anthropic在自己最前沿的模型上早已掌握并初步验证了其效果**。它不训练目标行为本身，只训练模型在被追问时说什么，就能让原始语境下不诚实分数从0.25降到0.07。如果这种技术能被泛化到更抽象或更具体的倾向上，它就是一种直接在概念级别植入原则的路径。'
+old_text = '反事实反思训练可能更值得盯：**它不训练目标行为，只训练模型在被追问时说什么，就能改变原始语境下不诚实分数从0.25到0.07。如果这种技术能被泛化到更抽象或更具体的倾向上，它就是一种直接在概念级别植入原则的路径**。'
+new_text = '反事实反思训练可能更值得盯——**这项内部技术如今已公开发表，意味着Anthropic在自己最前沿的模型上早已掌握并初步验证了其效果**。它不训练目标行为本身，只训练模型在被追问时说什么，就能让原始语境下不诚实分数从0.25降到0.07。如果这种技术能被泛化到更抽象或更具体的倾向上，它就是一种直接在概念级别植入原则的路径。'
 jieyu_inner = jieyu_inner.replace(old_text, new_text)
 
 new_jieyu = f'''<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
@@ -55,22 +54,16 @@ new_jieyu = f'''<div style="background:#f5f0eb;padding:14px 16px 10px 16px;borde
 </div>'''
 html = html[:jieyu_tag_start] + new_jieyu + html[reference_start:]
 
-# Save
 with open(r"D:\06_Hermes\articles\workspace-agent-brain\formatted_content.html", "w", encoding="utf-8") as f:
     f.write(html)
 
 # Verify
 jieyu_pos = html.find('反事实反思训练可能更值得盯')
-if jieyu_pos > 0:
-    context = html[jieyu_pos:jieyu_pos+300]
-    text = re.sub(r'<[^>]+>', ' ', context)
-    text = re.sub(r'\s+', ' ', text).strip()
-    print("结语修改后:")
-    print(text[:200])
-else:
-    print("⚠️ 未找到")
+context = html[jieyu_pos:jieyu_pos+300]
+text = re.sub(r'<[^>]+>', ' ', context)
+text = re.sub(r'\s+', ' ', text).strip()
+print("结语修改后:", text[:250])
 
-# Count images
 imgs = re.findall(r'<img[^>]*src="([^"]+)"', html)
 print(f"\n图片数: {len(imgs)}")
 print(f"内容长度: {len(html)}")
