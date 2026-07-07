@@ -14,7 +14,7 @@
 
 ## 为什么需要内核抽象层
 
-内核决定服务栈快慢，但"最好的内核"几乎从不固定：它取决于模型架构、张量形状、量化格式、GPU代数、厂商库，以及这次调用在服务decode还是prefill。引擎为覆盖所有情况堆出一堆路径，没有硬边界时，后端选择逻辑就会泄漏进模型代码和runtime——加新模型要改无关runtime路径，加新芯片要把设备检查贯穿模型各层。TokenSpeed-kernel的设计就是把这种复杂性收拢到一处。
+内核决定服务栈快慢，但"最好的内核"几乎从不固定：它取决于模型架构、张量形状、量化格式、GPU代数、厂商库，以及这次调用在服务decode还是prefill。引擎为覆盖所有情况堆出一堆路径，没有硬边界时，后端选择逻辑就会泄漏进模型代码和runtime：加新模型要改无关runtime路径，加新芯片要把设备检查贯穿模型各层。TokenSpeed-kernel的设计就是把这种复杂性收拢到一处。
 
 ## 三条设计原则
 
@@ -26,7 +26,7 @@
 
 ## 分层内核系统
 
-runtime通过通用公开API（`mha_prefill`、`mha_decode_with_kvcache`、`moe_apply`）进入，这些API与平台无关——只描述算子问题（张量、格式、模型特征、约束），由选择器结合当前平台和已注册特征挑实现。
+runtime通过通用公开API（`mha_prefill`、`mha_decode_with_kvcache`、`moe_apply`）进入，这些API与平台无关：只描述算子问题（张量、格式、模型特征、约束），由选择器结合当前平台和已注册特征挑实现。
 
 ![](img2.png)
 <span style="font-size:12px;color:rgb(153,153,153);">分层内核系统：runtime通过通用公开API进入，选择器将请求映射到后端内核</span>
@@ -52,7 +52,7 @@ GPT-OSS同时压attention（带sinks的MHA + 滑动窗口混合）和MoE（MXFP4
 
 ## Gluon：AMD内核路径
 
-性能关键的attention和MoE用Gluon实现——它是Triton家族的DSL，暴露CDNA4原语：异步拷贝、scaled MFMA、buffer load/store，以及显式软件流水线（多共享内存缓冲 + `async_wait` 轮转）。decode阶段靠它隐藏内存延迟、让矩阵核保持忙碌，而不把流水线细节推给TokenSpeed runtime。
+性能关键的attention和MoE用Gluon实现：它是Triton家族的DSL，暴露CDNA4原语：异步拷贝、scaled MFMA、buffer load/store，以及显式软件流水线（多共享内存缓冲 + `async_wait` 轮转）。decode阶段靠它隐藏内存延迟、让矩阵核保持忙碌，而不把流水线细节推给TokenSpeed runtime。
 
 ![](img6.png)
 <span style="font-size:12px;color:rgb(153,153,153);">Gluon attention内核代码片段，直接暴露CDNA4原语</span>
