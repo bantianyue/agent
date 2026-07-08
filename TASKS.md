@@ -10,18 +10,18 @@
 | 5 | 2026-07-06 | https://x.com/tanayj/status/2072766211256119475 | 2072766211256119475 | rl-beyond-verifiable | RL Beyond the Verifiable：当RL的奖励信号不可验证时 | cover.png | ✅ 已推送 |
 | 6 | 2026-07-06 | https://moondream.ai/blog/popping-the-gpu-bubble | popping-the-gpu-bubble | popping-the-gpu-bubble | Popping the GPU Bubble：Moondream 如何用流水线解码消除 GPU 闲置 | cover.png | ✅ 已推送 |
 | 7 | 2026-07-06 | https://x.com/tanayj/status/2072766211256119475 | 2072766211256119475 | 2072766211256119475 | TBD | TBD | 📥 进行中 |
-| 8 | 2026-07-06 | https://arxiv.org/html/2606.28436v1 | 2606-28436 | long-sequence-moe | Dockerless：无需Docker环境的代码补丁验证器，编码Agent训练不再卡在跑测试 | cover.png | ✅ 已推送 |
+| 8 | 2026-07-06 | https://arxiv.org/html/2606.28436v1 | 2606-28436 | dockerless-patch-verifier | Dockerless：无需Docker环境的代码补丁验证器，编码Agent训练不再卡在跑测试 | cover.png | ✅ 已推送 |
 | 9 | 2026-07-06 | https://arxiv.org/html/2605.10899v1 | 2605-10899 | rubricem-meta-rl | RubricEM：评分标准引导的深度研究Agent训练框架 | cover.png | ✅ 已推送 |
 | 10 | 2026-07-06 | https://mimo.xiaomi.com/zh/blog/mimo-tilert-1000tps | mimo-tilert-1000tps | mimo-1000tps | 小米MiMo x TileRT：8卡GPU让1T参数模型跑出1000 TPS，FP4+DFlash+TileRT全解读 | cover.png | ✅ 已推送 |
-| 11 | 2026-07-06 | https://x.com/LMDFinance/status/2074083831653773384 | 2074083831653773384 | 2074083831653773384 | 英伟达Rubin全面碾压Blackwell？五大升级详解，从HBM4到自研CPU | cover.png | ✅ 已推送 |
-| 12 | 2026-07-06 | https://x.com/LMDFinance/status/2074083831653773384 | 英伟达Rubin Ultra / Vera Rubin NVL72全面对比 | 2074083831653773384 | 英伟达Rubin全面碾压Blackwell？五大升级详解，从HBM4到自研CPU | cover.png | ✅ 已推送 |
+| 11 | 2026-07-06 | https://x.com/LMDFinance/status/2074083831653773384 | 2074083831653773384 | nvidia-rubin-vs-blackwell | 英伟达Rubin全面碾压Blackwell？五大升级详解，从HBM4到自研CPU | cover.png | ✅ 已推送 |
+| 12 | 2026-07-06 | https://x.com/LMDFinance/status/2074083831653773384 | 英伟达Rubin Ultra / Vera Rubin NVL72全面对比 | nvidia-rubin-vs-blackwell | 英伟达Rubin全面碾压Blackwell？五大升级详解，从HBM4到自研CPU | cover.png | ✅ 已推送 |
 | 13 | 2026-07-06 | https://arxiv.org/html/2601.15165v4 | 2601-15165 | flexibility-trap | TBD | TBD | 📥 进行中 |
-| 14 | 2026-07-07 | https://x.com/akshay_pachaar/status/2074200571834515574 | 2074200571834515574 | 2074200571834515574 | 如何从零构建一个 RL 环境：拆掉最后一道壁垒 | cover.png | ✅ 已推送 |
+| 14 | 2026-07-07 | https://x.com/akshay_pachaar/status/2074200571834515574 | 2074200571834515574 | rl-environment-from-scratch | 如何从零构建一个 RL 环境：拆掉最后一道壁垒 | cover.png | ✅ 已推送 |
 | 15 | 2026-07-07 | https://transformer-circuits.pub/2026/workspace/index.html | index-html | workspace-agent-brain | Anthropic 揭示 LLM 里的「意识可及性」：J-lens 与全局工作空间 | cover.png | ✅ 已推送 |
 | 16 | 2026-07-07 | https://mimo.xiaomi.com/zh/blog/mimo-code-long-horizon | mimo-code-long-horizon | mimo-code-long-horizon | 小米MiMo Code：让编码Agent跑完200步不崩的三条线 | cover.png | ✅ 已推送 |
 | 17 | 2026-07-07 | https://lilianweng.github.io/posts/2026-07-04-harness/ | 2026-07-04-harness | agent-harness-lilianweng | Harness工程：递归自我改进的主战场不在权重 | cover.png | ✅ 已推送 |
 | 18 | 2026-07-07 | https://agenticlearning.ai/context-tuning/ | context-tuning | context-tuning | 把KV缓存变成可训练记忆：Context Tuning让LLM免权重微调 | cover.png | ✅ 已推送 |
-| 19 | 2026-07-07 | https://arxiv.org/html/2607.02512v1 | 2607-02512 | arxiv-context-tuning | PAW：把函数编译成权重，0.6B干翻32B | cover.png | ✅ 已推送 |
+| 19 | 2026-07-07 | https://arxiv.org/html/2607.02512v1 | 2607-02512 | paw-compile-weights | PAW：把函数编译成权重，0.6B干翻32B | cover.png | ✅ 已推送 |
 | 20 | 2026-07-07 | https://arxiv.org/html/2601.15165v4 | 2601-15165 | flexibility-trap-dllm | 灵活性陷阱：dLLM任意顺序反而限制了推理潜力 | cover.png | ✅ 已推送 |
 | 21 | 2026-07-07 | https://arxiv.org/html/2607.02770v1 | 2607-02770 | arxiv-2607-02770 | Gemma 4 技术报告：无编码器与思考模式上车 | cover.png | ✅ 已推送 |
 | 22 | 2026-07-07 | https://pytorch.org/blog/lightseek-tokenspeed-kernel/ | lightseek-tokenspeed-kernel | lightseek-tokenspeed-kernel | TokenSpeed-kernel：把推理内核做成一等公民 | cover.png | ✅ 已推送 |
@@ -29,11 +29,11 @@
 | 24 | 2026-07-08 | https://x.com/haoailab/status/2072472882014486610 | haoailab status | DSpark_vs_JetSpec | DeepSeek极限吞吐DSprk Vs. 阶跃星辰极限时延JetSpec 因果性成推测解码新战场 | cover.png | ✅ 已推送 |
 | 25 | 2026-07-08 | https://www.liquid.ai/blog/antidoom | antidoom | liquid-antidoom | Liquid Antidoom：一个手术刀式拔除思维死循环的方法 | cover.png | ✅ 已推送 |
 | 26 | 2026-07-08 | https://arxiv.org/html/2602.18196v5 | 2602-18196 | arxiv-2602-18196 | RAT+：训练稠密、推理稀疏，一个模型切出64倍效率 | cover.png | ✅ 已推送 |
-| 27 | 2026-07-08 | https://x.com/shreybirmiwal/status/2074666256402448732 | 2074666256402448732 | 2074666256402448732 | 从第一性原理讲透推测解码：最高8倍无损加速 | cover.png | ✅ 已推送 |
+| 27 | 2026-07-08 | https://x.com/shreybirmiwal/status/2074666256402448732 | 2074666256402448732 | speculative-decoding-primer | 从第一性原理讲透推测解码：最高8倍无损加速 | cover.png | ✅ 已推送 |
 | 28 | 2026-07-08 | https://publish.obsidian.md/ueaj/Machine+Learning/Inference/Masquerade | Masquerade | masquerade | 把投机解码塞进主模型：Masquerade 闪蒸馏复盘 | cover.png | ✅ 已推送 |
 | 29 | 2026-07-08 | https://x.com/MichaelGannotti/status/2074552763326091381 | 2074552763326091381 | gpt-oss-nvfp4-mxfp4 | NVFP4对决MXFP4：GPT-OSS-120B原生上Blackwell | cover.png | ✅ 已推送 |
 | 30 | 2026-07-08 | https://x.com/AlphaSignalAI/status/2074496013675696300 | 2074496013675696300 | pxpipe-claude-code-token | 省60% token账单的野路子：把上下文发成图片 | cover.png | ✅ 已推送 |
-| 31 | 2026-07-08 | https://arxiv.org/html/2606.18394v3 | 2606-18394 | arithmetic-reasoning-icl | JetSpec：并行树草稿打破投机解码扩展天花板 | cover.png | ✅ 已推送 |
+| 31 | 2026-07-08 | https://arxiv.org/html/2606.18394v3 | 2606-18394 | jetspec-parallel-draft | JetSpec：并行树草稿打破投机解码扩展天花板 | cover.png | ✅ 已推送 |
 | 32 | 2026-07-08 | https://arxiv.org/html/2606.15007v1 | 2606-15007 | mamba-diffusion | Nemotron 3 Ultra技术解读：Mamba-Attention混血+NVFP4量化，推理吞吐5.9× | cover.png | ✅ 已推送 |
 |---|------|--------|--------|----------|----------|------|----------|
 
@@ -95,7 +95,7 @@
 | 2026-07-06 15:14 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0Wt9QA1jJdUWJtZeq0_lAB5YcvdSW2QZh8qEpUUxWCRD |
 | 2026-07-06 15:14 | 🔄 | 章节格式修复后重新推送 |
 
-### #8 - long-sequence-moe
+### #8 - dockerless-patch-verifier
 
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
@@ -117,13 +117,13 @@
 | 2026-07-06 19:59 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-06 20:06 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0XA-K92begYaXGQiS2xOx2jY5fyC7Dx8Cdfw-XqaW4_M |
 
-### #11 - 2074083831653773384
+### #11 - nvidia-rubin-vs-blackwell
 
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-06 22:10 | 📥 开始 | 收到 URL，开始提取内容 |
 
-### #12 - 2074083831653773384
+### #12 - nvidia-rubin-vs-blackwell
 
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
@@ -137,7 +137,7 @@
 | 2026-07-06 23:01 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-06 23:03 | 📝 | 写作中 |
 
-### #14 - 2074200571834515574
+### #14 - rl-environment-from-scratch
 
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
@@ -174,7 +174,7 @@
 | 2026-07-07 19:58 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-07 20:05 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0QS7hjad40_5-tzBMhMxmbalCL4Mj6ZLPGCm-dk-tteW |
 
-### #19 - arxiv-context-tuning
+### #19 - paw-compile-weights
 
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
@@ -232,7 +232,7 @@
 | 2026-07-08 11:43 | ⏳ | 推送中 |
 | 2026-07-08 11:44 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0Ufbl1EXp__ykupEJVXyBczWNmPKNcrL7gUOWBZBe-6y |
 
-### #27 - 2074666256402448732
+### #27 - speculative-decoding-primer
 
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
@@ -261,7 +261,7 @@
 | 2026-07-08 15:40 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-08 15:45 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0f3OIukMePPVCeu76NoykTWobqTDYYla6fUhqjHEvy8F |
 
-### #31 - arithmetic-reasoning-icl
+### #31 - jetspec-parallel-draft
 
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
