@@ -1,0 +1,95 @@
+\section{Method: TurnOPD}
+\label{sec:method}
+Based on the analysis in the diagnosis section, we identify two main issues in applying OPD to agents. First, the per-turn KL signal decreases sharply with turn depth, especially in the early training stages. The KL loss is dominated by shallow turns. This suggests that it is not necessary to wait until the end of the full rollout to compute the KL loss. Shortening the rollout horizon can improve overall training efficiency. Second, after a trajectory is collected, trajectory-level normalization assigns loss mass according to token count. This approach can neglect deeper decision turns once the shallow interaction patterns have converged. 
+
+In this section, we propose \textbf{TurnOPD}, a turn-level budgeting strategy for efficient OPD of long-horizon agents. TurnOPD consists of two budget controllers. The first controller adaptively budgets rollout depth. The second controller progressively shifts KL loss allocation from trajectory-level matching toward turn-balanced decision refinement.
+
+
+% \yuhang{目前这里连贯性比较差，还需要与前文的分析连贯起来。另外针对external mismatch，需要说明存在一个理论最优的rollout horizon H*。然后这个存在性证明放到附录里面。然后再说针对external mismatch部分，我们通过构建数学模型来逼近这个H*，从而达到针对不同模型和任务，能够自适应地控制student rollout深度.具体说的时候先引入H-eff和H-cov并分别说明其motivation和合理性，之后说明其计算方式，然后再说明最终的H-ctrl是二者取最大值。}
+% TurnOPD uses one shared \textbf{alignment-maturity} clock to address the two budget
+% mismatches from Section~\ref{sec:diag}. For the \textbf{external} mismatch, TurnOPD
+% builds an online proxy for how deep rollouts should be collected. For the
+% \textbf{internal} mismatch, TurnOPD shifts loss aggregation from trajectory-level
+% matching to turn-balanced refinement. The two interventions act on different
+% resources: collection depth and loss mass.
+
+% \textbf{Latent target.} The diagnosis suggests that there is a task- and
+% student-dependent rollout depth that balances supervision value against
+% interaction cost. We denote this latent optimum by $H^\star$: the depth that
+% would maximize validation improvement per unit collection cost if the full
+% future training effect of each candidate horizon were observable. Since
+% long-horizon training uses a finite rollout cap, such an optimizer exists by a
+% two-sided efficiency--coverage sandwich (Appendix~\ref{app:rollout-depth-existence}).
+% The method therefore does not try to identify $H^\star$ directly; it builds an
+% online proxy from measurable turn statistics.
+
+% \subsection{The Alignment-Maturity Clock}
+% \label{sec:method:clock}
+
+% We define a progress signal $\mathrm{progress}\in[0,1]$ from KL-alignment maturity
+% rather than raw step count: it measures how far the coverage-region KL has matured
+% relative to its historical peak. Using alignment rather than wall-clock makes the
+% curriculum self-paced; it slows when the student is still aligning and advances
+% when alignment saturates.
+
+\subsection{External Mismatch: Adaptive Rollout-Depth Budgeting}
+\label{sec:method:A}
+A key limitation identified in the diagnosis is the mismatch between rollout depth and the effective utility of supervision: the optimal trajectory length for data collection should account for both task and student progress to maximize the value of supervision per unit cost. Let $H^\star$ denote this optimal (but unobservable) rollout horizon, the depth yielding the greatest marginal validation improvement for the supervision cost. The existence of $H^\star$ is guaranteed by an efficiency–coverage tradeoff: too shallow a rollout under-explores, while overly deep rollouts waste computation on low-signal regions. A full proof is provided in Appendix~\ref{app:rollout-depth-existence}.
+
+However, $H^\star$ cannot be measured directly during training. Instead, TurnOPD estimates it online by synthesizing two complementary signals: an efficiency-centric proxy and a coverage-based lower bound. Specifically, we define the rollout-depth budget controller as
+\begin{equation}
+H_{\mathrm{ctrl}} = \max\big(\Heff,\, \Hcov\big),
+\end{equation}
+where $\Heff$ captures the centroid of effective supervision and $\Hcov$ enforces minimum task completion coverage.
+
+\textbf{Efficiency-side Mass.} To construct $\Heff$, we treat the reverse-KL signal over turns as a survivor-weighted distribution of distillation mass. Raw KL may be unreliable as a behavioral-error measure, but still useful as an observable supervision-value and cost proxy. For each turn $t$, let $K_t$ be the mean per-token reverse-KL on probed student rollouts and $n_t/n_0$ the on-policy survivor probability. We define
+\begin{equation}
+m_t = [K_t]_+\,\cdot \frac{n_t}{n_0}, \qquad
+q_t = \frac{m_t}{\sum_j m_j + \epsilon},
+\end{equation}
+where $[K_t]_+$ denotes the positive part of $K_t$\footnote{%
+In practice, $K_t$ can be slightly negative due to noise, so $[K_t]_+$ ensures $m_t$ is stable and non-negative.
+}.
+$m_t$ estimates the expected value of distillation signal contributed by turn $t$, and $q_t$ normalizes over all turns. The centroid and its discretized projection are then
+\begin{equation}
+\bar H_{\mathrm{eff}} = \sum_t t\,q_t, \qquad
+\Heff = \mathrm{round}(\bar H_{\mathrm{eff}}).
+\end{equation}
+This first-moment statistic responds adaptively: when meaningful supervision mass is concentrated in shallow turns, $\Heff$ remains shallow; when a correction tail persists at deeper turns, $\Heff$ deepens accordingly. Relative weighting ensures robustness to variation in absolute KL magnitude.
+
+\textbf{Coverage-side Lower Bound.} To prevent overly aggressive truncation, the coverage component sets a minimum rollout depth based on successful completions:
+\begin{equation}
+\Hcov = \hat Q_p(L_{\mathrm{succ}}) = \min\{H: F_{\mathrm{succ}}(H)\ge p\}, \qquad
+F_{\mathrm{succ}}(H) = 1 - \frac{n^{\mathrm{succ}}_{H+1}}{n^{\mathrm{succ}}_1}, \quad p=0.80,
+\end{equation}
+where $\Hcov$ is the $p$-quantile of the success-conditioned completion depth. This ensures the rollout is deep enough to include at least 80\% of successful trajectories, as estimated from periodic probe rollouts.
+
+\textbf{Dynamic Update.}
+The controller is causal: it updates the uncensored turn statistics for $\Heff$ and $\Hcov$ using periodic full-length probe rollouts, while routine training steps use only the current cap $\hat H_k$. Truncated rollouts still contribute to OPD updates, but are excluded from estimating rollout depth, since later turns are unobserved and would bias the statistics if naively included. Periodic full-depth probes are essential to prevent bias and cascading drift that would arise from directly relying on capped trajectories. 
+
+After each probe snapshot, TurnOPD sets $H_{\mathrm{ctrl},k} = \max(H_{\mathrm{eff},k}, H_{\mathrm{cov},k})$ and applies exponential moving average smoothing:
+\begin{equation}
+\bar H_k = (1-\alpha_{\mathrm{ema}})\bar H_{k-1}
+          + \alpha_{\mathrm{ema}} H_{\mathrm{ctrl},k}, \qquad
+\hat H_{k+1} = \mathrm{clip}\big(\mathrm{round}(\bar H_k)+1,\,
+H_{\min},\,H_{\max}\big).
+\end{equation}
+The $+1$ converts from a 0-based turn index to the actual rollout depth.
+
+\subsection{Internal Mismatch: Progressive Turn-Normalized Loss Budgeting}
+\label{sec:method:B}
+
+A second challenge is the internal budget mismatch: with standard trajectory-level normalization, most of the KL loss is assigned to shallow turns, so deeper turns often receive little or no supervision—especially at later training stages, when optimizing long-horizon decisions becomes crucial. This is reasonable early on (when shallow errors dominate), but later hampers correction of harder, deeper decisions.
+
+TurnOPD remedies this by introducing a linear blend between trajectory-level and turn-level normalization, shifting the loss allocation over the course of training. Specifically, let $n_t$ be the number of tokens at turn $t$ (with $T$ total turns). The standard trajectory-based weight for turn $t$ is $q_t^{\mathrm{traj}}=n_t/\sum_j n_j$, while the uniform turn-wise weight is $q_t^{\mathrm{turn}}=1/T$. The final weight is a linear interpolation:
+\[
+q_t^{\mathrm{blend}} = (1-\alpha)\,q_t^{\mathrm{traj}} + \alpha\,q_t^{\mathrm{turn}},
+\]
+where the blend coefficient $\alpha$ is tied to normalized training progress, e.g., $\alpha=\mathrm{clip}((\text{progress}-s)/(e-s),\,0,\,1)$ with $\text{progress} = k/K$ (step $k$ of $K$, and typically $s=0, e=1$).
+
+Initially ($\alpha=0$), loss follows token mass, ensuring stability in early stages. As $\alpha$ grows, supervision smoothly shifts to cover all turns more equally, explicitly mitigating turn-depth imbalance and enabling better learning of deep decisions.
+
+\subsection{Unification and Algorithm}
+\label{sec:method:alg}
+
+The two interventions regulate complementary resources: rollout depth determines how much interaction is collected, while loss normalization dictates how supervision is allocated over the collected tokens. For the complete training algorithm and all hyperparameters, see Appendix~\ref{app:hyper}.
