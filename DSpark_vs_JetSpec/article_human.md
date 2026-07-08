@@ -45,6 +45,10 @@ DSpark保留了便宜的并行草稿主干，同时加了一个轻量的串行�
 
 ![](img11.png)
 
+
+![](JetSpec.png)
+<span style="font-size:12px;color:rgb(153,153,153);">JetSpec</span>
+
 **推动延迟极限：JetSpec把草稿预算变成更高接受率。** 低并发下现代AI加速器有更多闲置FLOPs，关键问题就变成如何把更高的计算预算转化为每一步更多的接受token。JetSpec用因果并行草稿头生成路径条件化的草稿树，更深的节点取决于同一分支上更早的token。按深度的接受度剖面（图4）显示，无论编程还是数学推理负载，JetSpec都持续压过DFlash。
 
 ![](img4.jpg)
@@ -75,14 +79,17 @@ DSpark和JetSpec不是路线之争，而是同一前沿的两个侧面，一个�
 ---
 
 <span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/iVe2e5xiOCTUOaEiqpnZyw" target="_blank" data-linktype="2">本周值得看的10篇AI论文：Agent编译让速度提升10倍；PAPO - 过程对齐策略优化</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/Vn6IytoT8knZhQF-vLcGLg" target="_blank" data-linktype="2">Claude Code Workflow深度技术洞察：DAG不再由人画</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2OmwXVHkBKsN0nm0N6aAKA" target="_blank" data-linktype="2">深度拆解OpenAI ChatGPT记忆Dreaming：和你想的不一样</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/lVZUh5t0nbY5ni1RaDOVAQ" target="_blank" data-linktype="2">AI Agent的钱都花在哪了？首篇Token消耗系统性研究深入解读</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/pCRjhls1WFaiRglb2MtjBw" target="_blank" data-linktype="2">蚂蚁CausalMix: 将数据混合从超参搜索转换成因果推断</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0zKdjRmWg3TbL5Y3HGO3fA" target="_blank" data-linktype="2">从P/D分离到A/F分离：从学术原型变成行业标准</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/crfkhSIuMZJxjNA0Md8dXw" target="_blank" data-linktype="2">李飞飞：世界模型的功能分类</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/mqTab0qwrT95DVrxTllmcQ" target="_blank" data-linktype="2">Torch解析系列一：深入理解FX Graphs</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/sQTgsN529YAjXOQ0Y0bJuA" target="_blank" data-linktype="2">微软SkillOpt: 用Skill文件梯度下降法优化Agent技能，52项测试全胜</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/a0ZppQR7VpVc_xEDqgYY9w" target="_blank" data-linktype="2">Prompt →Context→Harness 演变背后的逻辑：认知逐步外化，为模型减</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FkaboLbPXA36kHkDgv8aSQ" target="_blank" data-linktype="2">Interpreter Skills：当Agent Skill 从说明书变成可执行代码</a><br>
 </span>
 
 ---
