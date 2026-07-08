@@ -32,7 +32,7 @@
 | 27 | 2026-07-08 | https://x.com/shreybirmiwal/status/2074666256402448732 | 2074666256402448732 | 2074666256402448732 | 从第一性原理讲透推测解码：最高8倍无损加速 | cover.png | ✅ 已推送 |
 | 28 | 2026-07-08 | https://publish.obsidian.md/ueaj/Machine+Learning/Inference/Masquerade | Masquerade | masquerade | 把投机解码塞进主模型：Masquerade 闪蒸馏复盘 | cover.png | ✅ 已推送 |
 | 29 | 2026-07-08 | https://x.com/MichaelGannotti/status/2074552763326091381 | 2074552763326091381 | gpt-oss-nvfp4-mxfp4 | NVFP4对决MXFP4：GPT-OSS-120B原生上Blackwell | cover.png | ✅ 已推送 |
-| 30 | 2026-07-08 | https://x.com/AlphaSignalAI/status/2074496013675696300 | 2074496013675696300 | pxpipe-claude-code-token | TBD | TBD | 📥 进行中 |
+| 30 | 2026-07-08 | https://x.com/AlphaSignalAI/status/2074496013675696300 | 2074496013675696300 | pxpipe-claude-code-token | 省60% token账单的野路子：把上下文发成图片 | cover.png | ✅ 已推送 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -257,3 +257,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-08 15:40 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-08 15:45 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0f3OIukMePPVCeu76NoykTWobqTDYYla6fUhqjHEvy8F |

@@ -13,7 +13,7 @@
 
 ## 推测解码的因果之争
 
-推测解码（Speculative Decoding，SD）这两年突然扎堆出现。它的核心idea很简单：让一个轻量的草稿模型先提出未来的一串token，目标模型再并行验证它们，从而加速自回归生成。但方法一多，问题就来了：DSpark和JetSpec，到底哪个更好？或者更本质一点，它们其实是互补的？
+推测解码（Speculative Decoding，SD）这两年突然扎堆出现。它的核心idea很简单：让一个轻量的草稿模型先提出未来的一串token，目标模型再并行验证它们，从而加速自回归生成。
 
 ![](img3.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">DSpark与JetSpec：从吞吐量与延迟这两个互补侧面切入推测解码</span>
