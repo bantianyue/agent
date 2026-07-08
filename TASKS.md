@@ -214,7 +214,7 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-08 09:28 | 📥 开始 | 收到 URL，开始提取内容 |
-| 2026-07-08 09:35 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0eFRGRSHqI4eI6idFrxxga1h-vF-lDruaoQH5LATUQPH |
+| 2026-07-08 14:09 | ✅ 已推送 | 重建草稿成功，media_id: TIqnnVEu6Oy3-wtKttGa0SUiHKciovq7pT5CxhB1Sg5-Si9bzB2iAk6vv7QrXFD4（原draft-media-id失效40007，改新建） |
 
 ### #25 - liquid-antidoom
 
