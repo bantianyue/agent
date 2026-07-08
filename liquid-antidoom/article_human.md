@@ -20,7 +20,9 @@
 
 Liquid AI的方法更精准：定位到开启循环的确切token，训练模型在该单一位置上偏好连贯的替代token，而让分布的其余部分基本不受影响。这个方法借鉴了Antislop，在代表单个补全token的chosen/rejected（被选中/被拒绝）配对上训练，使用的是Final Token Preference Optimization（FTPO，末位token偏好优化）。他们把这种方法称为"Antidoom"。
 
-**在LFM2.5-2.6B的一个早期checkpoint上，困难数学和编程提示词下有10.2% 的补全产生了重复循环。经过Antidoom训练，这一比例降到1.4%，评测分数也因循环减少而全面提升。**
+<div style="background:#f0f7fa;padding:16px 18px 14px 18px;border-radius:6px;margin:16px 0;border-left:4px solid #5b9bd5;">
+<div style="font-size:15px;color:#2c6a9e;line-height:1.7;">在LFM2.5-2.6B的一个早期checkpoint上，困难数学和编程提示词下有10.2%的补全产生了重复循环。经过Antidoom训练，这一比例降到1.4%，评测分数也因循环减少而全面提升。</div>
+</div>
 
 ## Doom Loop的三个成因
 
@@ -30,7 +32,9 @@ doom loop在推理中由三种机制共同作用而产生。
 
 词表中的某些token总体上更容易被选中。真实世界中广为人知的例子包括"delve"和"testament"。这可能发生在训练集中使用了合成数据，从而制造出比人类正常写作中更高的这些词的分布。在推理模型里，高先验的续写常常包含话语标记和自我反思token，例如"Wait"或"Alternatively"。这些token未必是坏的，它们可能标志着一次有用的策略转换、一个验证步骤，或者推理轨迹中的一个分支。
 
-**但当模型不确定或卡住时，它们会变成诱人的兜底续写，重新启动同样的局部推理模式，而不是帮助模型取得进展。**
+<div style="background:#f0f7fa;padding:16px 18px 14px 18px;border-radius:6px;margin:16px 0;border-left:4px solid #5b9bd5;">
+<div style="font-size:15px;color:#2c6a9e;line-height:1.7;">但当模型不确定或卡住时，它们会变成诱人的兜底续写，重新启动同样的局部推理模式，而不是帮助模型取得进展。</div>
+</div>
 
 在LFM2.5-2.6B的早期checkpoint上，最常用于开启doom loop的token如下：
 
