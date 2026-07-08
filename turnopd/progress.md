@@ -18,4 +18,6 @@
 | Step 4f: Humanizer 润色 | completed |
 | Step 4g: 文本格式修复 | completed |
 | Step 5: 预发布检查 | completed |
-| Step 6: 推送草稿 | pending |
+| Step 6: 推送草稿（全文版） | completed |
+| Step 7: 精简版另存 article_human_concise.md | completed |
+| Step 8: 精简版推送草稿（HTML模式，图走mmbiz复用） | completed |
