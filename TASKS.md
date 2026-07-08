@@ -35,7 +35,7 @@
 | 30 | 2026-07-08 | https://x.com/AlphaSignalAI/status/2074496013675696300 | 2074496013675696300 | pxpipe-claude-code-token | 省60% token账单的野路子：把上下文发成图片 | cover.png | ✅ 已推送 |
 | 31 | 2026-07-08 | https://arxiv.org/html/2606.18394v3 | 2606-18394 | jetspec-parallel-draft | JetSpec：并行树草稿打破投机解码扩展天花板 | cover.png | ✅ 已推送 |
 | 32 | 2026-07-08 | https://arxiv.org/html/2606.15007v1 | 2606-15007 | mamba-diffusion | Nemotron 3 Ultra技术解读：Mamba-Attention混血+NVFP4量化，推理吞吐5.9× | cover.png | ✅ 已推送 |
-| 33 | 2026-07-08 | https://arxiv.org/abs/2607.05804 | 2607-05804 | turnopd | TBD | TBD | 📥 进行中 |
+| 33 | 2026-07-08 | https://arxiv.org/abs/2607.05804 | 2607-05804 | turnopd | TurnOPD：让在线策略蒸馏具备回合感知，长程Agent训练提速2.29倍 | cover.png | ✅ 已推送 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -281,3 +281,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-08 22:13 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-08 22:25 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0ed812rVNRwjJsNAgAeQAb1H6Qkj5oLdc110_ro8QlSR |
