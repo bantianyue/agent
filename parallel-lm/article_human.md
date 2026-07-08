@@ -55,7 +55,7 @@ Meta这篇ICML 2026 Oral论文给出的框架叫ThreadWeaver（论文代号Paral
 
 做法分三步：先用正则从轨迹里抽出所有"上下文-补全"单元（每个单元对应状态机向补全接口发的一段请求及其LLM生成结果）；把这些单元插入一个token级前缀树，根节点是共享prompt，分支是各自的分叉续写；最后深度优先遍历，线性化成一条带"仅祖先"注意力掩码和从根节点计数的位置编码的训练序列，防止跨线程信息泄漏。损失只施加在补全部分的token上。
 
-**这个协同设计保证了一个重要性质：不经过编排器、直接自回归推理时，得到的整体轨迹一定是Trie遍历轨迹的合法子序列，因此模型即使退化成普通串行推理也不受损。**
+<div style="background:#f0f7fa;padding:16px 18px 14px 18px;border-radius:6px;margin:16px 0;border-left:4px solid #5b9bd5;"><div style="font-size:15px;color:#2c6a9e;line-height:1.7;">这个协同设计保证了一个重要性质：不经过编排器、直接自回归推理时，得到的整体轨迹一定是Trie遍历轨迹的合法子序列，因此模型即使退化成普通串行推理也不受损。</div></div>
 
 ![](decomposition_training.png)
 <span style="font-size:12px;color:rgb(153,153,153);">基于Trie的训练序列构造：抽取上下文-补全单元、插入token级前缀树、深度优先遍历得到带祖先注意力掩码的扁平序列</span>
@@ -68,7 +68,7 @@ Meta这篇ICML 2026 Oral论文给出的框架叫ThreadWeaver（论文代号Paral
 
 冷启动数据毕竟是事后拆解，未必契合模型自身生成习惯。于是他们在959条上微调Qwen3-8B，再对全部5.3万题跑并行rollout，按格式正确性和答案正确性过滤，得到1.7万多条与模型自身生成模式对齐的高质量数据。
 
-**数据质量比数据量更关键：光靠冷启动的959条远远不够，自训练补足的1.7万条才是精度天花板。**
+<div style="background:#f0f7fa;padding:16px 18px 14px 18px;border-radius:6px;margin:16px 0;border-left:4px solid #5b9bd5;"><div style="font-size:15px;color:#2c6a9e;line-height:1.7;">数据质量比数据量更关键：光靠冷启动的959条远远不够，自训练补足的1.7万条才是精度天花板。</div></div>
 
 ## P-GRPO：把"该并行时才并行"写进奖励
 
@@ -76,7 +76,7 @@ Meta这篇ICML 2026 Oral论文给出的框架叫ThreadWeaver（论文代号Paral
 
 奖励由两项相加：正确性奖励是答案是否正确的指示函数；加速奖励在并行确实缩短了关键路径时温和鼓励。加速项定义为 `min(ρ·η, ρ_clip)`，其中 η 是加速比（1减去最长线程长度与总token数之比），ρ=0.5、ρ_clip=0.2。也就是说，奖励只在答案正确时才给加速加分，且加速红利被压在正确性奖励的一小块比例内。
 
-**P-GRPO用一条简单的规则逼模型在精度和加速之间做权衡：答案错了，并行再快也不给加速分，模型因此不会为提速牺牲正确性。**
+<div style="background:#f0f7fa;padding:16px 18px 14px 18px;border-radius:6px;margin:16px 0;border-left:4px solid #5b9bd5;"><div style="font-size:15px;color:#2c6a9e;line-height:1.7;">P-GRPO用一条简单的规则逼模型在精度和加速之间做权衡：答案错了，并行再快也不给加速分，模型因此不会为提速牺牲正确性。</div></div>
 
 论文还发现一个训练稳定性坑：GRPO里常规的"减均值除标准差"归一化，在多项奖励下会出问题。当所有rollout都正确时，减均值抹掉了正确性信号，除标准差又抵消了加速尺度，导致模型为加速牺牲精度。改成只减均值（mean-centering）后，AIME24精度从74.8% 跳到79.9%，最长线程从18.7k降到16.9k。
 
