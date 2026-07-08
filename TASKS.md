@@ -29,7 +29,8 @@
 | 24 | 2026-07-08 | https://x.com/haoailab/status/2072472882014486610 | haoailab status | 2072472882014486610 | DSpark vs JetSpec：因果性成推测解码新战场 | cover.png | ✅ 已推送 |
 | 25 | 2026-07-08 | https://www.liquid.ai/blog/antidoom | antidoom | liquid-antidoom | Liquid Antidoom：一个手术刀式拔除思维死循环的方法 | cover.png | ✅ 已推送 |
 | 26 | 2026-07-08 | https://arxiv.org/html/2602.18196v5 | 2602-18196 | arxiv-2602-18196 | RAT+：训练稠密、推理稀疏，一个模型切出64倍效率 | cover.png | ✅ 已推送 |
-| 27 | 2026-07-08 | https://x.com/shreybirmiwal/status/2074666256402448732 | 2074666256402448732 | 2074666256402448732 | TBD | TBD | 📥 进行中 |
+| 27 | 2026-07-08 | https://x.com/shreybirmiwal/status/2074666256402448732 | 2074666256402448732 | 2074666256402448732 | 从第一性原理讲透推测解码：最高8倍无损加速 | cover.png | ✅ 已推送 |
+| 28 | 2026-07-08 | https://publish.obsidian.md/ueaj/Machine+Learning/Inference/Masquerade | Masquerade | masquerade | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -232,3 +233,11 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-08 13:18 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-08 14:09 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0Una3OZFDTHFQ1yKnYg_eilG8-Z66Me4af7g0r9Fy92n |
+
+### #28 - masquerade
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-08 14:21 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-08 14:21 | 📝 | 写作中 |
