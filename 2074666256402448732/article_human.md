@@ -54,7 +54,7 @@ token是模型吐出的词，KV是句子逐步累积起来的知识。**你应�
 ![](img4.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">Prefill阶段完全并行，decode阶段逐token顺序生成</span>
 
-序列并行不仅摊薄了权重，也摊薄了KV（每个请求独有的KV在整个序列间共享），而批并行只能摊薄权重。换句话说，decode是内存受限，prefill是计算受限。
+序列并行不仅摊薄了权重，也摊薄了KV（每个请求独有的KV在整个序列间共享），而批并行只能摊薄权重。结论很清楚：decode是内存受限，prefill是计算受限。
 
 ## 在decode阶段借用序列并行：推测解码
 
