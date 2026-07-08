@@ -71,4 +71,17 @@ DSpark和JetSpec不是路线之争，而是同一前沿的两个侧面，一个�
 
 ---
 
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/iVe2e5xiOCTUOaEiqpnZyw" target="_blank" data-linktype="2">本周值得看的10篇AI论文：Agent 编译让速度提升10倍；PAPO - 过程对齐策略优化</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/Vn6IytoT8knZhQF-vLcGLg" target="_blank" data-linktype="2">Claude Code Workflow 深度技术洞察：DAG 不再由人画</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2OmwXVHkBKsN0nm0N6aAKA" target="_blank" data-linktype="2">深度拆解OpenAI ChatGPT记忆Dreaming：和你想的不一样</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/lVZUh5t0nbY5ni1RaDOVAQ" target="_blank" data-linktype="2">AI Agent 的钱都花在哪了？首篇 Token 消耗系统性研究深入解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/pCRjhls1WFaiRglb2MtjBw" target="_blank" data-linktype="2">蚂蚁CausalMix: 将数据混合从超参搜索转换成因果推断</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0zKdjRmWg3TbL5Y3HGO3fA" target="_blank" data-linktype="2">从 P/D 分离到 A/F 分离：从学术原型变成行业标准</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/crfkhSIuMZJxjNA0Md8dXw" target="_blank" data-linktype="2">李飞飞：世界模型的功能分类</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/mqTab0qwrT95DVrxTllmcQ" target="_blank" data-linktype="2">Torch解析系列一：深入理解FX Graphs</a><br>
+</span>
+
+---
+
 <span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://x.com/haoailab/status/2072472882014486610</span>
