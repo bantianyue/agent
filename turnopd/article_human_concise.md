@@ -18,7 +18,7 @@
 
 **核心判断：长程 Agent 的 OPD 里，监督单位不应该是扁平 token 位置，而是交互轨迹中由回合（turn）所条件的决策。**
 
-![](http://mmbiz.qpic.cn/sz_mmbiz_png/MJRkdzPjdxR4OWicxbZbG0KWAPSeSSdnjGstico5gyC5iagiaoUU7lGBUcLX8QsC1cUCtGCTpwYQAnWVMZ1ZKqZ6BAEhhwE6QP7UXf3kmv8eMY/0?from=appmsg)
+![](https://mmbiz.qpic.cn/sz_mmbiz_png/MJRkdzPjdxRn6kWQsQDvKqgrehSxG2TtSibOQORh3Rd4mNdKDbl9eapmHp2YTAZowRj7fqaRg6Nib59KlskNgCaOOaadoib2zX9QfibqgX0ZXtc/0?from=appmsg)
 <span style="font-size:12px;color:rgb(153,153,153);">TurnOPD 视角：标准 OPD 固定 rollout 深度、在整条轨迹上平均 KL，常把算力浪费在低价值尾部回合；TurnOPD 基于回合级统计同时预算 rollout 深度与 KL 聚合。</span>
 
 ## 诊断：监督信号在回合轴上的两道错配
@@ -48,7 +48,7 @@ q_t^blend = (1−α) q_t^traj + α q_t^turn
 
 在 ALFWorld、WebShop、Multi-Hop Search 上，用三对师生对比原始 OPD、TCOD-F2B 与 TurnOPD，按最少时间（Least-Time）与同一步（Same-Step）两种机制评估。
 
-![](http://mmbiz.qpic.cn/mmbiz_png/MJRkdzPjdxRXhhTjgbx7tuao7LJYDm7ZwWHVhfVHay9TWgpe3StomSwnFLQicH4ZVv7lIpebwaehiau7MOJyVL96bTVRuLoYRSR9bibTO9CELA/0?from=appmsg)
+![](https://mmbiz.qpic.cn/mmbiz_png/MJRkdzPjdxSyD8gHBbkZ5Dw3g1IWCVu7l4eOvwEicfj7nCpX26PhEZsjxDDy6bfkgF6BQv1wUjIicDSibrkAdYLTOAkX14J9YfAlB320ibIibwp8/0?from=appmsg)
 <span style="font-size:12px;color:rgb(153,153,153);">主结果等时效率曲线。横轴为累计训练时间，TurnOPD 在每类任务上都把准确率-时间前沿向外推。</span>
 
 **准确率与效率双优。** TurnOPD 在所有任务与模型组合上拿到最高 Least-Time Avg@4，Same-Step 也大多匹配或超越最佳基线。
@@ -69,7 +69,7 @@ ALFWorld-1.7B 上 TurnOPD 的 Same-Step Avg@4 达 86.29（原始 83.00、TCOD 80
 
 **控制器确实按诊断信号工作。** ALFWorld 上成功轨迹一出现，覆盖约束迅速主导、鼓励更长的 rollout；WebShop 保持适度覆盖下界；Multi-Hop 上两臂动态转移。H_eff 保证效率，H_cov 阻止选过短、覆盖不足的 rollout。
 
-![](http://mmbiz.qpic.cn/sz_mmbiz_png/MJRkdzPjdxRhNvyqtK9glRM5h85jg7zAnMXYUaKJM5BNqXgXaMkatHL40oicLyoaDs1cSmrQQ7Nt6fWcFBVoq0lo8sb6icBBI9jyIgicJ7975o/0?from=appmsg)
+![](https://mmbiz.qpic.cn/mmbiz_png/MJRkdzPjdxRqEPhzOYhcZhrISVkUicNqJ99tjibLzWnFEGVlWQ3RSWdEoMic89czn2mFrDIIiaSibDvTy0OszmX2H315bhTj1Y1Dh1NibLwcBibkibU/0?from=appmsg)
 <span style="font-size:12px;color:rgb(153,153,153);">rollout 深度诊断回放：存活者加权 KL 质心 H_eff、成功覆盖下界 H_cov 及二者最大值的 EMA 视野 Ĥ，随训练步自适应变化。</span>
 
 ## 消融分析
