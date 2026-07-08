@@ -34,6 +34,7 @@
 | 29 | 2026-07-08 | https://x.com/MichaelGannotti/status/2074552763326091381 | 2074552763326091381 | gpt-oss-nvfp4-mxfp4 | NVFP4对决MXFP4：GPT-OSS-120B原生上Blackwell | cover.png | ✅ 已推送 |
 | 30 | 2026-07-08 | https://x.com/AlphaSignalAI/status/2074496013675696300 | 2074496013675696300 | pxpipe-claude-code-token | 省60% token账单的野路子：把上下文发成图片 | cover.png | ✅ 已推送 |
 | 31 | 2026-07-08 | https://arxiv.org/html/2606.18394v3 | 2606-18394 | arithmetic-reasoning-icl | JetSpec：并行树草稿打破投机解码扩展天花板 | cover.png | ✅ 已推送 |
+| 32 | 2026-07-08 | https://arxiv.org/html/2606.15007v1 | 2606-15007 | mamba-diffusion | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -266,3 +267,9 @@
 |--------|------|------|
 | 2026-07-08 17:05 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-08 17:13 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0fXcFwgRczcWLqQYT4qOE5eS6BzQqNzkhIg3LxVdYvjQ |
+
+### #32 - mamba-diffusion
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-08 20:27 | 📥 开始 | 收到 URL，开始提取内容 |
