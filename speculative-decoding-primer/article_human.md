@@ -18,9 +18,6 @@
 
 token是模型吐出的词，KV是句子逐步累积起来的知识。**你应该注意到一件关键的事：生成是顺序性的。**第50个token依赖第49个，第49个又依赖第48个，以此类推。这就是为什么ChatGPT是一个token一个token流式输出，而不是一大块一大块地吐字。
 
-![](img1.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">大语言模型的迭代生成循环：旧token与KV送入模型，预测新token与新KV</span>
-
 当我们优化LLM在GPU上的运行时，GPU只有两种最基础的操作值得关注。其一是计算（compute），即GPU每秒能做的浮点运算量（FLOP/s）；其二是内存带宽（memory bandwidth），即GPU能把多少字节从HBM显存加载进SRAM / SM（真正的计算核心）。
 
 直觉上任务耗时是内存时间加计算时间之和。但现实中GPU是大规模并行处理器，加载和计算交错进行，借助流水线，墙上时钟时间其实近似为较慢那项操作的时间。所以我们要专注减少瓶颈，确保加载权重的耗时永远不超过计算的耗时，即**永远不要处于内存受限状态**。
@@ -28,7 +25,7 @@ token是模型吐出的词，KV是句子逐步累积起来的知识。**你应�
 关键指标叫算术强度（arithmetic intensity）：每加载1字节所做计算的量，大致衡量计算受限与内存受限的比例。Roofline分析模型让这一点一目了然：随着算术强度增加，完成的工作量也增加，直到到达屋脊点（ridgepoint），从内存受限翻转为计算受限。
 
 ![](img2.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">Roofline分析模型：横轴为算术强度，纵轴为可用工作量，A点为内存受限、B点为屋脊点、C点为过度计算受限</span>
+<span style="font-size:12px;color:rgb(153,153,153);">大语言模型的迭代生成循环：旧token与KV送入模型，预测新token与新KV</span>
 
 在A点，模型需要加载整个文本知识和全部权重，只为生成1个新token，算术强度极低。我们的目标是通过提升并行度，把传统LLM处理从A点推向B点，最优地用满所有算力。
 
@@ -39,7 +36,7 @@ token是模型吐出的词，KV是句子逐步累积起来的知识。**你应�
 通过增大批大小（batch size），我们可以并行化并提高算术强度，因为token数乘了B倍，而共享权重这个除数保持不变。批大小有助于摊薄把权重从HBM加载到SRAM/SM的成本。
 
 ![](img3.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">批大小与吞吐、延迟的关系：屋脊点左侧延迟温和上升，右侧转为计算受限</span>
+<span style="font-size:12px;color:rgb(153,153,153);">Roofline分析模型：横轴为算术强度，纵轴为可用工作量，A点为内存受限、B点为屋脊点、C点为过度计算受限</span>
 
 在屋脊点左侧，延迟随批大小温和上升；到了右侧，已经是计算受限，增大批大小只是线性增加工作量。这也解释了为什么不想去C点：C点和B点吞吐相同，但每用户的延迟会显著变差。
 
@@ -52,7 +49,7 @@ token是模型吐出的词，KV是句子逐步累积起来的知识。**你应�
 **Prefill是并行的，decode是顺序的。**如果你知道接下来是什么，可以一次性算出接下来几个token的概率。LLM推理的第一部分（读取输入提示）叫prefill阶段，它完全可并行化。而生成新token的decode才是顺序的：我们不知道下一个token，每轮输入是上轮输出，每次前向只能出1个token，算术强度低、内存受限，浪费了闲置的GPU资源。
 
 ![](img4.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">Prefill阶段完全并行，decode阶段逐token顺序生成</span>
+<span style="font-size:12px;color:rgb(153,153,153);">批大小与吞吐、延迟的关系：屋脊点左侧延迟温和上升，右侧转为计算受限</span>
 
 序列并行不仅摊薄了权重，也摊薄了KV（每个请求独有的KV在整个序列间共享），而批并行只能摊薄权重。结论很清楚：decode是内存受限，prefill是计算受限。
 
@@ -65,12 +62,12 @@ Leviathan的解法是引入一个草稿模型（draft model），借用了CPU推
 目标模型沿用prefill的验证技巧验证所有草稿token。在第一次出现分歧的地方，目标模型拒绝草稿的答案、保留自己的。验证通过的最后一次输出是对n+1位置token的预测，这叫 +1奖励token（bonus token），因为这次前向总能给出1到n+1个正确token。
 
 ![](img5.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">草稿器/验证器流程：验证器纠正错误并给出奖励token</span>
+<span style="font-size:12px;color:rgb(153,153,153);">Prefill阶段完全并行，decode阶段逐token顺序生成</span>
 
 生成的token数量增加了，带宽压力却保持不变，算术强度随之上升，把decode推得离计算受限更近。
 
 ![](img6.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">推测通过提高算术强度，把decode从内存受限推向屋脊点</span>
+<span style="font-size:12px;color:rgb(153,153,153);">Decode阶段内存受限、Prefill阶段计算受限（序列并行与注意力所致）</span>
 
 **一个前提必须记牢**：如果批大小已经够大，推测前就已是计算受限，那么推测带来的额外成本就是直接的负收益。验证成本随生成token数线性增加，推测器本身的算力开销纯粹叠加到总延迟上。所以推测器只在你内存受限、而非计算受限时才该跑，并且要平衡它的占用、接受率和延迟。
 
@@ -89,7 +86,7 @@ Leviathan的解法是引入一个草稿模型（draft model），借用了CPU推
 通过把「提出并接受」与「拒绝并从残差采样」两条路径的概率相加，可以严格证明选中token x的总概率恒等于p(x)。**用这套拒绝采样数学，我们保证了被接受的草稿与原始目标输出之间有损无损、完全相同的分布。**
 
 ![](img7.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">拒绝采样保证输出分布与目标模型完全一致的数学推导</span>
+<span style="font-size:12px;color:rgb(153,153,153);">草稿器/验证器流程：验证器纠正错误并给出奖励token</span>
 
 ## 推测器的演进：更好的草稿模型
 
@@ -108,7 +105,7 @@ SpecInfer（Miao '23）指出，Leviathan的草稿模型一旦在某个token上�
 Eagle 2（Li '24）在Eagle 1之上加树状验证，并生成动态树：自信的分支走得更深，不自信时更宽更浅。DDTree（Ringel '26）把树状验证应用到DFlash的扩散块草稿器，通过沿图累积概率，先取最长概率最高的分支，一旦更短分支的联合概率更高就停止深入。
 
 ![](img8.png)
-<span style="font-size:12px;color:rgb(153,153,153);">树状验证：用累积概率产生不同长度的分支，捕获更浅路径</span>
+<span style="font-size:12px;color:rgb(153,153,153);">推测通过提高算术强度，把decode从内存受限推向屋脊点</span>
 
 这把某些工作负载的加速推到7-8倍，即便总token数与DFlash相同，也能因捕获后者可能错过的浅路径而获得更高加速。
 
@@ -119,7 +116,7 @@ Eagle 2（Li '24）在Eagle 1之上加树状验证，并生成动态树：自信
 最新的DSpark（DeepSeek '26）在DDTree之上进一步改进，是这一领域最值得跟进的新工作。
 
 ![](img9.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">推测解码的演进时间线与未来方向</span>
+<span style="font-size:12px;color:rgb(153,153,153);">树状验证：用累积概率产生不同长度的分支，捕获更浅路径</span>
 
 <div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
 <div style="text-align:center;margin-bottom:8px;">
