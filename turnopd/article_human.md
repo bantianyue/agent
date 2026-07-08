@@ -4,7 +4,7 @@
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
 - <strong>问题</strong>：在线策略蒸馏（OPD）用于长程智能体时效率极低，算力和梯度都被浪费在浅层回合和低信号尾部回合上。<br><br>
-- <strong>诊断</strong>：原始OPD存在两道错配，反向KL信号严重前载，最深的第三个回合只分到3.6%–4.5% 的KL损失；深层KL还会因「污染—压缩」机制失去判别力。<br><br>
+- <strong>诊断</strong>：原始OPD存在两道错配，反向KL信号严重前载，最深的第三个回合只分到3.6%至4.5%的KL损失；深层KL还会因「污染-压缩」机制失去判别力。<br><br>
 - <strong>方法</strong>：TurnOPD用两个预算控制器，自适应截断rollout深度，并把KL损失从token级逐步转向回合均衡监督。<br><br>
 - <strong>结果</strong>：在ALFWorld、WebShop、Multi-Hop Search上，同等时钟预算下准确率全面占优，训练最高提速2.29倍（4.42h→1.93h）。
 </div>
@@ -55,7 +55,7 @@ L_OPD(θ) = E_{x,τ}[ (1/Σ_i m_i) Σ_i m_i · KL( π_θ(·|s_i) ‖ π_T(·|s_i
 ![](success_failure_gap.png)
 <span style="font-size:12px;color:rgb(153,153,153);">反向KL按回合的结果分离力。正值表示失败轨迹KL更大。ALFWorld上深层G_t转负，说明深层KL不是干净的成果预测信号。</span>
 
-**「污染—压缩」机制。** 作者用一个分解解释上述歧义：在回合t的上下文c下，下一token分布有一部分被上下文强制决定（重复串、格式约束、复制实体、闭合分隔符等），记为共享的强制组件p_F，剩余是师生可能真正分歧的自由组件。可证：
+**「污染-压缩」机制。** 作者用一个分解解释上述歧义：在回合t的上下文c下，下一token分布有一部分被上下文强制决定（重复串、格式约束、复制实体、闭合分隔符等），记为共享的强制组件p_F，剩余是师生可能真正分歧的自由组件。可证：
 
 KL(π_S ‖ π_T) ≤ (1−λ(c)) · KL(p_S^free ‖ p_T^free)
 
@@ -89,7 +89,7 @@ q_t^blend = (1−α) q_t^traj + α q_t^turn
 在ALFWorld、WebShop、Multi-Hop Search上，用三对师生（ALFWorld：Qwen3-1.7B/4B学生 + Qwen3-8B-GRPO；WebShop：Qwen3-1.7B + Qwen3-8B-GRPO；Multi-Hop Search：Qwen3.5-2B + Qwen3.5-9B-GRPO）对比原始OPD、TCOD-F2B与TurnOPD，在最少时间（Least-Time）与同一步（Same-Step）两种机制下评估。
 
 ![](iso_time_efficiency.png)
-<span style="font-size:12px;color:rgb(153,153,153);">主结果等时效率曲线。横轴为累计训练时间，TurnOPD在每类任务上都把准确率—时间前沿向外推。</span>
+<span style="font-size:12px;color:rgb(153,153,153);">主结果等时效率曲线。横轴为累计训练时间，TurnOPD在每类任务上都把准确率-时间前沿向外推。</span>
 
 **准确率与效率双优。** 最少时间设定下，TurnOPD在所有任务与模型组合上拿到最高的整体Avg@4；同一步设定下也大多匹配或超越最佳基线。在ALFWorld-1.7B上达到86.29（原始OPD 83.00、TCOD-F2B 80.06）；Multi-Hop Search上原始OPD在同一步有微弱优势，但TurnOPD的最少时间准确率最佳。训练时间上，ALFWorld-1.7B从4.42h降到1.93h，Multi-Hop Search 2.94h vs 4.45h，WebShop 1.24h vs 1.57h。
 
@@ -119,7 +119,7 @@ q_t^blend = (1−α) q_t^traj + α q_t^turn
 **组件分解。** 仅自适应深度（保持轨迹级KL）把时钟从4.42h砍到1.96h，但准确率略降到82.8，说明缩短深度本身不解决损失分配问题；仅线性KL混合（保持全视野）把准确率提到85.1，但耗时2.59h，说明它直接改善了优化却没省算力。完整TurnOPD二者结合，拿到最佳准确率86.3，同时匹配自适应深度的低时钟1.93h，并在训练中期进度更快。
 
 ![](component_ablation.png)
-<span style="font-size:12px;color:rgb(153,153,153);">ALFWorld-1.7B组件消融（左）与干预分解表（右）。自适应深度提供效率杠杆，线性KL混合提供优化杠杆，组合给出最佳准确率—时间权衡。</span>
+<span style="font-size:12px;color:rgb(153,153,153);">ALFWorld-1.7B组件消融（左）与干预分解表（右）。自适应深度提供效率杠杆，线性KL混合提供优化杠杆，组合给出最佳准确率-时间权衡。</span>
 
 | 配置 | 深度预算 | KL 混合 | Avg@4 | 时钟(h) |
 |------|------|------|------|------|
@@ -134,14 +134,14 @@ q_t^blend = (1−α) q_t^traj + α q_t^turn
 
 ## 结论
 
-长程Agent的OPD里，原始方案把算力花在低产出的尾部回合、把损失压在浅层token上。TurnOPD用回合级预算同时自适应rollout深度、并把KL归一化渐进转向回合均衡，在三大基准上把准确率—时间前沿推到原始OPD之外。其更宽的启示是：长程Agent的监督单位不应是扁平token位置，而是交互轨迹内、由回合所条件的决策。
+长程Agent的OPD里，原始方案把算力花在低产出的尾部回合、把损失压在浅层token上。TurnOPD用回合级预算同时自适应rollout深度、并把KL归一化渐进转向回合均衡，在三大基准上把准确率-时间前沿推到原始OPD之外。其更宽的启示是：长程Agent的监督单位不应是扁平token位置，而是交互轨迹内、由回合所条件的决策。
 
 <div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
 <div style="text-align:center;margin-bottom:8px;">
 <strong style="font-size:15px;color:#8b6f4c;">结语</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-「污染—压缩」视角点破了一个常见误区：深层KL变小不等于学生学会了教师，可能只是自回归上下文把真正的策略分歧压缩进了强制组件。用原始KL当回合价值信号会严重误导优化方向。<br><br>
+「污染-压缩」视角点破了一个常见误区：深层KL变小不等于学生学会了教师，可能只是自回归上下文把真正的策略分歧压缩进了强制组件。用原始KL当回合价值信号会严重误导优化方向。<br><br>
 TurnOPD的价值不在某个惊艳的新模块，而是把「回合」作为一等公民接入了OPD的资源分配，深度和损失两件事各管各的杠杆，工程上干净、可调。<br><br>
 对做长程Agent训练的人，最该带走的结论是：先诊断信号在回合轴上的分布，再决定截断深度与损失权重，比盲目拉长rollout或堆算力划算得多。
 </div>
