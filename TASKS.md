@@ -31,7 +31,8 @@
 | 26 | 2026-07-08 | https://arxiv.org/html/2602.18196v5 | 2602-18196 | arxiv-2602-18196 | RAT+：训练稠密、推理稀疏，一个模型切出64倍效率 | cover.png | ✅ 已推送 |
 | 27 | 2026-07-08 | https://x.com/shreybirmiwal/status/2074666256402448732 | 2074666256402448732 | 2074666256402448732 | 从第一性原理讲透推测解码：最高8倍无损加速 | cover.png | ✅ 已推送 |
 | 28 | 2026-07-08 | https://publish.obsidian.md/ueaj/Machine+Learning/Inference/Masquerade | Masquerade | masquerade | 把投机解码塞进主模型：Masquerade 闪蒸馏复盘 | cover.png | ✅ 已推送 |
-| 29 | 2026-07-08 | https://x.com/MichaelGannotti/status/2074552763326091381 | 2074552763326091381 | gpt-oss-nvfp4-mxfp4 | TBD | TBD | 📥 进行中 |
+| 29 | 2026-07-08 | https://x.com/MichaelGannotti/status/2074552763326091381 | 2074552763326091381 | gpt-oss-nvfp4-mxfp4 | NVFP4对决MXFP4：GPT-OSS-120B原生上Blackwell | cover.png | ✅ 已推送 |
+| 30 | 2026-07-08 | https://x.com/AlphaSignalAI/status/2074496013675696300 | 2074496013675696300 | pxpipe-claude-code-token | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -249,3 +250,10 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-08 15:08 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-08 15:20 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0cekf9w7CcLRu-44MkKav4w3mQDMdS3sl3RWJz-XNgV3 |
+
+### #30 - pxpipe-claude-code-token
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-08 15:40 | 📥 开始 | 收到 URL，开始提取内容 |
