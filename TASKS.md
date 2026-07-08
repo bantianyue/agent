@@ -27,6 +27,7 @@
 | 22 | 2026-07-07 | https://pytorch.org/blog/lightseek-tokenspeed-kernel/ | lightseek-tokenspeed-kernel | lightseek-tokenspeed-kernel | TokenSpeed-kernel：把推理内核做成一等公民 | cover.png | ✅ 已推送 |
 | 23 | 2026-07-07 | https://www.primeintellect.ai/blog/rl-at-1t-scale | rl-at-1t-scale | rl-at-1t-scale | 万亿参数RL实战：prime-rl如何用28个H200节点训GLM-5 | cover.png | ✅ 已推送 |
 | 24 | 2026-07-08 | https://x.com/haoailab/status/2072472882014486610 | haoailab status | 2072472882014486610 | DSpark vs JetSpec：因果性成推测解码新战场 | cover.png | ✅ 已推送 |
+| 25 | 2026-07-08 | https://www.liquid.ai/blog/antidoom | antidoom | liquid-antidoom | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -208,3 +209,9 @@
 |--------|------|------|
 | 2026-07-08 09:28 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-08 09:35 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0eFRGRSHqI4eI6idFrxxga1h-vF-lDruaoQH5LATUQPH |
+
+### #25 - liquid-antidoom
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-08 10:30 | 📥 开始 | 收到 URL，开始提取内容 |
