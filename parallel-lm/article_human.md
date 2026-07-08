@@ -29,7 +29,7 @@ Meta这篇ICML 2026 Oral论文给出的框架叫ThreadWeaver（论文代号Paral
 
 框架有三个核心贡献。第一，一个两阶段并行轨迹生成器，产出带并行控制token、由LLM标注的高质量结构化推理轨迹，为后续强化学习提供低成本冷启动。第二，一套基于Trie（前缀树）的训练-推理协同设计，让并行推理能直接跑在vLLM、SGLang这类标准自回归引擎上。第三，并行感知的GRPO（论文称P-GRPO），通过数学上站得住的"按线程广播优势"和加速感知的奖励设计，同时优化精度与延迟。
 
-**ThreadWeaver是第一个在标准自回归引擎上落地、且精度追平同尺寸串行SOTA的自适应并行推理框架。**
+<div style="background:#f0f7fa;padding:16px 18px 14px 18px;border-radius:6px;margin:16px 0;border-left:4px solid #5b9bd5;"><div style="font-size:15px;color:#2c6a9e;line-height:1.7;">ThreadWeaver是第一个在标准自回归引擎上落地、且精度追平同尺寸串行SOTA的自适应并行推理框架。</div></div>
 
 ## 并行轨迹长什么样：分叉-汇合
 
