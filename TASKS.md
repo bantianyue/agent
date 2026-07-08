@@ -26,7 +26,7 @@
 | 21 | 2026-07-07 | https://arxiv.org/html/2607.02770v1 | 2607-02770 | arxiv-2607-02770 | Gemma 4 技术报告：无编码器与思考模式上车 | cover.png | ✅ 已推送 |
 | 22 | 2026-07-07 | https://pytorch.org/blog/lightseek-tokenspeed-kernel/ | lightseek-tokenspeed-kernel | lightseek-tokenspeed-kernel | TokenSpeed-kernel：把推理内核做成一等公民 | cover.png | ✅ 已推送 |
 | 23 | 2026-07-07 | https://www.primeintellect.ai/blog/rl-at-1t-scale | rl-at-1t-scale | rl-at-1t-scale | 万亿参数RL实战：prime-rl如何用28个H200节点训GLM-5 | cover.png | ✅ 已推送 |
-| 24 | 2026-07-08 | https://x.com/haoailab/status/2072472882014486610 | haoailab status | 2072472882014486610 | DSpark vs JetSpec：因果性成推测解码新战场 | cover.png | ✅ 已推送 |
+| 24 | 2026-07-08 | https://x.com/haoailab/status/2072472882014486610 | haoailab status | DSpark_vs_JetSpec | DeepSeek极限吞吐DSprk Vs. 阶跃星辰极限时延JetSpec 因果性成推测解码新战场 | cover.png | ✅ 已推送 |
 | 25 | 2026-07-08 | https://www.liquid.ai/blog/antidoom | antidoom | liquid-antidoom | Liquid Antidoom：一个手术刀式拔除思维死循环的方法 | cover.png | ✅ 已推送 |
 | 26 | 2026-07-08 | https://arxiv.org/html/2602.18196v5 | 2602-18196 | arxiv-2602-18196 | RAT+：训练稠密、推理稀疏，一个模型切出64倍效率 | cover.png | ✅ 已推送 |
 | 27 | 2026-07-08 | https://x.com/shreybirmiwal/status/2074666256402448732 | 2074666256402448732 | 2074666256402448732 | 从第一性原理讲透推测解码：最高8倍无损加速 | cover.png | ✅ 已推送 |
@@ -209,7 +209,7 @@
 | 2026-07-07 22:18 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-07 22:32 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0Z-TRTUErgoF9JldYgMaxPc8rG6KEHxSS7FJEBna7DFQ |
 
-### #24 - 2072472882014486610
+### #24 - DSpark_vs_JetSpec
 
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
