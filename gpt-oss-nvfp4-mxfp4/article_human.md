@@ -19,7 +19,7 @@ GPT-OSS-120B是HuggingFace上下载量最高的模型，430万次下载，1170�
 **因为MXFP4不是NVFP4。** 而在DGX Spark的GB10 Grace Blackwell芯片上，这个区别极其关键。GPT-OSS-120B已经能装下，真正的变量是：它能不能在硬件上原生跑，而不是被模拟。
 
 ![](img1.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">NVFP4与MXFP4格式对比示意（来源：X @MichaelGannotti）</span>
+<span style="font-size:12px;color:rgb(153,153,153);">NVFP4与MXFP4格式对比示意（来源：原推文配图）</span>
 
 ## 两种格式
 
