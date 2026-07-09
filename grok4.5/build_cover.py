@@ -1,9 +1,9 @@
 import subprocess, os
 os.chdir("D:/06_Hermes/articles/grok4.5")
 base="gemini_cover.png"
-f_title=os.path.abspath("msyhbd_font.ttc")
-f_sub=os.path.abspath("msyhbd_font.ttc")
-f_bottom=os.path.abspath("msyhbd_font.ttc")
+f_title=os.path.abspath("msyhbd0.ttf")
+f_sub=f_title
+f_bottom=f_title
 flt=(
     "scale=900:383,format=yuv420p,"
     "drawbox=x=0:y=0:w=900:h=128:color=black@0.55:t=fill,"
@@ -14,10 +14,7 @@ flt=(
 )
 cmd=["ffmpeg","-y","-i",base,"-vf",flt,"-frames:v","1","cover.png"]
 r=subprocess.run(cmd,capture_output=True,text=True)
-print("RC",r.returncode)
-print(r.stderr[-600:] if r.returncode else "OK cover.png")
+print("RC",r.returncode, r.stderr[-400:] if r.returncode else "OK cover.png")
 if r.returncode==0:
-    # square
-    cmd2=["ffmpeg","-y","-i","cover.png","-vf","scale=500:500,format=yuv420p","cover-square.png"]
-    r2=subprocess.run(cmd2,capture_output=True,text=True)
+    r2=subprocess.run(["ffmpeg","-y","-i","cover.png","-vf","scale=500:500,format=yuv420p","cover-square.png"],capture_output=True,text=True)
     print("square RC",r2.returncode)
