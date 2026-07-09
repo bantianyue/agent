@@ -1,0 +1,116 @@
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+- <strong>核心思路</strong>：用一个轻量 router，在每一步解码时既选出最合适的专家LLM，又输出一组互补 logit 去修正该专家的预测<br><br>
+- <strong>解决痛点</strong>：纯专家路由存在理论上的根本局限，仅靠选专家无法逼近最优策略；FusionRoute 用互补生成器扩展策略类，弥补这一缺口<br><br>
+- <strong>训练两阶段</strong>：SFT 阶段学路由+基础生成，CDPO 阶段用偏好优化学互补纠错<br><br>
+- <strong>实验结果</strong>：在 Llama-3 与 Gemma-2 两族、数学/代码/指令跟随任务上，平均准确率全面超过序列级协作、token级协作、模型融合与直接微调
+</div>
+</div>
+
+## 背景与动机
+
+单一通用大模型要跨领域都强，往往得堆到 prohibitively expensive 的规模。而小号的领域专家模型虽高效，一旦超出训练分布就掉链子。于是「用多个专家模型协作」成了高效又能力广的自然路线，但三种旧范式各有硬伤。
+
+MoE 把多个专家融进统一架构联合训练，需要所有专家的梯度访问和大量额外训练，还要求专家结构相似。多智能体系统（MAS）通常在「整条回答」这一粗粒度上运作——每个 agent 独立生成完整回答，再靠选择、辩论或合并出最终答案，既浪费又可能因上下文暴涨而掉性能。模型融合（model merging）免训练、结构简洁，但对超参敏感、存在参数干扰，难以在不同场景下稳定突出不同专家的行为。
+
+更细的 token 级协作近年被提出，但现有方法高度依赖底层模型质量，一旦某些专家在某些 token 上不行、或选择策略出错，就不鲁棒。本文要回答的问题很直接：**能不能做一个在所有场景下都鲁棒、高效、自动的 token 级协作范式？**
+
+![](img1_fig.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">图1：序列级协作粗且低效，既有 token 级方法不稳定；FusionRoute 通过互补路由实现细粒度、高效、鲁棒的 token 级协作</span>
+
+## FusionRoute 设计
+
+FusionRoute 让一个轻量 router（从基座 LLM 后训练得到）在每个解码步同时产出两样东西：一是路由权重向量 wθ∈ℝⁿ，决定从专家集合 {π₁,…,πₙ} 里选谁；二是 router 自己的一组 logit，作为互补纠错项。
+
+推理时，先取权重最高的专家 π_expert=π_{i*} 作为当前步的 specialists，再把 router 的互补 logit 与该专家 logit 做加法融合，得到最终下一 token 分布：
+
+**log π_final(·|x,y≤t) = log π_θLM(·|x,y≤t) + log π_expert(·|x,y≤t)**
+
+这个设计既保留了所选专家的领域特长，又允许 router 在专家不确定或不可靠时出手修正。
+
+![](img2_arch.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">图2：上——FusionRoute 整体架构，router 同时输出 token 级路由权重与互补 logit；下——训练拆为 SFT 与 CDPO 两阶段</span>
+
+## 训练：解耦的两阶段
+
+router 要同时满足两个耦合目标——选对专家、又要补对 logit，朴素地一起优化会此消彼长。论文用解耦策略：**SFT 阶段 + 互补偏好优化（CDPO）阶段**。
+
+SFT 阶段建立两个基础属性：next-token 预测能力，以及 token 级专家选择。这里并非训练互补行为，而是先产出与专家专长对齐的稳定路由机制。关键是路由损失只监督「专家意见分歧」的 token 位置——标点、功能词这类所有专家都一致预测的 token 若强行监督，会主导梯度、把 router 带偏到无信息的「一致」。因此对给定前缀，只在存在 i≠i′ 使两专家下一 token 预测不同的「informative token set」上计算路由损失。
+
+CDPO 阶段解决 SFT 没覆盖的问题：专家即便被选中，也可能输出不可靠的 logit。这一阶段把专家输出视为固定，专门训练 router 学互补 logit 贡献，称为 Complemented Direct Preference Optimization。
+
+## 理论：纯专家路由的根本局限
+
+论文给出理论分析：纯专家路由（只选专家、不加任何互补项）**在缺乏强全局覆盖假设时，根本上无法达到最优值函数**。换言之，仅靠「选对专家」这条路有天花板。FusionRoute 的互补生成器把有效策略类扩展得更大，在温和条件下就能恢复最优值函数。这给后面「去掉互补 logit 就掉点」的消融实验提供了理论支撑。
+
+## 实验：关键结果
+
+在 Llama-3（8B）与 Gemma-2（2B）两族上各取数学、代码、指令跟随三个 MergeBench 专家，在 GSM8K、MATH500、MBPP、HumanEval、IFEval 上测混合域平均准确率（Table 1）。
+
+Llama-3 家族：FusionRoute 平均 0.566，明显超过 Collab（0.502）、直接微调（0.536）、序列选择（0.466）以及 DARE/TaskArithmetic 融合（0.368/0.424）。Gemma-2 家族：FusionRoute 平均 0.426，超过 Collab（0.360）与直接微调（0.394）。
+
+**更重要的不是赢过基线，而是它不牺牲专精**：FusionRoute 在数学专家的强项 GSM8K/MATH500、代码专家的强项 MBPP/HumanEval 上都能匹配或超过该专家本身，同时在混合域保持鲁棒。
+
+![](img3_llama.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图3：Llama-3-8B 家族上 GPT-4o 评测的胜率对比（相对直接微调基线）</span>
+
+在 PerfectBlend 抽 500 条通用 prompt 上用 GPT-4o 比胜率：FusionRoute 两族都显著高于微调基线，且比其他所有基线都高，说明整体回复质量（对齐、流畅、格式）也更好。
+
+**规模越大收益越明显**：8B 的 Llama-3 上 FusionRoute 与 Collab、序列选择的胜率差距被显著拉大——模型容量越大，在固定专家输出里挑挑拣拣越脆弱；而 FusionRoute 的互补路由能借新增容量去精修专家预测。2B 的 Gemma-2 上差距较小，因为 router 容量有限，互补纠错空间本就小。
+
+![](img4_gemma.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图4：Gemma-2-2B 家族上 GPT-4o 评测的胜率对比</span>
+
+## 消融：互补 logit 与 CDPO 都不可省
+
+**去掉互补 logit**（只用 SFT 后的 router 做路由、不加 router logit）：FusionRoute 在几乎所有基准、两族模型上一致优于这个 routing-only 变体，差距在代码和指令跟随任务上尤其明显——因为即便选对了专家，局部次优或错位 token 仍需要纠错。这直接实证了 §理论：仅靠固定专家 logit 靠不住。
+
+值得注意的是，routing-only 变体本身已大多超过 Collab——说明**直接在专家数据上训路由组件**对学准确稳定的 token 级路由至关重要，而 Collab 这类依赖外部奖励信号的控制解码更易不稳定。
+
+**去掉 CDPO 阶段**（只留 SFT）：SFT 已给出合理初始化，但加上 CDPO 后胜率大幅跃升，全量 FusionRoute 显著胜过仅 SFT 版本，证明性能增益关键依赖偏好优化阶段学到的互补纠错。
+
+![](img5_ablation.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图5：Llama-3-8B 与 Gemma-2-2B 上，含 CDPO 与仅 SFT 的 GPT-4o 胜率对比</span>
+
+## 结语
+
+FusionRoute 的本质是把「选专家」和「补专家」塞进同一个轻量 router：选专家保留领域特长，补 logit 在专家掉链子时兜底，二者通过 logit 加法在解码时融合。
+
+理论上的那句话值得记住——**纯路由有天花板，互补项才是打破天花板的关键**。这解释了为什么 ablation 里去掉互补 logit 就掉点、去掉 CDPO 就掉胜率，不是工程 trick，而是策略类被扩展的必然结果。
+
+它相对 MoE 和模型融合的最大卖点是「免联合训练、免结构对齐、免梯度访问」：heterogeneous 的现成 LLM 直接拼，训练只发生在这个小 router 上。对想用一堆现成专家又不想重训大模型的人来说，这是一条更轻的路。
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+FusionRoute 把「路由选择」和「互补纠错」统一进一个可训练的轻量 router，既避开 MoE 的联合训练重负，也克服纯路由的理论天花板。<br><br>
+实验揭示一个反直觉点：规模越大，固定专家输出间的「挑挑拣拣」越脆弱，而互补路由反而越能借容量精修预测——这意味着它更可能在大模型时代而非小模型时代发光。<br><br>
+_pending_portal_
+</div>
+</div>
+
+---
+
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/crfkhSIuMZJxjNA0Md8dXw" target="_blank" data-linktype="2">李飞飞：世界模型的功能分类</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/orPguOPILj08E329SHculw" target="_blank" data-linktype="2">Claude Code 动态工作流Dynamic Workflows深入拆解：编排逻辑从对话变成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0zKdjRmWg3TbL5Y3HGO3fA" target="_blank" data-linktype="2">从 P/D 分离到 A/F 分离：从学术原型变成行业标准</a><br>
+</span>
+
+---
+
+<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：
+https://arxiv.org/abs/2601.05106</span>
