@@ -8,16 +8,14 @@ async def main():
         c=[0]
         async def send(m,p=None,wp=False):
             c[0]+=1
-            await ws.send(json.dumps({"id":c[0],"method":m,"params":p or {},**({"awaitPromise":True,"returnByValue":True} if wp else {})}))
+            params=dict(p or {})
+            if wp: params.update({"awaitPromise":True,"returnByValue":True})
+            await ws.send(json.dumps({"id":c[0],"method":m,"params":params}))
             while True:
                 r=json.loads(await ws.recv())
                 if r.get("id")==c[0]: return r
-        # list imgs first
-        r=await send("Runtime.evaluate",{"expression":'JSON.stringify(Array.from(document.querySelectorAll("img")).filter(function(i){return i.naturalWidth>100;}).map(function(i){return {src:i.src.substring(0,50),w:i.naturalWidth,h:i.naturalHeight};}))'},True)
-        print("imgs:",r.get("result",{}).get("result",{}).get("value"))
-        # canvas to dataURL
-        for attempt in range(3):
-            r=await send("Runtime.evaluate",{"expression":'(async()=>{var imgs=Array.from(document.querySelectorAll("img")).filter(function(i){return i.naturalWidth>100 && (i.src.indexOf("blob")===0 || i.src.indexOf("data:")===0);});if(!imgs.length){imgs=Array.from(document.querySelectorAll("img")).filter(function(i){return i.naturalWidth>300;});}if(!imgs.length)return null;var img=imgs[0];var c=document.createElement("canvas");c.width=img.naturalWidth;c.height=img.naturalHeight;var ctx=c.getContext("2d");ctx.drawImage(img,0,0);return c.toDataURL("image/png");})()'},True)
+        for attempt in range(4):
+            r=await send("Runtime.evaluate",{"expression":'(async()=>{var imgs=Array.from(document.querySelectorAll("img")).filter(function(i){return i.src.indexOf("blob")===0 && i.naturalWidth>300;});if(!imgs.length)return null;var img=imgs[0];var c=document.createElement("canvas");c.width=img.naturalWidth;c.height=img.naturalHeight;var ctx=c.getContext("2d");ctx.drawImage(img,0,0);return c.toDataURL("image/png");})()'},True)
             val=r.get("result",{}).get("result",{}).get("value","")
             if val and val.startswith("data:"):
                 b64=val.split(",",1)[1]
@@ -26,5 +24,5 @@ async def main():
                 print("SAVED",len(data),"bytes")
                 return
             print("attempt",attempt,"empty, retry")
-            await asyncio.sleep(4)
+            await asyncio.sleep(3)
 asyncio.run(main())
