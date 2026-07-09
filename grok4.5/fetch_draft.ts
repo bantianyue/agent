@@ -14,7 +14,7 @@ console.error("target media_id:", target);
 const r = await fetch(`https://api.weixin.qq.com/cgi-bin/draft/batchget?access_token=${token}`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ no_content: 0, offset: 0, count: 20 })
+  body: JSON.stringify({ offset: 0, count: 20 })
 });
 const j = await r.json();
 console.error("total_count:", j.total_count, "item_count:", (j.item_list||[]).length);
