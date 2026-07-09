@@ -68,7 +68,7 @@ Llama-3家族：FusionRoute平均0.566，明显超过Collab（0.502）、直接�
 
 **去掉互补logit**（只用SFT后的router做路由、不加router logit）：FusionRoute在几乎所有基准、两族模型上一致优于这个routing-only变体，差距在代码和指令跟随任务上尤其明显：因为即便选对了专家，局部次优或错位token仍需要纠错。这直接实证了 §理论：仅靠固定专家logit靠不住。
 
-值得注意的是，routing-only变体本身已大多超过Collab：说明**直接在专家数据上训路由组件**对学准确稳定的token级路由至关重要，而Collab这类依赖外部奖励信号的控制解码更易不稳定。
+routing-only变体本身已大多超过Collab：说明**直接在专家数据上训路由组件**对学准确稳定的token级路由至关重要，而Collab这类依赖外部奖励信号的控制解码更易不稳定。
 
 **去掉CDPO阶段**（只留SFT）：SFT已给出合理初始化，但加上CDPO后胜率大幅跃升，全量FusionRoute显著胜过仅SFT版本，证明性能增益关键依赖偏好优化阶段学到的互补纠错。
 
