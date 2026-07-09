@@ -27,7 +27,7 @@ FusionRoute让一个轻量router（从基座LLM后训练得到）在每个解码
 
 推理时，先取权重最高的专家 π_expert=π_{i*} 作为当前步的specialists，再把router的互补logit与该专家logit做加法融合，得到最终下一token分布：
 
-**log π_final(·|x,y≤t) = log π_θLM(·|x,y≤t) + log π_expert(·|x,y≤t)**
+<div style="background:#f5f5f5;padding:10px 14px;border-radius:4px;font-family:monospace;font-size:13px;color:#333;overflow-x:auto;margin:12px 0;">log π_final(·|x,y≤t) = log π_θLM(·|x,y≤t) + log π_expert(·|x,y≤t)</div>
 
 这个设计既保留了所选专家的领域特长，又允许router在专家不确定或不可靠时出手修正。
 
@@ -90,7 +90,6 @@ FusionRoute的本质是把「选专家」和「补专家」塞进同一个轻量
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
 FusionRoute把「路由选择」和「互补纠错」统一进一个可训练的轻量router，既避开MoE的联合训练重负，也克服纯路由的理论天花板。<br><br>
 实验揭示一个反直觉点：规模越大，固定专家输出间的「挑挑拣拣」越脆弱，而互补路由反而越能借容量精修预测：这意味着它更可能在大模型时代而非小模型时代发光。<br><br>
-_pending_portal_
 </div>
 </div>
 
