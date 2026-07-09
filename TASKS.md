@@ -38,7 +38,7 @@
 | 33 | 2026-07-08 | https://arxiv.org/abs/2607.05804 | 2607-05804 | turnopd | TurnOPD：让在线策略蒸馏具备回合感知，长程Agent训练提速2.29倍 | cover.png | ✅ 已推送 |
 | 34 | 2026-07-09 | https://cognition.com/blog/swe-1-7 | swe-1-7 | swe-1-7 | SWE-1.7：以极低成本逼近前沿级软件工程智能 | cover.png | ✅ 已推送 |
 | 35 | 2026-07-09 | https://arxiv.org/html/2607.07508v1 | 2607-07508 | sao-async-rl | 异步RL卡在等最慢轨迹?SAO单轨迹拆掉同步屏障 | cover.png | ✅ 已推送 |
-| 36 | 2026-07-09 | https://polymath707.substack.com/p/claude-mythos-class-training-compute | claude-mythos-class-training-c | claude-mythos-class | TBD | TBD | 📥 进行中 |
+| 36 | 2026-07-09 | https://polymath707.substack.com/p/claude-mythos-class-training-compute | claude-mythos-class-training-c | claude-mythos-class | 下一代前沿MoE要烧多少钱？2T到10T训练成本推演 | cover.png | ✅ 已推送 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -307,3 +307,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-09 17:48 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-09 17:57 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0Ye3lOLZrKpx6l9USHEJ_91cSneuc-hwN3v1grPgmWdo |
