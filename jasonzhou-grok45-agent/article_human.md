@@ -26,7 +26,7 @@
 我们跑的每一个loop都有相同的四个部分。
 
 ![](img1.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">原文配图 — loop循环工程概览</span>
+<span style="font-size:12px;color:rgb(153,153,153);">原文配图：loop循环工程概览</span>
 
 ## 1. The loop contract（循环契约）
 
@@ -53,7 +53,7 @@
 我们通常把contract、state、logs放进同一个md文件，就像下面这样：
 
 ```markdown
-# <loop 名字> — contract
+# <loop 名字> contract
 
 ## Goal
 什么是赢的样子。有没有终点线，还是作为监控永远跑下去？
@@ -90,7 +90,7 @@ State是持久的画面：backlog、当前假设、已经发出去但需要跟�
 - Stripe.js network blip on /checkout
 
 ## Fixed, still watching
-- null-team-on-login (019edc8a) — 在 #1027 修好，确认它在 prod 停止触发
+- null-team-on-login (019edc8a)：在 #1027 修好，确认它在 prod 停止触发
 ```
 
 没有这个区块，每天早上loop会重新发现同一个噪声错误，烧掉一次run去追它，还烦你。有了它，loop跳过它已经判断过的，把注意力花在新的东西上。**State是loop停止自我重复的地方。**
@@ -162,7 +162,7 @@ State还保存了loop通过运行学到的东西：一个关于谁转化的有�
 你可以加层，但**你不该加，除非简单版先把你坑了**。先搭一层版，感受到具体的痛，再加刚好能修它的那一层。这是我建议你先搭的loop，所以给个模板：
 
 ```markdown
-# doc-maintainer — contract
+# doc-maintainer contract
 
 ## Goal
 README、setup 指南、例子永远和代码实际发布的一致。发现 0 漂移 = 成功 run。
@@ -206,7 +206,7 @@ React Doctor是同样的形态，只是瞄准代码健康：每天早上用npx r
 让它对着真实客户安全跑的boundary：回复是分层的。例行、事实性的答案自己发；任何敏感的、退款的、愤怒用户的、无法review语气的非英文，只在人批了之后才出去。
 
 ```markdown
-# support-triage — contract
+# support-triage contract
 
 ## Goal
 每张进来的 ticket 在一小时内得到正确、调查过的回复，且 ticket 背后的每个产品缺口变成团队能行动的信号。
