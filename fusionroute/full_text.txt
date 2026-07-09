@@ -1,0 +1,5528 @@
+Token-Level LLM Collaboration via FusionRoute
+Nuoya Xiong
+Yuhang Zhou
+Hanqing Zeng
+Zhaorun Chen
+Furong Huang
+Shuchao Bi
+Lizhu Zhang
+Zhuokai Zhao
+Abstract
+
+Large language models (LLMs) exhibit strengths across diverse domains. However, achieving strong performance across these domains with a single general-purpose model typically requires scaling to sizes that are prohibitively expensive to train and deploy. On the other hand, while smaller domain-specialized models are much more efficient, they struggle to generalize beyond their training distributions. To address this dilemma, we propose FusionRoute, a robust and effective token-level multi-LLM collaboration framework in which a lightweight router simultaneously (i) selects the most suitable expert at each decoding step and (ii) contributes a complementary logit that refines or corrects the selected expert’s next-token distribution via logit addition. We provide a theoretical analysis showing that pure expert-only routing is fundamentally limited unless strong global coverage assumptions hold. We solve this issue by augmenting expert selection with a trainable complementary generator, FusionRoute expands the effective policy class and enables recovery of optimal value functions under mild conditions. Empirically, across both Llama-3 and Gemma-2 families and diverse benchmarks spanning mathematical reasoning, code generation, and instruction following, FusionRoute outperforms both sequence- and token-level collaboration, model merging, and direct fine-tuning, while remaining competitive with domain experts on their respective tasks. The code is available at https://github.com/xiongny/FusionRoute
+
+Machine Learning, ICML
+1Introduction
+
+Large language models (LLMs) have demonstrated strong performance across an extensive range of tasks, such as mathematical reasoning (Wang et al., 2025b; Zhao et al., 2025; Zhou et al., 2025), code generation (Deng et al., 2025; Huynh & Lin, 2025; Jiang et al., 2024b; Jimenez et al., 2023), and instruction following (Wang et al., 2025a; Qin et al., 2024). Although sufficiently large, general-purpose LLMs can often deliver balanced performance across diverse domains (Hurst et al., 2024; Team et al., 2025; Yang et al., 2025; Zeng et al., 2025), their computational and monetary costs make them not ideal for every real-world applications. This motivates an alternative paradigm: employing multiple specialized LLMs, each excelling in a particular domain while remaining comparatively efficient.
+
+Figure 1: Sequence-level collaboration is coarse and inefficient, while prior token-level methods are unstable. FusionRoute achieves fine-grained, efficient, and robust token-level collaboration through complementary routing.
+
+However, an LLM that performs exceptionally well on one task may underperform on others due to inductive biases (Levine et al., 2021; Si et al., 2023) and domain-specific training distributions (Yuan et al., 2023). As a result, achieving general-purpose performance through a collection of specialized models hinges on developing mechanisms that can robustly coordinate and leverage their complementary expertise, which has emerged as a central challenge in building efficient and broadly capable LLM systems.
+
+A natural direction toward such collaboration is mixture-of-experts (MoE), in which multiple experts are integrated into a unified architecture and trained jointly with a routing network (Zhou et al., 2022; Xue et al., 2024; Jiang et al., 2024a; Zeng et al.,). While effective, this framework is expensive and inflexible since it typically needs gradient access to all experts and substantial additional end-to-end training, and it usually requires expert models to have similar structures. Another line of work aims to combine the strengths of specialized models through multi-agent systems (MAS), where different LLMs are assigned different roles with the goal of leveraging the best capabilities of each model or agent during generation (Du et al., 2023; Zheng et al., 2025). However, without prior knowledge of which types of questions each model is best suited for, determining how tasks should be allocated in advance becomes inherently challenging. Moreover, existing MAS (Liu et al., 2024; Liang et al., 2024; Ashiga et al., 2025; Huang et al., 2024; Chen et al., 2025) typically operate at a coarse response level, where each agent independently generates a full response and a final answer is selected, merged or subjected to debate post hoc. This approach is inefficient, as it requires multiple full-sequence generations, and can even degrade performance when more agents and discussions are involved due to the heavily increased context length (Zheng et al., 2025). A third direction is model merging (Yang et al., 2024; He et al., 2025), which combines multiple specialized models into a single set of parameters. Although training-free and architecturally simple, model merging is often sensitive to hyperparameters and suffers from parameter interference, making it unable to robustly emphasize different expert behaviors in changing scenarios.
+
+To overcome these limitations, recent work has explored token-level multi-agent collaboration, a more fine-grained and dynamic paradigm that allows multiple LLMs to jointly produce each token during generation (Chakraborty et al., 2025; Shen et al., 2024). However, the effectiveness of these works depends heavily on the quality of the underlying models, making them not robust when expert models perform poorly, or the selection strategy is not correct on certain tasks or tokens. This lead to the following key question:
+
+Can we develop a token-level collaboration paradigm that
+works robustly, efficiently, and automatically across all scenarios?
+
+To address this question, we propose FusionRoute, a token-level collaboration framework that unifies expert selection and knowledge complementation within a single, lightweight router LLM. FusionRoute learns to identify which specialized model is most suitable for generation each next token, enabling fine-grained, context-dependent use of expert capabilities without requiring expensive joint training or per-token evaluation across multiple models (Zhou et al., 2022). At the same time, FusionRoute is trained to provide its own complementary generation signal, allowing it to refine an expert whenever the expert is uncertain or unreliable. By fusing the router’s corrective logits with those of the selected expert during decoding, FusionRoute achieves both robustness by mitigating expert failures, and efficiency through avoiding the overhead that limits prior multi-LLM collaboration methods. This design allows FusionRoute to function as an automatic, domain-agnostic coordination mechanism, enabling consistent performance improvements across diverse tasks and datasets. In summary, we have the following contributions:
+
+• 
+
+We propose FusionRoute, a token-level approach that automatically selects the most suitable expert model at each decoding step while simultaneously providing a complementary logit for better generation.
+
+• 
+
+Theoretically, we show that expert-only token-level collaboration cannot attain the optimal value function unless strong assumptions hold, revealing a fundamental limitation of prior methods. In contrast, FusionRoute’s complementary generator overcomes this limitation and enables recovery of the optimal policy.
+
+• 
+
+Empirically, FusionRoute consistently outperforms strong baselines—including token-level collaboration methods, model merging, and finetuned models—across diverse expert domains (mathematics, coding, and instruction following) as well as general-purpose evaluations. These results highlight FusionRoute’s robustness, efficiency, and broad applicability in scenarios where expert strengths differ.
+
+Related Works
+
+Due to space constraints, we defer a detailed discussion of related work to Appendix A, which includes many previous works for multi-LLM collaboration and multi-model integration.
+
+2Preliminaries
+
+We formalize the decoding process of a language model as sampling from an autoregressive policy 
+𝜋
+. Let 
+𝒳
+ denote the space of prompts and 
+𝒴
+ the vocabulary. A response is represented as a sequence 
+𝑦
+=
+(
+𝑦
+1
+,
+…
+,
+𝑦
+𝑇
+)
+∈
+𝒴
+𝑇
+. Given a prompt 
+𝑥
+∈
+𝒳
+, the language model induces a conditional distribution over responses through the policy 
+𝜋
+​
+(
+𝑦
+∣
+𝑥
+)
+=
+∏
+𝑡
+=
+1
+𝑇
+𝜋
+​
+(
+𝑦
+𝑡
+∣
+𝑥
+,
+𝑦
+<
+𝑡
+)
+,
+ where 
+𝜋
+​
+(
+𝑦
+𝑡
+∣
+𝑥
+,
+𝑦
+<
+𝑡
+)
+ specifies the probability of generating token 
+𝑦
+𝑡
+ given the prompt and the preceding tokens. At each step 
+𝑡
+, greedy decoding selects the token with the highest conditional probability under the policy 
+𝜋
+: 
+𝑦
+𝑡
+=
+arg
+⁡
+max
+𝑦
+∈
+𝒴
+⁡
+𝜋
+​
+(
+𝑦
+∣
+𝑥
+,
+𝑦
+<
+𝑡
+)
+.
+
+3FusionRoute
+3.1Overall Design
+
+FusionRoute enables token-level collaboration among specialized LLMs by selecting the most suitable expert at each decoding step while remaining robust to unreliable experts. However, pure expert selection is often brittle, as even strong specialists can fail on some tokens. FusionRoute addresses this challenge by introducing a router that simultaneously selects the appropriate expert and supplies a complementary logit to refine the expert’s prediction.
+
+The FusionRoute router model 
+𝜋
+𝜃
+ is post-trained from a base LLM parameterized by 
+𝜃
+LM
+. Given a prompt 
+𝑥
+ and a partial generation 
+𝑦
+≤
+𝑡
+, FusionRoute processes the sequence and produces two outputs: a vector of routing weights 
+𝑤
+𝜃
+∈
+ℝ
+𝑛
+, which determines the preferred expert from a set of specialized LLMs 
+{
+𝜋
+1
+,
+…
+,
+𝜋
+𝑛
+}
+, and a set of logits 
+log
+𝜋
+𝜃
+LM
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+, which act as a complementary corrective component. The routing weights are generated via a lightweight linear projection applied to the final hidden state 
+ℎ
+𝜃
+LM
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+, namely 
+⟨
+𝑊
+,
+ℎ
+𝜃
+LM
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+⟩
+.
+
+During inference, FusionRoute first selects the expert with the highest routing weight, 
+𝐼
+𝜃
+∗
+=
+arg
+⁡
+max
+𝑖
+⁡
+𝑤
+𝜃
+,
+𝑖
+, and uses 
+𝜋
+expert
+=
+𝜋
+𝐼
+𝜃
+∗
+ as the selected specialist model for the current step. The final next-token distribution is then obtained by combining the router’s complementary logits with those of the selected expert through logit addition,
+
+	
+log
+𝜋
+final
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+	
+	
+=
+log
+𝜋
+𝜃
+LM
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
++
+log
+𝜋
+expert
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+.
+		
+(1)
+
+This design preserves the domain-specific strengths of the selected expert while allowing the router to correct expert behavior when necessary.
+
+Figure 2: Top: Overall architectural design of FusionRoute. FusionRoute enables multiple specialized LLMs to work collaboratively through a carefully designed router. The router outputs both the weights for token-level routing and the logits to complement the experts’ output. Bottom: The training process is decomposed into two phases. In the SFT phase (§3.2.1), the router learns token-wise mixture weights over the expert models and is jointly fine-tuned to become a good response generator. In the CDPO phase (§3.2.2), FusionRoute refines the final policy by using preference optimization to improve upon the experts’ outputs.
+3.2Training FusionRoute
+
+Having introduced the framework of FusionRoute, we now describe how the router is trained. Training FusionRoute is non-trivial since the router must simultaneously satisfy two coupled objectives: 1) it must reliably select the most suitable expert at each token, while 2) also providing a complementary logit contribution that corrects expert failures when necessary. Naively optimizing these objectives together can lead to bad behavior, where improvements in complementary generation degrade routing quality or vice versa. To address this challenge, we use a decoupled training strategy consisting of an SFT phase followed by a complemented preference-optimization phase.
+
+3.2.1SFT Phase
+
+We first perform SFT to establish two foundational properties of the router: next-token prediction capability and token-level expert selection. Importantly, this phase is not for training the router’s complementary behavior, but rather to produce a stable routing mechanism aligned with expert specialization. We jointly optimize the base LLM parameters 
+𝜃
+LM
+ and the routing projection 
+𝑊
+ using a combination of a standard language modeling loss and a routing loss. The language modeling loss 
+ℒ
+LM
+​
+(
+𝜃
+LM
+;
+𝑥
+,
+𝑦
+)
+ follows the standard SFT objective to encourage accurate next-token prediction on the training data.
+
+To enable token-level routing, we introduce a routing loss that favors experts whose predictions align with the ground-truth sequence. However, many tokens (e.g., punctuation or function words) provide little routing signal because all experts predict them similarly. Supervising on such tokens can dominate the gradient and bias the router toward uninformative agreement. We therefore restrict routing supervision to token positions where experts disagree.
+
+For a given prefix 
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+, let 
+𝑦
+𝑖
+,
+𝑡
++
+1
+=
+arg
+⁡
+max
+𝑦
+⁡
+log
+⁡
+𝜋
+𝑖
+​
+(
+𝑦
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+ denote the next-token prediction of expert 
+𝜋
+𝑖
+. We define the informative token set as 
+𝒮
+=
+{
+𝑡
+∈
+[
+𝑇
+]
+:
+∃
+𝑖
+≠
+𝑖
+′
+​
+ such that 
+​
+𝑦
+𝑖
+,
+𝑡
++
+1
+≠
+𝑦
+𝑖
+′
+,
+𝑡
++
+1
+}
+.
+ For these positions, at token 
+𝑡
+∈
+𝑆
+, we first compute the router weight 
+𝑤
+𝜃
+𝑡
+ and compute the aggregated logits as 
+log
+𝜋
+agg
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+=
+∑
+𝑖
+=
+1
+𝑛
+𝑤
+𝜃
+,
+𝑖
+𝑡
+log
+𝜋
+𝑖
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+,
+ where the weight 
+𝑤
+𝜃
+𝑡
+=
+(
+𝑤
+𝜃
+,
+1
+𝑡
+,
+⋯
+,
+𝑤
+𝜃
+,
+𝑛
+𝑡
+)
+ represents the output of the linear layer for token 
+𝑡
+ under parameter 
+𝜃
+. Then, we define the routing loss as 
+ℒ
+expert
+​
+(
+𝜃
+;
+𝑥
+,
+𝑦
+)
+=
+∑
+𝑖
+∈
+𝑆
+−
+log
+⁡
+𝜋
+agg
+​
+(
+𝑦
+𝑖
+∣
+𝑥
+,
+𝑦
+≤
+𝑖
+−
+1
+)
+.
+ Given a hyperparameter 
+𝜆
+ for balancing the loss scale, the final SFT objective is
+
+	
+ℒ
+SFT
+​
+(
+𝜃
+)
+=
+𝔼
+(
+𝑥
+,
+𝑦
+)
+∈
+𝒟
+SFT
+​
+[
+ℒ
+LM
+​
+(
+𝜃
+LM
+;
+𝑥
+,
+𝑦
+)
++
+𝜆
+​
+ℒ
+expert
+​
+(
+𝜃
+;
+𝑥
+,
+𝑦
+)
+]
+,
+		
+(2)
+3.2.2Complemented Direct Preference Optimization (CDPO)
+
+While SFT establishes routing and preserves next-token prediction, it does not address how the router should correct locally suboptimal expert outputs. In practice, experts may produce unreliable logits even when correctly selected. We therefore introduce a preference optimization phase that trains the router to learn complementary logit contributions while treating expert outputs as fixed. We refer to this preference-optimization stage as Complemented Direct Preference Optimization (CDPO).
+
+During inference, the final policy is obtained by combining the router and the selected expert model logits through logits addition, as shown in Eq. (1). To align training with this decoding behavior, we introduce a preference-optimization objective that modifies Direct Preference Optimization (DPO) (Rafailov et al., 2023) to the router’s base model parameters 
+𝜃
+LM
+. Given preference pairs 
+(
+𝑥
+,
+𝑦
+𝑤
+,
+𝑦
+𝑙
+)
+ for the same prompt 
+𝑥
+ and the router 
+𝜋
+ref
+ after the SFT phase, for any policy 
+𝜋
+, define the contrastive loss as
+
+	
+𝑟
+𝜋
+​
+(
+𝑥
+,
+𝑦
+,
+𝑦
+𝑙
+)
+	
+:=
+∑
+𝑡
+≥
+0
+𝛽
+​
+log
+⁡
+𝜋
+​
+(
+𝑦
+𝑡
++
+1
+∣
+𝑦
+𝑤
+,
+≤
+𝑡
+,
+𝑥
+)
+𝜋
+ref
+​
+(
+𝑦
+𝑡
++
+1
+∣
+𝑦
+𝑤
+,
+≤
+𝑡
+,
+𝑥
+)
+	
+		
+−
+∑
+𝑡
+≥
+0
+𝛽
+​
+log
+⁡
+𝜋
+​
+(
+𝑦
+𝑡
++
+1
+∣
+𝑦
+𝑙
+,
+≤
+𝑡
+,
+𝑥
+)
+𝜋
+ref
+​
+(
+𝑦
+𝑡
++
+1
+∣
+𝑦
+𝑙
+,
+≤
+𝑡
+,
+𝑥
+)
+.
+	
+
+The objective is defined by
+
+	
+ℒ
+CDPO
+​
+(
+𝜃
+LM
+)
+	
+	
+=
+−
+𝔼
+(
+𝑥
+,
+𝑦
+𝑤
+,
+𝑦
+𝑙
+)
+∼
+𝒟
+DPO
+​
+[
+log
+⁡
+𝜎
+​
+(
+ℓ
+𝜋
+final
+​
+(
+𝑥
+,
+𝑦
+𝑤
+,
+𝑦
+𝑙
+)
+)
+]
+	
+	
+=
+−
+𝔼
+(
+𝑥
+,
+𝑦
+𝑤
+,
+𝑦
+𝑙
+)
+∼
+𝒟
+DPO
+[
+log
+𝜎
+(
+ℓ
+𝜋
+𝜃
+LM
+(
+𝑥
+,
+𝑦
+𝑤
+,
+𝑦
+𝑙
+)
+	
+	
++
+∑
+𝑡
+≥
+0
+𝛽
+​
+log
+⁡
+𝜋
+expert
+​
+(
+𝑦
+𝑡
++
+1
+∣
+𝑦
+𝑤
+,
+≤
+𝑡
+,
+𝑥
+)
+𝜋
+expert
+​
+(
+𝑦
+𝑡
++
+1
+∣
+𝑦
+𝑙
+,
+≤
+𝑡
+,
+𝑥
+)
+⏟
+(Bias)
+)
+]
+,
+		
+(3)
+
+where 
+𝜎
+​
+(
+𝑥
+)
+=
+(
+1
++
+𝑒
+−
+𝑥
+)
+−
+1
+ is the sigmoid function, and 
+𝛽
+ controls the strength of preference alignment.
+
+Importantly, we do not backward propagate any gradient for the bias term. It can be regarded as an extra token-level bias. Optimizing this loss naturally encourages the router to provide a complementary logit contribution that compensates for the weaknesses in the expert models. When an expert is strong for a prompt, its log-ratio gap term (B) is large, yielding a small gradient on 
+𝜃
+LM
+. When the expert is weak, the gap term is small, leading to a larger gradient that encourages stronger corrective logits. As a result, the router refines expert predictions precisely when needed, improving robustness while aligning training with the collaborative decoding behavior used at inference time.
+
+3.2.3Mix Training
+
+Since preference optimization updates the router’s base parameters 
+𝜃
+LM
+, it can indirectly affect expert selection through shared representations. It is therefore necessary to preserve both reliable expert selection and effective complementary logit refinement during training. However, naively applying DPO to the entire router often degrades routing, as the final linear layer overfits to preference signals and loses its ability to select experts correctly.
+
+To address this issue, we adopt a decoupled optimization strategy. Specifically, for SFT samples, all parameters, including the routing layer, are updated using the routing loss 
+ℒ
+LM
+. On the other hand, we apply the preference-optimization objective (Eq. (3)) only to the router’s base model parameters 
+𝜃
+LM
+, while excluding the routing projection. To ensure consistency between the base model and the linear layer, we jointly mix preference-optimization data with supervised SFT data during training. This mixed training scheme preserves expert-selection capability while enabling the router to acquire a complementary logit contribution. The full procedure is summarized in Algorithm 1.
+
+1: Initial: Dataset 
+𝒟
+SFT
+, 
+𝒟
+DPO
+, SFT router 
+𝜋
+𝜃
+, batch size 
+𝐵
+, learning rate 
+𝜂
+.
+2: Mix two datasets randomly to get 
+𝒟
+mix
+.
+3: for 
+𝑡
+=
+1
+,
+2
+,
+⋯
+,
+ do
+4:  Receive a batch of data points 
+{
+𝑑
+1
+,
+⋯
+,
+𝑑
+𝐵
+}
+∈
+𝒟
+mix
+. Set 
+ℒ
+=
+0
+.
+5:  for 
+𝑖
+=
+1
+,
+2
+,
+⋯
+,
+𝐵
+ do
+6:   if 
+𝑑
+𝑖
+=
+(
+𝑥
+,
+𝑦
+)
+∈
+𝒟
+SFT
+ then
+7:    
+ℒ
+=
+ℒ
++
+𝜆
+​
+ℒ
+LM
+​
+(
+𝜃
+;
+𝑑
+𝑖
+)
+.
+8:   else
+9:    
+ℒ
+=
+ℒ
++
+ℒ
+CDPO
+​
+(
+𝜃
+LM
+;
+𝑑
+𝑖
+)
+.
+10:   end if
+11:  end for
+12:  Update the parameter 
+𝜃
+=
+𝜃
+−
+𝜂
+​
+∇
+𝜃
+ℒ
+.
+13: end for
+Algorithm 1 Mix Training
+4Theoretical Analysis
+4.1Token-Level Markov Decision Process
+
+We formulate the decoding process as a token-level Markov Decision Process (MDP) 
+ℳ
+=
+{
+𝒮
+,
+𝒜
+,
+ℙ
+,
+𝑟
+}
+, where 
+𝒮
+ is the state space, 
+𝒜
+ is the action space, 
+ℙ
+ is the transition kernel, and 
+𝑟
+ defines the reward function. Let the prompt space be 
+𝒳
+ and the vocabulary be 
+𝒴
+. Starting from the prompt 
+𝑠
+0
+=
+𝑥
+, at step 
+𝑡
+ the state is defined by 
+𝑠
+𝑡
+=
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+,
+ and the action is represented by the next token 
+𝑎
+𝑡
+=
+𝑦
+𝑡
++
+1
+. The transition kernel is then defined by 
+ℙ
+​
+(
+𝑠
+𝑡
++
+1
+∣
+𝑠
+𝑡
+,
+𝑎
+𝑡
+)
+=
+𝕀
+​
+{
+𝑠
+𝑡
++
+1
+=
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝑦
+𝑡
++
+1
+)
+}
+. Finally, the token-level reward function 
+𝑟
+​
+(
+𝑠
+,
+𝑎
+)
+=
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+∈
+[
+0
+,
+1
+]
+ maps any text 
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+ to a real number. A language model is a policy 
+𝜋
+​
+(
+𝑎
+∣
+𝑠
+)
+=
+𝜋
+​
+(
+𝑦
+𝑡
++
+1
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+, where it takes the previous text 
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+ as the input and generates the next token 
+𝑦
+𝑡
++
+1
+. Let 
+𝜏
+=
+(
+𝑥
+,
+𝑦
+1
+,
+⋯
+,
+𝑦
+𝑇
+)
+ denote the trajectory, which is indeed a full response generated by a language model. The value function 
+𝑉
+𝜋
+​
+(
+𝑠
+)
+=
+𝑉
+𝜋
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+ for a state 
+𝑠
+=
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+ can be defined as 
+𝑉
+𝜋
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+=
+𝔼
+𝜏
+∼
+𝜋
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+∑
+𝑖
+=
+𝑡
++
+1
+𝑇
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑖
+)
+]
+.
+ Similarly, for 
+𝑎
+=
+𝑦
+𝑡
++
+1
+, the Q function can be defined as 
+𝑄
+𝜋
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝑦
+𝑡
++
+1
+)
+=
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
++
+𝔼
+𝜏
+∼
+𝜋
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+​
+[
+∑
+𝑖
+=
+𝑡
++
+1
+𝑇
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑖
++
+1
+)
+]
+.
+ We assume a upper bound 
+𝑄
+max
+ and 
+𝑉
+max
+ for any Q-function and value function respectively.
+
+4.2Token-Level Expert Selection through the Lens of Performance Difference Lemma
+
+In this section, we establish a connection between the Performance Difference Lemma (PDL) (Kakade & Langford, 2002) and our token-level expert selection training. At a high level, PDL characterizes how deviations from the optimal policy at individual decision steps accumulate into a final performance gap.
+
+Lemma 4.1 (Performance Difference Lemma (Kakade & Langford, 2002)). 
+
+Denote 
+𝜌
+∈
+Δ
+​
+(
+𝒳
+)
+ as a distribution over the prompt space. Suppose each response 
+𝑦
+ has length 
+𝑇
+. Then, for any two policies 
+𝜋
+,
+𝜋
+∗
+, we have
+
+	
+𝔼
+𝑥
+∼
+𝜌
+​
+[
+𝑉
+𝜋
+∗
+​
+(
+𝑥
+)
+−
+𝑉
+𝜋
+​
+(
+𝑥
+)
+]
+	
+=
+∑
+𝑡
+=
+0
+𝑇
+−
+1
+𝔼
+𝑥
+∼
+𝜌
+,
+𝑦
+≤
+𝑡
+∼
+𝜋
+[
+𝑉
+∗
+(
+𝑥
+,
+𝑦
+𝑡
+)
+	
+		
+−
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+[
+𝑄
+∗
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+]
+.
+	
+
+When applied to LLM, this lemma shows that selecting an expert whose next token approximately maximizes the optimal value at each token yields a near-optimal final policy.
+
+To formalize the connection, we assume the SFT dataset is generated by the optimal policy 
+𝜋
+∗
+(
+⋅
+∣
+𝑠
+)
+, where 
+𝜋
+∗
+ achieves the optimal value function in the token-level MDP, and we denote 
+𝑄
+𝜋
+∗
+ as the optimal Q-function. Since we trained on the SFT dataset which follows trajectories generated by 
+𝜋
+∗
+, at step 
+𝑡
+ with prefix 
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+, the router can be viewed as approximating an expert action that aligns with the action preferred by 
+𝜋
+∗
+ , i.e., choosing the expert that can maximize the optimal Q-function: 
+𝜋
+expert
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+=
+𝜋
+𝐼
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+,
+ where 
+𝐼
+=
+arg
+⁡
+max
+𝑖
+⁡
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+𝑖
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+.
+
+We make the following assumption to state that for any prefix 
+𝑥
+,
+𝑦
+≤
+𝑡
+, there is one correct model that achieves approximate optimal value function.
+
+Assumption 4.2 (Global Coverage Assumption). 
+
+For any 
+𝑥
+,
+𝑦
+≤
+𝑡
+, there exists a small 
+Δ
+≤
+0
+ and an 
+𝑖
+∈
+[
+𝑛
+]
+ such that
+
+	
+|
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+𝑖
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+−
+𝑉
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+|
+≤
+Δ
+,
+		
+(4)
+
+This assumption states that the expert set is assumed to be sufficiently expressive so that for each token position, one expert always achieves an approximately optimal value. Following the Assumption 4.2 and Lemma 4.1, we can get
+
+	
+𝔼
+𝑥
+∼
+𝜌
+​
+[
+𝑉
+𝜋
+∗
+​
+(
+𝑥
+)
+−
+𝑉
+𝜋
+​
+(
+𝑥
+)
+]
+≤
+∑
+𝑡
+=
+0
+𝑇
+−
+1
+Δ
+=
+𝑇
+​
+Δ
+,
+		
+(5)
+
+which means that when 
+Δ
+=
+𝑜
+​
+(
+1
+/
+𝑇
+)
+, an idealized token-level routing policy can achieve near-optimal expected return under by selecting the appropriate expert at each step. We also discuss the difference between our approach and the prior token-level collaboration approach Collab (Chakraborty et al., 2025) in Appendix C.
+
+However, Assumption 4.2 is relatively strong, as it requires global coverage over all prefixes, including those unseen in supervised training. A more natural alternative is to assume coverage only on the trained data generated by 
+𝜋
+∗
+. However, we will show that this weaker assumption is insufficient to guarantee approximately optimal responses, revealing a fundamental limitation of purely token-level collaboration.
+
+4.3Limitations of Purely Token-Level Collaboration
+
+In the previous subsection, we showed that router training can recover the ideal action, with a relative restrictive Assumption 4.2. A more reasonable requirement is to enforce Eq. (4) only on good prefixes 
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+. We consider two types of good prefixes: (i) prefixes sampled from the optimal policy 
+𝜋
+∗
+, corresponding to the single-policy coverage assumption; and (ii) prefixes that can potentially lead to high-quality responses, corresponding to the generalization coverage assumption. Together, these prefixes capture the text patterns commonly encountered during training. Under these assumptions, we show that although a near-optimal candidate selection may exist, it cannot be recovered from observations of the value function 
+𝑄
+𝜋
+∗
+ alone.
+
+Theorem 4.3 (Informal). 
+
+Suppose the observation space only contains the prefix 
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+ and the optimal Q-value function for previous text 
+{
+𝑄
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑘
+)
+}
+𝑘
+=
+1
+𝑡
+ and the all possible next token 
+{
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝑦
+)
+}
+𝑦
+∈
+𝒴
+.
+ Then, even if (i) there exists a near-optimal trajectory achievable via purely token-level routing, and (ii) the value gap is bounded by a small 
+Δ
+ for all good prefixes, no token-level routing algorithm can guarantee a near-optimal policy.
+
+The formal statement and the proof is provided in Appendix B.1. The impossibility in Theorem 4.3 stems from an identifiability failure, where observing optimal values along trajectories generated by 
+𝜋
+∗
+ is insufficient to determine which expert actions actually realize those values. In fact, Theorem 4.3 shows that using SFT to train a router that chooses the optimal model is not reliable, because this is essentially equivalent to use behavior cloning for learning the actions that maximize the optimal value function 
+𝑄
+𝜋
+∗
+.
+
+4.4Benefits of Router Training
+
+The previous theorem shows that, even if a prefix has high value under the optimal policy 
+𝜋
+∗
+, since each token must be chosen from a fixed set of expert actions, any misalignment between 
+𝜋
+∗
+ and the experts at some tokens leads to uncontrollable approximation error. To address this issue, we add the logits of the router as a complementary component (Eq. (1)) to the final logits and train the final logits to align with the optimal policy. This removes the need to assume that any expert alone attains near-optimal Q-values; instead, we assume that the total variation distance between the final policy and the optimal policy is bounded. In fact, since our training is to align 
+𝜋
+𝑖
+′
+ with the expert data where 
+log
+⁡
+𝜋
+𝑖
+′
+=
+log
+⁡
+𝜋
+𝑖
++
+log
+⁡
+𝜋
+router
+, we can assume
+
+	
+𝔼
+𝑥
+∼
+𝜌
+,
+𝑦
+≤
+𝑡
+∼
+𝜋
+∗
+[
+arg
+min
+𝑖
+TV
+(
+𝜋
+𝑖
+′
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+,
+𝜋
+∗
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+)
+]
+≤
+Δ
+.
+	
+
+Then, if at each position 
+𝑡
+, the policy 
+𝜋
+ chooses the expert 
+𝑖
+ that 
+𝜋
+𝑖
+′
+ minimizes the TV distance to the optimal policy, from PDL we can get
+
+	
+𝔼
+𝑥
+∼
+𝜌
+​
+[
+𝑉
+𝜋
+∗
+​
+(
+𝑥
+)
+−
+𝑉
+𝜋
+​
+(
+𝑥
+)
+]
+≤
+𝑇
+​
+𝑄
+max
+​
+Δ
+.
+		
+(6)
+
+The proof is provided in Appendix B.2. This result highlights a key conceptual shift: rather than requiring any fixed expert to be near-optimal, we allow a router to jointly select and complement experts by adding adaptive logits. The resulting policy expands the expressivity of the action space, enabling approximation of the optimal policy 
+𝜋
+∗
+ even when no single expert suffices.
+
+Furthermore, this framework also has advantages compared to the directly fine-tuned model. When the optimal policy and a candidate model are already reasonably well aligned, the router’s complementary component need not be highly accurate. In this case, the router is substantially easier to learn, as it only needs to correct the limited set of states where the candidate model deviates from 
+𝜋
+∗
+. Consequently, combining a candidate model with a trainable router can outperform both fine-tuning a single model and pure routing.
+
+Method	GSM8K	MATH500	MBPP	HumanEval	IfEval	Avg Acc.
+Llama-3 Family 
+Expert Models 
+Math Expert	0.86	0.36	0.23	0.37	0.31	0.426
+Code Expert	0.52	0.15	0.34	0.66	0.48	0.430
+Instruct Expert	0.74	0.27	0.36	0.52	0.67	0.512
+Collaboration Approaches 
+Sequence Selection	0.76	0.31	0.21	0.45	0.50	0.466
+Collab	0.82	0.32	0.28	0.54	0.55	0.502
+Fine-tuned Model	0.75	0.26	0.36	0.58	0.72	0.536
+DARE	0.75	0.28	0.23	0.26	0.32	0.368
+TaskArithmetic	0.82	0.32	0.24	0.39	0.35	0.424
+FusionRoute (ours)	0.82	0.33	0.36	0.63	0.69	0.566
+Gemma-2 Family 
+Expert Models 
+Math Expert	0.67	0.27	0.22	0.36	0.47	0.398
+Code Expert	0.39	0.16	0.27	0.41	0.52	0.350
+Instruction Expert	0.19	0.08	0.23	0.34	0.61	0.290
+Collaboration Approaches 
+Sequence Selection	0.62	0.24	0.27	0.37	0.54	0.408
+Collab	0.52	0.22	0.26	0.35	0.45	0.360
+Fine-tuned Model	0.54	0.17	0.24	0.34	0.68	0.394
+TaskArithmetic	0.43	0.15	0.14	0.28	0.34	0.268
+DARE	0.36	0.10	0.14	0.16	0.36	0.224
+FusionRoute (ours)	0.65	0.22	0.25	0.40	0.61	0.426
+Table 1: Cross-domain performance comparison on Llama-3 and Gemma-2 families. Best and second-best performance within each family are highlighted by bold and underline, respectively.
+5Experiments
+
+In this section, we first describe the experimental setup in §5.1. We then present mixed-domain performance and win rates on general benchmarks in §5.2. These results show that FusionRoute enables effective multi-model collaboration by selecting domain-appropriate experts while maintaining strong performance on general tasks.
+
+5.1Experimental Setup
+Baselines
+
+We compare FusionRoute against a broad set of baselines, including sequence-level collaboration, token-level collaboration, model merging, and single-model fine-tuning. For sequence-level collaboration, we compare with Sequence Selection, where each expert independently generates a full response using greedy decoding, and an external reward model selects the highest-scoring output. For the token-level collaboration, we include Collab (Chakraborty et al., 2025), which scores candidate tokens from multiple models with an external reward signal. We also include two popular model merging approaches, DARE (Yu et al., 2024) and TaskArithmetic (Ilharco et al., 2022), as well as a fine-tuned model baseline that applies the same SFT and DPO as FusionRoute but removes routing and collaboration, isolating the contribution of complementary logits.
+
+Models and Datasets
+
+We conduct experiments on both the Llama-3 (Dubey et al., 2024) and Gemma-2 (Team et al., 2024) families. For each family we choose three models that are expertise in math, coding and instruction-following from MergeBench (He et al., 2025) respectively. Specifically, for the Llama-3 family, we use math expert models Llama-3.1-8B-Instruct
+_
+math and coding expert models Llama-3.1-8B-Instruct
+_
+coding from MergeBench (He et al., 2025) as the two expert models, and Llama-3.1-8B-Instruct as the instruction-following expert. Following Chakraborty et al. (2025), we use the one open-sourced Ray2333/reward-model-Mistral-7B-instruct-Unified-Feedback as the external reward for Collab (Chakraborty et al., 2025). For the Gemma-2 family, we choose Gemma-2-2B-Instruct_math, Gemma-2-2B-Instruct
+_
+coding and Gemma-2-2B-Instruct
+_
+instruction from MergeBench (He et al., 2025) as three expert models. For a fair comparison, we use weqweasdas/RM-Gemma-2B as the external reward for Collab (Chakraborty et al., 2025), instead of a larger 7B reward model. We randomly select 500 samples from the PerfectBlend dataset (Xu et al., 2024) as the test set and use the remaining samples as the training pool. For the initial SFT phase, we randomly sample 200k examples from the PerfectBlend training split, which provides a balanced mixture of mathematics, coding, and instruction-following tasks. For both the Llama and Gemma families, the router is initialized from the instruction-following expert and fine-tuned by minimizing the loss in Eq. (2) with 
+𝜆
+=
+1
+/
+3
+ and learning rate 
+10
+−
+5
+ for one epoch. After the SFT phase, we further train the model using the mixed training procedure in Algorithm 1. We sample 100k examples from the PerfectBlend training split as 
+𝒟
+SFT
+ and 100k preference pairs from the OpenHermes dataset as 
+𝒟
+DPO
+ with learning rate 
+10
+−
+5
+, 
+𝛽
+=
+0.1
+, and 
+𝜆
+=
+1
+/
+3
+ for one epoch. For the directly fine-tuned baseline, we apply the same SFT and DPO procedures and hyperparameters. For model merging baselines, we use the default parameters 
+𝑝
+=
+0.9
+ and 
+𝜆
+=
+1
+ for DARE and 
+𝜆
+=
+1
+ for TaskArithmetic.
+
+5.2Main Results
+5.2.1Mixed-Domain Performance.
+
+In practical deployment, users interact with a single model without knowing the prompt’s domain. We therefore evaluate FusionRoute in a general-purpose, mixed-domain setting, where the model must automatically leverage the most appropriate expert at inference time. We consider five benchmark datasets covering diverse expert domains: GSM8K (Cobbe et al., 2021) and MATH500 (Lightman et al., 2023) for mathematical reasoning, MBPP (Austin et al., 2021) and HumanEval (Chen et al., 2021) for code generation, and IfEval (Zhou et al., 2023) for instruction following. More implementation details for each task are provided in Appendix E.1.
+
+As shown in Table 1,
+
+(a)Llama3-8B Family
+(b)Gemma2-2B Family
+Figure 4: GPT-4o winrate on general datasets compared to fine-tuned model.
+
+FusionRoute consistently outperforms sequence-level collaboration, prior token-level collaboration Collab, model merging methods, and directly fine-tuned models. These results demonstrate that FusionRoute effectively functions as a general-purpose model assembled from specialized experts, relieving users from the need to select domain-specific checkpoints while delivering strong and stable performance across heterogeneous tasks. The examples of routing behavior in several domain-specific tasks are provided in Appendix E.2.
+
+Importantly, FusionRoute does not sacrifice specialization. In fact, FusionRoute matches or exceeds domain experts on their strongest benchmarks, such as math experts on GSM8K and MATH500 or coding experts on MBPP and HumanEval, while remaining robust across mixed domains. This shows that FusionRoute is compatible with expert specialization, while being substantially more robust and generalized in mixed-domain usage.
+
+5.2.2Performance on General Dataset
+
+To further assess overall response quality beyond task-specific correctness, we evaluate FusionRoute on a general dataset by sampling 500 prompts from the PerfectBlend (Xu et al., 2024) test set and generating responses. We use GPT-4o to evaluate the overall response quality compared to the response of the directly fine-tuned model (Fine-tuned Model in Table 1). We compute the fraction of wins as winrate over 500 examples. More details are provided in Appendix E.1. As shown in Fig. 4, FusionRoute achieves a substantially higher win rate than the fine-tuned baseline on both model families, compared to all other baselines, which indicates better overall response quality on general prompts. This improvement reflects better alignment, fluency, and formatting, complementing the strong task-level performance observed on domain benchmarks.
+
+5.2.3FusionRoute is More Beneficial at a Larger Scale
+
+As shown in Fig. 4, the performance gap between FusionRoute and other baselines becomes markedly larger in the 8B Llama-3 family. In this setting, both Collab and Sequence Selection exhibit substantial degradation in win rate. This suggests that as model capacity grows, selecting among fixed expert outputs becomes increasingly brittle, whereas FusionRoute ’s complementary routing effectively exploits the added capacity to refine expert predictions.
+
+In contrast, in the 2B Gemma-2 family, the gap between FusionRoute and pure token-level collaboration is smaller. While other collaboration approaches still underperform FusionRoute, they outperform the directly fine-tuned baseline. This indicates that there is relatively less room for complementary correction at smaller scales, due to the limited capacity of the router. Overall, these results suggest that FusionRoute becomes better as the model scale grows.
+
+6Ablation Study
+6.1Ablation on Complementary Logit Contribution
+
+In this section, we examine the role of the router’s complementary logit contribution in FusionRoute. In particular, we aim to isolate whether token-level expert selection alone is sufficient for effective collaboration. We therefore remove the complementary component, using the router after the SFT phase solely for token-level expert selection without adding router logits.
+
+Table 2 in Appendix D reports the mixed-domain performance of the routing-only variant compared with the full FusionRoute framework. We see that FusionRoute consistently outperforms FusionRoute w/o complementary logits across nearly all benchmarks and both model families. The performance gap is particularly pronounced on coding and instruction-following tasks, where even correctly selected experts can produce locally suboptimal or misaligned tokens that require correction. These results provide direct empirical evidence support for our theoretical analysis in §4: Even with accurate expert selection, relying solely on fixed expert logits cannot reliably yield a near-optimal policy. Allowing the router to add complementary logits expands the policy’s expressivity, enabling it to correct expert failures and achieve robust performance.
+
+Also, we find that the routing-only variant (FusionRoute w/o complementary logits) already outperforms the Collab across most benchmarks. This improvement suggests that directly training the routing component on expert data is crucial for learning accurate and stable token-level routing behaviors. In contrast, controlled-decoding approaches like Collab that rely solely on external reward signals tend to exhibit higher instability.
+
+6.2Ablation on FusionRoute Training Procedure
+Figure 5: GPT-4o winrate comparison: FusionRoute with vs. without CDPO on Llama-3-8B and Gemma-2-2B Family.
+
+Beyond the role of complementary logits at inference time, we also analyze FusionRoute ’s training pipeline by ablating the preference-optimization stage to assess the effectiveness of CDPO relative to SFT. To this end, we compare two variants: a FusionRoute after the SFT phase, and the full FusionRoute framework with CDPO training. We evaluate these variants using GPT-4o win rate compared to the fine-tuned model baseline on the general dataset.
+
+The result are shown in Fig. 5. We observe that while SFT already provides a reasonable initialization, applying CDPO training leads to a substantial improvement in win rate. In particular, the full FusionRoute model significantly outperforms its SFT-only counterpart, indicating that the complementary component learned during CDPO effectively corrects expert failures and enhances the overall response quality. These findings suggest that the performance gains of FusionRoute depend critically on the preference-optimization stage in the training procedure, which substantially improves general response quality.
+
+7Conclusion
+
+In this paper, we present FusionRoute, a framework that enables multiple candidate models to collaborate and works well automatically across diverse scenarios because of a routing mechanism, and provides robustness by letting the router provide complementary logits to refine the overall response quality. In addition, FusionRoute is computationally efficient, as it avoids requiring each model to generate candidate tokens or full responses for selection. Theoretically, we characterize the limitations of purely token-level collaboration and demonstrate the benefits of incorporating complementary logits. Extensive experiments on both domain-specific and general datasets verify the effectiveness of our framework.
+
+Impact Statement
+
+This paper presents work whose goal is to advance the field of multi-LLM collaboration. There are many potential societal consequences of our work, none which we feel must be specifically highlighted here.
+
+References
+Ashiga et al. (2025)	Ashiga, M., Jie, W., Wu, F., Voskanyan, V., Dinmohammadi, F., Brookes, P., Gong, J., and Wang, Z.Ensemble learning for large language models in text and code generation: A survey.arXiv preprint arXiv:2503.13505, 2025.
+Austin et al. (2021)	Austin, J., Odena, A., Nye, M., Bosma, M., Michalewski, H., Dohan, D., Jiang, E., Cai, C., Terry, M., Le, Q., et al.Program synthesis with large language models.arXiv preprint arXiv:2108.07732, 2021.
+Chakraborty et al. (2025)	Chakraborty, S., Bhatt, S., Sehwag, U. M., Ghosal, S. S., Qiu, J., Wang, M., Manocha, D., Huang, F., Koppel, A., and Ganesh, S.Collab: Controlled decoding using mixture of agents for llm alignment.arXiv preprint arXiv:2503.21720, 2025.
+Chan et al. (2023)	Chan, C.-M., Chen, W., Su, Y., Yu, J., Xue, W., Zhang, S., Fu, J., and Liu, Z.Chateval: Towards better llm-based evaluators through multi-agent debate.arXiv preprint arXiv:2308.07201, 2023.
+Chen et al. (2021)	Chen, M., Tworek, J., Jun, H., Yuan, Q., de Oliveira Pinto, H. P., Kaplan, J., Edwards, H., Burda, Y., Joseph, N., Brockman, G., Ray, A., Puri, R., Krueger, G., Petrov, M., Khlaaf, H., Sastry, G., Mishkin, P., Chan, B., Gray, S., Ryder, N., Pavlov, M., Power, A., Kaiser, L., Bavarian, M., Winter, C., Tillet, P., Such, F. P., Cummings, D., Plappert, M., Chantzis, F., Barnes, E., Herbert-Voss, A., Guss, W. H., Nichol, A., Paino, A., Tezak, N., Tang, J., Babuschkin, I., Balaji, S., Jain, S., Saunders, W., Hesse, C., Carr, A. N., Leike, J., Achiam, J., Misra, V., Morikawa, E., Radford, A., Knight, M., Brundage, M., Murati, M., Mayer, K., Welinder, P., McGrew, B., Amodei, D., McCandlish, S., Sutskever, I., and Zaremba, W.Evaluating large language models trained on code.2021.
+Chen et al. (2025)	Chen, Z., Li, J., Chen, P., Li, Z., Sun, K., Luo, Y., Mao, Q., Li, M., Xiao, L., Yang, D., et al.Harnessing multiple large language models: A survey on llm ensemble.arXiv preprint arXiv:2502.18036, 2025.
+Cobbe et al. (2021)	Cobbe, K., Kosaraju, V., Bavarian, M., Chen, M., Jun, H., Kaiser, L., Plappert, M., Tworek, J., Hilton, J., Nakano, R., et al.Training verifiers to solve math word problems.arXiv preprint arXiv:2110.14168, 2021.
+Deng et al. (2025)	Deng, X., Da, J., Pan, E., He, Y. Y., Ide, C., Garg, K., Lauffer, N., Park, A., Pasari, N., Rane, C., et al.Swe-bench pro: Can ai agents solve long-horizon software engineering tasks?arXiv preprint arXiv:2509.16941, 2025.
+Du et al. (2023)	Du, Y., Li, S., Torralba, A., Tenenbaum, J. B., and Mordatch, I.Improving factuality and reasoning in language models through multiagent debate.In Forty-first International Conference on Machine Learning, 2023.
+Dubey et al. (2024)	Dubey, A., Jauhri, A., Pandey, A., Kadian, A., Al-Dahle, A., Letman, A., Mathur, A., Schelten, A., Yang, A., Fan, A., et al.The llama 3 herd of models.arXiv e-prints, pp. arXiv–2407, 2024.
+He et al. (2025)	He, Y., Zeng, S., Hu, Y., Yang, R., Zhang, T., and Zhao, H.Mergebench: A benchmark for merging domain-specialized llms.arXiv preprint arXiv:2505.10833, 2025.
+Huang et al. (2024)	Huang, Y., Feng, X., Li, B., Xiang, Y., Wang, H., Liu, T., and Qin, B.Ensemble learning for heterogeneous large language models with deep parallel collaboration.Advances in Neural Information Processing Systems, 37:119838–119860, 2024.
+Hurst et al. (2024)	Hurst, A., Lerer, A., Goucher, A. P., Perelman, A., Ramesh, A., Clark, A., Ostrow, A., Welihinda, A., Hayes, A., Radford, A., et al.Gpt-4o system card.arXiv preprint arXiv:2410.21276, 2024.
+Huynh & Lin (2025)	Huynh, N. and Lin, B.Large language models for code generation: A comprehensive survey of challenges, techniques, evaluation, and applications.arXiv preprint arXiv:2503.01245, 2025.
+Ilharco et al. (2022)	Ilharco, G., Ribeiro, M. T., Wortsman, M., Gururangan, S., Schmidt, L., Hajishirzi, H., and Farhadi, A.Editing models with task arithmetic.arXiv preprint arXiv:2212.04089, 2022.
+Jiang et al. (2024a)	Jiang, A. Q., Sablayrolles, A., Roux, A., Mensch, A., Savary, B., Bamford, C., Chaplot, D. S., Casas, D. d. l., Hanna, E. B., Bressand, F., et al.Mixtral of experts.arXiv preprint arXiv:2401.04088, 2024a.
+Jiang et al. (2024b)	Jiang, J., Wang, F., Shen, J., Kim, S., and Kim, S.A survey on large language models for code generation.arXiv preprint arXiv:2406.00515, 2024b.
+Jimenez et al. (2023)	Jimenez, C. E., Yang, J., Wettig, A., Yao, S., Pei, K., Press, O., and Narasimhan, K.Swe-bench: Can language models resolve real-world github issues?arXiv preprint arXiv:2310.06770, 2023.
+Kakade & Langford (2002)	Kakade, S. and Langford, J.Approximately optimal approximate reinforcement learning.In Proceedings of the nineteenth international conference on machine learning, pp. 267–274, 2002.
+Levine et al. (2021)	Levine, Y., Wies, N., Jannai, D., Navon, D., Hoshen, Y., and Shashua, A.The inductive bias of in-context learning: Rethinking pretraining example design.arXiv preprint arXiv:2110.04541, 2021.
+Liang et al. (2024)	Liang, T., He, Z., Jiao, W., Wang, X., Wang, Y., Wang, R., Yang, Y., Shi, S., and Tu, Z.Encouraging divergent thinking in large language models through multi-agent debate.In Proceedings of the 2024 conference on empirical methods in natural language processing, pp. 17889–17904, 2024.
+Lightman et al. (2023)	Lightman, H., Kosaraju, V., Burda, Y., Edwards, H., Baker, B., Lee, T., Leike, J., Schulman, J., Sutskever, I., and Cobbe, K.Let’s verify step by step.arXiv preprint arXiv:2305.20050, 2023.
+Liu et al. (2024)	Liu, T., Wang, X., Huang, W., Xu, W., Zeng, Y., Jiang, L., Yang, H., and Li, J.Groupdebate: Enhancing the efficiency of multi-agent debate using group discussion.arXiv preprint arXiv:2409.14051, 2024.
+Qin et al. (2024)	Qin, Y., Song, K., Hu, Y., Yao, W., Cho, S., Wang, X., Wu, X., Liu, F., Liu, P., and Yu, D.Infobench: Evaluating instruction following ability in large language models.arXiv preprint arXiv:2401.03601, 2024.
+Rafailov et al. (2023)	Rafailov, R., Sharma, A., Mitchell, E., Manning, C. D., Ermon, S., and Finn, C.Direct preference optimization: Your language model is secretly a reward model.Advances in neural information processing systems, 36:53728–53741, 2023.
+Shen et al. (2024)	Shen, Z., Lang, H., Wang, B., Kim, Y., and Sontag, D.Learning to decode collaboratively with multiple language models.In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers), pp. 12974–12990, 2024.
+Shi et al. (2024)	Shi, R., Chen, Y., Hu, Y., Liu, A., Hajishirzi, H., Smith, N. A., and Du, S. S.Decoding-time language model alignment with multiple objectives.Advances in Neural Information Processing Systems, 37:48875–48920, 2024.
+Si et al. (2023)	Si, C., Friedman, D., Joshi, N., Feng, S., Chen, D., and He, H.Measuring inductive biases of in-context learning with underspecified demonstrations.arXiv preprint arXiv:2305.13299, 2023.
+Team et al. (2024)	Team, G., Riviere, M., Pathak, S., Sessa, P. G., Hardin, C., Bhupatiraju, S., Hussenot, L., Mesnard, T., Shahriari, B., Ramé, A., et al.Gemma 2: Improving open language models at a practical size.arXiv preprint arXiv:2408.00118, 2024.
+Team et al. (2025)	Team, G., Kamath, A., Ferret, J., Pathak, S., Vieillard, N., Merhej, R., Perrin, S., Matejovicova, T., Ramé, A., Rivière, M., et al.Gemma 3 technical report.arXiv preprint arXiv:2503.19786, 2025.
+Wang et al. (2025a)	Wang, C., Zhao, Z., Jiang, Y., Chen, Z., Zhu, C., Chen, Y., Liu, J., Zhang, L., Fan, X., Ma, H., et al.Beyond reward hacking: Causal rewards for large language model alignment.arXiv preprint arXiv:2501.09620, 2025a.
+Wang et al. (2025b)	Wang, P.-Y., Liu, T.-S., Wang, C., Wang, Y.-D., Yan, S., Jia, C.-X., Liu, X.-H., Chen, X.-W., Xu, J.-C., Li, Z., et al.A survey on large language models for mathematical reasoning.arXiv preprint arXiv:2506.08446, 2025b.
+Wang et al. (2025c)	Wang, T., Gui, D., Hu, Y., Lin, S., and Zhang, L.Mpo: An efficient post-processing framework for mixing diverse preference alignment.arXiv preprint arXiv:2502.18699, 2025c.
+Xiong & Singh (2025)	Xiong, N. and Singh, A.Projection optimization: A general framework for multi-objective and multi-group rlhf.arXiv preprint arXiv:2502.15145, 2025.
+Xu et al. (2024)	Xu, T., Helenowski, E., Sankararaman, K. A., Jin, D., Peng, K., Han, E., Nie, S., Zhu, C., Zhang, H., Zhou, W., et al.The perfect blend: Redefining rlhf with mixture of judges.arXiv preprint arXiv:2409.20370, 2024.
+Xue et al. (2024)	Xue, F., Zheng, Z., Fu, Y., Ni, J., Zheng, Z., Zhou, W., and You, Y.Openmoe: An early effort on open mixture-of-experts language models.arXiv preprint arXiv:2402.01739, 2024.
+Yadav et al. (2023)	Yadav, P., Tam, D., Choshen, L., Raffel, C. A., and Bansal, M.Ties-merging: Resolving interference when merging models.Advances in Neural Information Processing Systems, 36:7093–7115, 2023.
+Yang et al. (2025)	Yang, A., Li, A., Yang, B., Zhang, B., Hui, B., Zheng, B., Yu, B., Gao, C., Huang, C., Lv, C., et al.Qwen3 technical report.arXiv preprint arXiv:2505.09388, 2025.
+Yang et al. (2024)	Yang, E., Shen, L., Guo, G., Wang, X., Cao, X., Zhang, J., and Tao, D.Model merging in llms, mllms, and beyond: Methods, theories, applications and opportunities.arXiv preprint arXiv:2408.07666, 2024.
+Yu et al. (2024)	Yu, L., Yu, B., Yu, H., Huang, F., and Li, Y.Language models are super mario: Absorbing abilities from homologous models as a free lunch.In Forty-first International Conference on Machine Learning, 2024.
+Yuan et al. (2023)	Yuan, L., Chen, Y., Cui, G., Gao, H., Zou, F., Cheng, X., Ji, H., Liu, Z., and Sun, M.Revisiting out-of-distribution robustness in nlp: Benchmarks, analysis, and llms evaluations.Advances in Neural Information Processing Systems, 36:58478–58507, 2023.
+Zeng et al. (2025)	Zeng, A., Lv, X., Zheng, Q., Hou, Z., Chen, B., Xie, C., Wang, C., Yin, D., Zeng, H., Zhang, J., et al.Glm-4.5: Agentic, reasoning, and coding (arc) foundation models.arXiv preprint arXiv:2508.06471, 2025.
+(43)	Zeng, H., Xia, Y., Zhao, Z., Jiang, C., Zhang, Q., Liu, J., Zhang, Q., Zhang, L., Fan, X., and Zhang, B.S’more: Structural mixture of residual experts for parameter-efficient llm fine-tuning.In The Thirty-ninth Annual Conference on Neural Information Processing Systems.
+Zhao et al. (2023)	Zhao, Q., Wang, J., Zhang, Y., Jin, Y., Zhu, K., Chen, H., and Xie, X.Competeai: Understanding the competition dynamics in large language model-based agents.arXiv preprint arXiv:2310.17512, 2023.
+Zhao et al. (2025)	Zhao, X., Xu, T., Wang, X., Chen, Z., Jin, D., Tan, L., Yu, Z., Zhao, Z., He, Y., Wang, S., et al.Boosting llm reasoning via spontaneous self-correction.arXiv preprint arXiv:2506.06923, 2025.
+Zheng et al. (2025)	Zheng, Y., Zhao, Z., Li, Z., Xie, Y., Gao, M., Zhang, L., and Zhang, K.Thought communication in multiagent collaboration.arXiv preprint arXiv:2510.20733, 2025.
+Zhou et al. (2023)	Zhou, J., Lu, T., Mishra, S., Brahma, S., Basu, S., Luan, Y., Zhou, D., and Hou, L.Instruction-following evaluation for large language models.arXiv preprint arXiv:2311.07911, 2023.
+Zhou et al. (2022)	Zhou, Y., Lei, T., Liu, H., Du, N., Huang, Y., Zhao, V., Dai, A. M., Le, Q. V., Laudon, J., et al.Mixture-of-experts with expert choice routing.Advances in Neural Information Processing Systems, 35:7103–7114, 2022.
+Zhou et al. (2025)	Zhou, Y., Zhang, M., Li, K., Wang, M., Liu, Q., Wang, Q., Liu, J., Liu, F., Li, S., Li, W., et al.Mixture-of-minds: Multi-agent reinforcement learning for table understanding.arXiv preprint arXiv:2510.20176, 2025.
+Appendix ARelated Works
+A.1Multi-LLM Collaboration
+
+Recent advances in LLMs have shown that sufficiently large, general-purpose LLMs can achieve strong performance across a wide range of tasks, including mathematics, coding, and instruction following (Hurst et al., 2024; Team et al., 2025; Yang et al., 2025; Zeng et al., 2025). However, such models are often prohibitively expensive to train and deploy, motivating interest in more efficient alternatives. At the same time, smaller and domain-specialized LLMs can perform competitively within their respective domains, but typically struggle to generalize beyond the distributions on which they are trained. Bridging this gap between specialization and generalization without incurring the cost of training ever-larger models has therefore become an important challenge. One line of works study the benefits of multi-agent debate, in which several agents discuss and debate to generate a final response (Liu et al., 2024; Chan et al., 2023; Liang et al., 2024). Existing works also try to model the social and economic behavior in the real world using different specialized LLMs (Zhao et al., 2023). Moreover, model ensemble methods (Ashiga et al., 2025; Huang et al., 2024; Chen et al., 2025) combine responses or probability distributions from multiple models in a fixed manner to leverage their complementary strengths without modifying individual parameters; however, they lack dynamic, context-dependent collaboration among candidate models. More fine-grained token-level collaboration has been studied in recent years. Collab (Chakraborty et al., 2025) uses a controlled decoding-based approach to evaluate the candidate tokens during decoding. Compared to them, our decoding algorithm is much more efficient and also achieves a better performance. CO-LLM (Shen et al., 2024) also explores token-level collaboration, but mainly uses one strong math expert to assist a small fine-tuned model, and its output depends entirely on the candidate experts. In contrast, we use multiple specialized LLMs, evaluate both cross-domain performance and general win rate, and additionally train the router as a complementary generator to improve robustness.
+
+A.2Multi-LLM Integration
+
+Beyond multi-agent LLM collaboration, a substantial body of works also consider how to utilize and integrate different models to be comprehensive. The most representative area is Mixture-of-Expert (MoE), in which multiple expert models are combined for each layer with some routing network, allowing the system to leverage the specialized knowledge of each expert for different inputs (Zhou et al., 2022; Xue et al., 2024; Jiang et al., 2024a). However, because the final architecture tightly integrates the layers of multiple models with a routing network, these approaches are typically applicable only to models with similar structures. They also require access to the experts’ gradients and joint training of the entire system, which limits flexibility and incurs significant additional training cost. Model merging is another approach for integrating multiple experts (Yu et al., 2024; Ilharco et al., 2022; Yadav et al., 2023). While it does not incur additional training costs, its performance is often limited and sensitive to hyperparameters. Moreover, its flexibility is also limited, as it requires all models to share the same architecture. There is also a line of work on pluralistic alignment, in which multiple models with potentially conflicting objectives, such as safety and helpfulness, are integrated to achieve tradeoffs across multiple objectives (Shi et al., 2024; Xiong & Singh, 2025; Wang et al., 2025c). In contrast to these approaches, FusionRoute does not merge or jointly train expert models, nor does it require architectural compatibility or gradient access. Instead, FusionRoute enables flexible, token-level integration of heterogeneous, off-the-shelf LLMs by learning a lightweight router that selects among experts and provides complementary logits during decoding. This design allows FusionRoute to combine the strengths of specialized models while retaining robustness and generalization, without the rigidity or training overhead inherent in MoE and model-merging approaches.
+
+Appendix BTheoretical Analysis
+B.1Statement and Proof of Theorem 4.3
+
+Here we provide the formal statement of Theorem 4.3 and the detailed proof.
+
+Theorem B.1. 
+
+Denote 
+{
+𝑛
+1
+,
+𝑛
+2
+,
+⋯
+,
+𝑛
+𝑡
+}
+ as a path of length 
+𝑡
+, where 
+𝑛
+𝑖
+∈
+[
+𝑛
+]
+,
+1
+≤
+𝑖
+≤
+𝑡
+. Assume that all 
+𝜋
+∗
+ and 
+{
+𝜋
+𝑖
+}
+𝑖
+∈
+[
+𝑚
+]
+ are deterministic policy, the response length is fixed as 
+𝑇
+, and the transition function is also deterministic. Suppose the learner’s observation space 
+𝒪
+𝑡
+ contains
+
+	
+𝑜
+𝑡
+=
+{
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+{
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑘
+)
+}
+𝑘
+=
+1
+𝑡
+,
+{
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝑦
+)
+}
+𝑦
+∈
+𝒴
+}
+.
+	
+
+at the visited states 
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+ during decoding. Suppose 
+Δ
+>
+0
+ is a error constant. Then, there is a MDP such that no token-level routing algorithm 
+𝒜
+:
+𝒪
+↦
+[
+𝑛
+]
+ can achieve 
+𝑉
+𝜋
+𝒜
+≥
+𝑉
+𝜋
+∗
+−
+𝑇
+/
+2
++
+2
+ for all possible rewards in this MDP, even if we have the following two good properties:
+
+1. 
+
+Existence of a Near-Optimal Path. There exists a small 
+𝜀
+≤
+Δ
+∈
+[
+0
+,
+1
+]
+ and at least one possible token-level routing strategy 
+𝑃
+∗
+=
+{
+𝑛
+1
+∗
+,
+𝑛
+2
+∗
+,
+⋯
+,
+𝑛
+𝑇
+∗
+}
+ such that
+
+	
+𝑉
+𝜋
+∗
+=
+𝑉
+𝑃
+∗
++
+𝜀
+.
+		
+(7)
+2. 
+
+Single Policy Coverage. For the optimal policy 
+𝜋
+∗
+, the error constant 
+Δ
+∈
+[
+0
+,
+1
+]
+ such that the following approximation holds:
+
+	
+𝔼
+𝑥
+,
+𝑦
+𝑡
+∼
+𝜋
+∗
+​
+|
+arg
+⁡
+max
+𝑖
+⁡
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+𝑖
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+−
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+∗
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+|
+≤
+Δ
+.
+		
+(8)
+3. 
+
+Generalization Coverage For any prefix 
+𝑥
+,
+𝑦
+≤
+𝑡
+, if there exists a full response 
+𝑥
+,
+𝑦
+≤
+𝑇
+ with prefix 
+𝑥
+,
+𝑦
+≤
+𝑡
+ and 
+𝑅
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑇
+)
+≥
+𝑉
+𝜋
+∗
+−
+Δ
+, we have
+
+	
+|
+arg
+⁡
+max
+𝑖
+⁡
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+𝑖
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+−
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+∗
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+|
+≤
+Δ
+.
+		
+(9)
+Proof.
+
+We assume that the prompt 
+𝑥
+ is fixed and that the response length is fixed to 
+𝑇
+. For any 
+𝑡
+≤
+𝑇
+, define
+
+	
+𝒫
+𝑡
+=
+{
+(
+𝑛
+1
+,
+…
+,
+𝑛
+𝑡
+)
+|
+𝑛
+𝑘
+∈
+[
+𝑛
+]
+,
+∀
+𝑘
+=
+1
+,
+…
+,
+𝑡
+}
+	
+
+as the set of all possible expert-selection sequences of length 
+𝑡
+. We further assume that all expert models and transition dynamics are deterministic. In particular, for any expert 
+𝜋
+𝑖
+ and any prefix 
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+, the decoding rule 
+𝜋
+𝑖
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+∈
+𝒴
+ deterministically outputs the next token. Given any selection sequence 
+𝑝
+=
+(
+𝑛
+1
+,
+…
+,
+𝑛
+𝑡
+)
+∈
+𝒫
+𝑡
+, the induced token sequence 
+𝐲
+𝑝
+=
+(
+𝑦
+1
+𝑝
+,
+…
+,
+𝑦
+𝑡
+𝑝
+)
+ is defined recursively as
+
+	
+𝑦
+𝑘
+𝑝
+=
+𝜋
+𝑛
+𝑘
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑘
+−
+1
+𝑝
+)
+,
+𝑘
+=
+1
+,
+…
+,
+𝑡
+,
+	
+
+with the convention that 
+𝑦
+≤
+0
+𝑝
+:=
+∅
+. Accordingly, the induced state can be written as 
+𝑠
+𝑝
+=
+(
+𝑥
+,
+𝐲
+𝑝
+)
+.
+
+Construction
+
+Now we construct 
+|
+𝑃
+𝑇
+/
+2
+|
+ MDPs 
+{
+𝑀
+𝑝
+𝑇
+/
+2
+}
+𝑝
+𝑇
+/
+2
+∈
+𝑃
+𝑇
+/
+2
+ as follows:
+
+Same Structure We first define the shared components of all candidate MDPs.
+
+The initial state is 
+𝑠
+0
+=
+𝑥
+. The action space corresponds to token generation, with vocabulary 
+𝒴
+. Unless otherwise specified, the reward function is defined to be 1 for all prefixes 
+(
+𝑥
+,
+𝑦
+)
+.
+
+For each expert model 
+𝑖
+∈
+[
+𝑛
+]
+, define
+
+	
+𝑦
+1
+,
+𝑖
+:=
+arg
+⁡
+max
+𝑦
+∈
+𝒴
+⁡
+𝜋
+𝑖
+​
+(
+𝑦
+∣
+𝑥
+)
+.
+	
+
+We assign the first-step rewards as follows. For each token 
+𝑦
+1
+,
+𝑖
+, define
+
+	
+𝑟
+​
+(
+𝑥
+,
+𝑦
+1
+,
+𝑖
+)
+=
+1
+−
+𝜀
+.
+		
+(10)
+
+Otherwise, for any 
+𝑦
+∈
+𝒴
+∖
+{
+𝑦
+1
+,
+𝑖
+}
+𝑖
+∈
+[
+𝑛
+]
+, we assign 
+𝑟
+​
+(
+𝑥
+,
+𝑦
+)
+=
+1
+.
+
+Difference Now we show the difference between multiple candidate MDPs 
+{
+𝑀
+𝑝
+𝑇
+/
+2
+}
+𝑝
+𝑇
+/
+2
+∈
+𝑃
+𝑇
+/
+2
+. Each MDP 
+𝑀
+𝑝
+ is constructed in the following ways:
+
+• 
+
+For path 
+𝑝
+′
+∈
+{
+𝑝
+∈
+𝑃
+𝑇
+/
+2
++
+𝑖
+∣
+𝑖
+≥
+1
+,
+𝑝
+​
+ has prefix 
+​
+𝑝
+𝑇
+/
+2
+}
+, we define 
+𝑟
+​
+(
+𝑥
+,
+y
+𝑝
+′
+)
+=
+1
+.
+
+• 
+
+For any path 
+𝑝
+′
+∈
+{
+𝑝
+∈
+𝑃
+𝑇
+/
+2
++
+1
+∣
+𝑝
+​
+ does not have prefix 
+​
+𝑝
+𝑇
+/
+2
+}
+, 
+𝑟
+​
+(
+𝑥
+,
+y
+𝑝
+′
+)
+=
+1
+−
+Δ
+.
+
+• 
+
+For any path 
+𝑝
+′
+∈
+{
+𝑝
+∈
+𝑃
+𝑇
+/
+2
++
+𝑖
+∣
+𝑖
+≥
+2
+,
+𝑝
+​
+ does not have prefix 
+​
+𝑝
+𝑇
+/
+2
+}
+, we define 
+𝑟
+​
+(
+𝑥
+,
+y
+𝑝
+′
+)
+=
+0
+.
+
+For all other states that are not mentioned, their reward functions are defaulted to 1.
+
+Value Function
+
+Under this construction, for any prefix 
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+, the optimal policy will choose 
+𝑦
+PR
+ as its next token, and the final optimal value function satisfies
+
+	
+𝑉
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+=
+𝑇
+−
+𝑡
+,
+∀
+prefix
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+.
+	
+
+This is because the optimal policy 
+𝜋
+∗
+ selects the reward-maximizing token at every remaining time step, thereby accumulating a reward of 
+1
+ at each step until termination. In particular, for all possible model-selection paths 
+𝑝
+∈
+𝑃
+𝑡
+, the optimal value function satisfies
+
+	
+𝑉
+∗
+​
+(
+𝑥
+,
+y
+𝑝
+)
+=
+𝑇
+−
+𝑡
+.
+	
+
+Similarly, the 
+𝑄
+ function
+
+	
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝑦
+𝑡
++
+1
+)
+=
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝑦
+𝑡
++
+1
+)
++
+𝑇
+−
+𝑡
++
+1
+.
+		
+(11)
+
+In particular, for each policy 
+𝜋
+𝑖
+, define the greedy token at state 
+𝑠
+𝑝
+ as
+
+	
+𝑦
+𝑖
+𝑝
+:=
+arg
+⁡
+max
+𝑦
+∈
+𝒴
+⁡
+𝜋
+𝑖
+​
+(
+𝑦
+∣
+𝑥
+,
+𝐲
+𝑝
+)
+.
+	
+
+Then, the optimal state–action value under 
+𝜋
+∗
+ is given by
+
+	
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝐲
+𝑝
+,
+𝑦
+𝑖
+𝑝
+)
+=
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+y
+𝑝
+⊕
+𝑖
+)
+=
+𝑟
+​
+(
+𝑥
+,
+𝐲
+𝑝
+,
+𝑦
+𝑖
+𝑝
+)
++
+𝑉
+∗
+​
+(
+𝑥
+,
+𝐲
+𝑝
+⊕
+𝑖
+)
+=
+𝑟
+​
+(
+𝑥
+,
+𝐲
+𝑝
+⊕
+𝑖
+)
++
+𝑇
+−
+𝑡
++
+1
+,
+		
+(12)
+
+where 
+𝑝
+⊕
+𝑖
+∈
+𝑃
+𝑡
++
+1
+ denotes the extended path that follows 
+𝑝
+ for the first 
+𝑡
+ tokens and selects token 
+𝑖
+ at step 
+𝑡
++
+1
+.
+
+Since we construct the reward such that 
+𝑟
+​
+(
+𝑥
+,
+y
+𝑝
+)
+=
+1
+ for any path 
+𝑝
+∈
+𝑃
+𝑡
+ for 
+𝑡
+≤
+𝑇
+/
+2
+.
+ Then, for any 
+𝑘
+≤
+𝑇
+/
+2
+−
+1
+, we know that for any 
+𝑝
+𝑘
+∈
+𝑃
+𝑘
+
+	
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+y
+𝑝
+𝑘
+⊕
+𝑖
+)
+=
+𝑇
+−
+𝑡
+=
+𝑉
+∗
+​
+(
+𝑥
+,
+y
+𝑝
+)
+.
+		
+(13)
+Verfication of Assumption
+
+Now we verify whether three assumptions Eq. (7), Eq. (8) and Eq. (9) holds for all these MDPs.
+
+Eq. (7) By the construction, we can easily know that 
+𝑉
+∗
+=
+𝑇
+. Now, recall that 
+𝑅
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑇
+)
+=
+∑
+𝑖
+=
+1
+𝑇
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑖
+)
+. For any token-level routing generated response (full path) 
+𝑝
+𝑇
+ on MDP 
+𝑀
+𝑝
+ (
+𝑝
+ is path with length 
+𝑇
+/
+2
+), we have
+
+	
+𝑉
+𝑝
+𝑇
+=
+𝑅
+​
+(
+𝑥
+,
+y
+𝑝
+𝑇
+)
+=
+{
+𝑇
+−
+𝜀
+	
+if 
+​
+𝑝
+𝑇
+​
+has prefix
+​
+𝑝
+
+
+𝑇
+/
+2
++
+1
+−
+Δ
+−
+𝜀
+	
+else 
+.
+	
+
+Hence, on the MDP 
+𝑀
+𝑝
+ with 
+𝑝
+∈
+𝑃
+𝑇
+/
+2
+, if path 
+𝑝
+𝑇
+∈
+𝑃
+𝑇
+ has prefix 
+𝑝
+, we know that 
+𝑉
+𝑝
+𝑇
+=
+𝑇
+−
+𝜀
+, which implies that 
+𝑉
+∗
+−
+𝑉
+𝑝
+𝑇
+≤
+𝜀
+.
+
+Eq. (8) Note that both the transition kernel and the optimal policy 
+𝜋
+∗
+ are deterministic. As a result, all expectations reduce to deterministic quantities. For 
+𝑥
+,
+𝑦
+1
+,
+⋯
+,
+𝑦
+𝑇
+∼
+𝜋
+∗
+, we know that 
+𝑦
+𝑡
++
+1
+=
+arg
+​
+max
+𝑦
+∈
+𝒴
+⁡
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝑦
+)
+, which implies that
+
+	
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+∗
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+=
+𝑉
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+=
+𝑇
+−
+𝑡
+.
+		
+(14)
+
+Also, for 
+𝑡
+≥
+1
+, by Eq. (11), we have
+
+	
+arg
+​
+max
+𝑖
+∈
+[
+𝑛
+]
+⁡
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+𝑖
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝑦
+𝑡
++
+1
+)
+]
+=
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝑦
+𝑡
++
+1
+)
++
+𝑇
+−
+𝑡
++
+1
+=
+𝑇
+−
+𝑡
+.
+	
+
+The last inequality is because 
+𝑦
+1
+∈
+𝒴
+∖
+{
+𝑦
+1
+,
+𝑖
+}
+𝑖
+∈
+[
+𝑛
+]
+ and then all rewards are equal to 1. Hence, for any 
+𝑡
+≥
+1
+, we have
+
+	
+𝔼
+𝑥
+,
+𝑦
+𝑡
+∼
+𝜋
+∗
+​
+|
+arg
+⁡
+max
+𝑖
+⁡
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+𝑖
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+−
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+∗
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+|
+=
+0
+≤
+Δ
+.
+	
+
+Moreover, for 
+𝑡
+=
+0
+, we have
+
+	
+arg
+​
+max
+𝑖
+∈
+[
+𝑛
+]
+⁡
+𝔼
+𝑦
+1
+∼
+𝜋
+𝑖
+(
+⋅
+∣
+𝑥
+)
+​
+[
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+1
+)
+]
+=
+𝑟
+​
+(
+𝑥
+,
+𝑦
+1
+)
++
+𝑇
+−
+1
+=
+(
+1
+−
+𝜀
+)
++
+𝑇
+−
+1
+=
+𝑇
+−
+𝜀
+.
+	
+
+Hence, for 
+𝑡
+=
+0
+, we also have
+
+	
+𝔼
+𝑥
+,
+𝑦
+𝑡
+∼
+𝜋
+∗
+​
+|
+arg
+⁡
+max
+𝑖
+⁡
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+𝑖
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+−
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+∗
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+|
+=
+𝜀
+≤
+Δ
+.
+	
+
+Eq. (9) First, by our construction, for any prefix 
+𝑥
+,
+𝑦
+≤
+𝑡
+, one can follow the optimal policy 
+𝜋
+∗
+ to generate a response 
+𝑥
+,
+𝑦
+≤
+𝑇
+ such that
+
+	
+𝑅
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑇
+)
+=
+∑
+𝑖
+=
+1
+𝑛
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑖
+)
+=
+∑
+𝑖
+=
+1
+𝑡
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑖
+)
++
+𝑇
+−
+𝑡
+.
+		
+(15)
+
+This equality holds because optimal policy will select the reward-maximizing token at every remaining time step, that leads to a 
+𝑇
+−
+𝑡
+ reward.
+
+Now, on a particular MDP 
+𝑀
+𝑝
+ with path 
+𝑝
+∈
+𝑃
+𝑇
+/
+2
+, we know that for any prefix 
+𝑥
+,
+𝑦
+≤
+𝑡
+, if there is not a full response 
+𝑥
+,
+𝑦
+≤
+𝑇
+ with prefix 
+𝑥
+,
+𝑦
+≤
+𝑡
+ and 
+𝑅
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑇
+)
+≥
+𝑉
+𝜋
+∗
+−
+Δ
+=
+𝑇
+−
+Δ
+,
+ we must have
+
+	
+∑
+𝑖
+=
+1
+𝑡
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑖
+)
++
+𝑇
+−
+𝑡
+≤
+𝑇
+−
+Δ
+,
+	
+
+which implies that
+
+	
+∑
+𝑖
+=
+1
+𝑡
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑖
+)
+≤
+𝑡
+−
+Δ
+.
+		
+(16)
+
+By our construction, Eq. (16) holds if and only if 
+𝑡
+≥
+𝑇
+/
+2
++
+1
+ and 
+𝑦
+≤
+𝑇
+/
+2
+=
+y
+𝑝
+.
+
+Hence, we only need to verify Eq. (9) holds when 
+𝑦
+≤
+𝑇
+/
+2
+≠
+y
+𝑝
+.
+ We denote 
+𝜋
+𝑖
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+ is the deterministic next token given prefix 
+𝑥
+,
+𝑦
+≤
+𝑡
+ for expert model 
+𝜋
+𝑖
+. Then, we know that
+
+	
+|
+arg
+⁡
+max
+𝑖
+⁡
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+𝑖
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+−
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+∗
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+|
+	
+	
+=
+|
+arg
+​
+max
+𝑖
+∈
+[
+𝑛
+]
+⁡
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝜋
+𝑖
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+)
+−
+1
+|
+.
+	
+
+Situation 1: If 
+𝑡
+=
+𝑇
+/
+2
+ and 
+𝑦
+≤
+𝑡
+=
+𝐲
+𝑝
+ coincides with 
+𝐲
+𝑝
+, we have
+
+	
+|
+arg
+​
+max
+𝑖
+∈
+[
+𝑛
+]
+⁡
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝜋
+𝑖
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+)
+−
+1
+|
+=
+|
+(
+1
+−
+Δ
+)
+−
+1
+|
+=
+Δ
+.
+	
+
+Situation 2: If 
+𝑡
+≥
+1
+ and 
+𝑦
+≤
+𝑇
+/
+2
+≠
+y
+𝑝
+, by our construction, we have
+
+	
+|
+arg
+​
+max
+𝑖
+∈
+[
+𝑛
+]
+⁡
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝜋
+𝑖
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+)
+−
+1
+|
+=
+0
+.
+	
+
+Situation 3: For 
+𝑡
+=
+0
+, we can have
+
+	
+|
+arg
+​
+max
+𝑖
+∈
+[
+𝑛
+]
+⁡
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝜋
+𝑖
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+)
+−
+1
+|
+=
+|
+(
+1
+−
+𝜀
+)
+−
+1
+|
+=
+𝜀
+.
+	
+
+Combining these three conditions above, we successfully verify the Eq. (9).
+
+Since the learner only observes the expert value 
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+ at the visited states 
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+, and since these values are identical across all candidate MDPs 
+{
+𝑀
+𝑝
+}
+𝑝
+∈
+𝒫
+𝑇
+/
+2
+ for all 
+𝑡
+≤
+𝑇
+/
+2
+−
+1
+, the learner receives exactly the same observation sequence 
+𝑜
+𝑇
+/
+2
+ under every 
+𝑀
+𝑝
+. Consequently, the MDPs are indistinguishable to the learner during the first 
+𝑇
+/
+2
+−
+1
+ steps.
+
+We consider token-level routing algorithms 
+𝒜
+:
+𝒪
+→
+[
+𝑛
+]
+ whose observation space at step 
+𝑡
+ is defined as
+
+	
+𝒪
+=
+⋃
+𝑡
+=
+1
+𝑇
+𝒪
+𝑡
+=
+⋃
+𝑡
+=
+1
+𝑇
+{
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+{
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑘
+)
+}
+𝑘
+=
+1
+𝑡
+,
+{
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝑦
+)
+}
+𝑦
+∈
+𝒴
+}
+.
+	
+
+That is, at each step 
+𝑡
+, the learner’s observation 
+𝑜
+𝑡
+∈
+𝒪
+𝑡
+ includes the prompt, the generated prefix, the expert value along the realized trajectory, and the expert values of all possible next-token continuations. Formally, let 
+𝒜
+:
+𝒪
+→
+[
+𝑛
+]
+ be any (possibly randomized) token-level routing algorithm. Then there exists a path 
+𝑝
+∗
+=
+(
+𝑝
+1
+∗
+,
+…
+,
+𝑝
+𝑇
+/
+2
+∗
+)
+∈
+𝒫
+𝑇
+/
+2
+ such that
+
+	
+ℙ
+[
+𝒜
+(
+𝑜
+𝑖
+)
+=
+𝑝
+𝑖
++
+1
+∗
+for all 
+𝑖
+=
+0
+,
+…
+,
+𝑇
+/
+2
+−
+1
+]
+≤
+1
+|
+𝒫
+𝑇
+/
+2
+|
+=
+1
+𝑛
+𝑇
+/
+2
+.
+	
+
+This follows from a simple counting argument. Since the observation sequence is identical across all 
+𝑀
+𝑝
+, the algorithm 
+𝒜
+ induces a probability distribution over the set of paths 
+𝒫
+𝑇
+/
+2
+, and thus
+
+	
+∑
+𝑝
+∈
+𝒫
+𝑇
+/
+2
+ℙ
+[
+𝒜
+(
+𝑜
+𝑖
+)
+=
+𝑝
+𝑖
++
+1
+for all 
+𝑖
+=
+0
+,
+…
+,
+𝑇
+/
+2
+−
+1
+]
+≤
+ 1
+.
+	
+
+Therefore, there must exist at least one path 
+𝑝
+∗
+∈
+𝒫
+𝑇
+/
+2
+ whose probability mass is at most 
+1
+/
+|
+𝒫
+𝑇
+/
+2
+|
+.
+
+Hence, for the MDP 
+𝑀
+𝑝
+∗
+, this expect value of this token-level routing algorithm 
+𝒜
+ will be at most
+
+	
+(
+𝑇
+/
+2
++
+1
+−
+Δ
+−
+𝜀
+)
+⋅
+(
+1
+−
+1
+𝑛
+𝑇
+/
+2
+)
++
+(
+𝑇
+−
+𝜀
+)
+⋅
+1
+𝑛
+𝑇
+/
+2
+≤
+𝑇
+/
+2
++
+2
+,
+	
+
+which implies that 
+𝑉
+𝜋
+𝒜
+≤
+𝑉
+∗
+−
+𝑇
+/
+2
++
+2
+.
+ Hence, no token-level routing algorithm with observation space
+
+	
+𝑜
+𝑡
+=
+{
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+{
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑘
+)
+}
+𝑘
+=
+1
+𝑡
+,
+{
+𝑄
+𝜋
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝑦
+)
+}
+𝑦
+∈
+𝒴
+}
+	
+
+can guarantee achieving an approximately optimal value for a given prompt.
+
+∎
+
+B.2Proof of Eq. (6) in Section 4.4
+
+In fact, since we have
+
+	
+𝔼
+𝑥
+∼
+𝜌
+,
+𝑦
+≤
+𝑡
+∼
+𝜋
+∗
+[
+arg
+min
+𝑖
+TV
+(
+𝜋
+𝑖
+′
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+,
+𝜋
+∗
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+)
+]
+≤
+Δ
+,
+	
+
+from Performance Difference Lemma 4.1, we can get
+
+	
+𝔼
+𝑥
+∼
+𝜌
+​
+[
+𝑉
+𝜋
+∗
+​
+(
+𝑥
+)
+−
+𝑉
+𝜋
+​
+(
+𝑥
+)
+]
+	
+=
+∑
+𝑡
+=
+0
+𝑇
+−
+1
+𝔼
+𝑥
+∼
+𝜌
+,
+𝑦
+𝑡
+∼
+ℙ
+𝑡
+𝜋
+∗
+(
+⋅
+∣
+𝑥
+)
+​
+[
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+𝑄
+ℎ
+𝜋
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+−
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+∗
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+𝑄
+ℎ
+𝜋
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+	
+		
+≤
+𝑇
+⋅
+𝑄
+max
+⋅
+TV
+​
+(
+𝜋
+∥
+𝜋
+∗
+)
+.
+	
+
+Since for any token, the policy 
+𝜋
+ chooses the expert 
+𝜋
+𝑖
+ such that
+
+	
+𝑖
+=
+arg
+min
+𝑖
+TV
+(
+𝜋
+𝑖
+′
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+,
+𝜋
+∗
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+)
+≤
+Δ
+,
+	
+
+we know that 
+TV
+​
+(
+𝜋
+∥
+𝜋
+∗
+)
+≤
+Δ
+.
+ Hence, we finally have
+
+	
+𝔼
+𝑥
+∼
+𝜌
+​
+[
+𝑉
+𝜋
+∗
+​
+(
+𝑥
+)
+−
+𝑉
+𝜋
+​
+(
+𝑥
+)
+]
+≤
+𝑇
+​
+𝑄
+max
+​
+TV
+​
+(
+𝜋
+∥
+𝜋
+∗
+)
+≤
+𝑇
+​
+𝑄
+max
+​
+Δ
+.
+	
+Appendix CTheoretical Discussion of Prior Token-Level Approaches
+
+In §4, we show that training the router on SFT dataset which follows trajectories generated by 
+𝜋
+∗
+ can be viewed as approximating an optimal expert selection strategy. By the performance difference lemma, we establish a direct connection between the generated responses and the optimal response.
+
+However, in recent years, Collab (Chakraborty et al., 2025) provides a test-time controlled-decoding based multi-LLM token-level collaboration approaches. During the decoding process, for each token position, Collab first generates multiple candidate tokens from multiple experts 
+𝜋
+1
+,
+⋯
+,
+𝜋
+𝑛
+. For candidate tokens for each expert 
+𝜋
+𝑖
+, Collab then generates a few more tokens using 
+𝜋
+𝑖
+ for evaluating the 
+𝑄
+𝜋
+𝑖
+ function. Finally, they choose the token with the maximum corresponding 
+𝑄
+ function from the candidate token pool. In simple words, Collab tends to choose the action that
+
+	
+𝑎
+ℎ
+=
+arg
+⁡
+max
+𝑎
+ℎ
+⁡
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+𝑎
+ℎ
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+𝑄
+ℎ
+𝜋
+𝑎
+ℎ
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+.
+	
+
+Since the action is not selected by maximizing the optimal Q function, it leads to a mismatch
+
+	
+min
+𝑖
+∈
+[
+𝑛
+]
+⁡
+Δ
+𝑖
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+=
+𝑄
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+−
+𝑄
+𝜋
+𝑖
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+	
+
+between the generated response and the optimal response. This mismatch can lead to non-ideal performance. In fact, consider two different expert policies 
+𝜋
+1
+ and 
+𝜋
+2
+ with a horizon 
+𝐻
+ and 
+𝜋
+1
+​
+(
+𝑥
+,
+𝑦
+)
+≠
+𝜋
+2
+​
+(
+𝑥
+,
+𝑦
+)
+ for any prefix 
+(
+𝑥
+,
+𝑦
+)
+, we can construct the reward function that satisfies
+
+	
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝑦
+𝑡
++
+1
+)
+=
+𝕀
+​
+{
+𝑦
+𝑡
++
+1
+=
+𝜋
+1
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+}
+,
+∀
+𝑡
+≤
+𝐻
+3
+,
+	
+
+and
+
+	
+𝑟
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+,
+𝑦
+𝑡
++
+1
+)
+=
+𝕀
+​
+{
+𝑦
+𝑡
++
+1
+=
+𝜋
+2
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+}
+,
+∀
+𝑡
+>
+𝐻
+3
+.
+	
+
+In this setting, the optimal policy is 
+𝜋
+∗
+=
+𝜋
+1
+ for 
+𝑡
+≤
+𝐻
+/
+2
+ and 
+𝜋
+∗
+=
+𝜋
+2
+ for 
+𝑡
+≥
+𝐻
+/
+2
++
+1
+, which has 
+𝑄
+∗
+​
+(
+𝑥
+)
+=
+𝐻
+ for prompt 
+𝑥
+. However, at position 0, we have
+
+	
+𝑄
+∗
+​
+(
+𝑥
+)
+=
+𝐻
+,
+𝑄
+𝜋
+1
+​
+(
+𝑥
+)
+=
+𝐻
+3
+,
+𝑄
+𝜋
+2
+​
+(
+𝑥
+)
+=
+2
+​
+𝐻
+3
+.
+	
+
+Hence, the mismatch error
+
+	
+max
+𝑖
+∈
+[
+𝑛
+]
+⁡
+Δ
+𝑖
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+=
+𝐻
+3
+,
+	
+
+which is linear in the horizon 
+𝐻
+.
+
+Compared to Collab, FusionRoute directly finetunes the router on the expert dataset, which is equivalent to
+
+	
+𝑎
+ℎ
+=
+arg
+⁡
+max
+𝑎
+ℎ
+⁡
+𝔼
+𝑦
+𝑡
++
+1
+∼
+𝜋
+𝑎
+ℎ
+(
+⋅
+∣
+𝑥
+,
+𝑦
+≤
+𝑡
+)
+​
+[
+𝑄
+ℎ
+∗
+​
+(
+𝑥
+,
+𝑦
+≤
+𝑡
++
+1
+)
+]
+,
+	
+
+which helps us to bound the final error using Performance Difference Lemma.
+
+Appendix DAblation Study
+
+We provide the ablation study results in Section 6.1.
+
+Method	GSM8K	MATH500	MBPP	HumanEval	IFEval	Avg Acc.
+Llama-3 Family
+Collab	0.82	0.32	0.28	0.54	0.55	0.502
+FusionRoute w/o complementary logits 	0.82	0.32	0.26	0.56	0.65	0.522
+FusionRoute	0.82	0.33	0.36	0.63	0.69	0.566
+Gemma-2 Family
+Collab	0.52	0.22	0.26	0.35	0.45	0.360
+FusionRoute w/o complementary logits 	0.62	0.23	0.23	0.33	0.51	0.384
+FusionRoute	0.65	0.22	0.25	0.40	0.61	0.426
+Table 2: Cross-domain performance comparison between purely token-level routing and FusionRoute across model families. Best and second-best performance within each family are highlighted by bold and underline, respectively.
+Appendix EExperiment Details
+E.1Generation
+E.1.1Mixed-Domain Generation
+
+Due to the large number of prompts in certain tasks and computational constraints, for each task we evaluate on a subset of their datasets. The generation settings and number of samples are summarized in Table 3.
+
+Dataset	# of samples	# Max New Tokens
+GSM8K	400	400
+MATH500	500	400
+MBPP	500	400
+HumanEval	164	400
+Ifeval	400	400
+Table 3:Number of samples and number of max new tokens for each dataset.
+E.1.2GPT Evaluation Prompt
+
+For GPT-4o evaluation on the general dataset, we use the following text as the prompt provided to the GPT-4o model. The output scores for both responses are then extracted to compute the win rate.
+
+GPT-4o Evaluation Prompt
+Prompt: You are a precise assistant for checking the quality of the answer. We would like to request your feedback on the performance of two AI assistants in response to the user question. Please rate the correctness, fluency, and level of detail of their responses. Your evaluation should consider factors such as the accuracy, relevance, depth, creativity, fluency, and level of detail of the response. Bear in mind that the response might be truncated at the end due to length constraints. Each assistant receives an overall float score on a scale of 1 to 10, in increments of 0.25. A higher score indicates better overall performance. Do not give two responses a same score. Do not prefer longer response. Please first output a single line containing only two values indicating the scores for Assistant 1 and 2, respectively. The two scores are separated by a space. In the subsequent line, please provide a short explanation of your evaluation, avoiding any potential bias and ensuring that the order in which the responses were presented does not affect your judgment.
+[Question]
+question
+[The Start of Assistant 1’s Answer]
+answer1
+[The End of Assistant 1’s Answer]
+[The Start of Assistant 2’s Answer]
+answer2
+[The End of Assistant 2’s Answer]
+E.2Router’s Behavior
+
+In this section, we examine the routing behavior of our model on both domain-specific and general datasets to demonstrate the effectiveness of the router’s token-level routing capability. In the following text, we use red, blue and softgreen to represent the math, coding and instruction-following model, respectively.
+
+E.2.1Example of Coding Problem
+Prompt: Below is an instruction that describes a task. Write a response that appropriately completes the request. Instruction: Write a function to find the minimum cost path to reach (m,n) from (0,0) for the given cost matrxi cost[][] and a position (m,n) in cost[][]. Assistant:
+Response: Here is a Python solution using dynamic programming:
+“python def minCostPath(cost, m, n):
+dp=[[0 for x in range(n)] for y in range(m)] # Initialize the first row and first column
+for i in range(m):
+dp[i][0] = cost[i][0]
+for j in range(n):
+dp[0][j] = cost[0][j] # Fill dp[][] in bottom up manner
+for i in range(1,m):
+for j in range(1,n):
+dp[i][j] = min(dp[i-1][j] + dp[i][j-1] + cost[i][j]
+return dp[m-1][n-1]”
+This function works by creating a 2D array dp[][] where dp[i][j] represents the minimum cost to reach the cell (i,j) from (0,0). The first row and first column are initialized with the cost of the cells in the first row and first column respectively. Then, for each cell (i,j) in the rest of the matrix, the minimum cost to reach it is the minimum cost to reach the cell above it (i-1,j) or to the left of it (i,j-1) plus the cost of the cell itself. The function finally returns the minimum cost to reach the cell (m,n).
+E.2.2Example of Instruction Following Problem
+Prompt: Below is an instruction that describes a task. Write a response that appropriately completes the request. Instruction: Write a resume for a fresh high school graduate who is seeking their first job. Make sure to include at least 12 placeholders represented by square brackets, such as [address], [name]. Assistant:
+Response: Here is a sample resume for a fresh high school graduate: [Name][Address][City, State Zip][Phone Number][Email Address] Objective: To secure an entry-level position in a dynamic and growth-oriented organization where I can apply my skills and knowledge to contribute to the company’s success. Education: - High School Diploma, [Name of High School], [Graduation Date] - GPA: [GPA] Skills: - Proficient in Microsoft Office (Word], Excel, PowerPoint, Outlook) - Strong communication and teamwork skills - Proficient in [Programming Language or Software] - Experience with [Software or Technology] Work Experience: - [Job Title], [Company Name], [Employment Dates] -[Briefly describe job responsibilities and accomplishments] - [Job Title], [Company Name], [Employment Dates] - [Briefly describe job responsibilities and accomplishments] Volunteer Experience: - [Volunteer Position], [Organization], [Volunteer Dates] - [Briefly describe volunteer work and accomplishments] References: - Available upon request. Note: This is a basic template, and you should customize it to fit your specific experiences and qualifications. Remember to proofread your resume multiple times for any errors or typos. Good luck with your job search! Please let me know if you need any further assistance. Also, please note that this is a very basic template, and you may want to consider adding more sections or details to make your resume more comprehensive. Some additional sections you may want to consider include: Extracurricular activities - Awards or recognition - Relevant coursework - Projects or presentations - Leadership roles - Relevant certifications or licenses Let me know if you need any help with any of these sections. Also, please keep in mind that this is a vaery basic template, and you may want to consider tailoring your resume to the specific job you are applying for. You can do this by highlighting…
+E.2.3Example of Math Problem
+Prompt: Below is an instruction that describes a task. Write a response that appropriately completes the request. Instruction: Convert the point 
+(
+0
+,
+3
+)
+ in rectangular coordinates to polar coordinates. Enter your answer in the form 
+(
+𝑟
+,
+𝜃
+)
+,
+ where 
+𝑟
+>
+0
+ and 
+0
+≤
+𝜃
+<
+2
+​
+𝜋
+.
+ Assistant:
+Response: The polar coordinates $(r,\theta)$ of a point $(x,y)$ are given by $r =\sqrt {xˆ2+yˆ2}$ and $\theta= \tanˆ{-1}\left(\frac{y}{x}\right)$. In this case, we have $x =0$ and $y=3$, so $r=\sqrt{0ˆ2 + 3ˆ2}=3$\theta=\tanˆ{-1}\left(\frac{3}{0}\right)=\frac{\pi}{2}$. Therefore, the polar coordinates of the point $(0,3)$ are $\boxed{(3,\frac}{2})}$. The answer is: (3,\frac{\pi}{2})
+E.2.4Example of General Problem in PerfectBlend Dataset
+Prompt: Below is an instruction that describes a task. Write a response that appropriately completes the request. Instruction: You start out with some pens. Mike gives you another 22 pens. Cindy, whose father makes pens, decides to double your pens. You give Sharon 19 pens. At the end, you have 65 pens. How many pens did you start with?
+Response: Let’s denote the number of pens you started with as x. According to the problem, Mike gives you 22 pens, so you now have x + 22 pens. Cindy doubles your pens, so you now have 2(x + 22) pens. You give Sharon 19 pens, so you now have 2(x + 22) - 19 pens. According to the problem, at the end, you have 65 pens, so we can set up the equation: 2(x + 22) - 19 = 65. Now, let’s solve for x: 2x + 44 - 19 = 65 2x + 25 = 65 2x=65 - 25 2x = 40 x = 40/2 x = 20 So, you started with 20 pens. The answer is: 20.
+E.2.5Discussion on the Qualitative Examples
+
+Based on the above qualitative examples, we observe that FusionRoute successfully assigns the majority of tokens associated with specific problem types such as coding, mathematical reasoning, and instruction following, to their corresponding expert models. This behavior demonstrates the effectiveness of FusionRoute in performing accurate token-level routing on domain-specific datasets, enabling the model to effectively leverage the complementary expertise of different specialists.
+
+Furthermore, when evaluated on general-purpose datasets, we find that FusionRoute exhibits a more nuanced routing pattern. Tokens that require mathematical or logical reasoning are predominantly routed to the math and code experts, while tokens related to discourse structure, formatting, or general instruction phrasing (e.g., “According to”, “Let’s”, “So”) are more frequently assigned to the instruction-following model. This adaptive token-level routing behavior highlights FusionRoute’s ability to dynamically balance specialized reasoning and general linguistic fluency, thereby improving overall generation quality across diverse tasks.

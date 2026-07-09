@@ -43,6 +43,7 @@
 | 38 | 2026-07-09 | https://x.com/christinexzhu/status/2074847461588267466 | 2074847461588267466 | 2074847461588267466 | Claude Code 新命令 /checkup：一键给你的工程配置做体检 | cover.png | ✅ 已推送 |
 | 39 | 2026-07-09 | https://x.com/ArtificialAnlys/status/2075047187525034114 | 2075047187525034114 | grok4.5 | Grok 4.5登顶Agent评测：便宜、高分、还省token | cover.png | ✅ 已推送 |
 | 40 | 2026-07-09 | https://x.com/jasonzhou1993/status/2075179471951614381 | 2075179471951614381 | jasonzhou-grok45-agent | 我跑了一个月的Loop Agent后学到的：护栏才是真工作 | cover.png | ✅ 已推送 |
+| 41 | 2026-07-10 | https://arxiv.org/html/2601.05106v5 | 2601-05106 | fusionroute | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -341,3 +342,9 @@
 |--------|------|------|
 | 2026-07-09 22:47 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-09 22:54 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0fM_bmZZojEAtovN8SI6DTI3pbdRGHGnCndHHlSJxCEK |
+
+### #41 - fusionroute
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-10 00:11 | 📥 开始 | 收到 URL，开始提取内容 |
