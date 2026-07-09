@@ -1,8 +1,4 @@
-#!/usr/bin/env python3
-"""Download all images from CDP extraction."""
 import urllib.request, os
-
-urls = [
 
 urls = [
     ('img1.jpg', "https://substackcdn.com/image/fetch/$s_!3H8p!,w_1456,c_limit,f_auto,q_auto:good,fl_progressive:steep/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2Fdc703e1b-8ade-4ed0-80d9-f1ac48e985cc_720x255.avif"),
@@ -27,11 +23,13 @@ urls = [
     ('img20.jpg', "https://substackcdn.com/image/fetch/$s_!QIDW!,w_1456,c_limit,f_auto,q_auto:good,fl_progressive:steep/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2Fc0a808f9-e396-4995-b54c-2a0b01ef4004_3008x1786.png"),
 ]
 
-import urllib.request, os
 for fname, url in urls:
+    try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=30) as r:
-            with open(fname, "wb") as f:
-            print(f"  OK {fname} ({len(data)//1024}KB)")
+            with open(fname, 'wb') as f:
+                f.write(r.read())
+        print(f'OK {fname} ({os.path.getsize(fname)//1024}KB)')
     except Exception as e:
-        print(f"  FAIL {fname}: {e}")
+        print(f'FAIL {fname}: {e}')
+print('All images downloaded')
