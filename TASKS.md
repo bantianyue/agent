@@ -36,7 +36,8 @@
 | 31 | 2026-07-08 | https://arxiv.org/html/2606.18394v3 | 2606-18394 | jetspec-parallel-draft | JetSpec：并行树草稿打破投机解码扩展天花板 | cover.png | ✅ 已推送 |
 | 32 | 2026-07-08 | https://arxiv.org/html/2606.15007v1 | 2606-15007 | mamba-diffusion | Nemotron 3 Ultra技术解读：Mamba-Attention混血+NVFP4量化，推理吞吐5.9× | cover.png | ✅ 已推送 |
 | 33 | 2026-07-08 | https://arxiv.org/abs/2607.05804 | 2607-05804 | turnopd | TurnOPD：让在线策略蒸馏具备回合感知，长程Agent训练提速2.29倍 | cover.png | ✅ 已推送 |
-| 34 | 2026-07-09 | https://cognition.com/blog/swe-1-7 | swe-1-7 | swe-1-7 | TBD | TBD | 📥 进行中 |
+| 34 | 2026-07-09 | https://cognition.com/blog/swe-1-7 | swe-1-7 | swe-1-7 | SWE-1.7：以极低成本逼近前沿级软件工程智能 | cover.png | ✅ 已推送 |
+| 35 | 2026-07-09 | https://arxiv.org/html/2607.07508v1 | 2607-07508 | sao-async-rl | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -291,3 +292,10 @@
 | 2026-07-09 15:15 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-09 15:16 | 📥 | 开始：CDP 提取原文+图片 |
 | 2026-07-09 15:25 | 📝 | 写作完成，待humanize+检查 |
+| 2026-07-09 15:29 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0eFZYXMhHYk2puRstCmqD42d4HqyBXIyY-71kv_ys_EA |
+
+### #35 - sao-async-rl
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-09 16:04 | 📥 开始 | 收到 URL，开始提取内容 |
