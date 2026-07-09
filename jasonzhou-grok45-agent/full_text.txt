@@ -1,0 +1,283 @@
+Jason Zhou
+@jasonzhou1993
+What I learnt after running loops for 1 month???
+6
+18
+96
+9,148
+Last week I wrote about loop engineering: the shift from prompting an agent to complete a task, toward designing systems where the agent decides what to work on, executes, verifies, and improves over time.
+But a lot of people is like: ok, I'm sold, but how do I actually build one? More important, how do I build one actually works?
+Because anyone can wrap an agent in a while true and call it a loop. That is the easy 5%. The real work is the guardrails that let you walk away from it.
+We've been on an experiment to run @SuperDesignDev by setting up many many loops past month, and here we want to share some real practical learnings.
+The anatomy of a good loop
+Every loop we run has the same four parts.
+1. The loop contract
+One markdown file, injected into the agent every time a run fires. This is the constitution of the loop. It holds four things:
+the Goal (what winning looks like, and whether there's even a finish line)
+the Boundaries (what it can do freely, what it must never do, and the line between what it can ship on its own vs what needs a human)
+the SOP (the steps it follows each run)
+People underinvest in the boundary section, and it's the one that decides whether you can walk away. Take one of our loops, Error Sweep: every morning it reads our production error tracker, picks the worst new bug, and ships a fix. Here's the real boundary slice from its contract:
+- Fix only when the root cause is clear AND the fix is low-risk.
+  Anything risky or large: open a PR and flag a human. Do not merge it yourself.
+- Make the smallest fix that works. One PR per fix.
+- Never open a new PR while a previous Error Sweep PR is still unmerged.
+- Never copy credentials, tokens, or user data into a report or a PR.
+None of that is about how to fix a bug. It's four sentences drawing a fence. Inside the fence the agent ships on its own. Outside it, a human decides. You want to draw a clear picture for agent: When can it ship-it-yourself + When i should stop-and-ask.
+We normally put contract, state, logs into one md file like below
+markdown
+# <loop name> — contract
+
+## Goal
+What winning looks like. Is there a finish line, or does this run forever as a monitor?
+
+## Boundaries
+- Free to do: ...
+- Never do: ...
+- Ship on its own vs ask a human: <the exact line>
+
+## SOP (each run)
+1. Read state + logs.
+2. Gather what changed. Pick the single most worthwhile thing to do.
+3. Do it (or hand it to an executor).
+4. Verify. Record what happened. Report.
+
+## Current understanding
+...Current state of the loop run
+
+## Logs
+...Logs of past runs
+2. State + logs
+A loop that forgets everything between runs is a cron job with extra steps. It needs memory, split in two:
+State is the durable picture: the backlog, the current hypothesis, the experiments it shipped that needs follow-up. Read at the top of every run, kept small on purpose.
+Logs are the append-only record of what happened, run by run.
+The clearest example is the state our Error Sweep loop keeps so it doesn't waste a run re-investigating things it already understands:
+## Skip these fingerprints (known noise or upstream, not ours)
+- ResizeObserver loop limit exceeded
+- Stripe.js network blip on /checkout
+
+## Fixed, still watching
+- null-team-on-login (019edc8a) — fixed in #1027, confirm it stops firing in prod
+Without that block, every morning the loop rediscovers the same noisy error, burns a run chasing it, and annoys you. With it, the loop skips what it has already judged and spends its attention on what's new. State is where a loop stops repeating itself.
+State also holds what the loop learned by running: a working hypothesis about who converts, plus the habits it picked up from getting things wrong. Our CRM loop carries lines like:
+- users who hit the credit wall in their first week reply about 3x
+  more than everyone else. Draft those first.
+- Before drafting, check what the user actually built, not the label on their
+  profile. One account tagged "SaaS dashboard" was really a print brochure.
+
+None of that came from the original contract. The loop earned it run by run, and now every run starts one step smarter. That's why a good loop is worth more in month three than in week one: its state has absorbed everything it has seen.
+Our internal tool to manage loops, open-sourced here (Loopany): https://github.com/superdesigndev/loopany-platform
+3. The /verify
+This is pre-requisition to any loop that delivering high-stake work (e.g. real production code change, messaging real customers). Basically you want to make sure the verify process is easy + produce evidence that human can easily review
+Generally this means
+Setting up environment to make verify token-efficient & reliable
+A way to include evidence of verification
+For engineering task, that means:
+dev-local.sh script to easily start the local dev + remote sandbox env to test (like crabbox)
+Tooling to allow agent self-drive app like real user (e.g. Playwright-CLI)
+/verify skill that contain SOP for the test
+Place to upload evidence of screenshot + videos to attach in PR (We upload to github release assets)
+While for other non-engineering work could be tricker, but not impossible, for example for CRM loop we have a verifier agent to review the messages drafted with certain anti-slop rules;
+We open-sourced the setup as a verifier-setup skill for engineering task (https://github.com/AI-Builder-Club/skills). 
+The result is that a PR from a loop doesn't arrive as "trust me, it works." It arrives with a video of the thing working. I can approve in seconds because I'm looking at the behaviour, not reading the diff and hoping. This is also why a verifier is the deciding factor in whether a loop is even a good idea.
+
+
+4. The trigger
+What wakes the loop up. There are three shapes, and picking the right one is half the cost model:
+Continuous for-loop. This is ralph-loop or /goal type trigger. Agent running in for-loop until condition is met. This is the shape behind autonomous research agents. Right for bounded pushes ("keep going until the test suite is green"), wasteful as a permanent fixture. This is mainly useful when there are instant feedback loop and clear spec. (Like most bug fixing engineering work)
+Time based. A schedule fires the loop: every hour, every morning at 6am. Our Error Sweep, React Doctor, doc maintainer and CRM loops all run on cron.
+Workflow / event based. A new email arrives, an incident opens, a PR lands. The loop only runs when there's something to run on. It can even combine with time based - e.g. A time-based tick runs a script every hr to check if new support tickets, if there are some, trigger the agent; if not, log & silence. A good way to manage loop cost; You'll see the mechanics in the Evolve section.
+Orchestractor + Executor + Verifier
+Once a loop touches anything non-trivial, we started splits into three roles:
+Orchestrator finds the work. Executor does the work in an isolated box. Verifier proves it and attaches evidence.
+The orchestrator / prioritiser. The agent that wakes up on the schedule. Its job is not to do the task, it's to find the task: gather signals, look at what changed, pick the single most worthwhile thing this run, and hand it off.
+The executor. Does the actual work in an isolated space (for code, a fresh git worktree off main, so it never pollutes your working checkout or another loop's run).
+The verifier. Independently confirms the executor's work and produces the evidence a human can glance at.
+But not all loops need all three. The 3-layer shape is what complex, code-shipping loops grow into. Plenty of good loops are just the orchestrator doing the whole thing itself. Let me show you both ends.
+Evolve Loop - Build anti-fragile loops
+In Nassim Taleb's Antifragile, He splits systems into three kinds: fragile systems fear volatility, one accident means a big loss; robust systems survive volatility and recover to what they were; antifragile systems gain from it, every shock leaves them stronger. A glass is fragile, a stone is robust, your immune system is antifragile: every small infection trains it.
+Point that at loops and the question gets concrete: when a run fails, where does the lesson go? In our practice a lesson has three destinations, in rising order of abstraction:
+Everyone has logs, and they only ever get longer. Distilling experience into rules is what makes a loop antifragile. The question is: who does the distilling?
+So in Loopany (the internal app we built for these loops) this became a separate run role: evolve. An agent session reads the logs of the loop's last dozen runs, the results, the cost, and asks: where are we repeating mistakes? Which runs were wasted? Which boundary is too loose, which too tight? Its output isn't product code, it's changes to the loop itself:
+loop contract, State conventions,
+Trigger mechiansm,
+Scripts for repeating & determistic agentic steps
+Skills
+Dashboard humans look at.
+It’s a loop to improve loop itself.
+
+
+Real loops running Superdesign
+We've been running loops to automate most part of Superdesign, some works, some didn't (Learnings in separate blog later), below are a few real examples we run day to day that is relatively easy for you to copy and setup
+Doc maintainer loop
+One of our simplest and most useful loops. Once a week it keeps the project's docs honest;
+This loop is one layer. The orchestrator reads the diff, checks the docs, opens a PR if something drifted, done. No separate executor, no separate verifier, because the task is simple and low-blast-radius enough for one agent to hold in its head.
+You could add layers, a verifier that fact-checks each doc claim, a pass that flags tech debt it notices. You shouldn't, not until the simple version burns you. Build the 1-layer version first, feel the specific pain, then add exactly the layer that fixes it.
+This is the loop I'd tell you to build first, so here it is a template:
+markdown
+# doc-maintainer — contract
+
+## Goal
+The README, setup guides, and examples always match what the code
+actually ships. Zero drift found = a successful run, not a wasted one.
+
+## Boundaries
+- Ship on its own: open ONE pull request with the fixes. That's it.
+- Never: rewrite accurate docs to look busy, touch anything outside
+  the docs, stack a 2nd PR while last week's is still open.
+
+## SOP (each run)
+1. Read the diff: every commit + PR since the last sweep (cursor is
+   in state).
+2. Compare README, setup guides, examples, runbooks against what the
+   code ships NOW.
+3. Verify for real: run the commands, check the links, try the
+   examples. Never trust memory.
+4. Drift found → smallest fix, fresh worktree, one PR explaining what
+   drifted and why. Nothing stale → clean stop.
+5. Move the cursor, log the run.
+
+## State
+- last-sweep cursor (commit hash)
+- open PR, if any
+
+## Logs
+- one dated line per run: drift count + PR link, zero included
+Bug hunter loop
+Some loops ship real code to real customers, and a mistake there is expensive. That's when all three layers earn their keep.
+Our Error Sweep loop runs every morning:
+(orchestrator) it pulls the last 24h of production errors from our error tracker (A special script we wrote collect data from posthog/LLM log/server logs), ranks them by occurrences x users, skips the known-noise fingerprints from its state, and picks the single most impactful new exception. It pulls the de-minified stack trace and finds the root cause.
+(executor) if the cause is clear and low-risk, it fixes it in a fresh worktree and ships the PR. If it's risky or large, it stops and flags a human. That branch in the boundary is doing real work every run.
+(verifier) the fix gets proven before it counts, and the loop keeps watching that fingerprint on later runs to confirm the error actually stopped firing. A fix that doesn't move the real number isn't a fix.
+React Doctor is the same shape aimed at code health instead of runtime errors: every morning it scans the app with npx react-doctor, picks the single most severe issue, fixes it in an isolated worktree, verifies, and opens one PR. It reports a health score as a daily metric so you can watch the line move. And it has a small guardrail that keeps it livable:
+If a previous React Doctor PR is still open and unmerged, don't open another one today. Refresh the open PRs' statuses and still report the score.
+That rule is the difference between a helpful loop and one that buries you in 30 PRs you'll never review. A loop has to respect your review bandwidth, not just its own throughput.
+Support triage loop
+Runs hourly against our Intercom inbox. Its guiding principle: every support ticket is a free window into a product gap. A user who writes in is handing you a bug report, a conversion blocker, or a confusion signal for free. Most support setups answer the message and throw the window away. This loop keeps both.
+Each run walks four moves:
+Pull the window. Everything since the last run, plus any follow-ups that came due today. The window widens automatically over silent hours, so a missed fire never loses tickets. Bucket by who spoke last: customer = needs a response, bot = review it, teammate = already handled.
+Investigate before replying. This is the differentiator. For each ticket, root-cause against real data first: check the user's account, their actual sessions, the error logs, the billing records. Never answer blind. Half the time the user's description of the problem is not the problem.
+Fan out to three outputs. Every ticket can produce up to three things:a reply that fixes the user's problem now, in the thread;
+a signal filed to the knowledge base: the product gap behind the ticket, written down once, so the growth and eng loops can act on the pattern later;
+and when the root cause is a real bug, it spawns a fix agent in a fresh worktree, verifier and evidence included, same machinery as the bug hunter loop.
+
+
+Write back and sleep. Set follow-up dates, log the run, wait for the next tick.
+The boundary that makes this safe to run against real customers: replies are tiered. Routine, factual answers ship on their own. Anything sensitive, refunds, angry users, non-English where I can't review the tone, goes out only after a human approves it.
+Setting it up is the same recipe as every other loop: one contract file plus an hourly cron. Here's the support contract, trimmed to a template you can steal:
+markdown
+# support-triage — contract
+
+## Goal
+Every inbound ticket gets a correct, investigated response within an hour,
+and every product gap behind a ticket becomes a signal the team can act on.
+No finish line: this is a monitor.
+
+## Boundaries
+- Ship on its own: replies to routine, factual questions (how-to, billing
+  lookups, known issues with a documented fix).
+- Ask a human first: refunds, angry or churn-risk users, anything legal,
+  any reply in a language the team can't review.
+- Never: promise features or timelines, share another user's data, close
+  a ticket without a root cause written down.
+
+## SOP (each run)
+1. Pull conversations since the last run timestamp + follow-ups due today.
+   Bucket by last speaker (customer / bot / teammate).
+2. Per ticket: investigate root cause against the product DB, error logs,
+   and billing BEFORE drafting anything. Never answer blind.
+3. Reply per the boundary tiers. Draft-only where approval is required.
+4. If the root cause is a bug: spawn a fix agent in a fresh worktree,
+   require verification evidence, open a PR flagged to the team.
+5. File a signal for any recurring or conversion-relevant gap (dedupe
+   against existing signals first).
+6. Set follow-up dates. Log the run.
+
+## State
+- open follow-ups (ticket id -> due date)
+- recurring-theme tally (feeds signal creation)
+- standing lessons (e.g. "duplicate messages = retry artifacts, not spam")
+
+## Logs
+- one dated line per run: tickets handled / replies sent / signals filed
+Then put a cheap gate in front of the cron so the agent only wakes when there's something in the window (the Evolve move from earlier), and let it run. The payoff isn't just faster replies, it's the signals: when five people ask how to export something, that's a conversion gap filed and waiting for the growth loop, not a pattern somebody maybe notices in a quarterly review.
+CRM lifecycle loop
+Loops are not an engineering toy. Some of our highest-value ones never touch a line of code. This one runs our customer outreach, and it's the fullest expression of the 3-layer shape pointed at people instead of code.
+Every morning:
+Scripts pull the data first. Who was active in the last 24h, new business-email signups, and any replies that came in. Deterministic pre-stage, no LLM spent on data pulls. Users who replied exit the loop entirely: a live conversation belongs to a human.
+The orchestrator proposes segments, not one-off picks. Groups of high-intent users worth outreach today: people who hit the credit wall this week, new business signups, high-reach builders. Those are examples, not a fixed list; segments get proposed fresh from the data every run, and which ones convert lives in state.
+Each segment spawns an executor sub-agent that works user by user: read what they actually built, read every past exchange with them, then draft a personal email. Never draft blind. A profile label that says "SaaS dashboard" can turn out to be a print brochure; the executor checks the real work, not the label.
+A verifier checks every draft before it can go anywhere: fact-check every claim in the email against the data (nothing false goes out under your name), then voice and anti-slop rules. This is the taste problem from the SEO story again, but here it's tractable, because "is this claim about the user's project true" has a checkable answer.
+Sends are tiered by risk. We started drafts-only: every email waited for a human. As segments proved their reply rates, low-risk ones earned the right to send on their own, inside the fence. High-touch segments still land as drafts for a human to approve. Autonomy is earned per segment, not granted to the loop.
+Friction becomes signal. When the research finds a user stuck on something, that's not just email material, it files a signal the other loops read, and a real bug spawns a fix agent, the same machinery as the bug hunter.
+The fence you saw in part 1 holds it all: 7-day suppression, one follow-up max without a reply, replied means a human takes over. And the state does the compounding: log sends and replies per segment, keep what converts, drop what doesn't. The loop's taste in who to email gets measurably better every week, because it's calibrated on reply rates instead of vibes.
+markdown
+# crm-lifecycle — contract
+
+## Goal
+Turn high-intent product activity into conversations. Success = reply rate
+and upgrades per segment, not emails sent. No finish line: this is a monitor.
+
+## Boundaries
+- Ship on its own: sends to segments that have EARNED it (see state:
+  approved_segments). Everything else: drafts only, a human sends.
+- Ask a human first: any new segment's first batch, anyone who ever
+  replied, any claim the verifier couldn't confirm.
+- Never: email anyone contacted in the last 7 days, send a 2nd follow-up
+  without a reply, invent facts about what a user built.
+
+## SOP (each run)
+1. Scripts have already pulled actives, signups, and replies. Read the
+   output. Users who replied exit to a human.
+2. Score users, then propose SEGMENTS (groups, not one-off picks).
+   Check state for which segments converted before proposing more.
+3. Per segment: spawn an executor sub-agent. Per user: read what they
+   actually built + every past exchange, then draft. Never draft blind.
+4. Every draft passes the verifier: fact-check each claim against the
+   data, then voice + anti-slop rules. Nothing false goes out.
+5. Route by risk: approved segments send; the rest queue for review.
+6. Friction found during research → file a signal; real bug → spawn a
+   fix agent.
+
+## State
+- approved_segments (earned autonomy + the reply rate that earned it)
+- per-segment performance (sends → replies → upgrades)
+- suppression list · standing lessons (e.g. "verify from their real
+  work, not their profile label")
+
+## Logs
+- one dated line per run: segments proposed / drafts / sends / replies
+
+
+Checklist for a good loop
+[ ]  Loop contract file: goal, SOP, output rules, read at every run
+[ ]  Boundary and constraints: what it ships on its own vs asks a human; no-op is a valid run
+[ ]  State + logs: memory across runs, so it never re-does work
+[ ]  Cheap verifier: proof with evidence; if none exists, keep a human in the loop
+[ ]  Isolated execution: fresh worktree or own sandbox per run
+[ ]  Cost-effective trigger: gate script or event, empty runs cost nothing
+[ ]  Loop evolve cycle: review run history, fold mechanical work into scripts/skills
+[ ]  Small scope: split the loop until "just let it run" feels comfortable
+
+
+Loopany - Our internal loop manage tool (Open-sourced)
+1:30
+We have been using an internal tool Loopany to orchestrate all our loops across company, it was super useful to us so we are open sourcing it
+It's a loop management environment connect to your team's own local agents.
+Loop templates & auto log/state tracking built in
+Programmable triggers + Auto retry & recovery
+The evolve cycle
+Mini apps for each loop
+Team workspace so loops don't conflict
+Feel free to try and let us know your feedback: https://github.com/superdesigndev/loopany-platform
+想发布自己的文章？
+升级为 Premium
+下午7:25 · 2026年7月9日
+·
+9,148
+ 查看
+6
+18
+96
+257
+相关
+查看引用
