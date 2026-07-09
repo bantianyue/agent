@@ -14,10 +14,10 @@ async def run(name, url):
         rep=json.loads(await ws.recv())
         target_id=rep['result']['targetId']
         # get target ws
-        targets=json.loads(urllib.request.urlopen('http://localhost:9222/json/targets',timeout=5).read())
+        targets=json.loads(urllib.request.urlopen('http://localhost:9222/json',timeout=5).read())
         tws=None
         for t in targets:
-            if t['targetId']==target_id:
+            if t.get('targetId')==target_id:
                 tws=t['webSocketDebuggerUrl']; break
         print(name,'tab created', round(time.time()-t0,1))
         async with websockets.connect(tws, max_size=50*1024*1024) as tw:
