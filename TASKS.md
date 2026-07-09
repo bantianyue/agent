@@ -46,6 +46,7 @@
 | 41 | 2026-07-10 | https://arxiv.org/html/2601.05106v5 | 2601-05106 | fusionroute | FusionRoute：让多个专家LLM在token级协作，一个轻量router同时选专家+补纠错 | cover.png | ✅ 已推送 |
 | 42 | 2026-07-10 | https://x.com/akshay_pachaar/status/2074502882812952666 | 2074502882812952666 | 2074502882812952666 | 你的KV缓存是坏的：Agent 62%的token在重复，LMCache解耦架构首token快14倍 | cover.png | ✅ 已推送 |
 | 43 | 2026-07-10 | https://arxiv.org/html/2607.06906v1 | 2607-06906 | 2607.06906 | 换编排层不换模型：单任务成本直降41% | cover.png | ✅ 已推送 |
+| 44 | 2026-07-10 | https://claude.com/blog/claude-model-and-effort-level-in-claude-code | claude-model-and-effort-level-in-claude-code | claude-model-effort-level | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -366,3 +367,9 @@
 |--------|------|------|
 | 2026-07-10 07:27 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-10 07:32 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0aFcYjdrfeoQJaJFPoo75dfRGVH9cw8vOpxfBu6X0q-a |
+
+### #44 - claude-model-effort-level
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-10 07:59 | 📥 开始 | 收到 URL，开始提取内容 |
