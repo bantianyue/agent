@@ -16,7 +16,7 @@
 
 现有用户记忆系统大多把记忆访问做成一个系统级检索函数或预设计管线：底层把不同存储结构压缩成"预选上下文"塞给模型。一旦检索到的上下文不完整，Agent几乎没有能力再去查证额外证据。
 
-NapMem的反向思路是：长期用户记忆不应是被动喂给模型的上下文，而应是Agent能主动使用的动作空间。模型自己决定要不要查记忆、查哪个抽象层级、拿到的证据够不够。
+NapMem反过来想：长期用户记忆不该是被动喂给模型的上下文，而该是Agent能主动调度的动作空间。模型自己决定要不要查记忆、查哪个抽象层级、拿到的证据够不够。
 
 ![](x1.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图1：被动检索只给Agent部分证据；NapMem把记忆暴露成动作接口，让Agent在回答前主动搜证</span>
@@ -99,8 +99,8 @@ RL把不必要记忆调用压到6.90%且非记忆任务不退化，证明"主动
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/qcIFzXsBalSGpca5fzJKxg" target="_blank" data-linktype="2">Claude Code 动态Workflow Vs. SubAgent Vs. Skill</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/VwQP-AZcHMYksmMLHOy_FQ" target="_blank" data-linktype="2">从 Token 流到 Agent 流：LangChain 全新流式架构深度解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/qcIFzXsBalSGpca5fzJKxg" target="_blank" data-linktype="2">Claude Code动态Workflow Vs. SubAgent Vs. Skill</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/VwQP-AZcHMYksmMLHOy_FQ" target="_blank" data-linktype="2">从Token流到Agent流：LangChain全新流式架构深度解读</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0dQ7pBJ0NmFt-bOwUCQ5ew" target="_blank" data-linktype="2">Torch解析系列二：Dynamo字节码级的计算图捕获</a><br>
 </span>
 
