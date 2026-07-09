@@ -44,7 +44,7 @@
 | 39 | 2026-07-09 | https://x.com/ArtificialAnlys/status/2075047187525034114 | 2075047187525034114 | grok4.5 | Grok 4.5登顶Agent评测：便宜、高分、还省token | cover.png | ✅ 已推送 |
 | 40 | 2026-07-09 | https://x.com/jasonzhou1993/status/2075179471951614381 | 2075179471951614381 | jasonzhou-grok45-agent | 我跑了一个月的Loop Agent后学到的：护栏才是真工作 | cover.png | ✅ 已推送 |
 | 41 | 2026-07-10 | https://arxiv.org/html/2601.05106v5 | 2601-05106 | fusionroute | FusionRoute：让多个专家LLM在token级协作，一个轻量router同时选专家+补纠错 | cover.png | ✅ 已推送 |
-| 42 | 2026-07-10 | https://x.com/akshay_pachaar/status/2074502882812952666 | 2074502882812952666 | 2074502882812952666 | TBD | TBD | 📥 进行中 |
+| 42 | 2026-07-10 | https://x.com/akshay_pachaar/status/2074502882812952666 | 2074502882812952666 | 2074502882812952666 | 你的KV缓存是坏的：Agent 62%的token在重复，LMCache解耦架构首token快14倍 | cover.png | ✅ 已推送 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -357,3 +357,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-10 01:25 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-10 01:35 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0cuwdDlSynTnavq9hsnU-g5cT6dNCffe2oUD70oThbTV |
