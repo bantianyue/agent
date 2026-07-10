@@ -15,11 +15,11 @@
 
 多GPU部署LLM推理，通用基线就是流水线并行（PP）和张量并行（TP）。PP在层间切分只为提吞吐，TP在算子层面空间切分能同时降延迟。但TP每两层就要一次All-Reduce集合通信来消解数据依赖，这给单batch延迟优化画了一道硬天花板。
 
-这些都不是为"降低单batch延迟"设计的。CTA-pipelining瞄准的正是这块空白：用细粒度空间流水线，把跨GPU的依赖kernel并发跑起来。
+这些方案都不是冲着单batch延迟去的。CTA-pipelining补的正是这块：用细粒度空间流水线，把跨GPU的依赖kernel并发跑起来。
 
 ## CTA-pipelining：在CTA粒度上跨GPU流水线依赖kernel
 
-CTA（协作线程阵列）是GPU最细的执行粒度。传统做法是等生产者kernel完全结束、再启动消费者kernel；CTA-pipelining改为：生产者每产出一个输出块，消费者对应的CTA立刻启动去消费它。依赖的kernel在空间上分布到多GPU，几乎同时启动、几乎同时完成（仅消费者尾部最后一轮略晚）。
+CTA（协作线程阵列）是GPU最细的执行粒度。老做法是等生产者kernel整段跑完，才轮到消费者；CTA-pipelining不这么干：生产者每吐出一个输出块，对应的消费者CTA马上启动去接。依赖的kernel摊到多GPU上，几乎同时点火、同时收工，只有消费者尾部最后一轮略晚半拍。
 
 ![](fig01.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图1：双GPU下CTA-pipelining的整体执行架构（含依赖数组、记分牌、跨设备工作队列三类组件）</span>
@@ -46,7 +46,7 @@ CTA（协作线程阵列）是GPU最细的执行粒度。传统做法是等生�
 - 经典kernel：每CTA epilogue约6μs，跨设备可见需120μs，消费者prologue取队列约1.5μs，且逐轮累积。
 - warp特化持久kernel：利用微流水线中其他warp的等待空闲，把协议操作塞进去。跨设备写可见仅5μs，prologue 1.5μs、广播0.5μs均被隐藏。开销只在流水线初始爬升时可见一次。
 
-实测两个连续GEMM基线各1080μs；用CTA-pipelining后生产者1090μs、消费者1165μs（含可见开销与末轮流水线延迟）。对原kernel无寄存器/共享内存干扰，不引发溢出。
+实测两个连续GEMM基线各自1080μs；套上CTA-pipelining后，生产者1090μs、消费者1165μs（含可见开销与末轮流水线延迟）。没动原kernel的寄存器分配和共享内存，不引发溢出。
 
 ## 对比micro-batching：最高降31.8%
 
@@ -70,7 +70,7 @@ CTA（协作线程阵列）是GPU最细的执行粒度。传统做法是等生�
 ![](fig12.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图7(c)：高TP度下纯TP因通信主导反而变慢，组合方案继续降延迟</span>
 
-组合方案的直接收益是All-Reduce world size减小、通信时间下降；同时降低了所需TP度、保留了更大矩阵维度，计算效率也受益（部分尺寸被流水线爬升延迟抵消）。两者正交、可无缝叠加。
+组合方案最实在的账是：All-Reduce的world size砍半、通信时间直接掉下来；同时不必上那么高的TP度，矩阵维度保得更大，计算效率也跟着沾光（个别尺寸被流水线爬升延迟吃回去一部分）。两者正交，能直接叠。
 
 ## 讨论：中心化NVLink拓扑限制重叠
 
@@ -86,6 +86,20 @@ CTA-pipelining依赖NVLink营造的"共享内存错觉"。但8卡B200经NVSwitch
 真正的瓶颈已经不在软件而在互连拓扑：中心化NVLink让"共享内存错觉"在物理上撑不住，后续收益要看更分散的交换机拓扑和硬件级kernel间信令支持。
 </div>
 </div>
+
+
+---
+
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/TrDau7cG1M7kwsLQNwOpzA" target="_blank" data-linktype="2">揭秘最快的GLM-5.2推理优化技术：如何将吞吐推到280 TPS</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/Ww55Gc65e32oFDEXw24VRA" target="_blank" data-linktype="2">A4Q：大神用Claude一天给Blackwell写出原生4-bit Attention Kernel，花费$5.34</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/g2sTEQwPjDcmas42qU49nw" target="_blank" data-linktype="2">Anthropic用J透镜打开LLM意识黑箱J-Space,揭秘干预LLM思维的新训练技术</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+</span>
 
 ---
 
