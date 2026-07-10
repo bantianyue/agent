@@ -32,7 +32,7 @@ TRACE把「反复出现的智能体失败」转成「面向能力的训练环境
 
 ### Step1：通过对比找到缺失的能力，而不是靠猜
 
-我们收集基础智能体在目标环境中的rollout，把它们分成成功（𝒟⁺）和失败（𝒟⁻）两个集合。一个分析智能体读取工具调用、观测和最终回复，归纳出一份标准的能力词典，然后给每一对「轨迹—能力」打上NA、PRESENT（具备）或LACKING（缺失）的标签。一个能力c只有在「它的缺失集中在失败中」且「能解释足够多的失败」时，才会被保留：
+我们收集基础智能体在目标环境中的rollout，把它们分成成功（𝒟⁺）和失败（𝒟⁻）两个集合。一个分析智能体读取工具调用、观测和最终回复，归纳出一份标准的能力词典，然后给每一对「轨迹-能力」打上NA、PRESENT（具备）或LACKING（缺失）的标签。一个能力c只有在「它的缺失集中在失败中」且「能解释足够多的失败」时，才会被保留：
 
 Δ̂(c) = R̂⁻(c) − R̂⁺(c) ≥ 0.20
 
@@ -88,9 +88,9 @@ Qwen3.6-27B这个结果值得多说几句。TRACE把一个27B的开源权重骨�
 
 **T1：失败对比是可操作的。** 对比成功与失败的轨迹，识别出的是「可训练的缺项」，而不是泛泛的错误类别。这个诊断在多次分析运行中都很稳定，而且少数几个缺项就覆盖了大多数失败。
 
-**T2 — 有针对性的合成环境很高效。** 围绕单一能力构建的可验证环境，提供的监督远比稀疏的终端任务奖励稠密。TRACE用不到目标环境GRPO和GEPA四分之一的rollout，就超过了它们。
+**T2：有针对性的合成环境很高效。** 围绕单一能力构建的可验证环境，提供的监督远比稀疏的终端任务奖励稠密。TRACE用不到目标环境GRPO和GEPA四分之一的rollout，就超过了它们。
 
-**T3 — 组合式适配很重要。** 每个能力一个LoRA专家，避免了把多种技能坍缩进同一次更新；token级别的MoE路由在每一步选出正确的专家，比最好的单适配器方案高出 +7.3分。
+**T3：组合式适配很重要。** 每个能力一个LoRA专家，避免了把多种技能坍缩进同一次更新；token级别的MoE路由在每一步选出正确的专家，比最好的单适配器方案高出 +7.3分。
 
 更广义地说，TRACE是一份「面向特定环境的智能体自我改进」配方：部署一个智能体，观察它在哪里反复失败，再把这些失败转化成恰好能修复它们的训练信号，回路里不需要人工去筛选技能、环境或奖励。
 
@@ -104,6 +104,19 @@ Qwen3.6-27B这个结果值得多说几句。TRACE把一个27B的开源权重骨�
 - 27B开源权重在SWE-bench上压过GPT-5.2-Codex，说明很多榜单差距不是「模型不够大」，而是「没被精准训练过」。诊断缺失能力，往往比加参数更划算
 </div>
 </div>
+
+---
+
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/lIoX1-iyYAVYfnB6jaENPA" target="_blank" data-linktype="2">用 Hermes Agent 搭建 Eval Loop，拒绝输出AI垃圾</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2kSChMJR6gYdGxXIlCgmhw" target="_blank" data-linktype="2">GitHub Copilot突破Agent不确定性验证难题:基于编译理论的PTA完胜LLM-as-a-Judg</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/aiJs5CC8Gb6qa_xDRNEjTA" target="_blank" data-linktype="2">Dynamic Subagents：用代码编排Agents，告别逐轮工具调用</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/qcIFzXsBalSGpca5fzJKxg" target="_blank" data-linktype="2">Claude Code 动态Workflow Vs. SubAgent Vs. Skill</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/YnMyg85RydYrJvk6C5cLdQ" target="_blank" data-linktype="2">微软$25亿砸向FDE，四巨头AI军备竞赛最后一公里的FDE之战</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/crfkhSIuMZJxjNA0Md8dXw" target="_blank" data-linktype="2">李飞飞：世界模型的功能分类</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4Iz5SjE4D240EL4MmKrWZQ" target="_blank" data-linktype="2">OpenAI Dreaming记忆系统：从记住你到理解你</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/VZRcpl6vL7riJp77ZmtSIg" target="_blank" data-linktype="2">Hermes vs OpenClaw创始人隔空互怼：假星标，抄袭，死亡威胁各种瓜</a><br>
+</span>
 
 ---
 
