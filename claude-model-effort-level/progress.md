@@ -22,3 +22,4 @@
 
 创建时间: 2026-07-10
 来源: https://claude.com/blog/claude-model-and-effort-level-in-claude-code
+| Step 4d-i: 传送门 | completed |
