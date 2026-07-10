@@ -13,13 +13,12 @@
 | Step 4b: 确定独立观点 | completed |
 | Step 4c: 写正文（含full_translation） | completed |
 | Step 4d: 写结语 | completed |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
 | Step 4e: 写参考区 | completed |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | completed (第1次) |
-| Step 5: 预发布检查 | pending |
+| Step 4f: Humanizer 润色 | completed (文章本身干净，0改动) |
+| Step 4g: 文本格式修复 | completed (第1+3次) |
+| Step 4d-i: 写传送门 | completed (11篇) |
+| Step 5: 预发布检查 | in_progress |
 | Step 6: 推送草稿 | pending |
 
 创建时间: 2026-07-10
 来源: https://x.com/SergioPaniego/status/2074863503312044499
-| Step 4d-i: 传送门 | completed |

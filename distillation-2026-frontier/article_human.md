@@ -48,7 +48,7 @@ Qwen3在经典方向上用了同样的机制：一个大教师和小的学生，
 
 第三种用法彻底丢掉了独立的教师。
 
-Cursor的Composer 2.5用自我蒸馏训练。它们往上下文里注入一条描述期望行为的hint（提示），带着hint的模型就成为没有hint的同一模型的教师。**逐token的KL把无hint策略拉向它「以hint为条件」的自己，于是模型最终能在推理时不需要hint就产出该行为。**这就是直播课里称作「特权教师（privileged teacher）」的东西。Cursor的Sasha Rush（@srush_nlp）在Dwarkesh Patel的访谈里讲得很细，类比里还出现了Rafa Nadal，光这点就值得一看。
+Cursor的Composer 2.5用自我蒸馏训练。它们往上下文里注入一条描述期望行为的hint（提示），带着hint的模型就成为没有hint的同一模型的教师。**逐token的KL把无hint策略拉向它「以hint为条件」的自己，于是模型最终能在推理时不需要hint就产出该行为。**这就是直播课里称作「特权教师（privileged teacher）」的东西。Cursor的Sasha Rush在Dwarkesh Patel的访谈里讲得很细，类比里还出现了Rafa Nadal，光这点就值得一看。
 
 ![](img3.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">原文配图：Cursor Composer 2.5的特权教师自我蒸馏机制（Sergio Paniego长文）</span>
@@ -57,6 +57,8 @@ Thinking Machines展示了另一种自我教师，用了上一节同样的在线
 
 ![](img4.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">原文配图：Thinking Machines用微调前检查点做自我蒸馏（持续学习）（Sergio Paniego长文）</span>
+
+## 教师不一定要更大，只要更对路
 
 **教师不需要更大，只需要在情境里更好。有时那就是模型自己。**
 
