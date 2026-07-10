@@ -15,9 +15,7 @@
 
 多GPU部署LLM推理，通用基线就是流水线并行（PP）和张量并行（TP）。PP在层间切分只为提吞吐，TP在算子层面空间切分能同时降延迟。但TP每两层就要一次All-Reduce集合通信来消解数据依赖，这给单batch延迟优化画了一道硬天花板。
 
-在层间PP和算子级TP之间，还留着一块被忽略的空间：层内、算子间的执行。已有方案要么靠kernel融合/mega-kernel（需重编译整个工作流），要么靠micro-batching（小chunk下出现流水线气泡、kernel效率崩）。这些都不是为"降低单batch延迟"设计的。
-
-**CTA-pipelining瞄准的正是这块空白：用细粒度空间流水线，把跨GPU的依赖kernel并发跑起来。**
+这些都不是为"降低单batch延迟"设计的。CTA-pipelining瞄准的正是这块空白：用细粒度空间流水线，把跨GPU的依赖kernel并发跑起来。
 
 ## CTA-pipelining：在CTA粒度上跨GPU流水线依赖kernel
 
