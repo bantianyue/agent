@@ -62,7 +62,7 @@ CTA（协作线程阵列）是GPU最细的执行粒度。传统做法是等生�
 ![](fig07.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图5：不同输入序列长度下，CTA-pipelining相对TP的延迟降低（R-TP）</span>
 
-纯CTA-pipelining在2/4/8 GPU上相对TP降29.0%/46.2%/59.0%，主要因为**完全绕开了All-Reduce**。但有的负载kernel不够多、凑不出足够流水线阶段，这时把它和TP组合：硬件切成2-GPU组，组内用CTA-pipelining跑本地两层GEMM，最终All-Reduce的world size减半。
+纯CTA-pipelining在2/4/8 GPU上相对TP降29.0%/46.2%/59.0%，主要因为完全绕开了All-Reduce。但有的负载kernel不够多、凑不出足够流水线阶段，这时把它和TP组合：硬件切成2-GPU组，组内用CTA-pipelining跑本地两层GEMM，最终All-Reduce的world size减半。
 
 ![](fig10.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图7(a)：CTA-pipelining+TP组合的总延迟（线）与计算/通信拆分（柱）</span>
@@ -74,7 +74,7 @@ CTA（协作线程阵列）是GPU最细的执行粒度。传统做法是等生�
 
 ## 讨论：中心化NVLink拓扑限制重叠
 
-CTA-pipelining依赖NVLink营造的"共享内存错觉"。但8卡B200经NVSwitch中心化交换，每GPU并发进出带宽被这颗星型交换机瓶颈。生产者直写消费者内存会长期占住同一物理链路，导致消费者想和第三方通信做计算-通信重叠时被迫与它争用。论文指出更分散的NVLink拓扑（如GB200 NVL72多Switch）可化解：把一栈CTA-pipelining kernel局部化在单一Switch下，二次通信走另一Switch，重叠才真正可行。
+CTA-pipelining依赖NVLink营造的"共享内存错觉"。但8卡B200经NVSwitch中心化交换，每GPU并发进出带宽被这颗星型交换机卡住。生产者直写消费者内存会长期占住同一物理链路，消费者想和第三方通信做计算-通信重叠时只能跟它抢带宽。论文提到更分散的NVLink拓扑（如GB200 NVL72多Switch）能化解：一栈CTA-pipelining kernel塞进单一Switch下，二次通信走另一Switch，重叠才真正可行。
 
 <div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
 <div style="text-align:center;margin-bottom:8px;">
