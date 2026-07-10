@@ -165,8 +165,6 @@ warp特化持久kernel精确执行轨迹见图2(b)，仅含相关warp。每轮�
 
 总之，CTA-pipelining在大多数情况下优于micro-batch chunk流水线，最大化跨设备并行并保留原生kernel效率，同时有效隐藏流水线气泡与全局内存屏障开销。实际益处还包括省去发现最优micro-batch chunk尺寸的调参工作。对已用micro-batch流水线的流程，CTA-pipelining可直接替换。
 
-（图注：R-MB为相对micro-batching的延迟降低；R-TP为相对TP的延迟降低。权重矩阵固定8192×8192。micro-batching执行延迟由扫描chunk尺寸取最优者。）
-
 ### B. 对比TP及与TP结合的空间扩展
 
 如引言所述，TP已成为多GPU环境下面向延迟扩展的事实标准。我们提出CTA-pipelining作为可与TP结合的正交空间扩展技术。本节评测分两部分：首先在多层GEMM上对比CTA-pipelining与TP；其次评测两者结合，展示联合应用如何进一步推高延迟优化前沿。
