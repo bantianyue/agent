@@ -55,7 +55,7 @@ CTA（协作线程阵列）是GPU最细的执行粒度。传统做法是等生�
 ![](fig06.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图4：不同GPU数与chunk尺寸下，CTA-pipelining相对micro-batching的延迟降低（R-MB）</span>
 
-结果：对比扫描中最优chunk，CTA-pipelining在2/4/8 GPU下分别降31.8%/30.0%/23.4%。**micro-batching的本质矛盾是chunk尺寸两难**：chunk太大会拉长流水线头尾、降低并行度；太小则单kernel效率崩、启动气泡多。CTA-pipelining在CTA级重叠，又不显式切chunk，保住原生kernel效率，直接化解这个两难。极小输入（序列长1024、kernel仅百微秒级）时协议开销会凸显，但此时micro-batching也到极限。
+结果：对比扫描中最优chunk，CTA-pipelining在2/4/8 GPU下分别降31.8%/30.0%/23.4%。micro-batching的根本矛盾是chunk尺寸两难：chunk太大会拉长流水线头尾、降低并行度；太小则单kernel效率崩、启动气泡多。CTA-pipelining在CTA级重叠，又不显式切chunk，保住原生kernel效率，直接化解这个两难。极小输入（序列长1024、kernel仅百微秒级）时协议开销会凸显，但此时micro-batching也到极限。
 
 ## 对比TP：最高降29.6%，且能与TP正交组合
 
