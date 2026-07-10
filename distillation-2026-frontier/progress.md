@@ -17,8 +17,8 @@
 | Step 4f: Humanizer 润色 | completed (文章本身干净，0改动) |
 | Step 4g: 文本格式修复 | completed (第1+3次) |
 | Step 4d-i: 写传送门 | completed (11篇) |
-| Step 5: 预发布检查 | in_progress |
-| Step 6: 推送草稿 | pending |
+| Step 5: 预发布检查 | completed (全PASS，覆盖率100.6%) |
+| Step 6: 推送草稿 | in_progress |
 
 创建时间: 2026-07-10
 来源: https://x.com/SergioPaniego/status/2074863503312044499
