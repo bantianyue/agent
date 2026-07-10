@@ -1,0 +1,59 @@
+\section{Discussion} % 1.5 page
+
+\subsection{Memory Consistency Using Lamport Synchronization}
+
+As described in previous sections, to guarantee memory consistency during inter-kernel signaling, an explicit system-wide threadfence is issued after the output data write and before workqueue update. This ensures correct memory visibility ordering across the entire multi-GPU system. However, a system-wide threadfence is an expensive operation, especially when it must be issued for every single tile. Although we demonstrated that in warp-specialized multi-stage persistent kernels, this overhead can be hidden, classical kernels still suffer from this overhead. Furthermore, our empirical experiments show that even without an explicit threadfence, the probability of an out-of-order global write is low, motivating the exploration of further optimizations.
+
+To address this, we evaluated an alternative method to guarantee memory consistency, referred to as Lamport synchronization. Under this approach, explicit threadfence are no longer used. Instead, the dependent data buffer between kernels is pre-initialized with dummy sentinel values (such as negative zero) that are unlikely to be produced during normal computation. Upon retrieving a ready CTA ID from the workqueue, the consumer kernel directly reads the dependent data from global memory, and performs an additional validation check. If the read data matches the dummy value, the kernel continuously re-reads from global memory until valid data is observed.
+
+Despite its theoretical viability, Lamport synchronization introduces hardware and software implementation challenges. On Blackwell, data transfers directly to Tensor Memory (TMEM). As TMEM is only accessible to Tensor Cores, directly checking fetched data against dummy values is infeasible, while inferring correctness from final Tensor Core outputs instead dramatically increases programming complexity. Furthermore, Lamport synchronization might require tracking intermediate states (e.g., GEMM K-indices), which can increase shared memory pressure and degrades performance. Finally, the introduction of Lamport synchronization also breaks the simplicity of only adding prologue and epilogue code snippets to enable CTA-pipelining, creating challenge for automating the integration. 
+
+As a result, we have excluded Lamport synchronization as the default configuration for our CTA-pipelining protocol. Nevertheless, we note that if Lamport synchronization were supported at the hardware level, where the memory subsystem natively checks sentinel values during global memory reads, this approach would become highly practical. Such hardware-assisted checking would benefit many applications far beyond CTA-pipelining.
+
+\subsection{Tile-Based Models and Inter-Kernel Signaling}
+
+It is natural to connect CTA-pipelining to the tile-based execution model, which has recently gained popularity with the introduction of frameworks like Triton~\cite{tillet2019triton} and cuTile~\cite{cutile}. If a GPU program is described using the tile abstraction, achieving tile-level inter-kernel pipeline execution becomes a highly intuitive process. The tile abstraction largely formalizes the input and output patterns of a kernel, thereby simplifying the dependency analysis between kernels. This demonstrates the potential of CTA-pipelining to serve as a widely adaptable technique for multi-kernel workflows in future GPU programming paradigms.
+
+Building on these insights, enabling more efficient CTA-level inter-kernel signaling presents bigger potential impact. While our current CTA-pipelining protocol is fully functional on current hardware using strictly user-level CUDA code, it exposes a broader architectural paradigm shift. In modern GPUs, dense arithmetic is increasingly offloaded to specialized accelerators, frequently leaving the general-purpose Arithmetic Logic Units underutilized. Our methodology demonstrates how these idle general-purpose units can be effectively repurposed for inter-kernel orchestration. On the other hand, this also hints the potential for native driver-level support and future hardware integration for more efficient inter-kernel signalling.
+
+% We discussion several factors on how the change of work queue item can affect the execution. 
+
+% The first one is the order of the item placed in workqueue. As described before, each kernel takes a source workqueue and a destination workqueue. Intermediate kernels in the workflow follows the execution model, fetch and push work queue items as soon as they are ready, so there is not much one can change. However, the first kernel can optionally takes a source work queue, which can be used the guide the execution order of the whole work flow. For example, in the GEMM case, one can prefill the source work queue for the first layer to force the first GEMM to produce output in row-major order, unblocking later executions. The initial work queue serve as a user-control handle for the whole execution paradigm. 
+
+% The item in the work queue can also change to presents different level of pipeline granularity. Although we named the execution paradigm to be CTA-pipelining, the idea is beyond CTA-level inter kernel dependency. This is mainly expressed by the item that is pushed into the work queue, and how kernels interpret it to control the execution. In the basic setup, the work queue items are simply linearized CTA IDs, reflecting the naming of CTA pipelining. In the GEMM case, since the inter-kernel dependency is row-to-row, one can use row id as the work queue item, where an ready item in workqueue signals a whole row of CTAs in the consumer kernel. Besides, as mentioned in our implementation for Blackwell GEMM kernels, a cluster of CTAs can launch cooperatively and has multicasting inside the cluster. In this case, the work queue item becomes the tile ID that is processed by one CGA cooperatively. 
+
+
+\subsection{Communication Overlap and NVLink Topology}
+
+The NVLink interconnect attempts to create the illusion of a unified multi-GPU system, where GPUs can access each other's memory as if it were local. To a large extent, this abstraction is successful, and our CTA-pipelining technique effectively utilize this illusion. However, current hardware still possesses physical limitations that prevent it from fully supporting this seamless abstraction. Analyzing how communication actually occurs during CTA-pipelining execution demonstrates these limitations, while also highlighting how more advanced hardware could eventually resolve them.
+
+Within our 8-GPU B200 testbed, the devices are interconnected via NVLink and NVSwitch. While this fabric theoretically support a peer-to-peer bandwidth of 1.8 TB/s~\cite{nvhgx}, the routing is physically realized through the centralized switch. In contrast to traditional HPC topologies~\cite{hpctopology} that approximate non-blocking all-to-all connectivity, this star-like centralized architecture bottlenecks the maximum concurrent ingress and egress bandwidth per GPU.
+
+Under the CTA-pipelining execution paradigm, this centralized NVLink topology restricts the full potential for compute-communication overlap. As the producer kernel writes output data directly to the consumer's device memory, leveraging the illusion of a shared-memory machine, it consumes NVLink bandwidth under the hood. Consequently, if the consumer device wants to achieve compute-communication overlap by communicating with a device other than the producer, its performance is still degraded by the producer's ongoing memory writes. Even though the producer is not actively involved in the consumer's secondary communication, both operations share the same physical interconnect links to the centralized NVLink Switch, resulting in contention.
+
+Theoretically, these bottlenecks can be resolved by more advanced NVLink topologies, similar to the complex fabrics that currently exist for HPC clusters. For instance, the GB200 NVL72~\cite{nvidia2024gb200nvl72} system is capable to have more NVLink Switch. If we strategically place the workflow, such that a stack of kernels executing via CTA-pipelining is localized under a single NVLink Switch, while secondary communication is routed through a separate switch, compute-communication overlap becomes highly feasible. This would further increase the power of CTA-pipelining and hints at potential hardware-software co-design on upcoming large-scale multi-GPU shared-memory systems beyond NVL72.
+
+% Elasticity?
+
+% hetergeneous: slower hardware can be used to run smaller operators for rate matching
+
+
+
+% Make it a separate section?
+% \subsection{Workflow-Level Integration and Scaling}
+
+% As our objective is to position CTA-pipelining not merely as a single-GPU micro-optimization, but as a general scaling technique for any multi-GPU workflows, it is essential to analyze the feasibility of applying it to complex, real-world workloads, particularly LLM inference. In this subsection, we demonstrate how CTA-pipelining can be integrated into a layer of the Llama-3 70B model \cite{llama3}. We also detail the resulting control flow based on the dependency structures of the specific kernels involved.
+
+
+% \begin{figure}
+%     \includegraphics[width=\columnwidth]{fig/llama.png}
+%     \caption{Mapping LLAMA}
+%     \Description{Something required by ACM}
+%     \label{llama}
+% \end{figure}
+
+% Figure \ref{llama} shows the operator structure of one layer of LLAMA-3. In order to ensure that our CTA Pipelined implementation is efficient and performant, it is necessary to ensure that kernels across different GPUs are rate-matched such that no stage is idle.
+
+% When the whole workflow is executed in CTA-pipelined manner, it implicitly does a fusion for the whole workflow, balancing the compute and memory access across different kernels.
+
+% % Imbalance kernel time and rate matching!!!
