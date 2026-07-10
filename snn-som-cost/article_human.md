@@ -28,11 +28,13 @@ CTA（协作线程阵列）是GPU最细的执行粒度。老做法是等生产�
 
 支撑这套控制流的是三个数据结构，统称依赖结构：
 
-- **依赖数组**：以生产者CTA ID为索引，标明它影响哪些消费者CTA，存在生产者设备内存。
-- **记分牌**：原子计数器数组，每个消费者CTA一个条目，初始化为前置生产者数；归零即表示"我就绪了"，也存生产者侧。
-- **跨设备工作队列**：环形缓冲区作就绪信号。放在消费者设备内存以压低关键路径延迟，生产者用CUDA异步写"发射后不管"，消费者单线程忙轮询。
+- **依赖数组**：以生产者CTA ID为索引，标明它影响哪些消费者CTA，存在生产者设备内存。它含"连续消费者CTA ID列表 + 偏移数组"两块：偏移数组界定每个生产者负责的索引区间，用一段连续范围表达"第i个生产者对应哪些消费者"。依赖可直接静态分析得出，也可kernel试跑采集，或闭式公式下运行时动态算。因只读消费者访问，放生产者侧最省跨设备流量。
+- **记分牌**：原子计数器数组，每个消费者CTA一个条目，初始化为前置生产者数；归零即表示"我就绪了"，也存生产者侧。它解的是多对一依赖：一个消费者可能要等好几个生产者都交差，计数器归零才是放行信号，随依赖分析一起初始化。
+- **跨设备工作队列**：环形缓冲区作就绪信号，由head/tail/size等原子值管一致性。它要被两kernel并发访问，故挂NVLink；**放消费者设备内存**为压住关键路径延迟：生产者用CUDA异步写"发射后不管"无需等完成，消费者则单线程忙轮询。
 
-注入的逻辑极轻：生产者CTA把输出经NVLink直写消费者输入内存后，发系统级内存屏障，再原子递减记分牌；计数器归零就把就绪的消费者CTA ID推入队列。消费者侧prologue单线程轮询队列、广播取值，CTA把自己重映射成该ID，跑标准未改动的kernel负载。核心kernel一字不动，只加了首尾片段。
+注入的逻辑极轻（图1编号箭头即完整走查）：①生产者CTA把输出经NVLink直写消费者输入内存；②epilogue发系统级内存屏障，确保后续依赖操作与队列更新在实际输出数据可见前不提前对其他设备生效；③SIMD执行、查依赖数组后原子递减记分牌计数器；④计数器归零，生产者线程把就绪的消费者CTA ID推入工作队列；⑤消费者侧prologue单线程忙轮询队列、其余线程在屏障等；⑥取到ID后通过共享内存广播，消费者CTA把自己重映射成该ID，跑标准未改动的kernel负载。核心kernel一字不动，只加了首尾片段。
+
+主机侧也几乎零改动：每个kernel绑一条专用CUDA stream到指定设备，全部同时启动，内部顺序由协议动态引导；多层负载里中间kernel既当消费者（取源队列）又当生产者（推目标队列），整套执行还能被CUDA Graph捕获以消除启动气泡。若驱动默认CTA调度顺序不利于平滑流水线，把执行序从列主序改行主序、或让首kernel直接消费预定义源队列即可显式引导。还有个可选微优化：用 `cuStreamWaitValue32` 阻塞消费者流直到队列有项，省掉初始忙轮询的SM占用（代价是流级同步带来轻微启动延迟）。
 
 图3给出多层GEMM的流水线示意，第一层输出被第二层直接消费。
 
@@ -41,21 +43,37 @@ CTA（协作线程阵列）是GPU最细的执行粒度。老做法是等生产�
 
 ## 开销实测：warp特化kernel里几乎为零
 
-开销评测在8卡H200（经典SM90 kernel）和8卡B200（SM100 warp特化持久kernel）上进行，GEMM尺寸16384×8192。
+开销评测在8卡H200（经典SM90 kernel）和8卡B200（SM100 warp特化持久kernel）上进行，GEMM尺寸16384×8192，数据类型BF16、累加FP32，具体CUTLASS配置由Profiler在给定尺寸上挑最快的。
 
-- 经典kernel：每CTA epilogue约6μs，跨设备可见需120μs，消费者prologue取队列约1.5μs，且逐轮累积。
-- warp特化持久kernel：利用微流水线中其他warp的等待空闲，把协议操作塞进去。跨设备写可见仅5μs，prologue 1.5μs、广播0.5μs均被隐藏。开销只在流水线初始爬升时可见一次。
+经典kernel的执行阶段剖析见图2(a)：每个CTA的epilogue操作约T1=6μs；更新对消费者设备可见需T2=120μs；消费者侧prologue取队列并广播约T3=1.5μs。注意这开销逐轮CTA执行累积：生产者每推出一个就绪CTA，消费者就要付一次1.5μs的取队列成本，流水跑得越久付得越多。
 
-实测两个连续GEMM基线各自1080μs；套上CTA-pipelining后，生产者1090μs、消费者1165μs（含可见开销与末轮流水线延迟）。没动原kernel的寄存器分配和共享内存，不引发溢出。
+![](fig02a.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图2(a)：经典SM90 kernel各执行阶段的延迟剖析（epilogue / 跨设备可见 / prologue取队列）</span>
+
+warp特化持久kernel表现截然不同，执行轨迹见图2(b)。它本质是微流水线：整条线通常受计算密集的MMA延迟主导，其他warp常在流水线屏障处空等。CTA-pipelining就钻这个空子：把协议操作塞进等待中的warp，不抢计算warp的节拍。每轮epilogue操作（含线程屏障）仍约T1=6μs，但此时别的warp正在算下一轮；等下一轮跑到GEMM epilogue warp时，上一轮的CTA-pipelining epilogue早已完成，开销被盖掉。跨设备NVLink写对消费者可见仅T2=5μs，prologue取队列1.5μs、调度warp跨CGA广播0.5μs同样被隐藏。开销只在流水线初始爬升时可见一次。
+
+![](fig02b.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图2(b)：warp特化持久kernel的执行轨迹：协议操作隐藏于微流水线空闲warp中</span>
+
+实测两个连续GEMM基线各自1080μs；套上CTA-pipelining后，生产者1090μs、消费者1165μs（含可见开销与末轮流水线延迟）。没动原kernel的寄存器分配和共享内存，不引发溢出。正因协议逻辑全挤在prologue/epilogue里，它既不破坏主计算阶段的活跃寄存器分配，也不加重共享内存争用。
 
 ## 对比micro-batching：最高降31.8%
 
-负载为多层GEMM（模拟MLP层，省去激活），权重固定8192×8192，每GPU一层、GPU数即层数；基线用cuBLAS+CUDA Graph，并扫描最优chunk尺寸保证公平。
+直觉上CTA-pipelining类似最细粒度的micro-batching，但架构上两样：它不显式把输入预切成静态chunk，也不为每个流水线阶段反复启动独立kernel，而是保留原始kernel结构、靠NVLink域内统一内存空间协调。负载为多层GEMM（模拟MLP层，省去激活），权重固定8192×8192，每GPU一层、GPU数即层数；基线用cuBLAS+CUDA Graph（cuBLAS比CUTLASS更鲁棒，因自适应不同输入尺寸），并扫描最优chunk尺寸保证公平。
 
 ![](fig06.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图4：不同GPU数与chunk尺寸下，CTA-pipelining相对micro-batching的延迟降低（R-MB）</span>
 
-结果：对比扫描中最优chunk，CTA-pipelining在2/4/8 GPU下分别降31.8%/30.0%/23.4%。micro-batching的根本矛盾是chunk尺寸两难：chunk太大会拉长流水线头尾、降低并行度；太小则单kernel效率崩、启动气泡多。CTA-pipelining在CTA级重叠，又不显式切chunk，保住原生kernel效率，直接化解这个两难。极小输入（序列长1024、kernel仅百微秒级）时协议开销会凸显，但此时micro-batching也到极限。
+结果：对比扫描中最优chunk，CTA-pipelining在2/4/8 GPU下分别降31.8%/30.0%/23.4%。micro-batching的根本矛盾是chunk尺寸两难：chunk太大会拉长流水线头尾、降低并行度（多数设备空等前阶段）；太小则单kernel效率崩、受启动气泡与量化效应拖累。CTA-pipelining在CTA级重叠，又不显式切chunk，保住原生kernel效率，直接化解这个两难。
+
+此外，把micro-batching跨设备空间化还引入一层额外开销：它既受重复kernel启动的流水线气泡影响，也受跨设备写延迟拖累：最后一轮TMA写必须post之后kernel才能终止。反观CTA-pipelining，虽然也需要系统级内存屏障保跨设备一致，但warp特化kernel把这个屏障开销也藏进了微流水线空闲（见图2(b)）。
+
+不过CTA-pipelining在极小输入下收益会缩水。如图5，当kernel执行时间跌到百微秒级（如序列长1024），协议开销虽大多被藏住仍会凸显；最极端：只需单轮CTA的kernel，kernel内流水线物理上就建不起来。但此时micro-batching也到极限，半斤八两。
+
+![](fig07.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图5：不同输入序列长度下，CTA-pipelining相对TP的延迟降低（R-TP）；极小输入处协议开销凸显</span>
+
+实际益处还包括省掉找最优micro-batch chunk尺寸的调参：对已经跑micro-batch流水线的流程，CTA-pipelining能直接替换。
 
 ## 对比TP：最高降29.6%，且能与TP正交组合
 
