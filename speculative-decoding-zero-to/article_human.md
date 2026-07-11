@@ -159,7 +159,7 @@ DFlash是DSpark所基于的并行草稿器，值得细说，因为DSpark重用�
 
 这个设计也了结了无损性问题：截断K从两步前的旧数据定下、在这一步任何token存在之前，而填槽的新鲜排序只查块里更早的token，从不是token k自己或它之后的任何东西：正是非预知性要求的，所以构造上成立，early-stopping断点可以去掉，搜索能全局跑到真最大值。**同一个设计选择既修了流水线停顿又恢复了精确性。**
 
-**真实流量数字**
+### 真实流量数字
 
 部署在DeepSeek-V4-Flash和V4-Pro下、真实用户流量中，对比在位者MTP-1。论文Figure 8显示中等并发下平均验证预算停在每请求4–6个token，随着并发上升调度器缩小它，在低价token占批槽前就丢掉低置信度token。
 
@@ -183,6 +183,19 @@ DSpark的启发在于把投机解码从「怎么造更好的草稿器」重新�
 仍待解的缺口是调度器只剪验证不剪起草：每个请求无论多没希望都先烧一整块 γ 前向，这部分的计算浪费DSpark还没碰。
 </div>
 </div>
+
+---
+
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/00mkoR8kdo_G9Xt2PLUevg" target="_blank" data-linktype="2">RLM：MIT提出递归语言模型，处理超长上下文不再是难题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/LernqwWz_g6jUMSHDGiLZQ" target="_blank" data-linktype="2">Google发布Agent知识标准OKF - Open Knowledge Format：解决上下文碎片问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/US2wSIxUd4GrtFm1Ion1BA" target="_blank" data-linktype="2">MiniMax-M2.7解读: 9.8B激活参数硬刚GPT5.4/Opus4.6;逆势Full Attention</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/o6pnSWW01pahFQelJSbSPA" target="_blank" data-linktype="2">华为「韬定律」全解析：从 τ 常数到4GHz麒麟，一张时间表看清未来十年芯片路线</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/olxLm3almopaba6J2JeFrA" target="_blank" data-linktype="2">Anthropic：如何用Claude实现95%自动化数据化分析</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/0dQ7pBJ0NmFt-bOwUCQ5ew" target="_blank" data-linktype="2">Torch解析系列二：Dynamo字节码级的计算图捕获</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/MLFtBJrXFoHn6IPj1Z_36Q" target="_blank" data-linktype="2">苹果Apple感知压缩新突破PICO：图像画质不降低，体积只有1/3</a><br>
+</span>
 
 ---
 
