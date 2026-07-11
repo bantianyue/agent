@@ -197,7 +197,9 @@ def forward(self, add_2, cos, tangents_1):
 
 如果你记得GPU上的情况，一个算子花的大部分时间不是算术，而是实际的内存读写。对逐点（pointwise）算子（add、mul、cos、sin、relu等）尤其如此，它们每个元素的计算量极少。
 
-**所以融合多个逐点算子可能根本没帮助，因为瓶颈是内存访问而不是浮点运算量（flops）。**
+### 所以融合多个逐点算子可能根本没帮助
+
+因为瓶颈是内存访问而不是浮点运算量（flops）。
 
 那么在训练时，如果你的图是一条逐点算子的链，前向和后向都完全是逐点的，运行时间和你读写的内存量成正比。由于默认切分保存了每一个中间张量，你本质上付了两次内存代价（前向里写、后向里读）。
 
@@ -268,6 +270,19 @@ AOTAutograd的真正价值，是把「后向图」从运行时动态构造，变
 min-cut切分最值得记住的一点：默认保存所有中间张量在逐点算子链上是浪费的（内存读写付两次），而activation checkpointing的本质就是「只存输入、后向重算」，min-cut把它形式化成最大流/最小割的优化问题，自动决定每个张量存还是重算。
 </div>
 </div>
+
+---
+
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2h0NULN9kXjdxoxphZx0Ew" target="_blank" data-linktype="2">OpenClaw之父&Claude Code之父都在用的Loop到底是什么？答案藏在Loop之下</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/f05wnBex0ECquqLadXgwAg" target="_blank" data-linktype="2">Agent自进化/持续学习的三个层次：Model、Harness、Context</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/lcs_gT9vfs0eaW001g2dfg" target="_blank" data-linktype="2">SGLang用Waterfill+LPLB解决DeepEP MoE负载不均，吞吐提升7.3%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/1Sgdxx2WfDwlhc-tf2V1MQ" target="_blank" data-linktype="2">深度拆解Hermes Agent：一个最优秀Harness(之一)的九层架构</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/qHscVKN06FEGTru80STlxA" target="_blank" data-linktype="2">M²A多模态双层混合记忆系统：记住你的每一次变化</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/M0qN4cXknU_CmZBQm5ChzA" target="_blank" data-linktype="2">你为什么离职？Top AI公司面试秘籍-一套框架从容应对15个套路问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/o6pnSWW01pahFQelJSbSPA" target="_blank" data-linktype="2">华为「韬定律」全解析：从 τ 常数到4GHz麒麟，一张时间表看清未来十年芯片路线</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/_4vgKCTSir14mhtdvs7_HA" target="_blank" data-linktype="2">美团开源LongCat-2.0 (OpenRouter原Owl Alpha)解读：1.6T参数，5万国产卡上</a><br>
+</span>
 
 ---
 
