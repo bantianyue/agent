@@ -53,7 +53,7 @@
 | 48 | 2026-07-10 | https://hgkang02.github.io/trace-blog/ | trace-blog | trace-agentic-training | TRACE：把智能体的反复失败，变成精准的训练信号 | cover.png | ✅ 已推送 |
 | 49 | 2026-07-10 | https://arxiv.org/html/2607.02980v1 | 2607-02980 | 2607-02980 | 块级稀疏注意力做对了：HiLS让块选择端到端可学 | cover.png | ✅ 已推送 |
 | 50 | 2026-07-11 | https://www.the-information-bottleneck.com/p/speculative-decoding-from-zero-to | speculative-decoding-from-zero | speculative-decoding-zero-to | 投机解码从零到DSpark：DeepSeek如何把长块草稿用进生产 | cover.png | ✅ 已推送 |
-| 51 | 2026-07-11 | https://jino-rohit.github.io/blogs/14_aot_autograd.html | 14_aot_autograd-html | aot-autograd | TBD | TBD | 📥 进行中 |
+| 51 | 2026-07-11 | https://jino-rohit.github.io/blogs/14_aot_autograd.html | 14_aot_autograd-html | aot-autograd | AOTAutograd 深度拆解：torch.compile 如何把前向和后向合进一张图 | cover.png | ✅ 已推送 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -431,3 +431,5 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-11 14:59 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-11 15:09 | ✅ | 已推送 |
+| 2026-07-11 15:09 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0VQgAvtdO_cH4lYbHiL0ateS-eBa82pQ2Uk6wSO7CSAk |
