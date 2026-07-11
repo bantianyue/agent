@@ -90,7 +90,13 @@ MooreEval 是一个可扩展的、基于执行的评测环境，负责编译、�
 
 **单轮 RL warmup。** 第一阶段单轮 GRPO，提升模型在零反馈下直接生成正确、合法、高效核函数的能力。
 
-**多轮反馈 RL。** 从单轮检查点进入多轮 RL，引入 MooreEval 的在线反馈作为后续轮的修正信号。多轮 rollout 最多 3 轮模型回答，任一轮通过验证即提前终止。
+**多轮反馈 RL。** 从单轮检查点进入多轮 RL，引入 MooreEval 的在线反馈作为后续轮的修正信号。多轮 rollout 最多 3 轮模型回答，任一轮通过验证即提前终止。下图展示多轮 RL 的 rollout 过程和奖励设计。
+
+![](fig04.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 4：多轮 RL 的 rollout 过程</span>
+
+![](fig05.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 5：多轮奖励设计</span>
 
 **PrimeEcho：首轮锚定的多轮奖励。** 多轮 RL 的策略梯度损失只在首轮模型回答上计算，后续轮只参与轨迹评估和奖励计算。PrimeEcho（默认 α=0.75）在利用多轮修复信号的同时，维持对首轮生成质量的优化压力，平衡最终成功率和推理效率。
 
@@ -113,7 +119,7 @@ RL 阶段用两阶段 GRPO：单轮 GRPO 提升零反馈首轮生成能力；多
 
 **全部实验跑在 64 台摩尔线程 MTT S5000 机器上，每台 8 张 80GB 加速卡。** 这一国产硬件集群稳健支撑了端到端训练闭环：长上下文 SFT、异步 rollout、MooreEval 在线验证、GRPO 策略更新。在国产硬件上同时跑通 9B 和 27B 模型的有监督微调和执行反馈强化学习，说明该平台不仅能做标准 LLM 微调，也能扛住涉及大规模代码生成、编译执行反馈和在线奖励计算的复杂 RL 负载。
 
-![](fig12.png)
+![](fig18.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图 10：MooreEval 架构——可扩展的、基于执行的核函数编译/验证/profiling/奖励环境</span>
 
 ### 5.2 评测设置
@@ -163,10 +169,24 @@ Faster Rate 比正确性更苛刻。基础模型极少产出加速核函数：Qw
 
 #### 5.4.4 多轮 RL 训练动态
 
-图 7 展示多轮评测指标随 KernelBench 级别的变化：训练奖励、首轮准确率、最佳轮准确率和到成功所需轮数。图 8 的 BDR 消融显示不同反馈设置下训练奖励的走势。
+下图展示多轮评测指标的各项面板：包括轮次数分布、奖励、以及首轮与最佳轮的正确性对比。
+
+![](fig06.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 7（a）：多轮评测中模型回答的轮次数分布</span>
+
+![](fig07.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 7（b）：多轮评测中的奖励曲线</span>
 
 ![](fig08.png)
-<span style="font-size:12px;color:rgb(153,153,153);">图 7：跨 KernelBench 级别的多轮评测指标</span>
+<span style="font-size:12px;color:rgb(153,153,153);">图 7：跨 KernelBench 级别的多轮评测指标（score）</span>
+
+![](fig09.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 7：跨 KernelBench 级别的多轮评测指标（accuracy）</span>
+
+![](fig10.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 7：跨 KernelBench 级别的多轮评测指标（到验证通过的轮数）</span>
+
+图 8 的 BDR 消融显示不同反馈设置下训练奖励的走势。
 
 ![](fig11.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图 8：不同反馈设置下 Buffered Dynamic Retry 的消融</span>
@@ -174,18 +194,30 @@ Faster Rate 比正确性更苛刻。基础模型极少产出加速核函数：Qw
 图 9 的 MirrorPop 训练动态（训练奖励、熵、梯度范数、响应长度裁剪比、离策略度量）显示，MirrorPop 相比 vanilla 形式更稳地控制离策略更新。
 
 ![](fig12.png)
-<span style="font-size:12px;color:rgb(153,153,153);">图 9：MirrorPop 训练动态（a-f 分别为训练奖励、熵、梯度范数、响应长度裁剪比、vanilla 与 MirrorPop 形式的离策略度量）</span>
+<span style="font-size:12px;color:rgb(153,153,153);">图 9（a）：MirrorPop 训练动态——训练奖励</span>
+
+![](fig13.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 9（b）：MirrorPop 训练动态——熵</span>
+
+![](fig14.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 9（c）：MirrorPop 训练动态——梯度范数</span>
+
+![](fig15.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 9（d）：MirrorPop 训练动态——响应长度裁剪比</span>
+
+![](fig16.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 9（e）：离策略度量——Vanilla 形式</span>
+
+![](fig17.png)
+<span style="font-size:12px;color:rgb(153,153,153);">图 9（f）：离策略度量——MirrorPop 形式</span>
 
 #### 5.4.5 BDR 的效果
 
 表 3 的 BDR 效果显示，从单轮 RL 最佳检查点继续训练时，BDR 把全失败组转成可学习修复任务，回收了长尾难样本的训练信号。
 
-#### 5.4.6 MirrorPop 的效果
+#### 5.4.6 MirrorPop 的效果与 MUSA 评测
 
-表 4 的 MUSA KernelBench 评测显示，在摩尔线程 MUSA 原生基准上，MusaCoder 同样取得领先的正确性和性能，验证了整条流水线在国产硬件上的端到端有效性。
-
-![](fig18.png)
-<span style="font-size:12px;color:rgb(153,153,153);">图 10（MUSA）：摩尔线程 MUSA KernelBench 上的评测结果</span>
+表 4 的 MUSA KernelBench 评测显示，在摩尔线程 MUSA 原生基准上，MusaCoder 同样取得领先的正确性和性能，验证了整条流水线在国产硬件上的端到端有效性。MUSA 基准下各组件趋势与 CUDA 侧一致，MirrorPop 对离策略稳定性的增益在国产硬件上同样成立。
 
 ## 6 结语
 
