@@ -17,8 +17,9 @@
 | Step 4e: 写参考区 | pending |
 | Step 4f: Humanizer 润色 | pending |
 | Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
+| Step 5: 预发布检查 | completed |
 | Step 6: 推送草稿 | pending |
 
 创建时间: 2026-07-11
 来源: https://humansand.ai/blog/nvfp4-rl?v=3
+| Step 4d-i: 传送门 | completed |
