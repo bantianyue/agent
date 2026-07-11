@@ -206,7 +206,7 @@ Faster Rate 比正确性更苛刻。基础模型极少产出加速核函数：Qw
 <span style="font-size:12px;color:rgb(153,153,153);">图 9（d）：MirrorPop 训练动态，响应长度裁剪比</span>
 
 ![](fig16.png)
-<span style="font-size:12px;color:rgb(153,153,153);">图 9（e）：离策略度量——Vanilla 形式</span>
+<span style="font-size:12px;color:rgb(153,153,153);">图 9（e）：离策略度量，Vanilla 形式</span>
 
 ![](fig17.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图 9（f）：离策略度量——MirrorPop 形式</span>
