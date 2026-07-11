@@ -32,7 +32,7 @@
 4-bit量化的意义在于把训练和推理的算力门槛压下来。当RL这种本就吃算力的范式能被塞进更便宜的硬件，长周期、多智能体的实验就不再是少数大厂的专利。视频里展示的应该就是这套方案在真实训练任务上的加速效果。
 
 ![](figure1.jpg)
-<span style="font-size:12px;color:rgb(153,153,153);">humans& 开源的硬件原生 4-bit 强化学习方案演示</span>
+<span style="font-size:12px;color:rgb(153,153,153);">humans& 开源的硬件原生4-bit强化学习方案演示</span>
 
 ---
 
