@@ -56,6 +56,7 @@
 | 51 | 2026-07-11 | https://jino-rohit.github.io/blogs/14_aot_autograd.html | 14_aot_autograd-html | aot-autograd | AOTAutograd 深度拆解：torch.compile 如何把前向和后向合进一张图 | cover.png | ✅ 已推送 |
 | 52 | 2026-07-11 | https://humansand.ai/blog/nvfp4-rl?v=3 | nvfp4-rl-v-3 | nvfp4-rl | NVFP4 4-bit RL：humans& 如何把稳定量化配方跑通 | cover.png | ✅ 已推送 |
 | 53 | 2026-07-11 | https://x.com/humansand/status/2075618383631167692 | 2075618383631167692 | 2075618383631167692 | TBD | TBD | 📥 进行中 |
+| 54 | 2026-07-11 | https://arxiv.org/html/2606.04847v1 | 2606-04847 | musacoder-mtt-kernel | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -448,3 +449,10 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-11 19:29 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-11 19:39 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0VFMLdNczav-vYUhHCDdTsPkTTfM0HCkpa4PZXfC2E8L |
+
+### #54 - musacoder-mtt-kernel
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-11 20:03 | 📥 开始 | 收到 URL，开始提取内容 |
