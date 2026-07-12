@@ -122,7 +122,7 @@ GPU 最爱这个。矩阵乘就是为它们而生的。这一阶段的瓶颈是�
 
 分词。文字变成整数 ID。嵌入。ID 变成向量，位置信息被折进去。预填充。每一层在所有输入 token 上并行跑，计算受限，KV 缓存被填满，第一个输出 token 蹦出来。解码循环。对每个新 token：投影 Q、在缓存的 K/V 上做注意力、跑前馈、采样、把新 K/V 追加进缓存，内存受限。反分词（Detokenize）。token ID 被映射回字符，流到你的屏幕上。
 
-现代服务框架（vLLM、TensorRT-LLM、Text Generation Inference）用连续批处理（多个用户的 token 在同一个 GPU 步里交错）、投机解码（小模型先起草、大模型来验证）和巧妙的内存管理，把这个循环包了起来——这就是一块 GPU 怎么同时服务几十个并发用户的。
+现代服务框架（vLLM、TensorRT-LLM、Text Generation Inference）用连续批处理（多个用户的 token 在同一个 GPU 步里交错）、投机解码（小模型先起草、大模型来验证）和巧妙的内存管理，把这个循环包了起来：这就是一块 GPU 怎么同时服务几十个并发用户的。
 
 ![](body_06_2050927172437905408.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">从分词到反分词的完整推理流水线，prefill 与 decode 两个阶段特征截然不同</span>
