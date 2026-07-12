@@ -40,7 +40,7 @@ GPU核函数生成已成为代码合成的重要方向。它比通用程序合�
 
 通过这三阶段，MusaCoder的SFT数据从简单的翻译对，演进成融合了算子知识、结构化推理、自动验证和执行反馈解析的丰富语料，为后续RFT和RL提供强而稳的初始化。
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig03.png)
+![](fig03.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图3：SFT数据构建流水线的三阶段演进</span>
 
 ## 4方法
@@ -53,7 +53,7 @@ MusaCoder的训练分三个递进阶段：监督warmup、任务对齐、执行�
 
 SFT之后做拒绝采样微调（RFT）把模型拉近最终任务。从SFT检查点出发，对每个PyTorch工作负载采样多个候选实现，用MooreEval过滤出「可解析、可编译、数值正确、满足任务约束」的正样本。和标准RFT只保留单一最优解不同，MusaCoder采用**保多样性过滤**：把同一prompt下生成的正确实现聚类，训练时从这个正样本池里随机采样监督目标。这既提升RFT样本正确性，又防止模型过早塌缩进一小撮固定实现模板，为后续RL保留必要的探索空间。
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig02.png)
+![](fig02.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图2：MusaCoder训练流水线总览，从多源语料到执行反馈RL</span>
 
 和开放式代码生成不同，核函数任务能通过真实编译、执行、正确性验证和性能测量拿到程序化反馈。MooreEval不仅验证候选代码能否编译、输出是否对齐PyTorch参考、是否取得实测性能增益，还执行严格的反黑客协议：通过静态规则和运行时profiling，检测被禁的PyTorch/aten::* 计算回调，防止模型在ModelNew.forward() 里直接调现成PyTorch算子来冒充自定义核函数。只有真正用原生核函数执行核心计算、且同时满足正确性与合法性约束的候选，才拿到正奖励。
@@ -92,10 +92,10 @@ MooreEval是一个可扩展的、基于执行的评测环境，负责编译、�
 
 **多轮反馈RL。** 从单轮检查点进入多轮RL，引入MooreEval的在线反馈作为后续轮的修正信号。多轮rollout最多3轮模型回答，任一轮通过验证即提前终止。下图展示多轮RL的rollout过程和奖励设计。
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig04.png)
+![](fig04.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图4：多轮RL的rollout过程</span>
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig05.png)
+![](fig05.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图5：多轮奖励设计</span>
 
 **PrimeEcho：首轮锚定的多轮奖励。** 多轮RL的策略梯度损失只在首轮模型回答上计算，后续轮只参与轨迹评估和奖励计算。PrimeEcho（默认 α=0.75）在利用多轮修复信号的同时，维持对首轮生成质量的优化压力，平衡最终成功率和推理效率。
@@ -106,7 +106,7 @@ MooreEval是一个可扩展的、基于执行的评测环境，负责编译、�
 
 **MirrorPop离策略序列掩码。** 标准离策略序列掩码在跨序列平均有符号对数比率（或相乘比率）时，正负偏离会互相抵消，让一个严重离策略的序列看起来接近策略内。MirrorPop提出新的序列级离策略度量，更准确估计策略漂移幅度，从而可靠屏蔽严重离策略样本，稳定RL更新。
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig19.png)
+![](fig19.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图11：vanilla离策略序列掩码中的抵消现象，红token表示 ρt>1，绿token表示 ρt<1</span>
 
 ## 5实验
@@ -119,7 +119,7 @@ RL阶段用两阶段GRPO：单轮GRPO提升零反馈首轮生成能力；多轮R
 
 **全部实验跑在64台摩尔线程MTT S5000机器上，每台8张80GB加速卡。** 这一国产硬件集群稳健支撑了端到端训练闭环：长上下文SFT、异步rollout、MooreEval在线验证、GRPO策略更新。在国产硬件上同时跑通9B和27B模型的有监督微调和执行反馈强化学习，说明该平台不仅能做标准LLM微调，也能扛住涉及大规模代码生成、编译执行反馈和在线奖励计算的复杂RL负载。
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig18.png)
+![](fig18.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图10：MooreEval架构，可扩展的、基于执行的核函数编译/验证/profiling/奖励环境</span>
 
 ### 5.2评测设置
@@ -138,7 +138,7 @@ RL阶段用两阶段GRPO：单轮GRPO提升零反馈首轮生成能力；多轮R
 
 Faster Rate比正确性更苛刻。基础模型极少产出加速核函数：Qwen3.5-9B相对Eager仅0.9%、相对Compile 0.5%；Qwen3.6-27B为3.4%/1.6%。MusaCoder-9B-RL性能已略超Claude Opus 4.7，达12.6%/7.9%（Claude 11.8%/7.5%）。**MusaCoder-27B-RL性能增益最强，Faster Rate达15.0%（vs Eager）/9.2%（vs Compile），相对Claude Opus 4.7绝对提升3.2和1.7点。** 整体说明执行反馈训练不仅提升功能正确性，也提升了生成「有可测量运行时收益的原生核函数」的概率。
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig01.png)
+![](fig01.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图1：KernelBench性能对比</span>
 
 ### 5.4消融与RL训练分析
@@ -171,44 +171,44 @@ Faster Rate比正确性更苛刻。基础模型极少产出加速核函数：Qwe
 
 下图展示多轮评测指标的各项面板：包括轮次数分布、奖励、以及首轮与最佳轮的正确性对比。
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig06.png)
+![](fig06.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图7（a）：多轮评测中模型回答的轮次数分布</span>
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig07.png)
+![](fig07.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图7（b）：多轮评测中的奖励曲线</span>
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig08.png)
+![](fig08.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图7：跨KernelBench级别的多轮评测指标（score）</span>
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig09.png)
+![](fig09.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图7：跨KernelBench级别的多轮评测指标（accuracy）</span>
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig10.png)
+![](fig10.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图7：跨KernelBench级别的多轮评测指标（到验证通过的轮数）</span>
 
 图8的BDR消融显示不同反馈设置下训练奖励的走势。
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig11.png)
+![](fig11.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图8：不同反馈设置下Buffered Dynamic Retry的消融</span>
 
 图9的MirrorPop训练动态（训练奖励、熵、梯度范数、响应长度裁剪比、离策略度量）显示，MirrorPop相比vanilla形式更稳地控制离策略更新。
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig12.png)
+![](fig12.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图9（a）：MirrorPop训练动态，训练奖励</span>
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig13.png)
+![](fig13.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图9（b）：MirrorPop训练动态，熵</span>
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig14.png)
+![](fig14.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图9（c）：MirrorPop训练动态，梯度范数</span>
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig15.png)
+![](fig15.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图9（d）：MirrorPop训练动态，响应长度裁剪比</span>
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig16.png)
+![](fig16.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图9（e）：离策略度量，Vanilla形式</span>
 
-![](D:/06_Hermes/articles/musacoder-mtt-kernel/fig17.png)
+![](fig17.png)
 <span style="font-size:12px;color:rgb(153,153,153);">图9（f）：离策略度量，MirrorPop形式</span>
 
 #### 5.4.5 BDR的效果
