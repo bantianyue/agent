@@ -10,7 +10,7 @@
 </div>
 </div>
 
-![](cover.png)
+![](fig00.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">奥赛罗棋的RL环境：黑棋每落一子，环境判定合法性、推进棋盘、由对手引擎应招，再返回一个可量化的奖励</span>
 
 用强化学习教一个大语言模型学会下棋，听起来很玄，其实拆开就四件事：模型在某一刻看到了什么、它基于这个看到的东西做了什么选择、这个选择有多好、以及那个「看到的东西和好坏反馈」到底由谁提供。把棋局装进这套结构，模型就能像学走路一样，在无数次试错里慢慢变强。
@@ -79,7 +79,7 @@ def opponent_engine(board, randomness, depth):
     if random.random() < randomness:               # 随机模式
         return random.choice(legal_moves(board))
 
-    best_move = None                                 # minimax 模式：尝试每一步
+    best_move = None                                 # minimax模式：尝试每一步
     best_score = float("-inf")                       # 保留得分最高的那一步
 
     for move in legal_moves(board):
@@ -178,7 +178,7 @@ class TaskEnv(MultiTurnEnv):
             return error_message(action), penalize(state)
         state = apply_action(state, action)          # 你任务的规则
         if not task_complete(state):
-            state = environment_step(state)          # 工具、API 调用，或对手
+            state = environment_step(state)          # 工具、API调用，或对手
         return render_state(state), state            # 你任务的展示
 ```
 
