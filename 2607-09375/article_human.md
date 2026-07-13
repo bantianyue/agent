@@ -87,7 +87,7 @@ MOPD融合继承了强CoT模型的老毛病：过度思考。融合模型产生�
 
 **乘法式组合** R_final = R_acc · R_token：强制正确性第一、长度第二，错误或超预算轨迹拿零奖励，绝不向错误答案给效率梯度。单遍运行比多阶段基线少用1.5×–2.5× 的GPU小时。
 
-值得注意的是，HMPO只在约6.5K数学问题上训练（组大小10，奖励偏移0.8），学到的长度控制却泛化到代码、科学问答、指令遵循，说明它灌输的是通用的「正确前提下尽量简洁」策略，而非数学专用的偷懒捷径。
+HMPO只在约6.5K数学问题上训练（组大小10，奖励偏移0.8），学到的长度控制却泛化到代码、科学问答、指令遵循，说明它灌输的是通用的「正确前提下尽量简洁」策略，而非数学专用的偷懒捷径。这一泛化能力恰恰证明长度压缩学到的是行为模式，而不是任务特化的记忆。
 
 ![](fig10.png)
 <span style="font-size:12px;color:rgb(153,153,153);">Figure 11：工具智能体pilot study。</span>
@@ -109,7 +109,7 @@ MOPD融合继承了强CoT模型的老毛病：过度思考。融合模型产生�
 
 **指令遵循**：模型最突出的强项，IFEval 94.64、IFBench 82.82、LexInstructEval 74.63三项全居首。IFBench领先尤其说明问题，很多基线在IFEval高分却在留出约束上骤降，表明是过拟合模板而非真理解约束。
 
-**安全**：Content-SafetyBench 98.20、Behavioral-SafetyBench 80.74双双居首。行为级安全领先亚军约13分，多数基线仅20–35分，揭示智能体场景行为安全仍是未解难题。
+**安全**：Content-SafetyBench 98.20、Behavioral-SafetyBench 80.74双双居首。行为级安全领先亚军约13分，多数基线仅20–35分，揭示智能体场景行为安全仍是未解难题。这条轴的分化程度，比任何准确率数字都更能暴露当前Agent模型的能力断层。
 
 **工具与代码智能体**：BFCL-v4 75.80超所有同规模35B模型、匹配SOTA MiMo-V2-Flash（76.30），并超越Qwen3.5-122B和Kimi-K2.5；τ2-bench 80.04大幅领先；SWE-bench Verified 70.60与120B级相当。
 
@@ -145,5 +145,19 @@ MOPD真正解决的是「多目标如何不互相牺牲」这个老问题。混�
 </div>
 
 ---
+
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+</span>
+
+---
+
 <span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：
 https://arxiv.org/abs/2607.09375</span>
