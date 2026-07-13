@@ -195,7 +195,7 @@ class KVCache:
 
 他们的混合方案结合了两种压缩注意力变体，一个稀疏、一个稠密，都跑在重度压缩的KV流上。在100万token的上下文里，V4-Pro报告cache大小约为前代的10%，每个token的计算量约为27%。
 
-重点不在某个具体架构，而在于：**KV cache已经成为整个领域围着优化的那个瓶颈**。当注意力本身都被重新设计来最小化cache时，你就知道约束已经转移了。想看清长上下文推理往哪走，这篇值得一读。完整技术报告在此：`https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/DeepSeek_V4.pdf`
+真正的信号是：KV cache已经成了整个领域围着优化的那个瓶颈。连注意力本身都被重新设计来最小化cache，约束显然已经转移了。完整技术报告在此：`https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/DeepSeek_V4.pdf`
 
 ![](fig06.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">不同上下文长度下KV cache占用的显存规模对比</span>
