@@ -1,0 +1,124 @@
+State: what the model sees right now
+
+Action: the choice it makes from that state
+
+Reward: a number that says how good that choice was
+
+Environment: the thing that holds the state, accepts the action, and returns the reward
+
+How to read this article
+
+The Othello RL env: Why a board game
+
+Tech stack
+
+Verifiers: the RL framework. It defines the environment, runs the turn loop, and handles evals.
+
+Lightning AI: an OpenAI-compatible inference API, so the same code calls hosted models like Claude or DeepSeek without provider-specific rewrites.
+
+vLLM: serves open-weight models locally behind that same OpenAI-compatible endpoint.
+
+The game loop
+
+class OthelloEnv(MultiTurnEnv):
+    def env_response(self, model_output, state):
+        move = parse_move(model_output)
+
+        if not is_valid(move, state.board):
+            state.penalty += INVALID_MOVE_PENALTY
+            return error_message(move), state          # same turn, retry
+
+        state.board = apply_move(state.board, move, player="black")
+
+        if not game_over(state.board):
+            white_move = opponent_engine(state.board, state.difficulty)
+            state.board = apply_move(state.board, white_move, player="white")
+
+        return render_board(state.board), state
+
+The built-in opponent engine
+
+Random picks any legal move. Useful for early training, since the model can win just by making reasonable decisions.
+
+Minimax simulates future moves, scores each resulting position by corner control, board position, and available moves, and picks the move with the best worst-case outcome. Depth-3 means it looks three moves ahead, enough to set traps and avoid obvious blunders.
+
+def opponent_engine(board, randomness, depth):
+    if random.random() < randomness:               # random mode
+        return random.choice(legal_moves(board))
+    best_move = None                                 # minimax mode: try every move,
+    best_score = float("-inf")                       # keep the one with the best score
+    for move in legal_moves(board):
+        score = minimax(apply_move(board, move), depth - 1, my_turn=False)
+        if score > best_score:
+            best_move, best_score = move, score
+    return best_move
+
+The reward functions
+
+def win_reward_func(state):
+    result = state.get("result")
+    if result == "black":   # the model's color
+        return 1.0
+    if result == "draw":
+        return 0.5
+    return 0.0              # loss, or game never finished
+
+def total_reward(state):
+    return (
+        win_loss_score(state)
+        + piece_advantage(state)
+        + format_compliance(state)
+        - invalid_move_penalty(state)
+    )
+
+Piece advantage separates a close loss from a blowout, giving the model gradient before it starts winning.
+
+Format compliance carries a low weight so clean formatting never outweighs good play.
+
+The invalid move penalty is capped so one broken game can't drown out everything the model did right.
+
+Wiring it together
+
+def load_environment(min_random_move_prob, max_random_move_prob, parse_think):
+    dataset = generate_games(min_random_move_prob, max_random_move_prob)
+    parser = XMLParser(fields=["think", "move"])
+    rubric = Rubric(funcs=[...], weights=[1.0, 1.0, 0.2, 1.0])
+    return OthelloEnv(dataset, parser, rubric)
+
+What the numbers show
+
+prime eval run othello -m openai/gpt-4.1 -n 100 \
+  -a '{"min_random_move_prob": 0.0, "max_random_move_prob": 0.0, "minimax_depth": 3}'
+
+From evaluation to training
+
+prime eval run othello -m openai/gpt-4.1 -n 200 \
+  --save-to-hf-hub --hf-hub-dataset-name your-username/othello-data
+
+for prompt in batch:
+    rollouts = [play_game(model, prompt) for _ in range(group_size)]
+    rewards = [total_reward(r.final_state) for r in rollouts]
+    advantage = rewards - mean(rewards)     # relative to the group
+    update_model(model, rollouts, advantage)
+
+Adapting this to your own task
+
+class TaskEnv(MultiTurnEnv):
+    def env_response(self, model_output, state):
+        action = parse_action(model_output)          # your task's syntax
+        if not is_valid(action, state):
+            return error_message(action), penalize(state)
+        state = apply_action(state, action)          # your task's rules
+        if not task_complete(state):
+            state = environment_step(state)          # tool, API call, or opponent
+        return render_state(state), state            # your task's display
+
+Task logic: your domain's rules for what counts as a valid action and how the state changes
+
+Response engine: whatever the model reacts to, from a rule-based simulator to a live API to another model
+
+Reward functions: keep the pattern (outcome signal, partial credit, format, penalty) and replace the domain logic
+
+State rendering: whatever the model needs to see, whether that's a file diff, a conversation transcript, or a tool's response
+
+Try it yourself
