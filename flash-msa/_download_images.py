@@ -1,7 +1,6 @@
 #!/usr/env python3
 """Download images in document order; hero->cover.png, others->figNN.png."""
 import urllib.request, os, json
-
 here = os.path.dirname(os.path.abspath(__file__))
 blocks = []
 with open(os.path.join(here, "blocks.jsonl"), encoding="utf-8") as f:
@@ -14,8 +13,7 @@ figs = [b for b in blocks if b.get("type") == "figure"]
 n = 0
 for b in figs:
     src = b["img"]
-    if b.get("hero"):
-        fname = "cover.png"
+    if b.get("hero"): fname = "cover.png"
     else:
         n += 1
         fname = f"fig{n:02d}.png"
@@ -26,8 +24,6 @@ for b in figs:
             ct = r.headers.get("Content-Type", "")
             if "svg" in ct: fname = fname.rsplit(".", 1)[0] + ".svg"
             elif ("jpg" in ct or "jpeg" in ct) and not fname.endswith(".svg"): fname = fname.rsplit(".", 1)[0] + ".jpg"
-            with open(os.path.join(here, fname), "wb") as ff:
-                ff.write(data)
+            with open(os.path.join(here, fname), "wb") as ff: ff.write(data)
             print(f"  OK {fname} ({len(data)//1024}KB)")
-    except Exception as e:
-        print(f"  FAIL {fname}: {e}")
+    except Exception as e: print(f"  FAIL {fname}: {e}")
