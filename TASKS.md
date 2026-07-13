@@ -470,3 +470,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-13 13:24 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-13 13:33 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0VrUZNnJsoayK8xRcc8wVOK1r_tF1cnXq5D8Dxt3BEaQ |
