@@ -180,11 +180,14 @@ class KVCache:
         return self.K, self.V # full history so far
 ```
 
+![](fig05.jpg)
+<span style="font-size:12px;color:rgb(153,153,153);">KV Cache结构示意：每层保留K、V张量并随token追加</span>
+
 加速效果巨大，长生成能快5倍以上。但代价是：cache活在GPU显存里，且随每个token增长。每一层都保留自己的K和V张量。以13B模型为例，每个token大约要占1MB；一个4K token的上下文，光cache就烧掉4GB显存。
 
 这就是为什么长上下文既慢又贵。不是模型「脑子不够用」，是cache「房间不够住」。
 
-补救手段很有创意：把cache量化到INT8或INT4、丢掉滑动窗口之外的token、在多头之间共享K和V（GQA，分组查询注意力）、或者像操作系统分页那样管理cache（PagedAttention，vLLM背后的那招）。
+补救手段也多：把cache量化到INT8或INT4、丢掉滑动窗口之外的token、在多头之间共享K和V（GQA，分组查询注意力）、或者像操作系统分页那样管理cache（PagedAttention，vLLM背后的那招）。
 
 ## 前沿研究：压缩cache本身
 
@@ -194,7 +197,7 @@ class KVCache:
 
 重点不在某个具体架构，而在于：**KV cache已经成为整个领域围着优化的那个瓶颈**。当注意力本身都被重新设计来最小化cache时，你就知道约束已经转移了。想看清长上下文推理往哪走，这篇值得一读。完整技术报告在此：`https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/DeepSeek_V4.pdf`
 
-![](fig05.jpg)
+![](fig06.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">不同上下文长度下KV cache占用的显存规模对比</span>
 
 ## 量化：用比特换速度
@@ -236,7 +239,7 @@ class KVCache:
 
 ## 这应该改变你思考的方式
 
-图景清晰之后，有几个实用的结论：
+理清了这些，有几个结论能直接用上：
 
 **长prompt在TTFT上贵，长输出在ITL上贵。** 它们压的是不同的东西，针对用户真正能感知的那个去优化。
 
@@ -246,7 +249,7 @@ class KVCache:
 
 **GPU利用率会骗人。** 一个在Prefill时把GPU跑满的模型，在Decode时可能只有30% 利用率。解药不是更多算力，而是更快的内存或更小的cache。
 
-Transformer架构吸引了所有的目光，但推理性能的生死却系在那些无聊的东西上：内存布局、cache管理、比特宽度。艺术在于把你手上的硬件榨到极致。
+Transformer架构吸引了所有的目光，但推理性能的生死却系在那些无聊的东西上：内存布局、cache管理、比特宽度。能不能把硬件榨干，决定了同样一个模型跑起来是快还是慢。
 
 当下次有人说「他的模型好慢」，你会知道该先问哪个问题：**是启动慢，还是流式慢？**
 
