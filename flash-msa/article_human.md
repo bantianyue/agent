@@ -29,7 +29,7 @@ MSA与DeepSeek Sparse Attention（DSA）类似，但有几处核心改动。
 ![Fig.1来自MSA论文](cover.png)
 <span style="font-size:12px;color:rgb(153,153,153);">Fig. 1 from the MSA Paper</span>
 
-**1. 块状稀疏（Blockwise sparsity）**
+## 1. 块状稀疏（Blockwise sparsity）
 
 代理注意力不再为每个主注意力挑选单独的KV，而是以128为块、通过对代理分数做最大池化来挑选块。这为kernel带来很好的缓存特性。
 
