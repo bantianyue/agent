@@ -483,3 +483,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-07-13 17:45 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-13 17:58 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0YaWtH01EKVnCfmfRKieQbRI24F40Quz_k4W24wvFPyW |
