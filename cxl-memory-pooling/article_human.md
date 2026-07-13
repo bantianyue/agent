@@ -14,7 +14,7 @@
 
 ## 为什么KV Cache如此重要
 
-随着生成式 AI 加速落地，基础设施的关注点已经从单纯的训练性能，转移到推理的效率与可扩展性上。而对在生产环境部署大语言模型（LLM）的组织来说，这两项指标直接决定了服务是快还是贵。
+随着生成式AI加速落地，基础设施的关注点已经从单纯的训练性能，转移到推理的效率与可扩展性上。而对在生产环境部署大语言模型（LLM）的组织来说，这两项指标直接决定了服务是快还是贵。
 
 问题出在KV Cache（键值缓存）。LLM在推理时依赖它来存储已经算过的注意力键和值，复用这些信息，而不是为每个新生成的token重新计算，从而大幅压低延迟和计算开销。但随着模型规模、上下文长度、并发用户数一起往上走，KV Cache的需求可以轻松冲到数百GB，迅速吃光GPU显存和系统DRAM。这条内存墙，正在变成推理侧最现实的卡点。
 
@@ -27,11 +27,11 @@
 
 Compute Express Link（CXL）正在成为下一代数据中心架构的一项关键技术。它的核心是用一条一致性、高带宽的互连来做内存扩展，让系统突破传统DRAM配置的物理上限。
 
-当CXL遇上CXL交换机，多个内存设备就能被聚合成一个共享内存池，内存分配变得灵活，容量也大幅拉升。三星的CMM-D（CXL Memory Module-DRAM）就是为这类扩展架构设计的，它给AI推理这类内存密集型负载提供了一个颇具吸引力的选项。
+当CXL遇上CXL交换机，多个内存设备就能被聚合成一个共享内存池，内存分配变得灵活，容量也大幅拉升。更重要的是，这种池化把内存从单台服务器里解耦出来，资源可以按负载动态借调，而不是每台机器都按峰值预留、常年闲置。三星的CMM-D（CXL Memory Module-DRAM）就是为这类扩展架构设计的，它给AI推理这类内存密集型负载提供了一个颇具吸引力的选项。
 
 ## 为AI推理评估CXL内存
 
-评估环境由几部分组成：NVIDIA RTX PRO 6000 Blackwell GPU、通过 CXL 交换机连接并配置成 1TB CXL 内存池的三星 CMM-D 模块、vLLM 与 LMCache 软件栈，再加上三星自研的宿主级优化。
+评估环境由几部分组成：NVIDIA RTX PRO 6000 Blackwell GPU、通过CXL交换机连接并配置成1TB CXL内存池的三星CMM-D模块、vLLM与LMCache软件栈，再加上三星自研的宿主级优化。
 
 核心问题很直接：CXL内存池能不能在支撑大规模KV Cache卸载的同时，把性能维持在和DRAM差不多的水平？
 
@@ -42,9 +42,9 @@ Compute Express Link（CXL）正在成为下一代数据中心架构的一项关
 
 评估结果显示，CXL内存池化确实能同时给AI推理负载带来接近DRAM的性能和可观的内存可扩展性。
 
-单GPU配置下，经过优化的CXL内存池作为LMCache后端使用时，性能与DRAM相当。在8块GPU的多GPU环境里，CXL内存池在提供明显更大内存容量的同时，保持了约92% 的DRAM性能。
+单GPU配置下，经过优化的CXL内存池作为LMCache后端使用时，性能与DRAM相当。在8块GPU的多GPU环境里，CXL内存池在提供明显更大内存容量的同时，保持了约92% 的DRAM性能。换句话说，把KV Cache从昂贵的GPU显存挪到CXL池里，几乎不付性能代价，却换来一个数量级的容量空间。
 
-研究还把512GB DRAM配置和1TB CXL内存池放在不断增长的KV Cache需求下做了对比。当KV Cache需求超过DRAM可用容量，缓存重算开销就会引发性能下降；而CXL内存池在容纳大得多的KV Cache足迹时，性能纹丝不动。
+研究还把512GB DRAM配置和1TB CXL内存池放在不断增长的KV Cache需求下做了对比。一旦KV Cache需求超过DRAM可用容量，缓存重算开销立刻拖垮性能；CXL内存池却能稳稳容纳大得多的KV Cache足迹，性能纹丝不动。
 
 ## 内存池化在AI基础设施中的未来
 
@@ -64,6 +64,19 @@ Compute Express Link（CXL）正在成为下一代数据中心架构的一项关
 技术本身不是瓶颈，CXL 3.0生态和交换机的成熟节奏才是。内存池化要真正成为数据中心的「基石」，先得过供应链和软件栈这一关。
 </div>
 </div>
+
+---
+
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+</span>
 
 ---
 
