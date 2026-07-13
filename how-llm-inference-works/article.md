@@ -32,7 +32,7 @@ LLM 是一个预测下一个 token 的神经网络。就一个 token。然后它
 
 这一步比人们意识到的更重要。那些在分词器训练数据里 representation 不足的语言，会被切成更多片段，意味着更多 token，也意味着同样一句话成本更高、响应更慢。
 
-![](body_00_2050883466112483328.jpg)
+![](images/body_00_2050883466112483328.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">分词把文本切成片段并映射为整数 ID（图中 ID 仅为示意）</span>
 
 ## 第二步：每个 token 变成一个向量
@@ -49,7 +49,7 @@ LLM 是一个预测下一个 token 的神经网络。就一个 token。然后它
 
 自注意力是值得深入理解的部分。对每一个 token，这一层通过乘以三个学好的权重矩阵，生成 Query、Key、Value 三个新向量。诀窍在于：每个 token 用自己的 query 去查看其他所有 token 的 key，匹配的强度决定要把那个 token 的多少 value 混进来。
 
-![](body_01_2050925588274384896.jpg)
+![](images/body_01_2050925588274384896.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">每个 token 生成 Q/K/V，query 与所有 key 匹配后决定混入多少 value</span>
 
 这就是魔法所在：一个 token 通过环顾四周、拉取它觉得有用的东西，来决定自己需要什么上下文。叠 32 层这样的结构，你就得到了一个能跨越上千个 token 追踪引用的模型。
@@ -70,7 +70,7 @@ LLM 是一个预测下一个 token 的神经网络。就一个 token。然后它
 
 GPU 最爱这个。矩阵乘就是为它们而生的。这一阶段的瓶颈是纯粹的计算吞吐：GPU 被钉在极高的利用率上，以硅片允许的最快速度做运算。衡量它的指标叫 TTFT（Time to First Token，首 token 时延），即第一个词出现在你屏幕上之前的空闲时间。
 
-![](body_02_2050916062749982720.jpg)
+![](images/body_02_2050916062749982720.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">Prefill 阶段所有输入 token 的 Q/K/V 并行计算，是一次大矩阵乘</span>
 
 ## 阶段二：Decode（解码）
