@@ -18,6 +18,8 @@
 
 他是这么比喻的：以前是一个人扛，Grok、Claude、Gemini负责高层搜索，剩下一堆小众工具做深度检索；**现在是先让Hermes调对技能把研究跑完，再去核它的活**。那条研究流水线磨了挺久才顺，毕竟要覆盖的资产和策略太杂，但跑通之后，最值钱的就这三条。
 
+这套打法的关键不在某个模型，而在「把重复的信息采集外包出去，把判断留给自己」。下面拆开看他是怎么搭的。
+
 ## 1. 每日Alpha流水线：追踪 + 书签 + 综合
 
 X上从不缺alpha，但现在的算法让你几乎刷不到关注的大V，想全面掌握动态基本不可能。**Hermes在这里干的就是「信息雷达加编辑部」的活。**
@@ -26,7 +28,7 @@ X上从不缺alpha，但现在的算法让你几乎刷不到关注的大V，想�
 
 书签走同一套逻辑。他每天大约收藏5到15条，Hermes把它们分成高、中、低三档重要度，每天定时送达。
 
-最后一步是把分析师输出、书签和轮换外部来源一起，喂进一个「Top 10 alpha 综合」定时任务。**所以他不用逐条读摘要，先扫 Top 10，再对感兴趣的头条深挖。** Top 10 里的内容全部写进 Hindsight 外部记忆，这些沉淀又用来优化第二天的上下文。
+最后一步是把分析师输出、书签和轮换外部来源一起，喂进一个「Top 10 alpha综合」定时任务。**所以他不用逐条读摘要，先扫Top 10，再对感兴趣的头条深挖。** Top 10里的内容全部写进Hindsight外部记忆，这些沉淀又用来优化第二天的上下文。
 
 ![](fig01.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">0xJeff推文配图：Hermes工作流的实际输出（Discord每日Alpha摘要与综合）</span>
@@ -41,7 +43,7 @@ X上从不缺alpha，但现在的算法让你几乎刷不到关注的大V，想�
 
 如果你也在链上积极投资，大概率常担心「会不会有人砸盘砸到我头上」。如今大部分可投资代币都是过去一两年里公平发射或上发射平台的，**搞清持有人集中度、链上买卖模式和资金动向因此变得极关键**。
 
-早投一个项目不等于赢，真正要看的是：团队和代币利益是否一致，代币是否分散到了同样利益一致的持有者手里。手动翻链上浏览器又慢又累，这正是Hermes的用武之地。
+早投一个项目不等于赢，真正要看的是：团队和代币利益是否一致，代币是否分散到了同样利益一致的持有者手上。手动翻链上浏览器又慢又累，这正是Hermes派上用场的地方。
 
 给它一个代币合约地址，它能查出前几大持有人、判断他们在任意时间窗口里是买还是卖，勾勒持有人行为图谱，并给出「继续持有、卖出还是开始建仓」的判断。0xJeff自己挂了3个以上的每日工作流盯主要持仓：Agent检查大额鲸鱼动向（买/卖/转账）、标记反复出现的模式、输出每日和每周的持有人变化摘要，再和X情绪交叉核对。**目标就是尽可能早地从链上和X两端拿到信号，看两者是否对得上。**
 
@@ -65,9 +67,22 @@ X情绪负面、链上却持续流入，可能是有人在某个事件前悄悄�
 这套用法真正的价值不在某个具体工具，而在那条「追踪到摘要、摘要到综合、综合写进外部记忆、记忆反哺第二天」的闭环。把这套流水线设计出来，Agent本身是可替换的，他综合环节用DeepSeek就是证明。<br><br>
 轮换外部来源是整套设计里最被低估的一点。它用逆向信号专门对抗信息茧房，而多数人搭Agent工作流时只喂自己本来就认同的源，越用越回声。<br><br>
 但别把「交叉核对」读成可省略。作者依然每天核对Agent的产出，说明他清楚摘要会漏会偏。把书签和关注列表当真理来源、完全放手让Agent决策，才是这条流水线最危险的用法。<br><br>
-依赖面也要算账：cron、X API v2、Nansen、Cookie MCP都是外部依赖，有费率、限额和成本。流水线越顺，对这些接口的黏性越强，断一个环节当天的研究就缺一块。
+依赖面也要算账：cron、X API v2、Nansen、Cookie MCP都是外部依赖，有费率、限额和成本。流水线越顺，对这些接口的黏性越强，断一个环节当天的研究就缺一块。更隐蔽的是成本结构本身：追踪11位分析师加3条链上工作流，每天触发十几次外部调用，按月算下来不是小数，搭之前最好先估一版账单。
 </div>
 </div>
+
+---
+
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+</span>
 
 ---
 
