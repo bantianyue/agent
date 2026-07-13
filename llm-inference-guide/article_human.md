@@ -3,7 +3,7 @@
 <strong style="font-size:16px;color:#1a6ba0;">要点速览</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-- <strong>推理是两段异构任务</strong>：同一个模型在一次请求里干两件完全不同的活，瓶颈也完全不同——Prefill 受算力限制，Decode 受内存带宽限制。<br><br>
+- <strong>推理是两段异构任务</strong>：同一个模型在一次请求里干两件完全不同的活，瓶颈也完全不同。Prefill 受算力限制，Decode 受内存带宽限制。<br><br>
 - <strong>Prefill 与 Decode 的切换</strong>：提交 prompt 后先并行算完所有输入 token（Prefill，算得快），再逐 token 循环生成（Decode，卡在等显存送数据）。<br><br>
 - <strong>KV Cache 是隐形账单</strong>：它让长文本生成快上数倍，却随每个 token 膨胀吃显存，长上下文之所以贵，是 cache 装不下了而非模型不够聪明。<br><br>
 - <strong>量化是性价比最高的旋钮</strong>：FP16 降到 INT8 往往 latency 减半而质量几乎无损，7B 模型因此能塞进笔记本显卡。
@@ -175,3 +175,18 @@ Transformer 架构吸引了所有的目光，但推理性能的生死却系在�
 当下次有人说「他的模型好慢」，你会知道该先问哪个问题：**是启动慢，还是流式慢？**
 
 如果你喜欢这篇文章，在评论区告诉我。这给我一个信号：应该多写点这类内容。谢谢阅读！干杯 :)
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+推理性能的真问题不在 Transformer 架构，而在那些无聊处：内存布局、cache 管理、比特宽度。下次有人抱怨模型慢，先分清是启动慢还是流式慢，比盲目加算力更能救命。<br><br>
+KV cache 已从「加速技巧」变成了整个领域重新审视注意力的出发点，DeepSeek V4 直接为压缩 cache 重构注意力，约束转移的信号已经很明确。<br><br>
+量化是杠杆最高的旋钮。FP16 到 INT8 常常 latency 减半而质量几乎无损，却常被忽视，因为比起新架构它不够性感。
+</div>
+</div>
+
+---
+
+<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://x.com/akshay_pachaar/status/2050941458614751327</span>
