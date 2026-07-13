@@ -32,7 +32,7 @@ LLM是一个预测下一个token的神经网络。就一个token。然后它把�
 
 这一步比人们意识到的更重要。那些在分词器训练数据里representation不足的语言，会被切成更多片段，意味着更多token，也意味着同样一句话成本更高、响应更慢。
 
-![](images/body_00_2050883466112483328.jpg)
+![](body_00_2050883466112483328.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">分词把文本切成片段并映射为整数ID（图中ID仅为示意）</span>
 
 ## 第二步：每个token变成一个向量
@@ -49,7 +49,7 @@ LLM是一个预测下一个token的神经网络。就一个token。然后它把�
 
 自注意力是值得深入理解的部分。对每一个token，这一层通过乘以三个学好的权重矩阵，生成Query、Key、Value三个新向量。诀窍在于：每个token用自己的query去查看其他所有token的key，匹配的强度决定要把那个token的多少value混进来。
 
-![](images/body_01_2050925588274384896.jpg)
+![](body_01_2050925588274384896.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">每个token生成Q/K/V，query与所有key匹配后决定混入多少value</span>
 
 这就是魔法所在：一个token通过环顾四周、拉取它觉得有用的东西，来决定自己需要什么上下文。叠32层这样的结构，你就得到了一个能跨越上千个token追踪引用的模型。
@@ -70,7 +70,7 @@ LLM是一个预测下一个token的神经网络。就一个token。然后它把�
 
 GPU最爱这个。矩阵乘就是为它们而生的。这一阶段的瓶颈是纯粹的计算吞吐：GPU被钉在极高的利用率上，以硅片允许的最快速度做运算。衡量它的指标叫TTFT（Time to First Token，首token时延），即第一个词出现在你屏幕上之前的空闲时间。
 
-![](images/body_02_2050916062749982720.jpg)
+![](body_02_2050916062749982720.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">Prefill阶段所有输入token的Q/K/V并行计算，是一次大矩阵乘</span>
 
 ## 阶段二：Decode（解码）
@@ -81,7 +81,7 @@ GPU最爱这个。矩阵乘就是为它们而生的。这一阶段的瓶颈是�
 
 但GPU仍然得把每一个权重矩阵和每一个缓存起来的K、V从显存里加载出来，才能做这点微小的计算。突然之间瓶颈翻转了：芯片有大量的算力余量，却干坐在那里等显存送来下一块数据。
 
-![](images/body_03_2050926705385287680.jpg)
+![](body_03_2050926705385287680.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">Decode阶段只算新token的Q，去乘缓存的K矩阵，计算量极小但受显存带宽限制</span>
 
 这就是为什么decode是内存带宽受限（memory-bound）的，而prefill是计算受限（compute-bound）的。同一个模型、同一块硬件，性能特征却完全不同。衡量decode的指标是ITL（Inter-Token Latency，token间时延），即流出来的连续token之间的间隔，ITL低模型才显得快。
@@ -94,7 +94,7 @@ GPU最爱这个。矩阵乘就是为它们而生的。这一阶段的瓶颈是�
 
 这就是为什么长上下文又慢又贵：不是模型"脑子不够用"，是缓存"地方不够住"。
 
-![](images/body_04_2050928191561482240.jpg)
+![](body_04_2050928191561482240.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">KV缓存随token增长线性占用显存，长上下文的主要成本就在这里</span>
 
 解法很有创意：把缓存量化到INT8或INT4、丢掉滑动窗口之外的token、在注意力头之间共享K和V（grouped-query attention，分组查询注意力），或者像操作系统分页那样给缓存做分页（PagedAttention，vLLM背后的那招）。
@@ -107,7 +107,7 @@ GPU最爱这个。矩阵乘就是为它们而生的。这一阶段的瓶颈是�
 
 重点不是某个具体架构，而是KV缓存已经成了整个领域围绕它去优化模型的那个瓶颈。当注意力本身都被重新设计来最小化缓存时，你就知道约束已经转移了。
 
-![](images/body_05_2050929751758700546.jpg)
+![](body_05_2050929751758700546.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">DeepSeek-V4用混合压缩注意力，让百万级上下文的缓存和计算量大幅缩水</span>
 
 ## 量化：用比特换速度
@@ -124,7 +124,7 @@ GPU最爱这个。矩阵乘就是为它们而生的。这一阶段的瓶颈是�
 
 现代服务框架（vLLM、TensorRT-LLM、Text Generation Inference）用连续批处理（多个用户的token在同一个GPU步里交错）、投机解码（小模型先起草、大模型来验证）和巧妙的内存管理，把这个循环包了起来：这就是一块GPU怎么同时服务几十个并发用户的。
 
-![](images/body_06_2050927172437905408.jpg)
+![](body_06_2050927172437905408.jpg)
 <span style="font-size:12px;color:rgb(153,153,153);">从分词到反分词的完整推理流水线，prefill与decode两个阶段特征截然不同</span>
 
 <div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
