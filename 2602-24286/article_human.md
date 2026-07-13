@@ -18,7 +18,7 @@ GPU核函数是现代深度学习的基石，但高性能CUDA核函数的开发�
 
 两条老路线的天花板很清楚：训练-free的方法再怎么搜，也受限于基础模型本身就弱的CUDA编码能力；固定多轮微调则把所有历史解法塞进上下文，既浪费长度，又限制了智能体自己学调试、搜索和优化的空间。
 
-**CUDA Agent 的思路是：别只教模型"怎么写"，而是给它一套能跑、能测、能改的真实开发环境，再用强化学习把"写得更优"刻进模型本身。** 说白了，过去的方法卡在"模型自己的能力上限"上，而 CUDA Agent 想做的是把能力上限本身抬高，这恰恰是训练-free 路线永远够不到的地方。
+**CUDA Agent的思路是：别只教模型"怎么写"，而是给它一套能跑、能测、能改的真实开发环境，再用强化学习把"写得更优"刻进模型本身。** 说白了，过去的方法卡在"模型自己的能力上限"上，而CUDA Agent想做的是把能力上限本身抬高，这恰恰是训练-free路线永远够不到的地方。
 
 ![](fig0.png)
 <span style="font-size:12px;color:rgb(153,153,153);">CUDA Agent系统总览：数据合成、技能集成智能体循环、稳定RL训练三大支柱</span>
@@ -78,7 +78,7 @@ CUDA Agent在KernelBench上取得SOTA，三个核心结论很硬：
 
 **第一，专有模型能写出"对"的核函数，但写不出"快"的核函数。** Claude Opus 4.5和Gemini 3 Pro通过率有91.2%–95.2%，但加速率只有66%–69%：通用LLM产出的往往是朴素核函数，跑不过torch.compile。CUDA Agent拿到98.8% 通过率和96.8% 加速率，说明专门的RL训练带来的是"既正确又高度优化"的实现。
 
-**第二，学会的优化策略能持续胜过静态编译器，尤其在算子融合上。** 这一点在Level 2（算子序列）最明显：CUDA Agent取得100% 加速率，相对torch.compile几何平均加速高达2.80×。传统编译器靠预定义、基于规则的融合模式，遇到非平凡算子组合经常束手无策；CUDA Agent靠迭代循环探索更大的设计空间，发现硬件特定的内存访问模式和分块策略。
+**第二，学会的优化策略能持续胜过静态编译器，尤其在算子融合上。** 这一点在Level 2（算子序列）最明显：CUDA Agent取得100% 加速率，相对torch.compile几何平均加速高达2.80×。传统编译器靠预定义、基于规则的融合模式，遇到非平凡算子组合经常束手无策；CUDA Agent靠迭代循环探索更大的设计空间，发现硬件特定的内存访问模式和分块策略，这些是静态后端根本碰不到的。
 
 下表是Overall总体与各Level上CUDA Agent与最强基线的关键对比：
 
@@ -132,6 +132,19 @@ CUDA Agent在KernelBench上取得SOTA，三个核心结论很硬：
 工程上最实用的洞见是那套"先预热再长跑"：17步崩到200步稳，靠的不是更大模型，而是RFT给行为先验、Value Pretraining给价值先验。这给所有"RL一跑就崩"的多轮智能体训练提供了一个低成本、可复用的稳定化模板。
 </div>
 </div>
+
+---
+
+<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+</span>
 
 ---
 
