@@ -1,0 +1,1221 @@
+Mach-Mind-4-Flash Technical Report
+
+Abstract
+
+We present Mach-Mind-4-Flash, a 35B-parameter Mixture-of-Experts (MoE) agentic model with 3B activated parameters. Through post-training optimization alone without scaling pre-training compute, the model achieves performance on par with or surpassing that of 100B-parameter-class models. By introducing scalable agentic interaction environments for large-scale reinforcement learning, the model attains significant performance gains on real-world application tasks. Our pipeline comprises three stages: (1) a unified RL/OPD training infrastructure with dynamic multi-teacher scheduling and operator-level acceleration, delivering 17% end-to-end training speedup; (2) multiple domain-specific RL experts trained in parallel across Reasoning, General, and Agent tracks, then fused into a single generalist via Multi-Teacher On-Policy Distillation (MOPD)—a routed reverse-KL objective that eliminates the see-saw degradation of mixed-reward RL; (3) Hybrid Median-length Policy Optimization (HMPO), a single-stage token-efficiency method that compresses reasoning chains by 19–46% with 
+≤
+0.7 percentage-point accuracy loss. Mach-Mind-4-Flash scores 92.70 on AIME’26, 82.82 on IFBench, 80.74 on Behavioral-SafetyBench, 75.80 on BFCL-v4, 72.31 on BrowseComp-zh, and 84.20 on ClawBench—leading or matching models with 10–30
+×
+ its activated size at a fraction of the inference cost.
+
+Contents
+
+1 Introduction
+
+2 Related Work
+
+2.1 Agentic Foundation Models and Benchmarks
+2.2 Agentic Post-training and Reinforcement Learning
+2.3 Efficient and Safe Agent Deployment
+
+2.1 Agentic Foundation Models and Benchmarks
+
+2.2 Agentic Post-training and Reinforcement Learning
+
+2.3 Efficient and Safe Agent Deployment
+
+3 Infra
+
+3.1 Unified OPD Training Paradigm Based on the RL Framework
+3.2 Dynamic Multi-Teacher Scalable Architecture
+3.3 Training Acceleration and Extreme Optimization
+
+3.1 Unified OPD Training Paradigm Based on the RL Framework
+
+3.2 Dynamic Multi-Teacher Scalable Architecture
+
+3.3 Training Acceleration and Extreme Optimization
+
+4 Post-Training
+
+4.1 Supervised Fine-Tuning
+4.2 Reasoning and General RL
+4.3 Safety RL
+4.4 Tool-Use RL
+4.5 DeepSearch RL
+4.6 Code Agent RL
+4.7 Claw Agent RL
+4.8 Multi-Teacher On-Policy Distillation (MOPD)
+4.9 Hybrid Median-length Policy Optimization (HMPO)
+
+4.1 Supervised Fine-Tuning
+
+4.2 Reasoning and General RL
+
+4.3 Safety RL
+
+4.4 Tool-Use RL
+
+4.5 DeepSearch RL
+
+4.6 Code Agent RL
+
+4.7 Claw Agent RL
+
+4.8 Multi-Teacher On-Policy Distillation (MOPD)
+
+4.9 Hybrid Median-length Policy Optimization (HMPO)
+
+5 Experimental Results
+
+5.1 Overall Results
+5.2 Effect of Expert Training and MOPD Fusion
+5.3 Token efficient (HMPO)
+
+5.1 Overall Results
+
+5.2 Effect of Expert Training and MOPD Fusion
+
+5.3 Token efficient (HMPO)
+
+6 Limitation and Future Work
+
+7 Contributions
+
+References
+
+Appendix
+
+A Acceleration of the Infra operator
+
+B Derivation of the MOPD Objective
+
+C Ablations on the Reasoning Expert in MOPD
+
+1Introduction
+
+Scaling language models has been the dominant recipe for capability gains, yet the associated inference cost makes trillion-parameter models impractical for latency-sensitive deployment. An emerging alternative is to scale the post-training pipeline, pushing a compact base model toward frontier performance through reinforcement learning, expert fusion, and inference-time efficiency optimization rather than scaling pre-training compute alone. Mach-Mind-4-Flash is our contribution along this axis: a 35B MoE model (3B activated) whose post-training stack elevates it to the performance tier of models with 10–30
+×
+ more activated parameters. Three technical pillars underpin this result:
+
+(1) Scalable training infrastructure with operator-level acceleration.
+
+Post-training a generalist model requires orchestrating multiple RL expert tracks, a multi-teacher distillation stage, and a token-efficiency stage, all sharing the same distributed infrastructure. We build a unified Reinforcement Learning / On-Policy Distillation (RL/OPD) training paradigm that seamlessly switches between pure RL, pure distillation, and joint modes through a single weighted loss. On top of this, we design a dynamic multi-teacher architecture where adding a new expert requires zero intrusion into the training core. At the operator level, we deeply integrate SonicMoE indexed Grouped General Matrix Multiplication (GEMM) kernels and a segmented shared-expert fusion strategy that overlaps communication with computation, delivering up to 17% end-to-end speedup on Qwen3.5-35B-A3B training.
+
+(2) Specialization-then-integration: multiple experts, one generalist.
+
+Rather than training a single model on a heterogeneous reward mixture, which invariably suffers from capability see-saw, we independently train multiple RL experts across three tracks: Reasoning (Math, Code, STEM), General (Instruction Following, Writing, Safety), and Agent (Tool-Use, DeepSearch, Code Agent, Claw Agent). Each expert is optimized with domain-appropriate data synthesis, verifiable reward signals, and tailored training strategies (e.g., two-stage reward curricula for sparse-outcome domains, executable multi-turn environments for agent domains). These specialists are then consolidated through Multi-Teacher On-Policy Distillation (MOPD), which routes each training sample to its corresponding frozen teacher and supervises the student on its own rollouts via a token-level reverse-KL objective. This design parallelizes expert development, eliminates sequential dependencies, and produces a unified model that retains, and occasionally exceeds, individual expert performance.
+
+(3) Token efficiency without accuracy sacrifice.
+
+Strong reasoning models tend to overthink, producing verbose chains that inflate serving cost without proportional accuracy gains. We address this with HMPO (Hybrid Median-length Policy Optimization), a single-stage RL method applied as the final pipeline step. HMPO derives a group-adaptive length budget from the median of correct rollouts and applies a multiplicative correctness-first reward that mathematically prevents reward hacking on short-but-wrong outputs. Trained only on mathematics, the compression generalizes across code, science, and instruction following, reducing generation length by 19–46% with at most 0.7pp accuracy loss.
+
+Results.
+
+The resulting model, Mach-Mind-4-Flash, demonstrates that aggressive post-training can close the gap between a compact 35B MoE and substantially larger frontier models. On competition mathematics (AIME’26: 92.70), code generation (LiveCodeBench-V6: 80.91), instruction following (IFEval: 94.64; IFBench: 82.82), safety (Content-SafetyBench: 98.20; Behavioral-SafetyBench: 80.74), and autonomous agent tasks (ClawBench: 84.20; BFCL-v4: 75.80), Mach-Mind-4-Flash consistently matches or outperforms 120B-class models and remains competitive with trillion-parameter systems—while requiring only 3B activated parameters at inference time. We release this technical report to provide a detailed account of the training methodology, infrastructure innovations, and evaluation results.
+
+2Related Work
+
+Recent large language models are moving from general-purpose chat assistants toward production-oriented agentic systems that can reason, call tools, execute code, interact with environments, and complete long-horizon tasks. We summarize related work from three aspects: agentic foundation models and benchmarks, agentic post-training and reinforcement learning, and efficient and safe deployment.
+
+2.1Agentic Foundation Models and Benchmarks
+
+Early language-agent work showed that LLMs can act through external tools and environments rather than only generate text. ReAct [69] interleaves reasoning and actions, while Toolformer [52], Gorilla [45], ToolBench [47], and API-Bank [30] study tool learning, API selection, and tool-augmented instruction following. These works establish the basic agent loop of selecting tools, generating arguments, observing results, and continuing reasoning.
+
+Recent technical reports further frame foundation models as agentic systems. Kimi K2 [28] emphasizes open agentic intelligence with strong reasoning, coding, and tool-use capabilities. GLM-5 [13] describes the transition from “vibe coding” to agentic engineering, targeting complex software engineering and long-horizon workflows. Step-3.5-Flash [19] and MiMo-V2-Flash [63] highlight efficient sparse activation for low-cost agent deployment, while Qwen3-Coder-Next [5] focuses on coding agents trained with executable environments. Meanwhile, agent benchmarks are also moving from static QA to realistic task completion: BFCL [44] evaluates function calling, 
+𝜏
+-bench [68] evaluates tool-agent-user interaction, ToolSandbox [35] studies stateful tool use, and SWE-bench [25] evaluates real software issue resolution. These works suggest that agentic models should be judged by task success, tool reliability, and long-horizon execution rather than final-answer accuracy alone.
+
+2.2Agentic Post-training and Reinforcement Learning
+
+Post-training has become a major driver of model capability. InstructGPT [41] established the effectiveness of SFT and RLHF for instruction following. More recent reasoning models show that reinforcement learning can further elicit long-chain reasoning and self-improvement. DeepSeek-R1 [16] demonstrates that RL can induce long chain-of-thought reasoning, verification, and self-reflection. Kimi k1.5 [27], DAPO [71], and Skywork-OR1 [17] further explore scalable RL recipes, rule-based rewards, and stable large-scale optimization.
+
+For agentic tasks, post-training must handle multi-turn interaction, delayed feedback, sparse rewards, and error recovery. Multi-turn RL for tool-calling agents [37] studies reward calibration for intermediate tool actions, while long-context software-engineering-agent training [15] shows the value of interactive RL for repository-level tasks. In addition, preference optimization methods such as DPO [49], ORPO [18], SimPO [36], and multi-objective DPO [81] provide practical alternatives for aligning models with preference signals. These methods are closely related to OPD/MOPD-style training, where multiple objectives such as task success, tool efficiency, token cost, and safety must be optimized jointly instead of being collapsed into a single reward.
+
+2.3Efficient and Safe Agent Deployment
+
+Production agents require not only strong reasoning but also efficient and safe execution. Agent workflows often contain tool schemas, retrieved documents, execution traces, conversation history, and intermediate observations, making long-context inference and prefill cost major bottlenecks. Prompt compression methods such as LLMLingua [23], LongLLMLingua [24], and LLMLingua-2 [42] reduce token usage while preserving task-relevant information. DeepSeek-V4 [11] targets million-token context efficiency, and MiniMax-M1 [7] uses lightning attention to scale test-time compute. At the serving level, vLLM [29], DistServe [78], and multi-token prediction [14] improve KV-cache management, prefill/decode efficiency, and decoding speed.
+
+Safety is equally important because agents can execute actions rather than merely output text. Constitutional AI [1] and Rule-Based Rewards [38] provide principle-based and rule-based alignment mechanisms, while Llama Guard [20] supports safety classification. For deployed agents, safety must cover both content safety and behavior safety, including whether the model calls tools appropriately, respects constraints, and avoids unsafe operations. Therefore, practical agent systems require joint optimization of capability, latency, token cost, and safety.
+
+3Infra
+
+To enhance the training efficiency and system flexibility of large language models (LLMs) during the post-training phase (which encompasses reinforcement learning (RL) and knowledge distillation), we have systematically upgraded the existing mature RL training framework. We propose a unified joint training paradigm for RL and On-Policy Distillation (OPD), upon which we construct a dynamic multi-teacher scalable architecture. Furthermore, we conduct in-depth training acceleration and optimization from two dimensions: the system framework level and the underlying operator level. The core technical innovations are detailed as follows:
+
+3.1Unified OPD Training Paradigm Based on the RL Framework
+
+Traditional knowledge distillation is typically independent of the RL training pipeline, making it difficult to fully leverage the system advantages of the RL framework in distributed scheduling, experience sampling, and policy optimization. To this end, we deeply integrate OPD into the RL framework to construct a unified joint training paradigm. The specific framework is illustrated in Figure 2.
+
+This paradigm achieves global optimization control through a unified weighted loss function:
+
+where:
+
+• 
+
+ℒ
+OPD
+: Applied to the distillation path. To accommodate complex knowledge transfer requirements, we extend the loss function forms of OPD. In addition to the traditional MSE loss, it supports various distillation objectives such as Forward_kl_TopK, thereby driving the student model’s output distribution to approximate the teacher’s target distribution more accurately and efficiently.
+
+ℒ
+OPD
+: Applied to the distillation path. To accommodate complex knowledge transfer requirements, we extend the loss function forms of OPD. In addition to the traditional MSE loss, it supports various distillation objectives such as Forward_kl_TopK, thereby driving the student model’s output distribution to approximate the teacher’s target distribution more accurately and efficiently.
+
+• 
+
+ℒ
+RL
+: Applied to the policy gradient path. It performs sequence-level clipped updates based on task reward signals.
+
+ℒ
+RL
+: Applied to the policy gradient path. It performs sequence-level clipped updates based on task reward signals.
+
+By dynamically adjusting the weight coefficients 
+𝛼
+ and 
+𝛽
+, this formulation can flexibly switch between three training modes:
+
+1. 
+
+Pure RL Mode (
+𝛼
+=
+0
+,
+𝛽
+>
+0
+): The distillation path is disabled, and the framework degenerates into standard RL training, fully retaining native RL capabilities such as policy gradient updates and multi-turn tool calling.
+
+Pure RL Mode (
+𝛼
+=
+0
+,
+𝛽
+>
+0
+): The distillation path is disabled, and the framework degenerates into standard RL training, fully retaining native RL capabilities such as policy gradient updates and multi-turn tool calling.
+
+2. 
+
+Pure OPD Mode (
+𝛼
+>
+0
+,
+𝛽
+=
+0
+): Policy updates based on task rewards are disabled, retaining only the distillation path. The student model undergoes online distillation entirely using the teacher as the supervision target. This mode exhibits more stable convergence and is suitable for the model capability initialization phase.
+
+Pure OPD Mode (
+𝛼
+>
+0
+,
+𝛽
+=
+0
+): Policy updates based on task rewards are disabled, retaining only the distillation path. The student model undergoes online distillation entirely using the teacher as the supervision target. This mode exhibits more stable convergence and is suitable for the model capability initialization phase.
+
+3. 
+
+Joint RL + OPD Mode (
+𝛼
+>
+0
+,
+𝛽
+>
+0
+): Both distillation and policy gradient losses are enabled. The two optimization paths are mutually independent and naturally superimposed, demonstrating excellent compatibility.
+
+Joint RL + OPD Mode (
+𝛼
+>
+0
+,
+𝛽
+>
+0
+): Both distillation and policy gradient losses are enabled. The two optimization paths are mutually independent and naturally superimposed, demonstrating excellent compatibility.
+
+Benefiting from this deep integration, the unified paradigm directly inherits the system-level capabilities of the RL framework:
+
+• 
+
+Reuses mature distributed training and scheduling mechanisms, significantly reducing the additional engineering complexity of the distillation system;
+
+Reuses mature distributed training and scheduling mechanisms, significantly reducing the additional engineering complexity of the distillation system;
+
+• 
+
+Inherits the asynchronous reward routing mechanism, supporting parallel reward computation for over 20 types of tasks;
+
+Inherits the asynchronous reward routing mechanism, supporting parallel reward computation for over 20 types of tasks;
+
+• 
+
+Achieves a closed-loop implementation of online sampling, reward evaluation, policy optimization, and distillation supervision within a single framework, significantly enhancing the consistency and maintainability of the training pipeline.
+
+Achieves a closed-loop implementation of online sampling, reward evaluation, policy optimization, and distillation supervision within a single framework, significantly enhancing the consistency and maintainability of the training pipeline.
+
+3.2Dynamic Multi-Teacher Scalable Architecture
+
+In practical large-scale post-training scenarios, a single teacher model often struggles to comprehensively cover all task domains. Conversely, building independent training pipelines for different tasks easily leads to resource waste and engineering fragmentation. Therefore, we design a dynamic multi-teacher scalable architecture that supports the flexible, on-demand integration of teacher models, enabling a “building-block” style combinatorial training capability.
+
+Architecture Design and Routing Mechanism
+
+The core design principle of the multi-teacher architecture is: adding a new teacher requires zero intrusion into the framework’s core logic and remains completely transparent to the student model’s training process.
+
+Specifically, each teacher instance is registered as an independent configuration node in the distillation configuration tree. After the Rollout phase is completed, the framework asynchronously distributes samples to the corresponding teacher instances based on the routing identifier of each data entry. After obtaining the target logits, they are uniformly aggregated to compute the distillation loss. This process is completely decoupled from the training updates of the student model, avoiding interference from the teacher-side logic on the main training pipeline. At the data level, simply adding a routing identifier column to the samples enables binding and dynamic switching to any teacher model without modifying the training code throughout the process, endowing the system with extreme flexibility.
+
+Elastic Resource Scheduling
+
+This architecture relies on the Ray cluster to achieve transparent multi-node resource scheduling. The GPU allocation for the student model (Actor) nodes and teacher nodes is automatically bound by the framework based on the tensor parallelism (TP) scale and the number of replicas, requiring no manual intervention. Each teacher can independently configure its number of replicas, and Ray automatically schedules the corresponding processes to the designated GPUs.
+
+Meanwhile, the parallel inference of multiple teachers and the training of the student model are decoupled via Ray’s asynchronous mechanism, ensuring that an increase in the number of teachers does not become a serial bottleneck for training throughput. When business needs require the introduction of a teacher for a new domain, one only needs to request additional nodes and complete the registration to achieve seamless integration through “configuration-as-scaling.”
+
+3.3Training Acceleration and Extreme Optimization
+
+To achieve extreme throughput in complex joint RL and distillation training scenarios, we conduct deep optimizations from both the system framework level and the underlying operator level.
+
+System and Framework-Level Acceleration
+
+• 
+
+Multi-Dimensional Hybrid Parallelism: The student model is based on the Megatron-Core backend, natively supporting multi-dimensional parallel strategies such as Tensor Parallelism (TP), Pipeline Parallelism (PP), and Expert Parallelism (EP). Combined with MoE Grouped GEMM operator fusion technology, this significantly improves the training throughput of MoE architecture models.
+
+Multi-Dimensional Hybrid Parallelism: The student model is based on the Megatron-Core backend, natively supporting multi-dimensional parallel strategies such as Tensor Parallelism (TP), Pipeline Parallelism (PP), and Expert Parallelism (EP). Combined with MoE Grouped GEMM operator fusion technology, this significantly improves the training throughput of MoE architecture models.
+
+• 
+
+Fine-Grained Operator-Level Recomputation: A selective activation recomputation strategy is adopted, enabling recomputation only for lightweight operators (e.g., RMSNorm) while skipping compute-intensive operators (e.g., Linear). This strategy strikes an optimal balance between saving GPU memory and controlling computational overhead, allowing the system to support larger batch sizes and further enhancing overall training efficiency.
+
+Fine-Grained Operator-Level Recomputation: A selective activation recomputation strategy is adopted, enabling recomputation only for lightweight operators (e.g., RMSNorm) while skipping compute-intensive operators (e.g., Linear). This strategy strikes an optimal balance between saving GPU memory and controlling computational overhead, allowing the system to support larger batch sizes and further enhancing overall training efficiency.
+
+• 
+
+Multi-Token Prediction (MTP) Acceleration: The framework supports Megatron-Core’s native MTP module and utilizes the MTP head for speculative decoding during the vLLM sampling phase, substantially reducing the time consumed in the Rollout phase.
+
+Multi-Token Prediction (MTP) Acceleration: The framework supports Megatron-Core’s native MTP module and utilizes the MTP head for speculative decoding during the vLLM sampling phase, substantially reducing the time consumed in the Rollout phase.
+
+Underlying Operator-Level Optimization
+
+• 
+
+Deep Integration of SonicMoE: Targeting the most compute-intensive MoE MLP module in the Transformer layer, we deeply integrate SonicMoE into the Megatron framework. As shown in Figures 3a and 3b, SonicMoE fully utilizes the hardware characteristics of Hopper architecture GPUs (such as the TMA copy engine, Warp specialization, and multi-stage producer-consumer pipelines) to implement an efficient Indexed Grouped GEMM operator and its Gate-Up fused variant. This design eliminates the token permutation step, reduces global memory access latency, and greatly improves GPU computational throughput. During the backward propagation phase, the system introduces a local recomputation strategy to reduce memory access overhead and employs DeepEP instead of traditional All-to-All collective communication, further boosting multi-node communication efficiency.
+
+Deep Integration of SonicMoE: Targeting the most compute-intensive MoE MLP module in the Transformer layer, we deeply integrate SonicMoE into the Megatron framework. As shown in Figures 3a and 3b, SonicMoE fully utilizes the hardware characteristics of Hopper architecture GPUs (such as the TMA copy engine, Warp specialization, and multi-stage producer-consumer pipelines) to implement an efficient Indexed Grouped GEMM operator and its Gate-Up fused variant. This design eliminates the token permutation step, reduces global memory access latency, and greatly improves GPU computational throughput. During the backward propagation phase, the system introduces a local recomputation strategy to reduce memory access overhead and employs DeepEP instead of traditional All-to-All collective communication, further boosting multi-node communication efficiency.
+
+• 
+
+Segmented Fusion with Shared Expert: As shown in Figure 3c, building upon the introduction of SonicMoE, our efficient segmented fusion strategy for shared experts achieves communication-computation overlap. We introduce a multi-stream mechanism and split the computation of the shared expert into three stages: AllGather, Expert Computation, and ReduceScatter. These are stagger-fused with the computation stages of standard experts under the EP mode (Dispatch, Expert Computation, and Combine), achieving communication-computation overlap and hiding the time consumption of the shared expert. Additionally, we found that when TP, EP, and ETP are enabled simultaneously, if the shared expert only employs TP parallelism, it typically leads to a surge in communication volume. To address this, we forcibly set TP=1 in the shared expert module, reducing the idle waste of computational resources caused by communication. This strategy schedules the shared expert’s computation in parallel with the main computation of SonicMoE, effectively masking communication latency and thereby further breaking through the bottleneck of training speed.
+
+Segmented Fusion with Shared Expert: As shown in Figure 3c, building upon the introduction of SonicMoE, our efficient segmented fusion strategy for shared experts achieves communication-computation overlap. We introduce a multi-stream mechanism and split the computation of the shared expert into three stages: AllGather, Expert Computation, and ReduceScatter. These are stagger-fused with the computation stages of standard experts under the EP mode (Dispatch, Expert Computation, and Combine), achieving communication-computation overlap and hiding the time consumption of the shared expert. Additionally, we found that when TP, EP, and ETP are enabled simultaneously, if the shared expert only employs TP parallelism, it typically leads to a surge in communication volume. To address this, we forcibly set TP=1 in the shared expert module, reducing the idle waste of computational resources caused by communication. This strategy schedules the shared expert’s computation in parallel with the main computation of SonicMoE, effectively masking communication latency and thereby further breaking through the bottleneck of training speed.
+
+4Post-Training
+
+As illustrated in Figure 4, our post-training pipeline for Mach-Mind-4-Flash adopts a hierarchical “specialization-then-integration” approach. Building upon Qwen3.5-35B-A3B [48], we first perform Supervised Fine-Tuning (SFT) to establish foundational alignment. We then diverge the training into three parallel Reinforcement Learning (RL) tracks, each producing multiple specialist checkpoints: Reasoning RL (Math, Code, STEM), General RL (Instruction Following, Writing, Safety), and Agent RL (Tool-Use, DeepSearch, Code Agent, and Claw Agent). To consolidate these diverse experts into a unified model without performance degradation, we introduce Multi-Teacher On-Policy Distillation (MOPD) for seamless expert fusion. Finally, a Token Efficiency RL stage compresses generation length while preserving accuracy, yielding the deployed Mach-Mind-4-Flash.
+
+4.1Supervised Fine-Tuning
+
+To establish a robust foundation for subsequent reinforcement learning, we conduct large-scale multi-domain Supervised Fine-Tuning (SFT) starting from Qwen3.5-35B-A3B [48]. The goal is to align the base model with diverse task formats and equip it with broad capabilities across reasoning, general conversation, and agentic interaction.
+
+Data Composition.
+
+Our SFT corpus spans seven domains. The distribution of sample counts and token volumes is shown in Figure 5. Key design choices for each domain are:
+
+• 
+
+Math and STEM: We focus on verifiable problems with unambiguous ground-truth. High-quality reasoning chains are synthesized via rejection sampling from stronger teacher models, with a difficulty-based filter retaining only samples that challenge the current base model.
+
+Math and STEM: We focus on verifiable problems with unambiguous ground-truth. High-quality reasoning chains are synthesized via rejection sampling from stronger teacher models, with a difficulty-based filter retaining only samples that challenge the current base model.
+
+• 
+
+Code: Long-form code generation and competitive programming traces, distilled from capable teacher models and filtered by execution-based correctness verification.
+
+Code: Long-form code generation and competitive programming traces, distilled from capable teacher models and filtered by execution-based correctness verification.
+
+• 
+
+General: Covers instruction following, creative writing, and open-ended QA. Response style is optimized for logical clarity and conciseness, with data distilled from stronger teacher models and filtered by multi-dimensional quality rubrics.
+
+General: Covers instruction following, creative writing, and open-ended QA. Response style is optimized for logical clarity and conciseness, with data distilled from stronger teacher models and filtered by multi-dimensional quality rubrics.
+
+• 
+
+Tool-use, Code Agent, and DeepSearch: We construct over 10K diverse environments for agentic trajectory synthesis, focusing on repository-level software engineering and long-horizon multi-turn tasks. Trajectories are generated across multiple scaffolds and filtered by task-level verification.
+
+Tool-use, Code Agent, and DeepSearch: We construct over 10K diverse environments for agentic trajectory synthesis, focusing on repository-level software engineering and long-horizon multi-turn tasks. Trajectories are generated across multiple scaffolds and filtered by task-level verification.
+
+Our data strategy prioritizes quality and reasoning density over volume. Hard-to-solve samples for the base model are identified and re-annotated by more capable teacher models. Multi-dimensional filtering (instruction following, logical consistency, factual accuracy) is applied through both automated heuristics and human-in-the-loop verification.
+
+Training Configuration.
+
+We train with a global batch size of 32, a learning rate of 
+1
+×
+10
+−
+5
+ with cosine decay, and a maximum sequence length of 131,072 tokens. The model is trained for 2 epochs. For agentic trajectories, we apply error masking: trajectory segments containing erroneous actions are retained as input context but masked from the loss computation, allowing the model to observe and learn error-recovery behaviors without reinforcing incorrect actions. To improve training throughput, we adopt sample packing that concatenates multiple examples into a single sequence up to the context limit, with attention masks preventing cross-contamination between packed samples.
+
+4.2Reasoning and General RL
+
+We train two parallel RL expert tracks—Reasoning (Math, Code, STEM) and General (Instruction Following, Writing)—that share the same training framework but differ in data sources and reward definitions. Both tracks are trained independently using Group Relative Policy Optimization (GRPO) [53] with domain-specific hyperparameters, each producing a specialist checkpoint from the same SFT initialization that later serves as a frozen teacher in MOPD (Section 4.8).
+
+Data Synthesis and Difficulty Pruning.
+
+For reasoning domains (Math, Code, STEM), we curate tasks where correctness is deterministically verifiable—mathematical problems with unique numerical answers, coding problems with executable test suites, and STEM questions with unambiguous ground-truth. We employ LLM-assisted problem synthesis: seed templates are parameterized and transformed to produce diverse novel problems while preserving verifiability. For instruction-following tasks, inspired by the formal constraint grammar of LexInstructEval [51], we decompose instructions into composable 
+⟨
+Procedure, Relation, Value
+⟩
+ triplets and systematically generate constraint-rich prompts through combinatorial composition. Compliance is verified through a two-stage reward: a deterministic programmatic engine first checks each atomic constraint, and samples that pass all rule-based checks are further evaluated by an LLM judge to detect reward hacking (e.g., satisfying constraints via degenerate or nonsensical outputs). Only responses passing both stages receive a positive reward. For writing tasks, we adopt the automated coarse-to-fine rubric generation framework of RubricHub [31] to produce comprehensive, highly discriminative evaluation criteria at scale, which serve as both the data synthesis backbone and the reward signal for RL training.
+
+Regardless of domain, we apply unified Difficulty-based Pruning. For each candidate query, we perform 8 independent inference passes using the current SFT model, discarding samples that are too trivial (8/8 pass) or too hard (0/8 pass). Retaining only moderate-difficulty samples ensures that the RL training signal remains both informative and learnable.
+
+Reward Design.
+
+Our reward strategy is domain-dependent. For domains where the outcome signal is sparse and the zero-reward trap is severe (e.g., structured reasoning tasks such as Table QA), we employ a Two-Stage Reward Curriculum: Stage 1 uses a dense process reward 
+ℛ
+proc
+ that provides partial credit for intermediate reasoning steps, enabling stable cold-start learning; once validation performance crosses a predefined threshold, we transition to Stage 2, switching to a strict outcome reward 
+ℛ
+out
+ that forces the model to internalize end-to-end correctness.
+
+For domains where the outcome signal is already informative (e.g., Code with multi-test-case pass rates, Instruction Following with per-constraint compliance), we directly adopt outcome-based rewards without the process scaffolding stage. For writing, the multi-dimensional rubrics generated by RubricHub [31] provide fine-grained, criterion-level reward signals that enable effective RL optimization on open-ended generation tasks. The overall principle is consistent: we use the densest verifiable signal that the domain affords, while ensuring the final optimization target is always grounded in task-level correctness. Figure 6 illustrates the benefit of the two-stage curriculum on a structured reasoning task where the zero-reward trap is most pronounced.
+
+4.3Safety RL
+
+Large language models and agentic systems increasingly generate content and execute tool-mediated actions that can affect users, third parties, and the broader information environment, making safety-oriented training essential for reducing harmful outputs and risky agent behavior while preserving general-purpose utility [4; 61; 3]. We construct a safety-oriented Teacher Model that targets two complementary dimensions: content safety, which prevents unsafe or norm-violating responses, and behavioral safety, which prevents unauthorized, irreversible, or instruction-inconsistent tool use. The learned safety behavior is intended to be transferred to downstream models through Multi-Teacher On-Policy Distillation (MOPD), supporting scalable alignment without unnecessary capability loss [41; 1].
+
+Data Pipeline.
+
+The data pipeline combines content-safety data and behavioral-safety data as complementary supervision sources. For content safety, prompts and responses are organized according to a safety taxonomy covering major risk scenarios, value alignment, social norms, public order, and localized requirements, with boundary cases and contrastive examples emphasized to clarify the distinction between safe assistance and unsafe completion [61; 12]. For behavioral safety, tool-use scenarios are constructed around risk level, user authorization, parameter validity, reversibility, and consistency between tool calls and final responses, and pairwise contrastive samples are used so that the model learns when a tool should or should not be invoked [69; 52; 39]. Together, these two data streams improve safe response generation and safe action selection in agentic settings.
+
+Training Pipeline.
+
+For content safety, we train a dedicated safety Reward Model from the business safety specification through staged SFT, covering specification memorization, boundary-case understanding, and safety judgment [10; 83; 41]. During reinforcement learning, this model assigns low rewards to unsafe responses and optimizes safe responses for usefulness, encouraging helpful restraint while penalizing unsafe completion, policy circumvention, and unnecessary refusals. For behavioral safety, rule-based rewards evaluate the tool-use trajectory based on the safety of tool execution and parameters. Pairwise contrastive samples further distinguish valid tool calls from unsafe, unnecessary, or mismatched actions. Finally, the content and behavioral rewards are then combined to train the safety-oriented Teacher Model, whose safety capability can be distilled into downstream models through MOPD.
+
+4.4Tool-Use RL
+
+Motivation and task formulation.
+
+Tool-Use in production agents is a long-horizon interaction problem rather than an isolated function-call formatting problem. A capable model must ground tool schemas, inspect external state, bind arguments, interpret observations, recover from invalid actions, and decide when the user goal has been completed. Therefore, Tool-Use RL optimizes complete multi-turn trajectories instead of single-step tool-call accuracy. Given a user goal, an environment state or resource state, an available action/tool set, and task-specific verifiers, the policy repeatedly observes the environment, takes actions, receives feedback, and finally produces a response. The objective is trajectory-level task completion under the same interaction protocol used at inference time. The resulting checkpoint is used as the Tool-Use RL specialist teacher in MOPD.
+
+EnvScaling and data construction.
+
+We introduce EnvScaling as the main data strategy for Tool-Use RL. Instead of scaling static tool-call traces, we scale the environments in which agent decisions are executed, observed, and verified. Our environment pool contains three complementary families. First, file-system execution environments expose sandboxed workspaces, shell commands, file I/O, code execution, tests, graders, logs, and artifacts, training realistic operational behaviors over persistent resources. Second, programmatically verifiable environments are Python-simulated stateful environments with typed tool APIs, deterministic transition rules, and state-based validators, providing reliable supervision for schema grounding, state inspection, argument construction, state modification, and error recovery. Third, model-simulated environments use LLM- or world-model-based simulators to provide user feedback, dynamic world states, and open-ended interaction signals, with judges or rubrics used for evaluation.
+
+All environments are normalized into a unified agent-environment interface consisting of state, actions, transitions or executors, observations, and verifiers or judges. For the programmatically verifiable family, we use an LLM-assisted generate–build–verify pipeline to synthesize Python state backends, domain constraints, typed tools, and validators. Static checks and positive/negative tool-call tests are applied before rollout. The retained pool covers more than 190 stateful domains and over 3.5K tool interfaces, with each environment typically exposing 10–30 tools. On top of the scaled environment pool, we synthesize multi-turn scenarios by sampling initial states or resources, generating natural-language goals, and filtering candidates by reachability, executability, schema compatibility, and verifier coverage. The tasks are not derived from fixed tool-call scripts; instead, they allow multiple valid solution paths, encouraging information gathering, state tracking, planning, clarification, and recovery.
+
+Reward Design and Training Pipeline.
+
+Tool-Use RL uses trajectory-level rewards because the quality of an action is often revealed only after several later turns. A locally valid tool call may still fail the task, while a trajectory can recover from an invalid action through later inspection and correction. We therefore treat single-step format correctness as a protocol constraint and use end-to-end task completion as the main optimization signal. Different environment families use different reward adapters: file-system environments rely on execution results, tests, graders, and artifact checks; programmatically verifiable environments use final-state checklists and deterministic validators; model-simulated environments use rubric-based judges, simulator-consistency checks, or goal-satisfaction evaluation. Protocol checks over parseability, schema typing, argument validity, tool-execution status, and observation-grounded finalization are used as hard filters or auxiliary signals. For each prompt, we sample 
+𝐾
+=
+8
+ executable trajectories and optimize a group-relative clipped policy objective over their trajectory-level rewards. We use an asymmetric clipping range with 
+𝜖
+low
+=
+0.20
+ and 
+𝜖
+high
+=
+0.28
+, bound each trajectory by at most 
+𝑇
+max
+=
+40
+ assistant/tool-use turns, and disable explicit KL regularization. During optimization, system prompts, user turns, tool observations, environment messages, and padding are retained as context but masked from the policy loss; only assistant-generated decision tokens are optimized. This focuses the RL signal on multi-turn tool-use decisions and improves tool selection, argument binding, observation interpretation, state tracking, error recovery, and final task completion.
+
+4.5DeepSearch RL
+
+DeepSearch targets long-horizon, multi-hop open-domain retrieval QA: given a question, the agent must autonomously retrieve, cross-verify, and produce a traceable answer over many rounds of search/browse. Conventional multi-hop QA data lacks structural difficulty constraints and suffers a domain shift from online retrieval, making it ill-suited for training such agents by RL.
+
+Data Pipeline.
+
+We synthesize high-difficulty multi-hop QA through two complementary pipelines (Figure 8). Pipeline I seeds from obscure Wikipedia entities and runs breadth-first search over intra-entity hyperlinks to build a directed acyclic graph (DAG) whose depth sets the number of reasoning hops; questions are synthesized from chain subgraphs (sequential reasoning) and split subgraphs (parallel reasoning and cross-verification), with entities generalized and answers anchored to fine-grained objective attributes. Pipeline II uses a ReAct agent to explore the web in real time, linking cross-domain entities that share a key attribute and synthesizing from a dual-constraint chain joined by an attribute-coincidence edge—so that only the intersection of the two chains determines the answer. Both pipelines pass through a unified post-processing module that rewrites directly-searchable clues and validates correctness, uniqueness, and difficulty.
+
+Training Pipeline.
+
+We train DeepSearch with online reinforcement learning: the agent rolls out search/browse trajectories in a live retrieval environment, explores through trial and error, and updates its policy on the fly from the correctness of its final answer. We use Group Relative Policy Optimization (GRPO) with an outcome-based reward model (ORM), following a curriculum from moderate- to high-difficulty samples. For context management, rather than naively truncating or clearing the history [33], we implement it through four mechanisms: sliding-window observation filtering (keeping only the most recent observation rounds while retaining the full reasoning trajectory), context restart via progress summary (compressing the trajectory into a structured summary before discarding, so a restart continues from existing progress), a dynamic adaptive threshold (raising the restart point as retrieval proceeds), and answer self-check (reviewing the answer against all constraints and redoing the task with feedback if any are unmet).
+
+4.6Code Agent RL
+
+To enhance the coding capabilities of system-level agents, we establish an end-to-end coding-agent post-training pipeline. Centered on repository-level software engineering tasks, the pipeline constructs verifiable execution environments, synthesizes high-quality SWE data, and further enhances model capabilities through supervised fine-tuning and agentic reinforcement learning. Our model achieves strong performance on SWE-bench Verified, surpassing models of comparable scale.
+
+Code Agent Infrastructure.
+
+A robust coding infrastructure is the cornerstone of code-agent post-training, underpinning every stage of the pipeline from large-scale trajectory generation and reinforcement learning to reproducible evaluation. To this end, we build an automated lifecycle management system for containerized execution environments, covering environment provisioning, health monitoring, and automatic retry-based recovery. This infrastructure ensures stable state persistence and seamless multi-turn interactions throughout long-horizon coding tasks. By orchestrating these execution environments at scale, the system supports thousands of concurrent task instances without compromising execution stability or reproducibility. Beyond execution scalability, we expose the model to coding workflows instantiated through multiple scaffolds, such as OpenHands [58] and SWE-Agent [65]. Such cross-framework trajectory construction allows the model to learn scaffold-invariant problem-solving behaviors rather than overfitting to formats of specific frameworks, thereby improving robustness across diverse execution environments.
+
+Data Curation Pipeline.
+
+Building upon the scalable execution infrastructure, we construct an end-to-end data curation pipeline shown in Figure 9. For SWE tasks, we collect a large corpus of repository-level instances with executable environments [76; 40; 66]. Only executable and verifiable environments are retained through fail-to-pass validation.
+
+Based on curated instances, we leverage multiple code-focused LLMs to automatically generate trajectories across diverse scaffolds. Each rollout is configured with up to 300 turns and a 256K context budget. Only trajectories that successfully resolve the target issue, pass all task-specific test cases, and satisfy strict trajectory-level quality criteria with respect to turn/context constraints and tool-call format validity are retained for SFT.
+
+After trajectory generation, we further enhance a subset of trajectories. We diversify trajectory tool-call schemas while preserving the original chain-of-thought (CoT), tool calls, and observations, thereby improving robustness across diverse agent frameworks. Furthermore, we perform structured trajectory refinement by rewriting the initial step with explicit task-level planning and refining selected subsequent CoT segments. This enhancement strengthens planning capabilities and encourages more structured and deliberate reasoning throughout long-horizon SWE workflows. Additionally, we apply the following data-centric post-processing strategies to further improve trajectory quality and training effectiveness.
+
+• 
+
+Reasoning with Agent-Friendly Template. We recognize reasoning as a fundamental capability underpinning effective agentic problem solving. To effectively integrate reasoning with agentic tool use in coding tasks, we follow the ReAct paradigm and preserve the full reasoning history at every interaction turn. Meanwhile, JSON serialization introduces excessive character escaping and increases formatting fragility, whereas XML naturally supports flat string representations with substantially lower syntactic overhead [56]. We therefore adopt an XML-based tool-use template instead of the conventional JSON-style format. We ensure that all tool invocations throughout the trajectories are represented in XML format, thereby mitigating the format mismatch between training and inference.
+
+Reasoning with Agent-Friendly Template. We recognize reasoning as a fundamental capability underpinning effective agentic problem solving. To effectively integrate reasoning with agentic tool use in coding tasks, we follow the ReAct paradigm and preserve the full reasoning history at every interaction turn. Meanwhile, JSON serialization introduces excessive character escaping and increases formatting fragility, whereas XML naturally supports flat string representations with substantially lower syntactic overhead [56]. We therefore adopt an XML-based tool-use template instead of the conventional JSON-style format. We ensure that all tool invocations throughout the trajectories are represented in XML format, thereby mitigating the format mismatch between training and inference.
+
+• 
+
+Error Masking. We retain but mask erroneous steps in trajectories to prevent the model from learning incorrect actions, following the widely adopted error-masking strategy [13; 19; 55]. Building upon LLM annotations, we further develop a scalable rule-based masking pipeline. A large collection of trajectories is annotated by LLMs to identify representative action-level failure patterns. We then derive error-masking rules calibrated against LLM-generated annotations, enabling erroneous actions to be masked while preserving legitimate diagnostic behaviors, such as test execution and issue reproduction, which may produce abnormal observations but remain essential to the workflow. Empirically, error-masked trajectories yield nearly a 3% improvement over unmasked data, while our rule-based masking pipeline achieves performance comparable to that of LLM-based annotation with substantially higher efficiency and scalability.
+
+Error Masking. We retain but mask erroneous steps in trajectories to prevent the model from learning incorrect actions, following the widely adopted error-masking strategy [13; 19; 55]. Building upon LLM annotations, we further develop a scalable rule-based masking pipeline. A large collection of trajectories is annotated by LLMs to identify representative action-level failure patterns. We then derive error-masking rules calibrated against LLM-generated annotations, enabling erroneous actions to be masked while preserving legitimate diagnostic behaviors, such as test execution and issue reproduction, which may produce abnormal observations but remain essential to the workflow. Empirically, error-masked trajectories yield nearly a 3% improvement over unmasked data, while our rule-based masking pipeline achieves performance comparable to that of LLM-based annotation with substantially higher efficiency and scalability.
+
+Agentic Reinforcement Learning.
+
+To further enhance the coding agent’s capabilities in long-horizon tasks, we introduce agentic reinforcement learning on top of supervised fine-tuning. Stable and effective reinforcement learning relies on scalable training infrastructure, verifiable task environments, and high-quality data with appropriate difficulty. To this end, we integrate our internal Agent Harness and execution environments into Slime [82], building a fully asynchronous and decoupled reinforcement learning infrastructure. This design enables environment interaction, trajectory sampling, and policy updates to run in parallel, thereby supporting stable training on large-scale long-horizon coding tasks. For training data, we first perform difficulty-based task filtering according to the current model’s pass@8 performance, excluding overly simple instances with a pass@8 rate above 0.9 and overly difficult instances with a pass@8 rate below 0.1. For the reward design, we adopt a standard binary verifiable task-completion reward. For optimization, we build upon GRPO [53] and further incorporate training strategies such as TIS [67] and Dynamic Sampling [71] to improve sampling efficiency and training stability in long-horizon interaction scenarios. In addition, we remove standard-deviation normalization from advantage computation and adopt prompt-level loss aggregation [34; 71; 26]. With the above infrastructure, data-filtering mechanism, verifiable reward design, and optimization strategies, reinforcement learning consistently delivers stable performance gains for coding agents.
+
+4.7Claw Agent RL
+
+Claw Agent trains an autonomous agent expert for complex multi-step tasks in isolated sandbox environments. Unlike the tool-use agent setting, which focuses on structured API-style function invocation, Claw Agent targets environment-interactive tasks: the model must reason over multi-turn observations, invoke tools in context, handle execution feedback, and complete tasks whose success is determined by verifiable sandbox outcomes. This setting emphasizes long-horizon decision making and end-to-end task completion rather than single-turn tool usage accuracy.
+
+We formulate each task as a partially observable multi-turn decision process. A trajectory 
+𝜏
+ consists of interleaved model-generated tokens, tool calls, harness responses, and optional final answers, and receives a scalar reward 
+𝑅
+​
+(
+𝜏
+)
+ from task verification. Claw Agent is organized around a stateful agent loop with transitions Pending 
+→
+ Generating 
+→
+ Processing_Tools 
+→
+ Terminated, supporting dozens of assistant turns per trajectory as well as parallel execution of multiple tool calls within a single turn. To preserve clean optimization signals, Claw Agent applies token-level response masking so that only model-generated tokens contribute to the policy gradient, while harness-returned content is excluded.
+
+Data Pipeline.
+
+Training data is constructed from a curated collection of real-world analytical tasks paired with sandbox-based verification environments. To improve both coverage and difficulty diversity, we combine tasks from multiple categories spanning a range of complexity levels. The resulting dataset contains two complementary splits: a difficulty-mixed split emphasizing more challenging analytical tasks, and an easy-case split used for curriculum-style bootstrapping.
+
+Each sample provides a structured task specification including: (1) a system prompt and a user prompt, (2) task-specific resource provisioning for required dependencies, (3) a per-sample harness schema injected at inference time, (4) a check_list specifying verification criteria and reward weights, and (5) ground-truth references. The per-sample harness schema enables fine-grained control over the capabilities exposed to the agent for different task types, improving flexibility and operational safety. It also simplifies the integration of heterogeneous tasks into a unified training pipeline, since tool availability, verification logic, and resource access can all be configured at the sample level.
+
+Claw Agent Reinforcement Learning.
+
+Claw Agent is trained with GRPO using group-wise advantage normalization. For each task prompt, we sample a group of independent trajectories and compute the advantage for trajectory 
+𝑖
+ as:
+
+where 
+𝑅
+𝑖
+ denotes the task-completion reward obtained via asynchronous verification, and 
+𝜇
+𝑔
+ and 
+𝜎
+𝑔
+ are the mean and standard deviation of rewards within the sampled group. This removes the need for a learned value critic while providing a stable relative baseline for policy optimization. A KL penalty with respect to a reference policy is additionally incorporated to limit excessive policy drift and stabilize training.
+
+Training is performed on Claw expert using a distributed setup spanning multiple nodes with tensor, pipeline, and expert parallelism. The framework supports very long contexts to accommodate long-horizon agent trajectories, while rollout generation is executed asynchronously to improve GPU utilization and reduce stalls caused by environment-side latency.
+
+To further improve credit assignment in long-horizon interactions, Claw Agent introduces a token-level credit assignment mechanism that modulates gradient contributions within each trajectory. Concretely, token-level policy updates are reweighted according to their structural role in the interaction sequence, such as action generation, tool selection, intermediate reasoning, and final answer synthesis. This allows optimization to place greater emphasis on outputs more strongly associated with successful task completion, rather than treating all generated tokens as equally informative.
+
+4.8Multi-Teacher On-Policy Distillation (MOPD)
+
+Post-training, and reinforcement learning in particular, has become the primary lever for advancing a base model’s intelligence and per-domain capability. Fusing multiple such capabilities into a single generalist, however, remains a hard problem. Reinforcement learning on a heterogeneous reward mixture, whether staged or jointly mixed, is prone to a pronounced see-saw effect, where gains on one capability are routinely offset by regressions on others. It is also expensive: sequencing the specialists imposes a strict dependency chain, and jointly mixing them enlarges the reward stack that must be served at every optimization step. To address both issues, we adopt Multi-Teacher On-Policy Distillation (MOPD): each training sample is routed to the domain specialist that has already mastered it, and the student is supervised directly on its own rollouts through a token-level reverse-KL objective. Relative to mixed-reward RL, this replaces a heterogeneous reward stack with a homogeneous, dense distillation signal, allowing new domains to be folded into the student without eroding those already fused.
+
+Objective.
+
+Let 
+𝜋
+𝜃
+ be the student and 
+𝜋
+𝑇
+𝑘
+ the frozen specialist for domain 
+𝑘
+. Each training sample carries a routing key teacher_route that deterministically selects its supervising teacher. MOPD minimizes a routed mixture of token-level reverse-KL distillation losses computed on the student’s own rollouts:
+
+To make Eq. (3) tractable, we estimate the reverse KL with a single-sample 
+𝑘
+1
+ estimator and optimize a clipped policy-gradient surrogate on top of it that corrects for the asynchronous rollout-to-training drift induced by our vLLM inference engine; the full derivation and the magnitude-preserving monitoring quantity 
+ℒ
+abs
+ we log alongside are deferred to Appendix B. Gradients flow only through the student 
+𝜋
+𝜃
+; the routed teacher 
+𝜋
+𝑇
+𝑘
+ is frozen and provides the soft target.
+
+Training configuration.
+
+The production MOPD run fuses more than ten specialists spanning three categories: Reasoning RL, General RL, and Agent RL. Domains are mixed in a strict 
+1
+:
+1
+ ratio so that no single capability dominates the gradient signal. The key training hyper-parameters are collected in Table 1, with one detail worth highlighting: following the Early Stopping Rollout strategy of Ziheng et al. [84], we deliberately cap max_response_length at 
+8
+K tokens even for long-form math, code, and deep-search. Empirically this shortens each rollout step, lowers vLLM KV-cache pressure, and cuts total GPU hours substantially, while matching or exceeding runs with much longer response budgets on several domains.
+
+Convergence and results.
+
+Throughout the run we monitor two signals: (i) the teacher–student top-
+𝐾
+ token overlap rate, a direct proxy for how aligned the student’s decoding has become with the teacher, and (ii) the pair of loss quantities 
+ℒ
+abs
+ (magnitude-preserving, not back-propagated) and 
+ℒ
+distill
+ (the optimized clipped surrogate) defined in Appendix B. Figure 11 shows a representative pilot on the tool-agent domain: the top-
+𝐾
+ overlap rate climbs monotonically from 
+0.73
+ at initialisation to 
+0.84
+, evidencing that the student’s decoding progressively aligns with the teacher. Figure 12 then shows the two loss curves on the multi-task production run: both decrease monotonically without divergent spikes and settle at 
+ℒ
+abs
+≈
+0.05
+ and 
+ℒ
+distill
+≈
+0.01
+ within roughly 
+60
+ optimization steps, indicating stable convergence under the routed multi-teacher signal. Two design choices adopted from single-teacher pilots carry into this production run: (a) matching the teacher’s parameter count to the student yields a markedly higher overlap rate than a substantially larger teacher, at no measurable loss in final quality – an observation also reported by Li et al. [32]; and (b) training on prompts the teacher itself had seen further raises overlap and improves the final student. The detailed numerical impact of MOPD on every targeted capability is reported in Section 5.
+
+(a) Monitoring quantity 
+ℒ
+abs
+.
+
+(b) Back-propagated quantity 
+ℒ
+distill
+.
+
+4.9Hybrid Median-length Policy Optimization (HMPO)
+
+Why token efficiency.
+
+The MOPD stage (Section 4.8) fuses all per-domain specialists into a single generalist, but it inherits a well-known side effect of strong CoT reasoning models [60; 21; 16]: overthinking [9; 54], in which the fused model produces reasoning chains far longer than a task requires, inflating inference latency and serving cost without commensurate accuracy gains. We therefore add a final token-efficiency stage that takes the MOPD checkpoint as input and produces the deployed model as output: its sole objective is to compress generation length while preserving, rather than trading away, accuracy.
+
+Method: HMPO.
+
+To this end we apply HMPO (Hybrid Median-length Policy Optimization) [77], a cost-effective single-stage RL framework that, unlike prior length-control methods relying on rigid manual budgets or expensive multi-stage pruning, dynamically derives a group-adaptive budget 
+𝑏
+ from the median length of correct rollouts and applies a length-aware token reward. As illustrated in Figure 13, HMPO builds on GRPO and its only change is to redesign the rollout reward 
+𝑅
+𝑖
+ to be budget-aware, through three components.
+
+(1) Adaptive median budget. Static budgets ignore difficulty and prior-rollout estimation is costly, so we set the budget to the median length of the correct rollouts in the group, 
+𝑏
+=
+median
+​
+(
+{
+𝑛
+𝑖
+∣
+𝑖
+∈
+𝒞
+}
+)
+. This isolates the length signal from failed traces, is difficulty-aware (a harder query yields longer correct rollouts and thus a looser 
+𝑏
+), and self-tightens as the policy improves—an implicit curriculum with zero tuning.
+
+(2) Cosine-decay token reward. A naive penalty invites reward hacking, so we reward only correct traces shorter than 
+𝑏
+ with a smooth landing,
+
+(3) Multiplicative composition. 
+𝑅
+final
+=
+𝑅
+acc
+⋅
+𝑅
+token
+ enforces a strict correctness-first, length-second hierarchy: incorrect or over-budget traces receive exactly zero reward, denying efficiency gradients to wrong answers, whereas additive combination would still pay verbose-but-correct trajectories. By avoiding any auxiliary stage, the single-pass run uses 
+1.5
+×
+–
+2.5
+×
+ fewer GPU-hours than multi-stage baselines.
+
+Training configuration.
+
+We run HMPO on a compact subset of roughly 6.5K high-quality mathematics problems, deliberately mixing samples of varying difficulty and reasoning-chain length so that the group-adaptive budget is exposed to a broad spectrum of correct-rollout lengths. using a group size of 
+𝐺
+=
+10
+ rollouts per query and a reward offset of 
+𝜆
+=
+0.8
+. Notably, although training is conducted only on mathematics, the learned length-control behavior generalizes to unseen domains—code generation, science QA, and instruction following—indicating that HMPO instills a general “answer as concisely as correctness allows” policy rather than a math-specific shortcut.
+
+5Experimental Results
+
+5.1Overall Results
+
+We evaluate Mach-Mind-4-Flash against a broad set of open- and closed-weight baselines spanning a wide activated-parameter range: trillion-scale MoE models (Kimi-K2.5-1T-A32B [57]), MiMo-V2-Flash-309B-A15B [64] 
+∼
+120B models (Qwen3.5-122B-A10B [48], Nemotron-3-Super-120B-A12B [6]), and compact 
+≤
+35B models (Qwen3.5-35B-A3B [48], GLM-4.7-Flash-30B-A3B [56]). To ensure a self-consistent comparison, we use our own evaluation harness under identical decoding settings for all models; official numbers are adopted when available, and our reproduced values are used otherwise. The benchmark suite covers eight capability axes: reasoning & knowledge, instruction following, writing, safety, tool-use, code agent ability, DeepSearch and OpenClaw. For Reasoning & Knowledge, math benchmarks are evaluated with avg@32 and other benchmarks with avg@4.
+
+Reasoning and Knowledge.
+
+We probe reasoning and knowledge with competition mathematics (AIME’25, AIME’26) [72; 73], contamination-resistant code generation (LiveCodeBench-V6) [22], and graduate-level science (GPQA-Diamond) [50]. The headline result is on competition math: Mach-Mind-4-Flash scores 92.70 on AIME’26 and 92.08 on AIME’25, matching the 
+∼
+120B Qwen3.5-122B-A10B (91.67) and narrowing the gap to trillion-scale Kimi-K2.5 (93.30) to under one point—strong evidence that aggressive post-training compression does not sacrifice multi-step reasoning depth. On code generation it reaches 80.91 on LiveCodeBench-V6, ahead of all same-scale models and trailing only Step-3.5-Flash and Kimi-K2.5. GPQA-Diamond (83.08) tells a similar story: competitive with 120B-class baselines despite 30
+×
+ fewer activated parameters.
+
+Instruction Following and Writing.
+
+We assess instruction following with IFEval [79] (verifiable constraints), IFBench [46] (held-out, out-of-domain constraints), and our in-house LexInstructEval [51], which uses a rule-based programmatic engine to verify compliance with compositional lexical constraints without LLM-as-a-judge bias. Open-ended generation is evaluated on WritingBench [62], spanning 6 primary and 100 fine-grained domains with instance-specific multi-dimensional criteria. Instruction following is the model’s standout strength: Mach-Mind-4-Flash tops all three benchmarks with IFEval 94.64, IFBench 82.82, and LexInstructEval 74.63. The IFBench lead is especially telling—many baselines that score well on IFEval drop sharply on held-out constraints, indicating overfitting to known templates rather than genuine constraint comprehension. On WritingBench, Mach-Mind-4-Flash reaches 74.61, on par with Qwen3.5-122B (74.80) and ahead of most same-scale models.
+
+Safety.
+
+We design Content-SafetyBench and Behavioral-SafetyBench for evaluating LLM safety. Content-SafetyBench is constructed from safety evaluation data accumulated through extensive internal testing, while Behavioral-SafetyBench is built from internal evaluation data and further augmented with representative scenarios derived from Agent-SafetyBench [75], providing complementary coverage of content-level and behavior-level safety risks. Safety is another clear strength of Mach-Mind-4-Flash: it tops both benchmarks, reaching 98.20 on Content-SafetyBench and 80.74 on Behavioral-SafetyBench. The Behavioral-SafetyBench result is particularly striking—Mach-Mind-4-Flash leads the runner-up (Kimi-K2.5, 67.75) by around 13 points, while most baselines fall in the 20–35 range, revealing that behavior-level safety under agentic settings remains an unsolved challenge for the field and a distinctive advantage of our model.
+
+Tool Use and Code Agent.
+
+We evaluate tool-use ability with BFCL-v4 [43] (tool calling) and 
+𝜏
+2
+-bench [2] (multi-turn decentralized control), and code agent ability with SWE-bench Verified [66] (repository-level issue resolution). On BFCL-v4, Mach-Mind-4-Flash scores 75.80, outperforming all same-scale 35B models (Qwen3.5-35B 67.30, GLM-4.7-Flash 68.40) and matching the current SOTA MiMo-V2-Flash (76.30), while surpassing much larger models including Qwen3.5-122B (72.20) and Kimi-K2.5 (74.50). On 
+𝜏
+2
+-bench it reaches 80.04, substantially ahead of Kimi-K2.5 (72.82) and Qwen3.5-122B (79.50), indicating strong multi-turn coordination ability. On SWE-bench Verified it scores 70.60, comparable to Qwen3.5-122B (72.00) and trailing only models with dedicated SWE optimization pipelines.
+
+Deep Search.
+
+We assess deep-search ability with BrowseComp / BrowseComp-zh [59; 80] and X-Bench [8] (persistent multi-constraint web browsing). Mach-Mind-4-Flash tops BrowseComp-zh at 72.31, ahead of Qwen3.5-122B (70.30) and Kimi-K2.5 (71.28), and remains competitive on English BrowseComp (61.70) and X-Bench (65.00). This axis shows the sharpest divide across all baselines: weaker models collapse below 45 points, confirming that long-horizon web browsing with constraint tracking remains an unsolved bottleneck for the field.
+
+Claw Agent.
+
+We assess broader autonomous-agent competence with three OpenClaw benchmarks: ClawBench [74] (everyday online tasks), ClawEval [70] (trustworthy agent evaluation with trajectory-transparent grading), and PinchBench (coding agents in an agentic loop). Mach-Mind-4-Flash scores 84.20 on ClawBench (pass@3) and 69.49 on ClawEval. On ClawBench it outperforms Kimi-K2.5 (82.20) and Step-3.5-Flash (83.97), trailing only Qwen3.5-122B (85.11). On ClawEval it trails Kimi-K2.5 (74.90) but outperforms Qwen3.5-122B (68.20) and all other baselines. On PinchBench it scores 74.90, trailing the larger Kimi-K2.5 (79.60) and Qwen3.5-122B (80.60) but ahead of all same-scale models.
+
+5.2Effect of Expert Training and MOPD Fusion
+
+To validate the effectiveness of our post-training pipeline, we report the performance progression from the SFT base model, through domain-specific expert teachers, to the final MOPD-fused model across our three RL tracks: Reasoning, General, and Agent. Results are summarized in Table 3.
+
+Reasoning.
+
+The Reasoning RL expert improves LiveCodeBench-V6 from 79.39 (SFT base) to 80.23. After MOPD fusion, the fused model achieves 80.12, on par with the specialist. Notably, ablation experiments show that removing the Reasoning expert from the MOPD teacher pool causes a 2–4% drop on reasoning benchmarks, confirming that this expert serves as a critical anchor preventing capability regression during multi-domain fusion. Detailed ablations are deferred to Appendix C.
+
+General.
+
+The General RL expert delivers substantial gains over the SFT base, lifting IFBench from 72.79 to 82.65 (+9.86) and IFEval from 92.42 to 94.64. After MOPD fusion, these gains are fully retained: the fused model reaches 94.84 on IFEval, 82.92 on IFBench, and 75.63 on LexInstructEval, matching or marginally exceeding the expert on all instruction-following benchmarks and confirming that multi-teacher distillation introduces no dilution on this axis.
+
+Agent.
+
+The Agent RL experts improve over the SFT base on their respective tasks: the Code Agent expert reaches 73.80 on SWE-bench Verified (+4.80), while the Claw Agent expert achieves 77.10 on PinchBench (+2.79). After MOPD fusion, SWE-bench retains most of the gain at 71.10, with a small gap ( 2.7 points) reflecting the challenge of preserving highly specialized long-horizon behaviors during multi-domain distillation. Interestingly, the MOPD-fused model surpasses individual Agent experts on ClawBench (83.20 vs. 80.30) and ClawEval (70.35 vs. 67.23). We attribute this to cross-domain transfer: capabilities from the tool-use, instruction-following, and reasoning experts complement the Claw Agent specialist, providing stronger general reasoning that benefits open-ended autonomous tasks.
+
+Summary.
+
+Across the three tracks, we observe three distinct fusion outcomes: (1) capability anchoring for Reasoning, where the expert prevents regression during fusion; (2) full retention for General, where the fused model matches the expert; and (3) mixed results for Agent, combining partial retention on SWE with positive transfer on OpenClaw. This validates the MOPD design: instead of the see-saw degradation typical of mixed-RL training, on-policy distillation from routed experts consolidates diverse capabilities with minimal interference and occasional synergy.
+
+5.3Token efficient (HMPO)
+
+To contextualize HMPO’s practical value, Figure 14 plots accuracy versus average tokens per trajectory on AIME’26. Beyond self-improvement, Mach-Mind-4-Flash fundamentally reshapes the Pareto frontier against substantially larger frontier models. It decisively outperforms Nemotron-3-Super-120B-A12B (89.90% at 13.4K) and delivers performance highly competitive with massive models like Kimi-K2.5-1T-A32B (93.30% at 16.6K). This demonstrates that HMPO enables reasoning models to punch significantly above their weight class, delivering top-tier mathematical performance at a fraction of the frontier inference cost.
+
+6Limitation and Future Work
+
+In this work, we have presented Mach-Mind-4-Flash, a 35B MoE model that achieves frontier-level performance through a specialization-then-integration post-training pipeline. The capabilities of Mach-Mind-4-Flash mainly come from three sources: the strong initialization provided by Qwen3.5-35B-A3B, a scalable training infrastructure that supports parallel expert development with operator-level acceleration, and Multi-Teacher On-Policy Distillation that consolidates heterogeneous expert capabilities into a single deployable model without the see-saw degradation of mixed-reward RL.
+
+In our effort to push a compact model toward trillion-parameter-level performance, we identified several remaining challenges. First, MOPD fusion introduces a small but consistent gap on extremely long-horizon tasks such as repository-level software engineering, where scaffold-specific behaviors are partially smoothed during distillation. Second, our token-efficiency method (HMPO) currently targets single-turn reasoning; extending budget-aware compression to multi-turn agentic trajectories—where the model must allocate effort across dozens of tool-call turns—remains an open problem. Third, persistent multi-constraint web browsing (DeepSearch) and long-context comprehension remain the weakest axes for compact models, suggesting that scaling the agent horizon alone is insufficient without also improving the model’s ability to maintain coherent state over very long interactions. In future work, we will focus on turn-aware token efficiency for agentic settings, improved distillation strategies that better preserve long-horizon expert behaviors, and multimodal extensions that enable visual grounding and GUI interaction within the same post-training framework.
+
+7Contributions
+
+Core Contributions.
+
+Hongxu Chen, Xingru Chen, Baolan Gao, Maokui He, Jiaxin Li, Hao Ma1, Ziyu Peng, Xiaoyang Qu, Huimin Ren, Ming Song, Tong Sun, Zhaohong Sun, Wenqi Tang, Heqing Wang, Xin Wang, Ze Wang, Qifang Wu, Qiran Xu, Shuling Yang1, Shengyu Yao, Jiqing Zhan1, Hu Zhang, Qi Zhang, Rongbin Zhang, Minghui Zheng, Chunpeng Zhou, Xin Zhou1, Yawei Zhou, Jiaxu Zhu, Xuhan Zhu, Yun Zhu
+
+Contributions.
+
+Jianhang Chen2, Jiawei Chen1, Chaoqun Du, Wuxuan Gong1, Chenhe Gu, Feng Gu, Jiabang He, Jinkun Hou2, Miao Huang, Yan Liang2, Yunze Lin, Chaofan Liu2, Zhuo Liu2, Chen Lu, Denghui Lu, Chang Ren, Weidong Shi, Xintian Shen1, Tianyu Zhang2, Motong Zhang2, Yu Zhang, Linhui Yu2, Yuwen Wang2, Qian Xiong, Jiale Zhao2, Linhui Zhou2
+
+Project Leaders.
+
+Hongliang Chen, Zhichao Wang, Lian Wen, Hongsheng Xin, Pengfei Yu, Kaike Zhang1
+
+Supervisors.
+
+Kun Zhan, Bing Zhang, Pan Zhou
+
+References
+
+Y. Bai, S. Kadavath, S. Kundu, A. Askell, J. Kernion, A. Jones, A. Chen, A. Goldie, A. Mirhoseini, C. McKinnon, et al. (2022)	Constitutional ai: harmlessness from ai feedback.arXiv preprint arXiv:2212.08073.Cited by: §2.3, §4.3.
+
+V. Barres, H. Dong, S. Ray, X. Si, and K. Narasimhan (2025)	
+𝜏
+2
+-bench: evaluating conversational agents in a dual-control environment.arXiv preprint arXiv:2506.07982.Cited by: §5.1.
+
+E. M. Bender, T. Gebru, A. McMillan-Major, and S. Shmitchell (2021)	On the dangers of stochastic parrots: can language models be too big?.In Proceedings of the 2021 ACM Conference on Fairness, Accountability, and Transparency,pp. 610–623.Cited by: §4.3.
+
+R. Bommasani, D. A. Hudson, E. Adeli, R. Altman, S. Arora, S. von Arx, M. S. Bernstein, J. Bohg, A. Bosselut, E. Brunskill, et al. (2021)	On the opportunities and risks of foundation models.arXiv preprint arXiv:2108.07258.Cited by: §4.3.
+
+R. Cao et al. (2026)	Qwen3-coder-next technical report.arXiv preprint arXiv:2603.00729.External Links: LinkCited by: §2.1.
+
+A. Chandiramani, A. Blakeman, A. Olaoye, A. Gupta, A. Somasamudramath, A. Khattar, A. Adesoba, A. Renduchintala, A. Asif, A. Agrawal, et al. (2026)	Nemotron 3 super: open, efficient mixture-of-experts hybrid mamba-transformer model for agentic reasoning.arXiv preprint arXiv:2604.12374.Cited by: §5.1.
+
+A. Chen et al. (2025)	MiniMax-m1: scaling test-time compute efficiently with lightning attention.arXiv preprint arXiv:2506.13585.External Links: LinkCited by: §2.3.
+
+K. Chen, Y. Ren, Y. Liu, X. Hu, H. Tian, T. Xie, F. Liu, H. Zhang, H. Liu, Y. Gong, et al. (2025a)	Xbench: tracking agents productivity scaling with profession-aligned real-world evaluations.arXiv preprint arXiv:2506.13651.Cited by: §5.1.
+
+X. Chen, J. Xu, T. Liang, Z. He, J. Pang, D. Yu, L. Song, Q. Liu, M. Zhou, Z. Zhang, et al. (2025b)	Do not think that much for 2+ 3=? on the overthinking of long reasoning models.In Forty-second International Conference on Machine Learning,Cited by: §4.9.
+
+P. F. Christiano, J. Leike, T. Brown, M. Martic, S. Legg, and D. Amodei (2017)	Deep reinforcement learning from human preferences.In Advances in Neural Information Processing Systems,Vol. 30.Cited by: §4.3.
+
+DeepSeek-AI (2026)	DeepSeek-v4: towards highly efficient million-token context intelligence.arXiv preprint arXiv:2606.19348.External Links: LinkCited by: §2.3.
+
+S. Gehman, S. Gururangan, M. Sap, Y. Choi, and N. A. Smith (2020)	RealToxicityPrompts: evaluating neural toxic degeneration in language models.In Findings of the Association for Computational Linguistics: EMNLP 2020,pp. 3356–3369.Cited by: §4.3.
+
+GLM-5-Team, :, A. Zeng, X. Lv, Z. Hou, Z. Du, Q. Zheng, B. Chen, D. Yin, C. Ge, C. Huang, C. Xie, C. Zhu, C. Yin, C. Wang, G. Pan, H. Zeng, H. Zhang, H. Wang, H. Chen, J. Zhang, J. Jiao, J. Guo, J. Wang, J. Du, J. Wu, K. Wang, L. Li, L. Fan, L. Zhong, M. Liu, M. Zhao, P. Du, Q. Dong, R. Lu, Shuang-Li, S. Cao, S. Liu, T. Jiang, X. Chen, X. Zhang, X. Huang, X. Dong, Y. Xu, Y. Wei, Y. An, Y. Niu, Y. Zhu, Y. Wen, Y. Cen, Y. Bai, Z. Qiao, Z. Wang, Z. Wang, Z. Zhu, Z. Liu, Z. Li, B. Wang, B. Wen, C. Huang, C. Cai, C. Yu, C. Li, C. Hu, C. Zhang, D. Zhang, D. Lin, D. Yang, D. Wang, D. Ai, E. Zhu, F. Yi, F. Chen, G. Wen, H. Sun, H. Zhao, H. Hu, H. Zhang, H. Liu, H. Zhang, H. Peng, H. Tai, H. Zhang, H. Liu, H. Wang, H. Yan, H. Ge, H. Liu, H. Chu, J. Zhao, J. Wang, J. Zhao, J. Ren, J. Wang, J. Zhang, J. Gui, J. Zhao, J. Li, J. An, J. Li, J. Yuan, J. Du, J. Liu, J. Zhi, J. Duan, K. Zhou, K. Wei, K. Wang, K. Luo, L. Zhang, L. Sha, L. Xu, L. Wu, L. Ding, L. Chen, M. Li, N. Lin, P. Ta, Q. Zou, R. Song, R. Yang, S. Tu, S. Yang, S. Wu, S. Zhang, S. Li, S. Li, S. Fan, W. Qin, W. Tian, W. Zhang, W. Yu, W. Liang, X. Kuang, X. Cheng, X. Li, X. Yan, X. Hu, X. Ling, X. Fan, X. Xia, X. Zhang, X. Zhang, X. Pan, X. Zou, X. Zhang, Y. Liu, Y. Wu, Y. Li, Y. Wang, Y. Zhu, Y. Tan, Y. Zhou, Y. Pan, Y. Zhang, Y. Su, Y. Geng, Y. Yan, Y. Tan, Y. Bi, Y. Shen, Y. Yang, Y. Li, Y. Liu, Y. Wang, Y. Li, Y. Wu, Y. Zhang, Y. Duan, Y. Zhang, Z. Liu, Z. Jiang, Z. Yan, Z. Zhang, Z. Wei, Z. Chen, Z. Feng, Z. Yao, Z. Chai, Z. Wang, Z. Zhang, B. Xu, M. Huang, H. Wang, J. Li, Y. Dong, and J. Tang (2026)	GLM-5: from vibe coding to agentic engineering.External Links: 2602.15763, LinkCited by: §2.1, 2nd item.
+
+F. Gloeckle et al. (2024)	Better & faster large language models via multi-token prediction.arXiv preprint arXiv:2404.19737.External Links: LinkCited by: §2.3.
+
+A. Golubev et al. (2025)	Training long-context, multi-turn software engineering agents with reinforcement learning.arXiv preprint arXiv:2508.03501.External Links: LinkCited by: §2.2.
+
+D. Guo, D. Yang, H. Zhang, J. Song, P. Wang, Q. Zhu, R. Xu, R. Zhang, S. Ma, X. Bi, et al. (2025)	Deepseek-r1: incentivizing reasoning capability in llms via reinforcement learning.arXiv preprint arXiv:2501.12948.Cited by: §2.2, §4.9.
+
+J. He et al. (2025)	Skywork open reasoner 1 technical report.arXiv preprint arXiv:2505.22312.External Links: LinkCited by: §2.2.
+
+J. Hong, N. Lee, and J. Thorne (2024)	ORPO: monolithic preference optimization without reference model.arXiv preprint arXiv:2403.07691.External Links: LinkCited by: §2.2.
+
+A. Huang et al. (2026)	Step 3.5 flash: open frontier-level intelligence with 11b active parameters.arXiv preprint arXiv:2602.10604.External Links: LinkCited by: §2.1, 2nd item.
+
+H. Inan et al. (2023)	Llama guard: llm-based input-output safeguard for human-ai conversations.arXiv preprint arXiv:2312.06674.External Links: LinkCited by: §2.3.
+
+A. Jaech, A. Kalai, A. Lerer, A. Richardson, A. El-Kishky, A. Low, A. Helyar, A. Madry, A. Beutel, A. Carney, et al. (2024)	Openai o1 system card.arXiv preprint arXiv:2412.16720.Cited by: §4.9.
+
+N. Jain, A. Gu, W. Li, F. Yan, T. Zhang, S. Wang, A. Solar-Lezama, K. Sen, and I. Stoica (2025)	Livecodebench: holistic and contamination free evaluation of large language models for code.In International Conference on Learning Representations,Vol. 2025, pp. 58791–58831.Cited by: §5.1.
+
+H. Jiang et al. (2023a)	LLMLingua: compressing prompts for accelerated inference of large language models.arXiv preprint arXiv:2310.05736.External Links: LinkCited by: §2.3.
+
+H. Jiang et al. (2023b)	LongLLMLingua: accelerating and enhancing llms in long context scenarios via prompt compression.arXiv preprint arXiv:2310.06839.External Links: LinkCited by: §2.3.
+
+C. E. Jimenez, J. Yang, A. Wettig, S. Yao, K. Pei, O. Press, and K. Narasimhan (2023)	SWE-bench: can language models resolve real-world github issues?.arXiv preprint arXiv:2310.06770.External Links: LinkCited by: §2.1.
+
+D. Khatri, L. Madaan, R. Tiwari, R. Bansal, S. S. Duvvuri, M. Zaheer, I. S. Dhillon, D. Brandfonbrener, and R. Agarwal (2025)	The art of scaling reinforcement learning compute for llms.External Links: 2510.13786, LinkCited by: §4.6.
+
+Kimi Team (2025a)	Kimi k1.5: scaling reinforcement learning with llms.arXiv preprint arXiv:2501.12599.External Links: LinkCited by: §2.2.
+
+Kimi Team (2025b)	Kimi k2: open agentic intelligence.arXiv preprint arXiv:2507.20534.External Links: LinkCited by: §2.1.
+
+W. Kwon et al. (2023)	Efficient memory management for large language model serving with pagedattention.In Proceedings of the ACM Symposium on Operating Systems Principles,External Links: LinkCited by: §2.3.
+
+M. Li et al. (2023)	API-bank: a comprehensive benchmark for tool-augmented llms.arXiv preprint arXiv:2304.08244.External Links: LinkCited by: §2.1.
+
+S. Li, J. Zhao, H. Ren, Z. Wei, Y. Zhou, J. Yang, S. Liu, K. Zhang, and C. Wei (2026a)	Rubrichub: a comprehensive and highly discriminative rubric dataset via automated coarse-to-fine generation.In Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers),pp. 31320–31344.Cited by: §4.2, §4.2.
+
+Y. Li, Y. Zuo, B. He, J. Zhang, C. Xiao, C. Qian, T. Yu, H. Gao, W. Yang, Z. Liu, et al. (2026b)	Rethinking on-policy distillation of large language models: phenomenology, mechanism, and recipe.arXiv preprint arXiv:2604.13016.Cited by: §4.8.
+
+A. Liu, A. Mei, B. Lin, B. Xue, B. Wang, B. Xu, B. Wu, B. Zhang, C. Lin, C. Dong, et al. (2025a)	Deepseek-v3.2: pushing the frontier of open large language models.arXiv preprint arXiv:2512.02556.Cited by: §4.5.
+
+Z. Liu, C. Chen, W. Li, P. Qi, T. Pang, C. Du, W. S. Lee, and M. Lin (2025b)	Understanding r1-zero-like training: a critical perspective.External Links: 2503.20783, LinkCited by: §4.6.
+
+J. Lu et al. (2025)	ToolSandbox: a stateful, conversational, interactive evaluation benchmark for llm tool use.In Findings of the Association for Computational Linguistics: NAACL,External Links: LinkCited by: §2.1.
+
+Y. Meng et al. (2024)	SimPO: simple preference optimization with a reference-free reward.arXiv preprint arXiv:2405.14734.External Links: LinkCited by: §2.2.
+
+W. Modecrua et al. (2026)	Multi-turn reinforcement learning for tool-calling agents with iterative reward calibration.arXiv preprint arXiv:2604.02869.External Links: LinkCited by: §2.2.
+
+T. Mu et al. (2024)	Rule based rewards for language model safety.arXiv preprint arXiv:2411.01111.External Links: LinkCited by: §2.3.
+
+R. Nakano, J. Hilton, S. Balaji, J. Wu, L. Ouyang, C. Kim, C. Hesse, S. Jain, V. Kosaraju, W. Saunders, et al. (2021)	WebGPT: browser-assisted question-answering with human feedback.arXiv preprint arXiv:2112.09332.Cited by: §4.3.
+
+J. Naman, S. Jaskirat, S. Manish, Z. Liang, S. Koushik, and S. Ion (2025)	R2E-gym: procedural environment generation and hybrid verifiers for scaling open-weights swe agents.External Links: xxx.xxxx, LinkCited by: §4.6.
+
+L. Ouyang, J. Wu, X. Jiang, D. Almeida, C. Wainwright, P. Mishkin, C. Zhang, S. Agarwal, K. Slama, A. Ray, et al. (2022)	Training language models to follow instructions with human feedback.In Advances in Neural Information Processing Systems,Vol. 35, pp. 27730–27744.Cited by: §2.2, §4.3, §4.3.
+
+Z. Pan et al. (2024)	LLMLingua-2: data distillation for efficient and faithful task-agnostic prompt compression.arXiv preprint arXiv:2403.12968.External Links: LinkCited by: §2.3.
+
+S. G. Patil, H. Mao, F. Yan, C. C. Ji, V. Suresh, I. Stoica, and J. E. Gonzalez (2025)	The berkeley function calling leaderboard (bfcl): from tool use to agentic evaluation of large language models.In Forty-second International Conference on Machine Learning,Cited by: §5.1.
+
+S. G. Patil et al. (2024)	Berkeley function calling leaderboard (bfcl).Note: https://gorilla.cs.berkeley.edu/leaderboard.htmlExternal Links: LinkCited by: §2.1.
+
+S. G. Patil, T. Zhang, X. Wang, and J. E. Gonzalez (2023)	Gorilla: large language model connected with massive apis.arXiv preprint arXiv:2305.15334.External Links: LinkCited by: §2.1.
+
+V. Pyatkin, S. Malik, V. Graf, H. Ivison, S. Huang, P. Dasigi, N. Lambert, and H. Hajishirzi (2026)	Generalizing verifiable instruction following.Advances in Neural Information Processing Systems 38.Cited by: §5.1.
+
+Y. Qin et al. (2023)	ToolBench: towards better instruction tuning for tool learning.arXiv preprint arXiv:2307.16789.External Links: LinkCited by: §2.1.
+
+Qwen Team (2026)	Qwen3.5: towards native multimodal agents.External Links: LinkCited by: §4.1, §4, §5.1.
+
+R. Rafailov, A. Sharma, E. Mitchell, S. Ermon, C. D. Manning, and C. Finn (2023)	Direct preference optimization: your language model is secretly a reward model.arXiv preprint arXiv:2305.18290.External Links: LinkCited by: §2.2.
+
+D. Rein, B. L. Hou, A. C. Stickland, J. Petty, R. Y. Pang, J. Dirani, J. Michael, and S. R. Bowman (2023)	Gpqa: a graduate-level google-proof q&a benchmark.arXiv preprint arXiv:2311.12022.Cited by: §5.1.
+
+H. Ren, Y. Liang, B. Su, C. Sun, H. Lu, K. Zhang, and C. Wei (2026)	LexInstructEval: lexical instruction following evaluation for large language models.In Proceedings of the AAAI Conference on Artificial Intelligence,Vol. 40, pp. 25117–25123.Cited by: §4.2, §5.1.
+
+T. Schick, J. Dwivedi-Yu, R. Dessì, R. Raileanu, M. Lomeli, E. Hambro, L. Zettlemoyer, N. Cancedda, and T. Scialom (2023)	Toolformer: language models can teach themselves to use tools.In Advances in Neural Information Processing Systems,Vol. 36.Cited by: §2.1, §4.3.
+
+Z. Shao, P. Wang, Q. Zhu, R. Xu, J. Song, X. Bi, H. Zhang, M. Zhang, Y. K. Li, Y. Wu, and D. Guo (2024)	DeepSeekMath: pushing the limits of mathematical reasoning in open language models.External Links: 2402.03300, LinkCited by: §4.2, §4.6.
+
+Y. Sui, Y. Chuang, G. Wang, J. Zhang, T. Zhang, J. Yuan, H. Liu, A. Wen, S. Zhong, N. Zou, et al. (2025)	Stop overthinking: a survey on efficient reasoning for large language models.arXiv preprint arXiv:2503.16419.Cited by: §4.9.
+
+C. Tao, J. Chen, Y. Jiang, K. Kou, S. Wang, R. Wang, X. Li, S. Yang, Y. Du, J. Dai, Z. Mao, X. Wang, L. Shang, and H. Bai (2026)	SWE-lego: pushing the limits of supervised fine-tuning for software issue resolving.External Links: 2601.01426, LinkCited by: 2nd item.
+
+G. Team, A. Zeng, X. Lv, Q. Zheng, Z. Hou, B. Chen, C. Xie, C. Wang, D. Yin, H. Zeng, J. Zhang, K. Wang, L. Zhong, M. Liu, R. Lu, S. Cao, X. Zhang, X. Huang, Y. Wei, Y. Cheng, Y. An, Y. Niu, Y. Wen, Y. Bai, Z. Du, Z. Wang, Z. Zhu, B. Zhang, B. Wen, B. Wu, B. Xu, C. Huang, C. Zhao, C. Cai, C. Yu, C. Li, C. Ge, C. Huang, C. Zhang, C. Xu, C. Zhu, C. Li, C. Yin, D. Lin, D. Yang, D. Jiang, D. Ai, E. Zhu, F. Wang, G. Pan, G. Wang, H. Sun, H. Li, H. Li, H. Hu, H. Zhang, H. Peng, H. Tai, H. Zhang, H. Wang, H. Yang, H. Liu, H. Zhao, H. Liu, H. Yan, H. Liu, H. Chen, J. Li, J. Zhao, J. Ren, J. Jiao, J. Zhao, J. Yan, J. Wang, J. Gui, J. Zhao, J. Liu, J. Li, J. Li, J. Lu, J. Wang, J. Yuan, J. Li, J. Du, J. Du, J. Liu, J. Zhi, J. Gao, K. Wang, L. Yang, L. Xu, L. Fan, L. Wu, L. Ding, L. Wang, M. Zhang, M. Li, M. Xu, M. Zhao, M. Zhai, P. Du, Q. Dong, S. Lei, S. Tu, S. Yang, S. Lu, S. Li, S. Li, Shuang-Li, S. Yang, S. Yi, T. Yu, W. Tian, W. Wang, W. Yu, W. L. Tam, W. Liang, W. Liu, X. Wang, X. Jia, X. Gu, X. Ling, X. Wang, X. Fan, X. Pan, X. Zhang, X. Zhang, X. Fu, X. Zhang, Y. Xu, Y. Wu, Y. Lu, Y. Wang, Y. Zhou, Y. Pan, Y. Zhang, Y. Wang, Y. Li, Y. Su, Y. Geng, Y. Zhu, Y. Yang, Y. Li, Y. Wu, Y. Li, Y. Liu, Y. Wang, Y. Li, Y. Zhang, Z. Liu, Z. Yang, Z. Zhou, Z. Qiao, Z. Feng, Z. Liu, Z. Zhang, Z. Wang, Z. Yao, Z. Wang, Z. Liu, Z. Chai, Z. Li, Z. Zhao, W. Chen, J. Zhai, B. Xu, M. Huang, H. Wang, J. Li, Y. Dong, and J. Tang (2025)	GLM-4.5: agentic, reasoning, and coding (arc) foundation models.External Links: 2508.06471, LinkCited by: 1st item, §5.1.
+
+K. Team, T. Bai, Y. Bai, Y. Bao, S. Cai, Y. Cao, Y. Charles, H. Che, C. Chen, G. Chen, et al. (2026)	Kimi k2. 5: visual agentic intelligence.arXiv preprint arXiv:2602.02276.Cited by: §5.1.
+
+X. Wang, B. Li, Y. Song, F. F. Xu, X. Tang, M. Zhuge, J. Pan, Y. Song, B. Li, J. Singh, H. H. Tran, F. Li, R. Ma, M. Zheng, B. Qian, Y. Shao, N. Muennighoff, Y. Zhang, B. Hui, J. Lin, R. Brennan, H. Peng, H. Ji, and G. Neubig (2025)	OpenHands: an open platform for AI software developers as generalist agents.In The Thirteenth International Conference on Learning Representations,External Links: LinkCited by: §4.6.
+
+J. Wei et al. (2025)	BrowseComp: a simple yet challenging benchmark for browsing agents.arXiv preprint arXiv:2504.12516.External Links: LinkCited by: §5.1.
+
+J. Wei, X. Wang, D. Schuurmans, M. Bosma, F. Xia, E. Chi, Q. V. Le, D. Zhou, et al. (2022)	Chain-of-thought prompting elicits reasoning in large language models.Advances in neural information processing systems 35, pp. 24824–24837.Cited by: §4.9.
+
+L. Weidinger, J. Mellor, M. Rauh, C. Griffin, J. Uesato, P. Huang, M. Cheng, M. Glaese, B. Balle, A. Kasirzadeh, et al. (2021)	Ethical and social risks of harm from language models.arXiv preprint arXiv:2112.04359.Cited by: §4.3, §4.3.
+
+Y. Wu, J. Mei, M. Yan, C. Li, S. Lai, Y. Ren, Z. Wang, J. Zhang, M. Wu, Q. Jin, et al. (2026)	Writingbench: a comprehensive benchmark for generative writing.Advances in Neural Information Processing Systems 38.Cited by: §5.1.
+
+B. Xiao et al. (2026)	MiMo-v2-flash technical report.arXiv preprint arXiv:2601.02780.External Links: LinkCited by: §2.1.
+
+B. Xiao, B. Xia, B. Yang, B. Gao, B. Shen, C. Zhang, C. He, C. Lou, F. Luo, G. Wang, et al. (2026)	Mimo-v2-flash technical report.arXiv preprint arXiv:2601.02780.Cited by: §5.1.
+
+J. Yang, C. E. Jimenez, A. Wettig, K. Lieret, S. Yao, K. Narasimhan, and O. Press (2024)	SWE-agent: agent-computer interfaces enable automated software engineering.External Links: 2405.15793, LinkCited by: §4.6.
+
+J. Yang, K. Lieret, C. E. Jimenez, A. Wettig, K. Khandpur, Y. Zhang, B. Hui, O. Press, L. Schmidt, and D. Yang (2025)	SWE-smith: scaling data for software engineering agents.External Links: 2504.21798, LinkCited by: §4.6, §5.1.
+
+F. Yao, L. Liu, D. Zhang, C. Dong, J. Shang, and J. Gao (2025)	Your efficient rl framework secretly brings you off-policy rl training.External Links: LinkCited by: §4.6.
+
+S. Yao, N. Shinn, et al. (2024)	
+𝜏
+-Bench: a benchmark for tool-agent-user interaction in real-world domains.arXiv preprint arXiv:2406.12045.External Links: LinkCited by: §2.1.
+
+S. Yao, J. Zhao, D. Yu, N. Du, I. Shafran, K. Narasimhan, and Y. Cao (2023)	ReAct: synergizing reasoning and acting in language models.In International Conference on Learning Representations,Cited by: §2.1, §4.3.
+
+B. Ye, R. Li, Q. Yang, Y. Liu, L. Yao, H. Lv, Z. Xie, C. An, L. Li, L. Kong, et al. (2026)	Claw-eval: towards trustworthy evaluation of autonomous agents.arXiv preprint arXiv:2604.06132.Cited by: §5.1.
+
+Q. Yu, Z. Zhang, R. Zhu, Y. Yuan, X. Zuo, Y. Yue, W. Dai, T. Fan, G. Liu, L. Liu, X. Liu, H. Lin, Z. Lin, B. Ma, G. Sheng, Y. Tong, C. Zhang, M. Zhang, W. Zhang, H. Zhu, J. Zhu, J. Chen, J. Chen, C. Wang, H. Yu, Y. Song, X. Wei, H. Zhou, J. Liu, W. Ma, Y. Zhang, L. Yan, M. Qiao, Y. Wu, and M. Wang (2025)	DAPO: an open-source llm reinforcement learning system at scale.External Links: 2503.14476, LinkCited by: §2.2, §4.6.
+
+Y. Zhang and T. Math-AI (2025)	American invitational mathematics examination (aime) 2025.Cited by: §5.1.
+
+Y. Zhang and T. Math-AI (2026)	American invitational mathematics examination (aime) 2026.Cited by: §5.1.
+
+Y. Zhang, Y. Wang, Y. Zhu, P. Du, J. Miao, X. Lu, W. Xu, Y. Hao, S. Cai, X. Wang, et al. (2026)	ClawBench: can ai agents complete everyday online tasks?.arXiv preprint arXiv:2604.08523.Cited by: §5.1.
+
+Z. Zhang, S. Cui, Y. Lu, J. Zhou, J. Yang, H. Wang, and M. Huang (2024)	Agent-safetybench: evaluating the safety of llm agents.arXiv preprint arXiv:2412.14470.Cited by: §5.1.
+
+J. Zhao, G. Chen, F. Meng, M. Li, J. Chen, H. Xu, Y. Sun, X. Zhao, R. Song, Y. Zhang, P. Wang, C. Chen, J. Wen, and K. Jia (2026)	Immersion in the github universe: scaling coding agents to mastery.External Links: 2602.09892, LinkCited by: §4.6.
+
+M. Zheng, H. Chen, H. Ren, H. Xin, X. Qu, Z. Wang, S. Yang, Z. Peng, K. Zhang, P. Zhou, et al. (2026)	HMPO: hybrid median-length policy optimization for chain-of-thought compression.arXiv preprint arXiv:2606.01934.Cited by: §4.9.
+
+Y. Zhong et al. (2024)	DistServe: disaggregating prefill and decoding for goodput-optimized large language model serving.arXiv preprint arXiv:2401.09670.External Links: LinkCited by: §2.3.
+
+J. Zhou, T. Lu, S. Mishra, S. Brahma, S. Basu, Y. Luan, D. Zhou, and L. Hou (2023)	Instruction-following evaluation for large language models.arXiv preprint arXiv:2311.07911.Cited by: §5.1.
+
+P. Zhou, B. Leon, X. Ying, C. Zhang, Y. Shao, Q. Ye, D. Chong, Z. Jin, C. Xie, M. Cao, et al. (2025)	Browsecomp-zh: benchmarking web browsing ability of large language models in chinese.arXiv preprint arXiv:2504.19314.Cited by: §5.1.
+
+Z. Zhou et al. (2024)	Beyond one-preference-fits-all alignment: multi-objective direct preference optimization.In Findings of the Association for Computational Linguistics: ACL,External Links: LinkCited by: §2.2.
+
+Z. Zhu, C. Xie, X. Lv, and slime Contributors (2025)	Slime: an llm post-training framework for rl scaling.Note: https://github.com/THUDM/slimeGitHub repository. Corresponding author: Xin LvCited by: §4.6.
+
+D. M. Ziegler, N. Stiennon, J. Wu, T. B. Brown, A. Radford, D. Amodei, P. Christiano, and G. Irving (2019)	Fine-tuning language models from human preferences.arXiv preprint arXiv:1909.08593.Cited by: §4.3.
+
+Z. Ziheng, J. Li, H. Tang, Y. N. Wu, and D. Terzopoulos (2026)	Less is more: early stopping rollout for on-policy distillation.arXiv preprint arXiv:2605.27028.Cited by: §4.8.
+
+Appendix
+
+Appendix AAcceleration of the Infra operator
+
+Section 3.3 describes the fused operator leveraged during training for acceleration, which is designed for the MoE MLP module to reduce the communication and computation overhead. This appendix displays the end-to-end acceleration effects of the operator on the Qwen3.5-35B-A3B model under different parallel parameter configurations. As shown in Figure 15, when configured with tp=8, ep=8, the operator accelerates by 2% (656s/step 
+→
+ 642s/step); when configured with tp=4, ep=8, the operator accelerates by 2% (542s/step 
+→
+ 531s/step); when configured with tp=8, ep=4, the operator accelerates by 17% (681s/step 
+→
+ 580s/step). This indicates that the lower the proportion of communication time, the more pronounced the overall acceleration effect of the operator.
+
+Appendix BDerivation of the MOPD Objective
+
+Section 4.8 (Eq. 3) writes the MOPD loss as a routed mixture of token-level reverse KL divergences under the student’s on-policy distribution. This appendix records the three quantities we defer for brevity: the single-sample estimator we use in place of the exact reverse KL, the magnitude-preserving diagnostic we log for monitoring, and the clipped policy-gradient surrogate we actually back-propagate. Throughout, 
+𝜋
+𝜃
+ denotes the current student (training engine), 
+𝜋
+𝑇
+𝑘
+ the frozen teacher for the domain of the sample under a routing key 
+𝑘
+=
+teacher_route
+, and 
+𝑦
+∼
+𝜋
+𝜃
+old
+ a rollout of length 
+|
+𝑦
+|
+ produced by the (asynchronously updated) inference engine. Expectations over 
+(
+𝑥
+,
+𝑘
+)
+∼
+𝒟
+ and over the length 
+|
+𝑦
+|
+ are suppressed to keep the token-level form prominent.
+
+(a) Single-sample 
+𝑘
+1
+ estimator of the reverse KL.
+
+For a single realised token 
+𝑦
+𝑡
+∼
+𝜋
+𝜃
+(
+⋅
+∣
+𝑥
+,
+𝑦
+<
+𝑡
+)
+, Schulman’s low-variance 
+𝑘
+1
+ estimator of the per-token reverse KL is
+
+which is unbiased for 
+𝐷
+KL
+​
+(
+𝜋
+𝜃
+∥
+𝜋
+𝑇
+𝑘
+)
+ when 
+𝑦
+𝑡
+ is drawn from 
+𝜋
+𝜃
+. Because Eq. (5) requires only the two scalars 
+log
+⁡
+𝜋
+𝜃
+​
+(
+𝑦
+𝑡
+∣
+𝑥
+,
+𝑦
+<
+𝑡
+)
+ and 
+log
+⁡
+𝜋
+𝑇
+𝑘
+​
+(
+𝑦
+𝑡
+∣
+𝑥
+,
+𝑦
+<
+𝑡
+)
+ per position, the teacher’s forward pass returns a single log-probability per student-sampled token, and only this per-token scalar is shipped across the teacher
+→
+student boundary; no full-vocabulary distribution or top-
+𝐾
+ list is materialised at loss-computation time. Substituting Eq. (5) into Eq. (3) gives the sampled, tractable form of the MOPD loss.
+
+(b) Magnitude-preserving diagnostic 
+ℒ
+abs
+.
+
+Because the 
+𝑘
+1
+ estimator is signed, its running average can hover near zero even when the token-level teacher
+∥
+student gap is large in both directions; this is desirable for gradient estimation but misleading for monitoring. We therefore log alongside the signed loss a magnitude-preserving diagnostic
+
+with the outer expectation over 
+(
+𝑥
+,
+𝑘
+)
+∼
+𝒟
+ and 
+𝑦
+∼
+𝜋
+𝜃
+old
+. 
+ℒ
+abs
+ is computed under torch.no_grad() and is not back-propagated; it exists purely to give an interpretable, always non-negative summary of teacher
+∥
+student proximity that decreases monotonically as distillation progresses (Figure 12a).
+
+(c) Clipped policy-gradient surrogate 
+ℒ
+distill
+.
+
+Because rollouts are produced asynchronously by an inference engine at parameters 
+𝜃
+old
+ while the training engine has since advanced to 
+𝜃
+, samples are strictly off-policy at the moment of the gradient step. Following the standard PPO correction we treat the negated 
+𝑘
+1
+ estimator as a per-token advantage
+
+compute the (stop-gradient-normalised) importance ratio
+
+and optimize the clipped surrogate
+
+with 
+sg
+⁡
+[
+⋅
+]
+ the stop-gradient operator and 
+𝜖
+=
+0.2
+. Two properties are worth noting. First, when the inference and training engines are synchronised (
+𝜃
+=
+𝜃
+old
+) we have 
+𝜌
+𝑡
+≡
+1
+ and 
+ℒ
+distill
+ collapses to the on-policy MOPD gradient of Eq. (3). Second, tokens on which the training engine has already drifted far from the inference engine (
+𝜌
+𝑡
+ outside 
+[
+1
+−
+𝜖
+,
+ 1
++
+𝜖
+]
+) have their gradient attenuated by the clip, which we find empirically eliminates the loss spikes we observed in an unclipped variant during the first few steps of high-drift domains (tool-agent, deep-search). 
+ℒ
+distill
+ is the quantity actually back-propagated in every training step and is plotted in Figure 12b.
+
+Relation to Eq. 3.
+
+Eqs. (5) and (9) together constitute the sampled, off-policy-corrected estimator of the population objective stated in Eq. (3); Eq. (6) is a non-optimized diagnostic. In the on-policy limit (
+𝜃
+=
+𝜃
+old
+), both 
+ℒ
+abs
+ (up to the sign convention) and 
+ℒ
+distill
+ (up to the clip, inactive at 
+𝜌
+𝑡
+=
+1
+) reduce to the token-level reverse KL that Eq. (3) minimizes.
+
+Appendix CAblations on the Reasoning Expert in MOPD
+
+Before scaling MOPD to the full production run, we ran a progressive teacher-composition study in which teachers were added one domain at a time. The purpose was not merely to select a final recipe, but to expose cross-domain transfer effects (both synergies and conflicts) between task-specific experts. The clearest illustration comes from a pair that differs by a single teacher: one configuration distills from tool-use, IF, and safety teachers; the other extends it with a code teacher, holding every other component fixed. Table 4 reports the two configurations on a subset of evaluation benchmarks.
+
+Adding the code teacher produces the following observations. Reasoning-oriented benchmarks improve substantially: LiveCodeBench-V6 by 
++
+3.81
+, AIME’25 by 
++
+2.30
+, and AIME’26 by 
++
+0.83
+. Non-reasoning axes also improve: Content-SafetyBench (CS-Bench) by 
++
+0.85
+, Behavioral-SafetyBench (BS-Bench) by 
++
+4.06
+, IFEval by 
++
+2.14
+, and IFBench by 
++
+0.55
+. BFCL is essentially unchanged (
++
+0.09
+).
+
+Two lessons emerge, and both directly shape the full production configuration used in the main results. First, code is a load-bearing domain rather than a niche one: despite being intended for code, the code teacher measurably improves mathematical reasoning, instruction following, and safety metrics simultaneously. Notably, no mathematics-specific supervision was included at this stage; the gains on AIME therefore arise purely as cross-domain transfer from code supervision rather than from direct mathematical training. We therefore treat code as a first-class domain in every subsequent MOPD configuration. Second, every capability the practitioner intends to preserve or improve should be represented by at least one teacher in the joint distillation. The A/B comparison above shows that adding a teacher can benefit domains it was not designed to cover, but this positive transfer is not something to be relied upon in advance: whether a given cross-domain interaction is synergistic or competitive is difficult to predict from teacher composition alone, and capabilities left unrepresented risk drifting. We therefore recommend joint representation over reliance on cross-domain transfer from adjacent teachers alone. The two cases above are representative rather than exhaustive; together they provide the empirical basis for the final teacher composition adopted in the main experiments.
