@@ -21,8 +21,8 @@
 
 支撑这个结果的是三件事：可扩展训练基础设施、先专业化后整合的蒸馏融合、不牺牲准确率的token效率。
 
-![](cover.png)
-<span style="font-size:12px;color:rgb(153,153,153);">Figure 1：Mach-Mind-4-Flash在多个能力轴上匹配或超越大得多的模型。仅3B激活参数，就在IFBench、Behavioral-SafetyBench、BrowseComp-zh上领先，在推理、工具使用、智能体编码上与大它3–30倍的模型竞争。</span>
+![](fig00.png)
+<span style="font-size:12px;color:rgb(153,153,153);">Figure 1：Mach-Mind-4-Flash 在多个能力轴上匹配或超越大得多的模型。仅 3B 激活参数，就在 IFBench、Behavioral-SafetyBench、BrowseComp-zh 上领先，在推理、工具使用、智能体编码上与大它 3–30 倍的模型竞争。</span>
 
 ## 基础设施：统一的RL与蒸馏框架
 
