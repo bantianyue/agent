@@ -1,6 +1,6 @@
 要点速览
 
-- 分离部署解决长上下文下的MoE饥饿：共存部署中，Attention受KV-cache容量限制缩小decode batch，导致MoE层的expert GEMM效率大幅下降。Attention-FFN分离部署（AFD）将两个角色拆到不同GPU上，FFN端从多个Attention Worker聚合token，恢复MoE利用率。- GB200 NVL72上的1.35–1.45× 加速：FastAFD在GB200 NVL72上对比调优后的vLLM共存基线，Qwen3-235B和MiniMax-M2.5的每GPU steady-state decode吞吐提升1.35–1.45倍。加速来源是Attention GPU释放expert权重后获得1.5× 的KV-cache容量增益。- 运行时优化层：GPU通信 + 融合内核 + 零开销调度：FastAFD通过DeepEP风格GPU通信、MegaMoE融合内核（dispatch/expert/combine合一）、microbatch流水线、CUDA Graph重放和超前一步调度，将分离部署的通信和同步开销全部隐藏。- Vera Rubin + LPX上可达1.5–2× 加速：基于GB200实测的step分解，FastAFD推测在NVIDIA Vera Rubin + LPX（异质架构）上加速比可升至1.57–1.75×（仅MoE分离）或2× 以上（密集层也分离）。
+- 分离部署解决长上下文下的MoE饥饿：共存部署中，Attention受KV-cache容量限制缩小decode batch，导致MoE层的expert GEMM效率大幅下降。Attention-FFN分离部署（AFD）将两个角色拆到不同GPU上，FFN端从多个Attention Worker聚合token，恢复MoE利用率。- GB200 NVL72上的1.35–1.45× 加速：FastAFD在GB200 NVL72上对比调优后的vLLM共存基线，Qwen3-235B和MiniMax-M2.5的每GPU steady-state decode吞吐提升1.35–1.45倍。加速来源是Attention GPU释放expert权重后获得1.5× 的KV-cache容量增益。- 运行时优化层：GPU通信 + 融合内核 + 零开销调度：FastAFD通过DeepEP风格GPU通信、MegaMoE融合内核（dispatch/expert/combine合一）、microbatch流水线、CUDA Graph重放和超前一步调度，将分离部署的通信和同步开销全部隐藏。- Vera Rubin + LPX上可达1.5–2× 加速：基于GB200实测的step分解，FastAFD推测在NVIDIA Vera Rubin + LPX（异质架构）上加速比可升至1.57–1.75×（仅MoE分离）或2× 以上（密集层也分离）。注：这些数字是基于 GB200 实测比例推算的边界值，并非实际硬件的 benchmark，验证依赖未来硬件可用。
 Rubin + LPX（异质架构）上加速比可升至1.57–1.75×（仅MoE分离）或2× 以上（密集层也分离）。
 离）。
 
@@ -10,7 +10,7 @@ E层
 MoE模型的解码阶段交替执行两种层：Attention层（从KV-cache中计算注意力）和MoE层（将batch中的每个token路由到少量expert）。当请求上下文变长时，每个请求的KV-cache膨胀，占满GPU显存。系统一次迭代能前向的batch size随之缩小，这个缩小的batch直接打击MoE层：token太少，路由到每个expert的token不够，expert GEMM变小且效率骤降，MoE利用率断崖式下跌。
  GEMM变小且效率骤降，MoE利用率断崖式下跌。
 。
-这种不匹配在共存部署中创造了一个根本性矛盾：Attention和MoE层跑在相同的Worker上。每个Worker同时管理KV-cache、计算attention、执行路由、参与expert-parallel dispatch、运行本地expert、combine expert输出。被Admission放行的请求数量既决定attention的工作量，也定义MoE可用的token池。如果attention所选batch够大，两种层都高效；一旦KV-cache将batch压小，MoE先遭殃。
+这种不匹配在共存部署中构成了一种内生矛盾：Attention和MoE层跑在相同的Worker上。每个Worker同时管理KV-cache、计算attention、执行路由、参与expert-parallel dispatch、运行本地expert、combine expert输出。被Admission放行的请求数量既决定attention的工作量，也定义MoE可用的token池。如果attention所选batch够大，两种层都高效；一旦KV-cache将batch压小，MoE先遭殃。
 KV-cache将batch压小，MoE先遭殃。
 遭殃。
 通过在恒定per-rank KV-cache预算下增长上下文长度、缩小decode batch的MFU测量发现：decode attention受HBM带宽束缚，读取相似量的KV-cache使其MFU几乎持平；但MoE FFN的expert GEMM严重依赖当前batch大小：batch小了，每local expert收到的token减少，GEMM变小，MFU因expert权重读取、路由、dispatch的开销无法摊薄而全面下降。
@@ -123,7 +123,7 @@ Figure 10. FastAFD对比vLLM共存基线的per-GPU decode吞吐。Qwen3-235B提�
 Per-GPU decode throughput的加速可以分解为三个因子的乘积：batch expansion（内存容量增益）、FFN-node tax（拓扑损耗）和latency ratio（step延迟比）。Batch expansion来自expert权重被移除后Attention GPU获得的额外KV-cache空间：在所有workload中这个比例为1.5×（Qwen的per-Attention-GPU batch从64→96，MiniMax从48→72）。
 ，MiniMax从48→72）。
 。
-关键洞察是，当FFN侧被完全隐藏时，FastAFD的decode-step period等于attention侧的周期。Attention侧有两部分工作：FMHA（融合多头部attention kernel，HBM带宽绑定）和dense work（密集投影、路由、归一化等小kernel）。FMHA时间随KV流量线性增长（1.5× batch → 1.5× KV流量），而dense work主要跟踪launch次数而非batch大小，所以每个microbatch承担一次这个开销。
+关键在于当FFN侧被完全隐藏时，FastAFD的decode-step period等于attention侧的周期。Attention侧有两部分工作：FMHA（融合多头部attention kernel，HBM带宽绑定）和dense work（密集投影、路由、归一化等小kernel）。FMHA时间随KV流量线性增长（1.5× batch → 1.5× KV流量），而dense work主要跟踪launch次数而非batch大小，所以每个microbatch承担一次这个开销。
 每个microbatch承担一次这个开销。
 。
 FFN侧保持隐藏的条件是关键。MiniMax-M2.5（约10B激活参数）在整个测量范围内stay hidden：其FFN侧完成得比attention更快。Qwen3-235B（22B激活参数）在某个点跨越了边界。平衡不是最优目标：FFN闲置最多浪费了1个节点，而FFN暴露（Tₑ > Tₐ）会减慢每个decode step，后者随M增长而恶化。FastAFD选择运行在Tₑ ≤ Tₐ 的最大M点，用有界闲置换取鲁棒性。
@@ -159,9 +159,9 @@ M切片换来重叠，并将整个decode step保持在CUDA Graph内。
 h内。
 ② **平衡不是正确的目标。** MegaScale-Infer的Tₐ ≈ Tₑ 处在便宜失败模式和昂贵失败模式的边界上。FFN闲置浪费最多1个节点，而FFN暴露减慢每一步且随M增长而恶化。FastAFD选择Tₑ ≤ Tₐ 的最大M值运行，用有界闲置换取鲁棒性。
 ，用有界闲置换取鲁棒性。
-③ **两个microbatch就够了。** mb=2已能隐藏双向通信，mb=3/4只乘以小kernel的开销而不隐藏更多。
+③ **两个microbatch就够了。** 实测表明mb=2已能完全隐藏双向通信，mb=3和4只会成倍增加小kernel的开销而不隐藏更多通信。
 隐藏更多。
-④ **加速来自容量，而非延迟。** FastAFD的decode step时长与 vLLM 持平（延迟比≈1），变化的是每GPU的承载量：Attention GPU卸掉90%+ 的权重，携带1.5× 的resident request，在扣除FFN-node tax后per-GPU吞吐提升1.35–1.45×。
+④ **加速来自容量，而非延迟。** FastAFD的decode step时长与vLLM持平（延迟比≈1），计算延迟并未缩短，变化的是每GPU的承载量：Attention GPU卸掉90%+ 的权重，携带1.5× 的resident request，在扣除FFN-node tax后per-GPU吞吐提升1.35–1.45×。
 吐提升1.35–1.45×。
 
 开源与未来工作
@@ -170,7 +170,7 @@ ai-lab/FastAFD发布。
 
 结语
 
-FastAFD的核心价值不是提出新的分离思想：MegaScale-Infer和Step-3早已建立这一方向：而在于证明：即使在GB200 NVL72这样共存基线已经极强的硬件上，通过精心的运行时优化（GPU侧通信、融合kernel、超前调度），AFD依然能带来可观的吞吐收益。这个结论的深层含义是：MoE推理的瓶颈正在从「算力」转向「显存容量」和「token聚合」。值得反问的是：如果推理优化领域的共识确实是分离部署比共存更优，那模型架构设计是否也该为此做好准备：让Attention和MoE的显存需求和batch大小更独立地可调，而不是被迫在同一个GPU上竞争资源？
+FastAFD的核心价值不是提出新的分离思想：MegaScale-Infer和Step-3已铺好这条路：而在于证明：即使在GB200 NVL72这样共存基线已足够强的硬件上，通过精心的运行时优化（GPU侧通信、融合kernel、超前调度），AFD依然能带来可观的吞吐收益。这指向一个更深层的问题：MoE推理的瓶颈正在从「算力」转向「显存容量」和「token聚合」。值得反问的是：如果推理优化领域的共识确实是分离部署比共存更优，那模型架构设计是否也该为此做好准备：让Attention和MoE的显存需求和batch大小更独立地可调，而不是被迫在同一个GPU上竞争资源？
 是被迫在同一个GPU上竞争资源？
 ？
 
