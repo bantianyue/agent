@@ -166,7 +166,7 @@ FastAFD 团队用 GB200 上验证过的分解模型做了投影：
 
 </div>
 
-![](img/fig_vr_lpx_projection_model.svg)
+![](img/fig_vr_lpx_projection_model.png)
 <span style="font-size:12px;color:rgb(153,153,153);">GB200 step 分解与 AFD 延迟模型：左列 vLLM 分解为 FMHA + Dense + MoE，右列为 AFD 暴露路径</span>
 
 ## 几条关键结论
