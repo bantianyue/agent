@@ -2,8 +2,6 @@ import sys, json, os
 skill_dir = r"C:\Users\twfehh7\AppData\Local\hermes\skills\content-creation\wechat-article-sop\scripts"
 sys.path.insert(0, skill_dir)
 
-import write_article_data as wad
-
 # 构造临时测试
 test_dir = r"D:\06_Hermes\articles\ai-model-co-design"
 build = os.path.join(test_dir, "article_data_build.py")

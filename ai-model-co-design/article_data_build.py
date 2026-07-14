@@ -1,0 +1,7 @@
+
+DATA = {
+    "summary": [{"key": "测试", "body": "test"}],
+    "sections": [{"type": "h2", "title": "测试章", "paras": ["正文"]}],
+    "conclusion": ["结语"],
+    "reference_url": "https://example.com"
+}
