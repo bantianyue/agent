@@ -22,3 +22,4 @@
 
 创建时间: 2026-07-14
 来源: https://developer.nvidia.com/blog/ai-model-co-design-hardware-friendly-llm-design/?linkId=100000430616047
+| Step 4d-i: 传送门 | completed |
