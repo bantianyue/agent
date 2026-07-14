@@ -22,6 +22,7 @@ DATA = {
                 "通过在恒定 per-rank KV-cache 预算下增长上下文长度、缩小 decode batch 的 MFU 测量发现：decode attention 受 HBM 带宽束缚，读取相似量的 KV-cache 使其 MFU 几乎持平；但 MoE FFN 的 expert GEMM 严重依赖当前 batch 大小——batch 小了，每 local expert 收到的 token 减少，GEMM 变小，MFU 因 expert 权重读取、路由、dispatch 的开销无法摊薄而全面下降。",
             ],
             "figs": [
+                {"src": "fig01.jpg", "caption": "Attention-FFN 分离部署的 token 流：Attention Worker 以请求并行方式运行，FFN/MoE Worker 从所有 Attention Worker 聚合 token 形成大 expert batch。"},
                 {"src": "fig02.png", "caption": "Figure 1. Decode 阶段 attention 读取每个请求的 KV-cache 历史，MoE 层按 expert 分组 token 后执行 expert GEMM。"},
                 {"src": "fig03.jpg", "caption": "Figure 2. 共存 MoE 的 decode 流程。所有 GPU 在相同拓扑上依次执行 attention、路由、dispatch、expert 执行、combine。"},
                 {"src": "fig04.png", "caption": "Figure 3. 长上下文通过缩小 KV-capped decode batch 来饿死 MoE 层。在固定 GPU 和 EP 下，上下文长度 L 增长→active batch B 缩小→每 expert token 减少→MoE MFU 崩溃。"},
