@@ -20,7 +20,7 @@
 
 Attention 层的核心瓶颈是 KV Cache 容量。随着上下文增长，单 GPU 能同时容纳的活跃请求越来越少，batch 被迫缩小。而 MoE 层恰恰相反——它需要足够大的 batch 才能让各 expert 的 GEMM（通用矩阵乘法）达到高利用率。batch 一缩小，每个 expert 分到的 token 寥寥无几，矩阵乘法变成"小矩阵计算"，硬件利用率迅速崩塌。
 
-UCSD Hao AI Lab 在一篇技术博客中清晰地展示了这一矛盾。在固定的 KV Cache 预算下，随着上下文长度 \(L\) 增长，活跃 batch \(B\) 缩小，Attention 层的 MFU（模型算力利用率）基本持平——因为它是 HBM 带宽受限，读同样多的 KV Cache 自然保持稳定。但 MoE 层的 MFU 却随 batch 缩小而直线下降。
+UCSD Hao AI Lab 在一篇技术博客中清晰地展示了这一矛盾。在固定的 KV Cache 预算下，随着上下文长度 \\(L\\) 增长，活跃 batch \\(B\\) 缩小，Attention 层的 MFU（模型算力利用率）基本持平——因为它是 HBM 带宽受限，读同样多的 KV Cache 自然保持稳定。但 MoE 层的 MFU 却随 batch 缩小而直线下降。
 
 **这一矛盾的根本原因在于：Attention 受内存容量约束，MoE 受计算吞吐约束，把它们硬塞在同一块 GPU 上，两端都得不到最优资源配置。**
 
@@ -53,7 +53,7 @@ Attention-FFN Disaggregation（AFD）的思路来自 MegaScale-Infer 和 Step-3 
 - **Attention worker** 负责请求面路径：管理 KV Cache、注意力计算、路由决策和采样。它只持有模型权重中很小一部分（QKV 投影、输出投影等非专家权重）。
 - **FFN worker** 负责重量级 MoE 计算：接收来自多个 Attention worker 的路由 token，按 expert 分组，执行专家 GEMM 和激活函数，再将结果送回。
 
-这样做最大的好处是：**FFN 端不再受困于某个 Attention worker 的 KV Cache 容量限制。** 多个 Attention worker 的 token 在 FFN 端聚合，每个 local expert 的 GEMM 规模瞬间变大，利用率自然提升。
+这样做的最大好处：**FFN 端不再受困于某个 Attention worker 的 KV Cache 容量限制。** 多个 Attention worker 的 token 在 FFN 端聚合，每个 local expert 的 GEMM 规模瞬间变大，利用率自然提升。
 
 实验表明，随着 feeding 同一个 FFN pool 的 Attention worker 数量增加，MoE 的 MFU 显著高于 colocated baseline。
 
@@ -123,7 +123,7 @@ Attention 侧的边界 kernel 只用 24 个 SM（Blackwell 总共 148 SM，约 1
 
 FastAFD 在 steady-state decode（已 prefilled 后持续生成 token）上评估，对比 tuned vLLM colocated baseline。两个模型：Qwen3-235B-A22B-FP8（235B 参数/22B 激活/128 expert）和 MiniMax-M2.5（约 230B 参数/10B 激活）。
 
-**代码里有一组数字值得记住：**
+**代码里的一组数字：**
 
 | 模型 | 8K 上下文 | 16K 上下文 |
 |-------|-----------|------------|
@@ -139,7 +139,7 @@ $$\text{加速比} = \underbrace{\frac{B_{\text{AFD}}}{B_{\text{vLLM}}}}_{\text{
 - **延迟比**：AFD 的 decode step 时长和 vLLM 差不多，拉不掉多少分
 - **FFN 节点税**：FFN workers 参与计算但不承接请求，多出来的 GPU 是"税"
 
-**所以加速的核心来自"容量换吞吐"**——Attention worker 因为不存 expert 权重而能放更多 KV Cache（更大 batch），即使 FFN 端多占了些 GPU，净效果仍正向。
+**加速的核心来自"容量换吞吐"**——Attention worker 因为不存 expert 权重而能放更多 KV Cache（更大 batch），即使 FFN 端多占了些 GPU，净效果仍正向。
 
 </div>
 
@@ -177,7 +177,7 @@ FastAFD 团队用 GB200 上验证过的分解模型做了投影：
 
 1. **同一 NVLink 域内，通信必须留在 GPU 上。** MegaScale-Infer 选择 CPU 控 RDMA 来省 SM，这在 NVL72 上行不通——GPU 间通信必须用 GPU 端 kernel，才能进入 CUDA Graph，实现真正的零开销回放。
 
-2. **平衡不是目标。** 先前 MegaScale-Infer 追求 \(T_a \approx T_e\)（Attention 和 MoE 时间平衡），但这条路走不通。FFN 端闲一点，代价只是多占一个节点（固定 \(\frac{1}{M+1}\)）；FFN 端暴露了，每步 decode 都变慢，且随 M 增长恶化。FastAFD 的策略是**让 FFN 端始终隐藏**（\(T_e \le T_a\)），用最大的 M 让 MoE 空闲但可控。
+2. **平衡不是目标。** 先前 MegaScale-Infer 追求 \\(T_a \approx T_e\\)（Attention 和 MoE 时间平衡），但这条路走不通。FFN 端闲一点，代价只是多占一个节点（固定 \\(\frac{1}{M+1}\\)）；FFN 端暴露了，每步 decode 都变慢，且随 M 增长恶化。FastAFD 的策略是**让 FFN 端始终隐藏**（\\(T_e \le T_a\\)），用最大的 M 让 MoE 空闲但可控。
 
 3. **两个微批次就够了。** mb=2 已经能完全隐藏两个通信方向。更多微批次只会加倍小 kernel 的副本数，没有额外收益。
 
@@ -193,9 +193,9 @@ FastAFD 团队用 GB200 上验证过的分解模型做了投影：
 <strong style="font-size:15px;color:#8b6f4c;">结语</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-FastAFD 是一份非常"干净"的工程成果——它有清晰的问题定义（MoE 推理的 Attention vs FFN 资源冲突）、简洁的数学分解（加速比三因子恒等式）、扎实的实验验证（公式复现了每个 workload 的实测值），并且完全开源。<br><br>
-最值得关注的不是它在 GB200 上拿了 1.4x——这本身是预期内的改进。真正有意思的是它对 Vera Rubin + LPX 的推演：如果 AFD 的下一个硬件边界是把 Attention 和 MoE 放到完全不同的加速器上，那么 FastAFD 已经证明了这套软件接口是可移植的。KV Cache 重负载走 Rubin，权重重负载走 LPX——不用改模型，只改部署拓扑。<br><br>
-UCSD 团队开源的不仅是代码，更是一套用来"计算加速比"的方法：用 vLLM 的单机 kernel profile 就能预测 AFD 在新硬件上的收益。这个分析框架可能比具体数字更有长期价值。
+FastAFD 是一份很"干净"的工程成果——问题定义清晰（MoE 推理的 Attention vs FFN 资源冲突）、数学分解简洁（加速比三因子恒等式）、实验验证扎实（公式复现了每个 workload 的实测值），而且完全开源。<br><br>
+它在 GB200 上拿到 1.4x 不算意外——这是 AFD 预期的改进幅度。更有意思的是它对 Vera Rubin + LPX 的推演：如果 AFD 的下一个硬件边界是把 Attention 和 MoE 放到完全不同的加速器上，FastAFD 已经证明了这套软件接口是可移植的。KV Cache 重负载走 Rubin，权重重负载走 LPX——不用改模型，只改部署拓扑。<br><br>
+UCSD 团队开源的不仅是代码，还有一套用来"计算加速比"的方法：用 vLLM 的单机 kernel profile 就能预测 AFD 在新硬件上的收益。这个分析框架可能比具体数字更有长期价值。
 </div>
 </div>
 
