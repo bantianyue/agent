@@ -20,7 +20,7 @@
 
 Attention 层的核心瓶颈是 KV Cache 容量。随着上下文增长，单 GPU 能同时容纳的活跃请求越来越少，batch 被迫缩小。而 MoE 层恰恰相反——它需要足够大的 batch 才能让各 expert 的 GEMM（通用矩阵乘法）达到高利用率。batch 一缩小，每个 expert 分到的 token 寥寥无几，矩阵乘法变成"小矩阵计算"，硬件利用率迅速崩塌。
 
-UCSD Hao AI Lab 在一篇技术博客中清晰地展示了这一矛盾。在固定的 KV Cache 预算下，随着上下文长度 \\(L\\) 增长，活跃 batch \\(B\\) 缩小，Attention 层的 MFU（模型算力利用率）基本持平——因为它是 HBM 带宽受限，读同样多的 KV Cache 自然保持稳定。但 MoE 层的 MFU 却随 batch 缩小而直线下降。
+UCSD Hao AI Lab 在一篇技术博客中清晰地展示了这一矛盾。在固定的 KV Cache 预算下，随着上下文长度 \(L\) 增长，活跃 batch \(B\) 缩小，Attention 层的 MFU（模型算力利用率）基本持平——因为它是 HBM 带宽受限，读同样多的 KV Cache 自然保持稳定。但 MoE 层的 MFU 却随 batch 缩小而直线下降。
 
 **这一矛盾的根本原因在于：Attention 受内存容量约束，MoE 受计算吞吐约束，把它们硬塞在同一块 GPU 上，两端都得不到最优资源配置。**
 
@@ -177,7 +177,7 @@ FastAFD 团队用 GB200 上验证过的分解模型做了投影：
 
 1. **同一 NVLink 域内，通信必须留在 GPU 上。** MegaScale-Infer 选择 CPU 控 RDMA 来省 SM，这在 NVL72 上行不通——GPU 间通信必须用 GPU 端 kernel，才能进入 CUDA Graph，实现真正的零开销回放。
 
-2. **平衡不是目标。** 先前 MegaScale-Infer 追求 \\(T_a \approx T_e\\)（Attention 和 MoE 时间平衡），但这条路走不通。FFN 端闲一点，代价只是多占一个节点（固定 \\(\frac{1}{M+1}\\)）；FFN 端暴露了，每步 decode 都变慢，且随 M 增长恶化。FastAFD 的策略是**让 FFN 端始终隐藏**（\\(T_e \le T_a\\)），用最大的 M 让 MoE 空闲但可控。
+2. **平衡不是目标。** 先前 MegaScale-Infer 追求 \(T_a \approx T_e\)（Attention 和 MoE 时间平衡），但这条路走不通。FFN 端闲一点，代价只是多占一个节点（固定 \(\frac{1}{M+1}\)）；FFN 端暴露了，每步 decode 都变慢，且随 M 增长恶化。FastAFD 的策略是**让 FFN 端始终隐藏**（\(T_e \le T_a\)），用最大的 M 让 MoE 空闲但可控。
 
 3. **两个微批次就够了。** mb=2 已经能完全隐藏两个通信方向。更多微批次只会加倍小 kernel 的副本数，没有额外收益。
 
