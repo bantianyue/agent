@@ -160,9 +160,6 @@ DATA = {
                 "FastAFD 的操作点说便宜但不自动可达。在三个因子中运行时只能移动一个（T_AFD）。MegaMoE 保持 Tₑ 足够小以隐藏——没有融合的话 FFN 侧提早暴露，可行的 M 更小。Zero-overhead 调度保持 step period 在 CUDA Graph 长度：禁用跨 step 重叠后，Qwen3-235B 4-node 8K step 从 32.826 ms 增长到 42.612 ms，23% 的吞吐损失使配置低于共存基线。mb=2 是最低有用值——mb=1 暴露通信，mb=3/4 只增加小 kernel 开销。",
                 "在这个结构验证后，将预测扩展到异质硬件就是替换参数：移除 FFN-node tax，从延迟比中移除 MoE 时间，剩下就是纯 attention+dense 对共存的比例。",
             ],
-            "figs": [
-                {"src": "fig14.png", "caption": "Figure 13. 消融实验：每个运行时机制对 decode-step 延迟的贡献。MegaMoE 融合是最大的单一贡献者。"},
-            ],
         },
         # ==============================
         # Vera Rubin + LPX 预测
