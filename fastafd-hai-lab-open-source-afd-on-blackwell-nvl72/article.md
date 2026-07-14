@@ -202,8 +202,9 @@ UCSD 团队开源的不仅是代码，还有一套用来"计算加速比"的方�
 ---
 
 <span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/XXXX" target="_blank" data-linktype="2">已发布文章1</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/XXXX" target="_blank" data-linktype="2">已发布文章2</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
 </span>
 
 ---
