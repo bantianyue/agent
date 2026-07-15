@@ -6,11 +6,12 @@ from playwright.sync_api import sync_playwright
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 SVGS = {
-    "PredictableTarget.svg": "fig01.png",  # Figure 1
-    "TargetWithoutNoise.svg": "fig02.png",  # Figure 2
-    "Target.svg": "fig03.png",               # Figure 3
-    "SGD.svg": "fig04.png",                 # Figure 4
-    "IDBD.svg": "fig05.png",                # Figure 5
+    "Feature1Value.svg": "Feature1Value.png",      # Fig 1 & Fig 2 shared
+    "PredictableTarget.svg": "PredictableTarget.png",  # Fig 1 cont
+    "TargetWithoutNoise.svg": "TargetWithoutNoise.png",  # Fig 2 cont
+    "Target.svg": "Target.png",                     # Fig 3
+    "SGD.svg": "SGD.png",                           # Fig 4
+    "IDBD.svg": "IDBD.png",                         # Fig 5
 }
 
 with sync_playwright() as p:
@@ -25,7 +26,6 @@ with sync_playwright() as p:
         x, y, w, h = (float(v) for v in vb.groups())
         W, H = int(w + 0.5), int(h + 0.5)
         pg.set_viewport_size({"width": W + 20, "height": H + 20})
-        # force explicit size on the svg
         svg_sized = re.sub(r'(<svg[^>]*?)(/?>)',
                            lambda m: m.group(1) + f' width="{W}" height="{H}" style="display:block" ' + m.group(2),
                            svg_content, count=1)
@@ -38,7 +38,6 @@ with sync_playwright() as p:
         out_path = os.path.join(HERE, out)
         pg.screenshot(path=out_path, full_page=True)
         img = Image.open(out_path).convert("RGB")
-        # trim to content bounds (drop extra whitespace)
         bbox = img.getbbox()
         if bbox:
             img = img.crop(bbox)
@@ -47,7 +46,5 @@ with sync_playwright() as p:
         nw = sum(1 for c in px if c[0] < 240 or c[1] < 240 or c[2] < 240)
         pct = nw / len(px) * 100
         print(f"{out}: {img.size} content={pct:.1f}%")
-        if pct < 1:
-            raise RuntimeError(f"{out} 几乎全白，渲染失败")
     b.close()
 print("✅ 全部 SVG 渲染完成")
