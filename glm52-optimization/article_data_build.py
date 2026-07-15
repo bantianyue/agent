@@ -122,7 +122,14 @@ DATA = {
     ],
     "reference_url": "https://www.lmsys.org/blog/2026-07-13-glm52-optimization",
     "caption_translations": {
-        "fig06": "图5：DSA 索引器前导内核：融合前与融合后的对比。",
-        "fig07": "图6：CuteDSL BF16 GEMM 相对 CuBLAS GEMM 的提速，跨不同批大小。",
+        "fig00": "图0：Day-0 版本与 v0.5.15.post1 版本在 8×B300 上的性能对比。",
+        "fig01": "图1：批大小为 1 时的解码情况，上图为 Spec v2 优化前，下图为优化后。开启后 run_batch 各迭代之间不再有气泡。",
+        "fig02": "图2：TopK-V2 把一个长得分行切分到 8 个 CTA，每个构建本地 10-bit 直方图；cluster 级归约定位第 2048 大得分所在 bin。",
+        "fig03": "图3：TopK-V2 构建直方图时，每个 FP32 得分舍入到 FP16 并转为无符号 key，高 10 位选 bin，粗粒度直方图只定位边界区域。",
+        "fig04": "图4：在目标模型验证下、批大小 1、6 个 draft token 时，TopK-V1 与 TopK-V2 的内核延迟对比（两者都把 Top-K 与页表变换融合）。",
+        "fig05": "图5：DSA 索引器前导内核：融合前与融合后的对比。",
+        "fig06": "图6：CuteDSL BF16 GEMM 相对 CuBLAS GEMM 的提速，跨不同批大小。",
+        "fig07": "图7：GLM 5.2 NVFP4 在 SGLang 上的性能帕累托（Pareto）曲线。",
+        "fig08": "图8：随输入序列长度变化的消融（ablation）测试（模拟接受长度 5 以提高可复现性）。",
     },
 }
