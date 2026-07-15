@@ -69,7 +69,7 @@ DATA = {
             "paras": [
                 "GLM-5.2 中并非每个矩阵乘法都运行在 NVFP4 上。为了保护精度，检查点的量化方案让注意力投影（attention projections）和共享专家 MLP（shared-expert MLP）保持 BF16，只把路由专家（routed experts）量化。PR #30117 为这些 BF16 层新增了一个可选的 CuTe DSL BF16 GEMM 后端，它源自 Flashinfer 的 TGV GEMM，专为这些 BF16 层打造。",
                 "这个内核把工作切分到多个 warp 上并分配专门任务：有些 warp 只从内存加载数据，一个 warp 只做矩阵乘，少数 warp 只把结果写回。由于这些是同时运行的独立 warp，加载、计算和存储是重叠进行的，而不是一个接一个地发生。",
-                "提速的真正来源在于这个内核对加载操作的流水线化程度有多激进。它不会只加载一块数据（tile）然后等它被用掉再去加载下一块，而是让相当于很多块的数据同时处于传输途中，并为此几乎用满了 GPU 的全部共享内存。在解码运行的小批量下，这些 GEMM 大部分时间都在等内存而非计算，所以内核能提前加载得越远，等待的时间就越少。这就是相对 cuBLAS 这类通用库的主要优势——后者流水线化更保守。",
+                "提速的真正来源在于这个内核对加载操作的流水线化程度有多激进。它不会只加载一块数据（tile）然后等它被用掉再去加载下一块，而是让相当于很多块的数据同时处于传输途中，并为此几乎用满了 GPU 的全部共享内存。在解码运行的小批量下，这些 GEMM 大部分时间都在等内存而非计算，所以内核能提前加载得越远，等待的时间就越少。这就是相对 cuBLAS 这类通用库的主要优势，后者流水线化更保守。",
                 "一个调优步骤还会挑选最适合所运行形状的块大小（tile size），并且一个提前测得的启发式规则会在每次调用时决定是使用这个内核还是回退到 cuBLAS。",
                 "其中两个 BF16 层在 TP4 下获益明显：融合后的 QKV 投影（M, 2624, 6144，跨 rank 复制）和注意力输出投影 o_proj（M, 6144, 4096，跨 rank 切分）。",
                 "扫描整个解码范围 M=1 到 32：融合 QKV 投影在每个批大小下都胜出，相对 cuBLAS 平均 1.08 倍，峰值 1.13 倍。o_proj 在每个批大小下也胜出，平均 1.05 倍，峰值 1.08 倍。在批大小为 1 时，端到端解码提速约为 4%。",
@@ -100,9 +100,9 @@ DATA = {
             "title": "致谢",
             "paras": [
                 "我们要向以下为 GLM 5.2 NVFP4 模型的支持与优化做出贡献的组织和个人表达谢意。",
-                "SGLang 社区/RadixArk：Khoa Pham、Baizhou Zhang、Jimmy Shong、Brayden Zhong、Ziyi Xu、Mohammad Miadh Angkad、Xinyuan Tong、Zhendong Hua、Zijie Xia、Banghua Zhu 以及许多其他人——负责优化与基准测试。",
-                "Nvidia：Julien Lin、Zhiyu Cheng、Po-Han Huang、Ryan Stewart、Triston Cao 以及许多其他人——负责 GLM5.2 NVFP4 的 Day-0 支持。",
-                "GLM 团队：Yuxuan Zhang——负责在 SGLang 中实现并验证 IndexShare。",
+                "SGLang 社区/RadixArk：Khoa Pham、Baizhou Zhang、Jimmy Shong、Brayden Zhong、Ziyi Xu、Mohammad Miadh Angkad、Xinyuan Tong、Zhendong Hua、Zijie Xia、Banghua Zhu 以及许多其他人，负责优化与基准测试。",
+                "Nvidia：Julien Lin、Zhiyu Cheng、Po-Han Huang、Ryan Stewart、Triston Cao 以及许多其他人，负责 GLM5.2 NVFP4 的 Day-0 支持。",
+                "GLM 团队：Yuxuan Zhang，负责在 SGLang 中实现并验证 IndexShare。",
             ],
         },
         {
