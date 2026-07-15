@@ -1,0 +1,25 @@
+DATA = {
+    "summary": [{"key": "测试", "body": "验证图派生。"}],
+    "sections": [
+        {"type": "h2", "title": "第一节",
+         "paras": ["段落一内容。", "段落二内容。", "段落三内容。", "段落四内容。"]},
+        {"type": "h2", "title": "第二节",
+         "paras": ["第二段落一。", "第二段落二。", "第二段落三。"]},
+        {"type": "h3", "title": "子节",
+         "paras": ["子节段落。"]},
+    ],
+    "conclusion": ["结语一段。"],
+    "reference_url": "https://example.com",
+    "caption_translations": {
+        "fig01": "图1中文说明（逐字译）",
+        "fig02": "Figure 1. 中文说明",
+        "fig03": "Figure 2. 中文说明",
+        "fig04": "Figure 3. 中文说明",
+        "fig05": "Figure 4. 中文说明",
+        "fig06": "Figure 5. 中文说明",
+        "fig07": "Figure 6. 中文说明",
+        "fig08": "Figure 7. 中文说明",
+        "fig09": "Figure 8. 中文说明",
+        "fig10": "Figure 9. 中文说明",
+    },
+}
