@@ -1,4 +1,5 @@
 DATA = {
+    "title": "用 SGLang 优化 GLM-5.2 NVFP4 智能体负载：两周从能跑到 500+ TPS",
     "summary": [
         {"key": "500+ TPS", "body": "8×B300 上达成 500+ TPS：SGLang 把 day-0 的 GLM-5.2 NVFP4 服务栈两周内优化到生产级。"},
         {"key": "Spec V2", "body": "重叠调度消除 GPU 气泡，端到端 TPS 提升 11%。"},
