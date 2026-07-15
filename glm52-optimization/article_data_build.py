@@ -7,7 +7,7 @@ DATA = {
         "索引器前导融合把内核数从 12 降到 4；CuteDSL BF16 GEMM 在解码小批量下胜 cuBLAS。",
     ],
     "lead": [
-        "GLM-5.2 发布第一天，SGLang 就在 Blackwell 硬件上用 trtllm-gen 内核点亮了 NVFP4 服务。但 day-0 版本只是"能跑"，离生产级还差一口气。",
+        "GLM-5.2 发布第一天，SGLang 就在 Blackwell 硬件上用 trtllm-gen 内核点亮了 NVFP4 服务。但 day-0 版本只是「能跑」，离生产级还差一口气。",
         "这篇博客复盘了 SGLang 团队在两周内做的一系列优化：从运行时调度到 CUDA 内核，把 8×B300 上的吞吐推到 500+ TPS，同时把长上下文的交互性几乎拉平。",
     ],
     "sections": [
