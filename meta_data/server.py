@@ -1,16 +1,32 @@
 #!/usr/bin/env python3
-# 技术文章收藏 - 本地服务
+# 技术文章收藏 - 本地服务（SQLite 版）
+# 数据存于同目录 articles.db；对外仍提供 /data.json 的 GET(返回数组)/PUT(整体保存) 接口
 # 用法：双击本文件，或终端 `python server.py`
-# 然后浏览器打开 http://127.0.0.1:8765/文章.html
-import http.server, socketserver, os, sys, json
+# 浏览器打开 http://127.0.0.1:8765/文章.html
+import http.server, socketserver, os, json, sqlite3
 
 PORT = 8765
 ROOT = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(ROOT, "articles.db")
 # 文章根目录（用于扫描 source.url 判断“已完成”）
 ARTICLES_ROOT = r"D:\06_Hermes\articles"
 SKIP_DIRS = {"__pycache__", "_src_tmp", "_tmp"}
+# 兼容旧迁移：若存在 data.json 则导入
+LEGACY_JSON = os.path.join(ROOT, "data.json")
 
-DATA_FILE = os.path.join(ROOT, "data.json")
+
+def get_conn():
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("""CREATE TABLE IF NOT EXISTS articles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL DEFAULT '',
+        url TEXT NOT NULL UNIQUE,
+        priority TEXT NOT NULL DEFAULT 'mid',
+        done INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now'))
+    )""")
+    return conn
 
 
 def scan_done_urls():
@@ -26,49 +42,117 @@ def scan_done_urls():
         if os.path.isfile(su):
             try:
                 with open(su, "r", encoding="utf-8", errors="ignore") as f:
-                    url = f.read().strip().splitlines()
-                    if url:
-                        done.add(url[0].strip())
+                    line = f.read().strip().splitlines()
+                    if line:
+                        done.add(line[0].strip())
             except Exception:
                 pass
     return done
 
 
-def load_data():
-    """读取 data.json；对缺失 done 字段的条目，用扫描结果初始化（手动维护优先）"""
-    if not os.path.isfile(DATA_FILE):
-        return []
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        try:
+def migrate_from_json(conn):
+    """首次运行：若库为空且存在旧 data.json，则导入（并扫描 done）"""
+    cur = conn.execute("SELECT COUNT(*) FROM articles")
+    if cur.fetchone()[0] > 0:
+        return
+    if not os.path.isfile(LEGACY_JSON):
+        return
+    try:
+        with open(LEGACY_JSON, "r", encoding="utf-8") as f:
             arr = json.load(f)
+    except Exception:
+        return
+    if not isinstance(arr, list):
+        return
+    done_set = scan_done_urls()
+    seeded = False
+    for a in arr:
+        url = a.get("url", "").strip()
+        if not url:
+            continue
+        title = a.get("title", "") or ""
+        priority = a.get("priority", "mid") or "mid"
+        # 手动优先：若原数据带 done 字段则用之，否则用扫描结果
+        if "done" in a:
+            done = 1 if a["done"] else 0
+        else:
+            done = 1 if url in done_set else 0
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO articles (title,url,priority,done) VALUES (?,?,?,?)",
+                (title, url, priority, done),
+            )
+            seeded = True
         except Exception:
-            return []
-    # 检查是否已有任意条目带 done 字段 —— 若整文件都没有，则首次扫描填充
-    has_done_field = any("done" in a for a in arr)
-    if not has_done_field:
-        done_set = scan_done_urls()
-        changed = False
-        for a in arr:
-            a.setdefault("priority", "mid")
-            a["done"] = a.get("url", "") in done_set
-            changed = True
-        if changed:
-            save_data(arr)
-    else:
-        # 已有 done 字段：仅给缺 priority 的补默认，不覆盖手动 done
-        changed = False
-        for a in arr:
-            if "priority" not in a:
-                a["priority"] = "mid"
-                changed = True
-        if changed:
-            save_data(arr)
-    return arr
+            pass
+    if seeded:
+        conn.commit()
 
 
-def save_data(arr):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(arr, f, ensure_ascii=False, indent=2)
+def init_db():
+    conn = get_conn()
+    # 自动填充：仅对 done 尚未被“手动设过”的记录执行一次扫描
+    # 实现：表中新增 done_scanned 标记列（0=未初始化，1=手动维护过或已扫描）
+    try:
+        conn.execute("ALTER TABLE articles ADD COLUMN done_locked INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # 列已存在
+    cur = conn.execute("SELECT COUNT(*) FROM articles")
+    if cur.fetchone()[0] == 0:
+        migrate_from_json(conn)
+    # 首次扫描：对 done_locked=0 的记录，若其 url 命中 source.url 则置 done=1
+    done_set = scan_done_urls()
+    conn.execute(
+        "UPDATE articles SET done=1 WHERE done_locked=0 AND url IN ({})".format(
+            ",".join("?" * len(done_set)) or "NULL"
+        ),
+        tuple(done_set),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_articles():
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT title,url,priority,done FROM articles ORDER BY id DESC"
+    ).fetchall()
+    conn.close()
+    out = []
+    for title, url, priority, done in rows:
+        out.append({
+            "title": title,
+            "url": url,
+            "priority": priority,
+            "done": bool(done),
+        })
+    return out
+
+
+def save_articles(arr):
+    """整体替换：删除全部，按数组顺序重新插入。done 视为手动维护 -> done_locked=1"""
+    conn = get_conn()
+    conn.execute("DELETE FROM articles")
+    for i, a in enumerate(arr):
+        url = (a.get("url") or "").strip()
+        if not url:
+            continue
+        title = a.get("title", "") or ""
+        priority = a.get("priority", "mid") or "mid"
+        done = 1 if a.get("done") else 0
+        conn.execute(
+            "INSERT INTO articles (title,url,priority,done,done_locked) VALUES (?,?,?,?,1)",
+            (title, url, priority, done),
+        )
+    conn.commit()
+    conn.close()
+
+
+def res_json(handler, obj, code=200):
+    handler.send_response(code)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.end_headers()
+    handler.wfile.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -81,21 +165,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Location", "/%E6%96%87%E7%AB%A0.html")
             self.end_headers()
             return
+        if self.path == "/data.json":
+            res_json(self, load_articles())
+            return
         if self.path == "/scan":
-            # 手动触发：仅对缺失 done 字段的条目填充（手动维护优先）
-            arr = load_data()
+            # 手动触发：仅对未锁定的记录按 source.url 刷新 done
+            conn = get_conn()
             done_set = scan_done_urls()
-            changed = False
-            for a in arr:
-                if "done" not in a:
-                    a["done"] = a.get("url", "") in done_set
-                    changed = True
-            if changed:
-                save_data(arr)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"ok": True, "count": len(done_set)}).encode("utf-8"))
+            conn.execute(
+                "UPDATE articles SET done=1 WHERE done_locked=0 AND url IN ({})".format(
+                    ",".join("?" * len(done_set)) or "NULL"
+                ),
+                tuple(done_set),
+            )
+            conn.commit()
+            conn.close()
+            res_json(self, {"ok": True, "count": len(done_set)})
             return
         super().do_GET()
 
@@ -106,21 +191,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_PUT(self):
-        if os.path.basename(self.path) != "data.json":
-            self.send_error(403, "Only data.json writable")
+        if self.path != "/data.json":
+            self.send_error(403, "Only /data.json writable")
             return
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
         try:
             arr = json.loads(body.decode("utf-8"))
+            if not isinstance(arr, list):
+                raise ValueError("expected list")
         except Exception as e:
             self.send_error(400, f"Invalid JSON: {e}")
             return
-        save_data(arr)
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(b'{"ok":true}')
+        save_articles(arr)
+        res_json(self, {"ok": True})
 
     def log_message(self, fmt, *args):
         pass
@@ -128,7 +212,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     os.chdir(ROOT)
-    load_data()  # 启动时初始化 done 字段
+    init_db()
     with socketserver.TCPServer(("", PORT), Handler) as httpd:
         print(f"服务已启动： http://127.0.0.1:{PORT}/文章.html")
         print("按 Ctrl+C 停止")
