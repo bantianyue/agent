@@ -16,8 +16,10 @@ LEGACY_JSON = os.path.join(ROOT, "data.json")
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=30)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     # 候选文章：记录待生成公众号文章草稿的 URL
     conn.execute("""CREATE TABLE IF NOT EXISTS candidate_articles (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,20 +148,26 @@ def load_articles():
 def save_articles(arr):
     """整体替换：删除全部，按数组顺序（pos）重新插入。done 视为手动维护 -> done_locked=1"""
     conn = get_conn()
-    conn.execute("DELETE FROM candidate_articles")
-    for i, a in enumerate(arr):
-        url = (a.get("url") or "").strip()
-        if not url:
-            continue
-        title = a.get("title", "") or ""
-        priority = a.get("priority", "mid") or "mid"
-        done = 1 if a.get("done") else 0
-        conn.execute(
-            "INSERT INTO candidate_articles (pos,title,url,priority,done,done_locked) VALUES (?,?,?,?,?,1)",
-            (i, title, url, priority, done),
-        )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("BEGIN")
+        conn.execute("DELETE FROM candidate_articles")
+        for i, a in enumerate(arr):
+            url = (a.get("url") or "").strip()
+            if not url:
+                continue
+            title = a.get("title", "") or ""
+            priority = a.get("priority", "mid") or "mid"
+            done = 1 if a.get("done") else 0
+            conn.execute(
+                "INSERT INTO candidate_articles (pos,title,url,priority,done,done_locked) VALUES (?,?,?,?,?,1)",
+                (i, title, url, priority, done),
+            )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
 
 
 def res_json(handler, obj, code=200):

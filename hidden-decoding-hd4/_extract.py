@@ -10,58 +10,53 @@ def clean(t):
     t = re.sub(r'&#x[0-9a-fA-F]+;', '', t)
     return re.sub(r'\s+', ' ', t).strip()
 
-# locate content region
 s1 = html.find('<section id="S1"')
 bib = html.find('ltx_bibliography')
 region = html[s1:bib if bib>0 else len(html)]
 
-lines = []
-for m in re.finditer(r'<(h[1-4]|p)[^>]*class="[^"]*?(ltx_p|ltx_title)[^"]*"[^>]*>(.*?)</\1>', region, re.S):
-    tag, content = m.group(1), m.group(3)
-    txt = clean(content)
-    if not txt:
-        continue
-    lines.append(('## ' if tag.startswith('h') else '') + txt)
+# after_para: paragraph index into full_translation.md (1:1 with source text blocks)
+# figure id -> after_para
+AP = {
+    'S2.F2': 9,    # Figure 2 contrasts HD (para 9 = §2 intro)
+    'S2.F3': 26,   # Figure 3 illustrates masks (para 26)
+    'S4.F4': 62,   # Figure 4(a) training cost (para 62)
+    'S4.F5': 74,   # Figure 5 serving throughput (para 74)
+    'S5.F6': 84,   # Figure 6 stream probes (para 84)
+    'S5.F7': 87,   # Figure 7 LM-head probes (para 87)
+    'S5.F8': 88,   # Figure 8 stream-probe examples (para 88)
+    'A8.F9': 93,   # Appendix F9 (last para)
+}
 
-open(os.path.join(HERE, 'full_text.txt'), 'w', encoding='utf-8').write('\n\n'.join(lines))
-print("text blocks:", len(lines))
-
-# figures - scan whole html for <figure> with <img>
 figs = []
 for m in re.finditer(r'<figure\b.*?</figure>', html, re.S):
     seg = m.group(0)
     fid = re.search(r'\bid="([^"]+)"', seg)
+    if not fid:
+        continue
+    fid = fid.group(1)
     imgs = re.findall(r'<img[^>]*src="([^"]+)"', seg)
     if not imgs:
         continue
     cap = re.search(r'<figcaption.*?>(.*?)</figcaption>', seg, re.S)
     captxt = clean(cap.group(1)) if cap else ''
-    # full url
     src0 = imgs[0]
-    if src0.startswith('http'):
-        url = src0
-    else:
-        url = "https://arxiv.org/html/" + src0.lstrip('/')
-    figs.append({
+    url = src0 if src0.startswith('http') else "https://arxiv.org/html/" + src0.lstrip('/')
+    is_hero = (fid == 'S0.F1')
+    entry = {
         'type': 'figure',
-        'id': fid.group(1) if fid else 'fig%d' % len(figs),
+        'id': fid,
         'img': url,
         'caption': captxt,
-        'after_para': 0,
-        'hero': False
-    })
+        'after_para': AP.get(fid, 0),
+        'hero': is_hero,
+    }
+    figs.append(entry)
 
-# mark hero: first figure = S1.F1 typically
+# order: keep document order; hero first
 for i, f in enumerate(figs):
-    if i == 0:
-        f['hero'] = True
-
-print("figures found:", len(figs))
-for f in figs:
-    print(" ", f['id'], '|', f['img'][:80], '| hero=', f['hero'])
-    print("    cap:", f['caption'][:80])
+    print(i, f['id'], 'hero=', f['hero'], 'ap=', f['after_para'], '|', f['caption'][:60])
 
 with open(os.path.join(HERE, 'blocks.jsonl'), 'w', encoding='utf-8') as fp:
     for f in figs:
         fp.write(json.dumps(f, ensure_ascii=False) + '\n')
-print("blocks.jsonl written")
+print("blocks.jsonl written, total figures:", len(figs))
