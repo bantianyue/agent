@@ -68,21 +68,22 @@ def migrate_from_json(conn):
         return
     done_set = scan_done_urls()
     seeded = False
-    for a in arr:
+    for i, a in enumerate(arr):
         url = a.get("url", "").strip()
         if not url:
             continue
         title = a.get("title", "") or ""
         priority = a.get("priority", "mid") or "mid"
-        # 手动优先：若原数据带 done 字段则用之，否则用扫描结果
         if "done" in a:
             done = 1 if a["done"] else 0
+            locked = 1
         else:
             done = 1 if url in done_set else 0
+            locked = 0 if done else 0
         try:
             conn.execute(
-                "INSERT OR IGNORE INTO articles (title,url,priority,done) VALUES (?,?,?,?)",
-                (title, url, priority, done),
+                "INSERT OR IGNORE INTO articles (pos,title,url,priority,done,done_locked) VALUES (?,?,?,?,?,?)",
+                (i, title, url, priority, done, locked),
             )
             seeded = True
         except Exception:
@@ -93,23 +94,18 @@ def migrate_from_json(conn):
 
 def init_db():
     conn = get_conn()
-    # 自动填充：仅对 done 尚未被“手动设过”的记录执行一次扫描
-    # 实现：表中新增 done_scanned 标记列（0=未初始化，1=手动维护过或已扫描）
-    try:
-        conn.execute("ALTER TABLE articles ADD COLUMN done_locked INTEGER NOT NULL DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass  # 列已存在
     cur = conn.execute("SELECT COUNT(*) FROM articles")
     if cur.fetchone()[0] == 0:
         migrate_from_json(conn)
     # 首次扫描：对 done_locked=0 的记录，若其 url 命中 source.url 则置 done=1
     done_set = scan_done_urls()
-    conn.execute(
-        "UPDATE articles SET done=1 WHERE done_locked=0 AND url IN ({})".format(
-            ",".join("?" * len(done_set)) or "NULL"
-        ),
-        tuple(done_set),
-    )
+    if done_set:
+        conn.execute(
+            "UPDATE articles SET done=1 WHERE done_locked=0 AND url IN ({})".format(
+                ",".join("?" * len(done_set))
+            ),
+            tuple(done_set),
+        )
     conn.commit()
     conn.close()
 
@@ -117,7 +113,7 @@ def init_db():
 def load_articles():
     conn = get_conn()
     rows = conn.execute(
-        "SELECT title,url,priority,done FROM articles ORDER BY id DESC"
+        "SELECT title,url,priority,done FROM articles ORDER BY pos ASC"
     ).fetchall()
     conn.close()
     out = []
@@ -132,7 +128,7 @@ def load_articles():
 
 
 def save_articles(arr):
-    """整体替换：删除全部，按数组顺序重新插入。done 视为手动维护 -> done_locked=1"""
+    """整体替换：删除全部，按数组顺序（pos）重新插入。done 视为手动维护 -> done_locked=1"""
     conn = get_conn()
     conn.execute("DELETE FROM articles")
     for i, a in enumerate(arr):
@@ -143,8 +139,8 @@ def save_articles(arr):
         priority = a.get("priority", "mid") or "mid"
         done = 1 if a.get("done") else 0
         conn.execute(
-            "INSERT INTO articles (title,url,priority,done,done_locked) VALUES (?,?,?,?,1)",
-            (title, url, priority, done),
+            "INSERT INTO articles (pos,title,url,priority,done,done_locked) VALUES (?,?,?,?,?,1)",
+            (i, title, url, priority, done),
         )
     conn.commit()
     conn.close()
