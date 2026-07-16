@@ -127,12 +127,14 @@ def init_db():
 def load_articles():
     conn = get_conn()
     rows = conn.execute(
-        "SELECT title,url,priority,done FROM candidate_articles ORDER BY pos ASC"
+        "SELECT id,pos,title,url,priority,done FROM candidate_articles ORDER BY pos DESC"
     ).fetchall()
     conn.close()
     out = []
-    for title, url, priority, done in rows:
+    for aid, pos, title, url, priority, done in rows:
         out.append({
+            "id": aid,
+            "pos": pos,
             "title": title,
             "url": url,
             "priority": priority,
