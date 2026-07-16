@@ -1,7 +1,7 @@
 DATA = {
     'summary': [
         {'key': '975B 多模态', 'body': 'Inkling 是 9750 亿参数前沿多模态模型，上下文窗口最长 100 万 token，融合短卷积、相对位置注意力与共享专家池 MoE。'},
-        {'key': '71.7k tok/s', 'body': 'SGLang 在 Blackwell 上实现最高 71.7k tok/s 输入吞吐与 171.0 tok/s 每用户解码速度，全 CUDA 图 prefill 比 BCG 再快 14–17%。'},
+        {'key': '71.7k tok/s', 'body': 'SGLang 于 Blackwell 上实现最高 71.7k tok/s 输入吞吐与 171.0 tok/s 每用户解码速度，全 CUDA 图 prefill 比 BCG 再快 14–17%。'},
         {'key': '三处架构创新', 'body': 'ShortConv、查询条件化相对位置偏置、共享专家池：每处都打破标准推理服务的假设，需定制内核与执行策略。'},
         {'key': '多层 MTP + DFlash', 'body': '8 层串联 MTP（EAGLE 式）整链一张 CUDA 图；另有 Modal 训练的 DFlash 草稿模型提供第二条投机解码路径。'},
         {'key': 'Miles Day-0 RL', 'body': 'Megatron 后端支持全参数与 LoRA RL，靠定制精度对齐算子与 Rollout 路由重放(R3)保证训练-推理一致性。'},
@@ -45,7 +45,7 @@ DATA = {
             'type': 'h2',
             'title': 'SGLang 优化',
             'paras': [
-                'Inkling 的三处架构改动，每一处都打破了标准 decoder-only 推理服务所依赖的假设。要让 Inkling 在 SGLang 上跑得快，就得为每一处都上新算子和执行策略。',
+                'Inkling 的三处架构改动，每一处都打破了标准 decoder-only 推理服务所依赖的假设。要让 Inkling 于 SGLang跑得快，就得为每一处都上新算子和执行策略。',
             ],
         },
         {
@@ -66,7 +66,7 @@ DATA = {
             'paras': [
                 '剪裁偏置（Sheared-bias）内核：相对偏置项必须加在注意力内核内部。Inkling 的 FlashAttention-4 集成支持两种等价做法：score-mod 路径（每个注意力 tile 在 score 回调里计算 i−j 并即时查表 rel_logits）和 sheared-bias 路径（相对 logits 预先被剪裁进一个按列对齐的偏置张量），这样内核就能用普通的 tile 加载来加偏置，而不用逐个 score 做索引。剪裁布局更快，但需要 Inkling 专用的 FA4 分支，且 tile 对齐和 padding 约定要匹配：这也是 Inkling 默认采用的路径。',
                 '双流重叠：rel_logits 投影只依赖融合的 QKVR 投影输出，而不依赖 attention-prologue 内核对 K 和 V 所做的 ShortConv/QK-norm 工作。SGLang 把它放在与那个 prologue 不同的 CUDA 流上运行，从而与卷积/归一化重叠，而不是串行地排在它后面。',
-                'MXFP8 支持：用 MXFP8 而非 bf16 存储 K/V，KV-cache 容量大约翻倍，而 Blackwell 原生运行 MXFP8 矩阵乘的吞吐也高于 bf16。FA4 分支非对称地应用这一点：Q@Kᵀ 作为原生 MXFP8 MMA 运行，而 P@V 保留在 bf16 以保护精度，把 MXFP8 量化直接融进同一个 attention-prologue 内核，把开销压到约 4.7–4.8 µs：在 bf16 基线的约 14% 以内：同时拿到 KV-cache 的显存收益。',
+                'MXFP8 支持：用 MXFP8 而非 bf16 存储 K/V，KV-cache 容量大约翻倍，而 Blackwell 原生运行 MXFP8 矩阵乘的吞吐也高于 bf16。FA4 分支非对称地应用这一点：Q与Kᵀ 作为原生 MXFP8 MMA 运行，而 P与V 保留在 bf16 以保护精度，把 MXFP8 量化直接融进同一个 attention-prologue 内核，把开销压到约 4.7–4.8 µs：在 bf16 基线的约 14% 以内：同时拿到 KV-cache 的显存收益。',
             ],
         },
         {
@@ -74,14 +74,14 @@ DATA = {
             'title': '共享专家池优化',
             'paras': [
                 'Top-k：共享池 MoE 门控是 sigmoid + 偏置 top-k 选择，随后对选中的路由得分和共享得分做联合 logsigmoid 重归一化。一个融合的 Triton 内核把整串收拢，在真实 token 数下比未融合链快 1.6–5.6×；一个针对形状特化的 CUDA-JIT 版本更进一步，例如在 T=4096 时 7.72 µs 对未融合链的 26.15 µs（3.4×），在 T=16384 时 20.09 µs 对 52.88 µs（2.6×）。',
-                '共享专家融合：共享池的数学意味着共享专家作为一个完整的张量并行稠密块运行。我们转而把专家轴融合进矩阵维度：gate/up 权重沿输出维度堆叠，down 权重沿输入维度拼接，得到的二维权重表示称为线性化布局（linearized layout）。它的 down GEMM 在自己的归约中就完成了专家求和，从而消除了被复制的输入、逐专家的临时结果以及单独的一次求和。在 B200 W4A16 服务下，专家融合把输入吞吐提升 5.8–11.1%，并把 TTFT 降低 5.5–10.0%（BS1–32）；H200 输入吞吐提升 2.2–4.5%，解码吞吐则保持稳定。',
+                '共享专家融合：共享池的数学意味着共享专家作为一个完整的张量并行稠密块运行。我们转而把专家轴融合进矩阵维度：gate/up 权重沿输出维度堆叠，down 权重沿输入维度拼接，得到的二维权重表示称为线性化布局（linearized layout）。它的 down GEMM 在自己的归约中就完成了专家求和，从而消除了被复制的输入、逐专家的临时结果以及单独的一次求和。于 B200 W4A16 服务下，专家融合把输入吞吐提升 5.8–11.1%，并把 TTFT 降低 5.5–10.0%（BS1–32）；H200 输入吞吐提升 2.2–4.5%，解码吞吐则保持稳定。',
             ],
         },
         {
             'type': 'h2',
             'title': '功能支持',
             'paras': [
-                'Inkling 在 SGLang 上获得了广泛的功能覆盖，下面逐一展开关键能力。',
+                'Inkling 于 SGLang获得了广泛的功能覆盖，下面逐一展开关键能力。',
             ],
         },
         {
@@ -112,7 +112,7 @@ DATA = {
             'type': 'h3',
             'title': 'AMD GPU 支持',
             'paras': [
-                'SGLang 通过给 Triton 注意力后端新增的一个通用 score_mod 接口，在 AMD MI35X 上支持 Inkling。该接口在编译期把一个调用方提供的 score 修改函数内联进 extend 和 decode 内核，因此 Inkling 的相对位置嵌入能在 ROCm 上工作，而不需要 NVIDIA 专用的 FlashAttention-4 路径。再结合额外的算子适配和 aiter MoE runner 集成，Inkling 于 MI35X以 --attention-backend triton --moe-runner-backend aiter 端到端运行。',
+                'SGLang 通过给 Triton 注意力后端新增的一个通用 score_mod 接口，于 AMD MI35X 上支持 Inkling。该接口在编译期把一个调用方提供的 score 修改函数内联进 extend 和 decode 内核，因此 Inkling 的相对位置嵌入能于 ROCm 上工作，而不需要 NVIDIA 专用的 FlashAttention-4 路径。再结合额外的算子适配和 aiter MoE runner 集成，Inkling 于 MI35X以 --attention-backend triton --moe-runner-backend aiter 端到端运行。',
             ],
         },
         {
@@ -120,7 +120,7 @@ DATA = {
             'title': 'LoRA 服务',
             'paras': [
                 '对于一个投影 y = Wx，LoRA 让基础权重 W 保持不变，并加上一个低秩更新：A 把 token 从模型维度缩到秩 r，B 再把它扩回。Inkling 把这些更新应用到注意力、稠密 MLP、专家和输出投影上。SGLang 转而使用双流调度：主 CUDA 流运行基础模型，而一条 LoRA 侧流计算每个 token 所选适配器的秩 r 工作，两条流只在需要 delta 的地方同步。专家层复用基础模型的路由元数据，而不是对 LoRA 更新再做一次路由。',
-                '即便一个批里包含多个不同 LoRA，结果也始终接近无 LoRA 基线。在 BS4 下从一个不同 LoRA 切到四个，在 B200 上仅损失 0.9%。',
+                '即便一个批里包含多个不同 LoRA，结果也始终接近无 LoRA 基线。在 BS4 下从一个不同 LoRA 切到四个，于 B200 上仅损失 0.9%。',
             ],
         },
         {
@@ -142,7 +142,7 @@ DATA = {
             'type': 'h2',
             'title': '性能结果',
             'paras': [
-                '我们在 B200 节点上对 Inkling 做端到端基准测试，在固定序列形状（输入长度 8192、输出长度 1024）下扫描批大小，全程开启 TP=4 与 TP=8、对称内存和 CUDA 图。',
+                '我们于 B200 节点上对 Inkling 做端到端基准测试，在固定序列形状（输入长度 8192、输出长度 1024）下扫描批大小，全程开启 TP=4 与 TP=8、对称内存和 CUDA 图。',
                 '左图描绘了两种张量并行规模下的吞吐-交互性帕累托前沿：在 TP=8、批大小 1 时达到 171.0 tok/s/用户；批大小 32 时达到 71.7k tok/s 的聚合输入吞吐。右图显示两种张量并行规模下，token 间延迟（ITL）在批大小 8 之前都停留在个位数毫秒，直到批大小进入 30 多才升到十毫秒量级。',
             ],
         },
@@ -175,7 +175,7 @@ DATA = {
             'title': '面向训练-推理一致性的定制高效算子',
             'paras': [
                 '训练-推理一致性是 RL 中一项核心的正确性要求：训练器必须评估生成 rollout 的那个相同策略，即使训练和推理服务走的是不同的分布式执行栈。Miles 从定义 Inkling 前向传播的算子层面解决这种错配，同时提供分布式训练所需的反向实现。',
-                '相对注意力：Miles 采用与 SGLang 相同的固定相对投影 P 和注意力 logit 定义，提供 FlexAttention、FA4 和 Transformer Engine 三种训练侧注意力后端（默认 FlexAttention）。在 GB300 上、8K 打包序列、相对范围 1024 时，FlexAttention 比 Transformer Engine 参考实现约快 5×、峰值显存约少 5×，同时在 BF16 数值噪声范围内匹配。',
+                '相对注意力：Miles 采用与 SGLang 相同的固定相对投影 P 和注意力 logit 定义，提供 FlexAttention、FA4 和 Transformer Engine 三种训练侧注意力后端（默认 FlexAttention）。于 GB300 上、8K 打包序列、相对范围 1024 时，FlexAttention 比 Transformer Engine 参考实现约快 5×、峰值显存约少 5×，同时在 BF16 数值噪声范围内匹配。',
                 '短卷积：Miles 用定制的 Triton 前向和反向内核实现这个算子，把深度因果卷积与残差路径融合，以 FP32 累加、最后加残差，复现 SGLang 的算术顺序。',
                 'FP32 MoE 激活与组合：Inkling 的共享池 MoE 对门控激活和加权专家归约中的舍入都很敏感。Miles 用 FP32 执行这两个阶段，使连续的专家计算在训练和 rollout 间对齐，补足了 R3 提供的离散路由对齐。',
             ],
@@ -208,7 +208,7 @@ DATA = {
             'paras': [
                 'Inkling 原生支持文本、图像和音频输入。Miles 把这些模态的 RL 后端都扩展到了：全参数和 LoRA 配方都接受结构化的多模态 rollout，在 Megatron 中执行 Inkling 的视觉和音频塔，并在媒体扩展后的序列上保留路由重放。',
                 '图 11 展示了核心的数据变换：Miles 保留原始的结构化消息列表，直到 Inkling 专用渲染器为每个图像或音频项发出恰好一个哨兵（sentinel），再在训练前把哨兵替换成对应数量的词表内占位位置，同时记录必须插入媒体嵌入的样本局部位置。SGLang 在这次扩展之后才做 MoE 路由决策，所以 R3 trace 包含每个扩展位置的专家 ID。',
-                '在多模态 LoRA RL 中，当前生产配方冻结视觉和音频塔，在它们的嵌入周围训练语言模型适配器或基础模型。为验证该配方，我们在 Geo3K 上选用视觉-文本设置，Geo3K 评估从约 0.54 升到 0.58，训练-rollout KL 在整个训练中都保持在 10⁻³ 量级。同一条多模态路径也支持音频输入、全参数训练和分布式执行。',
+                '在多模态 LoRA RL 中，当前生产配方冻结视觉和音频塔，在它们的嵌入周围训练语言模型适配器或基础模型。为验证该配方，我们于 Geo3K 上选用视觉-文本设置，Geo3K 评估从约 0.54 升到 0.58，训练-rollout KL 在整个训练中都保持在 10⁻³ 量级。同一条多模态路径也支持音频输入、全参数训练和分布式执行。',
             ],
         },
         {
@@ -232,7 +232,7 @@ DATA = {
         'fig03': '图4：共享专家融合把一个专家批处理实现转换成线性化布局：gate/up 权重堆叠进一个稠密 GEMM，down 权重拼接进第二个稠密 GEMM，第二个 GEMM 的归约完成了专家求和。',
         'fig04': '图5：Inkling 多层 MTP 的一轮解码。目标隐藏状态和根 token 播种一条八层草稿链，被捕获进一张 CUDA 图，九位置块返回目标做单次验证前向。',
         'fig05': '图5：Inkling 的双流 LoRA 调度让基础模型 GEMM 留在主 CUDA 流，把选中适配器的低秩工作重叠在侧流上。融合 join 内核在激活和输出依赖处加上 delta。',
-        'fig06': '图7：Inkling 在 B200 上的服务性能（ISL=8192/OSL=1024）。左：跨批大小的每 GPU 吞吐 vs 交互性；右：匹配批大小下的 token 间延迟。',
+        'fig06': '图7：Inkling 于 B200 上的服务性能（ISL=8192/OSL=1024）。左：跨批大小的每 GPU 吞吐 vs 交互性；右：匹配批大小下的 token 间延迟。',
         'fig07a': '图8：Inkling 975B 全参数 GRPO：训练-rollout KL 保持在约 10⁻³，原始奖励与 AIME25 评估稳步提升。',
         'fig07b': '图8：Inkling 975B 全参数 GRPO：训练-rollout KL 保持在约 10⁻³，原始奖励与 AIME25 评估稳步提升。',
         'fig07c': '图8：Inkling 975B 全参数 GRPO：训练-rollout KL 保持在约 10⁻³，原始奖励与 AIME25 评估稳步提升。',
