@@ -1,0 +1,11 @@
+const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || null;
+console.error("[dbg] proxyUrl =", JSON.stringify(proxyUrl));
+const url = "https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=test&secret=test";
+const headers: Record<string,string> = {};
+const buf = Buffer.from("x", "utf-8");
+headers["Content-Type"] = "application/json";
+const res = await fetch(url, { method: "GET", headers, body: undefined, proxy: proxyUrl as any });
+console.error("[dbg] status =", res.status);
+console.error("[dbg] body =", (await res.text()).slice(0,120));
+const r2 = await fetch("https://api.ipify.org", { proxy: proxyUrl as any });
+console.error("[dbg] ipify =", await r2.text());
