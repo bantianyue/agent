@@ -160,7 +160,32 @@ def save_articles(arr):
     conn.close()
 
 
-def res_json(handler, obj, code=200):
+def add_candidate(url, title="", priority="mid"):
+    """新增一条候选文章：done=0（未完成），去重（url 已存在则返回已存在记录）"""
+    url = (url or "").strip()
+    if not url:
+        return None, "url required"
+    if priority not in ("high", "mid", "low"):
+        priority = "mid"
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT id,pos,title,url,priority,done FROM candidate_articles WHERE url=?", (url,)
+    ).fetchone()
+    if row:
+        conn.close()
+        return {
+            "id": row[0], "pos": row[1], "title": row[2],
+            "url": row[3], "priority": row[4], "done": bool(row[5]),
+        }, "already exists"
+    max_pos = conn.execute("SELECT COALESCE(MAX(pos),-1) FROM candidate_articles").fetchone()[0]
+    conn.execute(
+        "INSERT INTO candidate_articles (pos,title,url,priority,done,done_locked) VALUES (?,?,?,?,0,0)",
+        (max_pos + 1, title or "", url, priority),
+    )
+    cid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+    conn.close()
+    return {"id": cid, "pos": max_pos + 1, "title": title, "url": url, "priority": priority, "done": False}, "created"
     handler.send_response(code)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.end_headers()
@@ -217,6 +242,28 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         save_articles(arr)
         res_json(self, {"ok": True})
+
+    def do_POST(self):
+        if self.path != "/api/candidate":
+            self.send_error(404, "Not found")
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+        try:
+            data = json.loads(body.decode("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("expected object")
+        except Exception as e:
+            self.send_error(400, f"Invalid JSON: {e}")
+            return
+        url = (data.get("url") or "").strip()
+        if not url:
+            res_json(self, {"ok": False, "error": "url required"}, 400)
+            return
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = "https://" + url
+        rec, status = add_candidate(url, data.get("title", "") or "", data.get("priority", "mid") or "mid")
+        res_json(self, {"ok": True, "status": status, "record": rec}, 200)
 
     def log_message(self, fmt, *args):
         pass
