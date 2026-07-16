@@ -7,9 +7,9 @@ import http.server, socketserver, os, json, sqlite3
 
 PORT = 8765
 ROOT = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(ROOT, "candidate_articles.db")
+DB_FILE = os.path.join(ROOT, "articles.db")
 # 文章根目录（用于扫描 source.url 判断“已完成”）
-ARTICLES_ROOT = r"D:\06_Hermes\candidate_articles"
+ARTICLES_ROOT = r"D:\06_Hermes\articles"
 SKIP_DIRS = {"__pycache__", "_src_tmp", "_tmp"}
 # 兼容旧迁移：若存在 data.json 则导入
 LEGACY_JSON = os.path.join(ROOT, "data.json")
