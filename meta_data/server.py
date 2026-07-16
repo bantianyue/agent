@@ -20,10 +20,12 @@ def get_conn():
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""CREATE TABLE IF NOT EXISTS articles (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pos INTEGER NOT NULL DEFAULT 0,
         title TEXT NOT NULL DEFAULT '',
         url TEXT NOT NULL UNIQUE,
         priority TEXT NOT NULL DEFAULT 'mid',
         done INTEGER NOT NULL DEFAULT 0,
+        done_locked INTEGER NOT NULL DEFAULT 0,
         created_at TEXT DEFAULT (datetime('now'))
     )""")
     return conn
