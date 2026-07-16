@@ -160,6 +160,13 @@ def save_articles(arr):
     conn.close()
 
 
+def res_json(handler, obj, code=200):
+    handler.send_response(code)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.end_headers()
+    handler.wfile.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+
+
 def add_candidate(url, title="", priority="mid"):
     """新增一条候选文章：done=0（未完成），去重（url 已存在则返回已存在记录）"""
     url = (url or "").strip()
@@ -272,7 +279,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     os.chdir(ROOT)
     init_db()
-    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
+    with socketserver.ThreadingTCPServer(("", PORT), Handler) as httpd:
         print(f"服务已启动： http://127.0.0.1:{PORT}/文章.html")
         print("按 Ctrl+C 停止")
         try:
