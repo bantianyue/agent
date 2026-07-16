@@ -16,3 +16,5 @@
 - [ ] Step 4g: 文本格式修复
 - [ ] Step 5: 预发布检查
 - [ ] Step 6: 推送草稿
+| Step 4d-i: 传送门 | completed |
+| Step 5: 预发布检查 | completed |
