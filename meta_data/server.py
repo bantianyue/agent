@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # 技术文章收藏 - 本地服务（SQLite 版）
-# 数据存于同目录 candidate_articles.db；对外仍提供 /data.json 的 GET(返回数组)/PUT(整体保存) 接口
+# 数据存于同目录 candidate_articles.db；对外提供 /api/articles 的 GET(返回数组)/PUT(整体保存) 接口
 # 用法：双击本文件，或终端 `python server.py`
 # 浏览器打开 http://127.0.0.1:8765/文章.html
 import http.server, socketserver, os, json, sqlite3
@@ -211,7 +211,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Location", "/%E6%96%87%E7%AB%A0.html")
             self.end_headers()
             return
-        if self.path == "/data.json":
+        if self.path == "/api/articles":
             res_json(self, load_articles())
             return
         if self.path == "/scan":
@@ -237,7 +237,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_PUT(self):
-        if self.path != "/data.json":
+        if self.path != "/api/articles":
             self.send_error(403, "Only /data.json writable")
             return
         length = int(self.headers.get("Content-Length", 0))
