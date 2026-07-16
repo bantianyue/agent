@@ -1,4 +1,5 @@
 DATA = {
+    'title': 'SGLang 与 Miles 为前沿多模态模型 Inkling 提供 Day-0 支持',
     'summary': [
         {'key': '975B 多模态', 'body': 'Inkling 是 9750 亿参数前沿多模态模型，上下文窗口最长 100 万 token，融合短卷积、相对位置注意力与共享专家池 MoE。'},
         {'key': '71.7k tok/s', 'body': 'SGLang 于 Blackwell 上实现最高 71.7k tok/s 输入吞吐与 171.0 tok/s 每用户解码速度，全 CUDA 图 prefill 比 BCG 再快 14–17%。'},
@@ -13,7 +14,7 @@ DATA = {
     'sections': [
         {
             'type': 'h2',
-            'title': 'Inkling 模型架构',
+            'title': 'SGLang 与 Miles 为前沿多模态模型 Inkling 提供 Day-0 支持',
             'paras': [
                 'Inkling 在标准 decoder-only Transformer 架构基础上，集成了三个组件：短卷积、带相对位置嵌入的注意力，以及 MoE 中的共享专家池。',
                 '上图展示了 Inkling 在注意力和 MoE 上的设计，两者都以同样的新方式收尾：在残差连接之前加一个短卷积（ShortConv）。注意力还会在 Q/K 归一化之前对 K 和 V 做短卷积，并把一个可学习的、由 query 条件化的相对位置偏置（RelLogitsProj）直接加进注意力 logits，取代位置嵌入。MoE 运行 top-k 路由，并带有共享专家池（Sink）。与传统共享专家 MoE 不同：后者在顶部叠加一条永远开启、独立于路由器的共享通路：Inkling 的路由器连共享专家也一起打分，并把它们的权重与选中的路由专家权重一起归一化，因此两者共用同一个权重预算。',
