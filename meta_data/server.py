@@ -240,9 +240,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             conn = get_conn()
             rows = conn.execute("SELECT name FROM candidate_statuses ORDER BY id").fetchall()
             conn.close()
-            import sys
-            sys.stderr.write(f"[DEBUG statuses] rows={rows}\n")
-            sys.stderr.flush()
             res_json(self, [r[0] for r in rows])
             return
         if self.path == "/scan":
@@ -321,9 +318,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             conn = get_conn()
             try:
                 if old and old != name:
-                    # 改名：更新字典 + 同步文章记录
-                    conn.execute("UPDATE candidate_statuses SET name=? WHERE name=?", (name, old))
+                    # 改名：先同步文章记录，再删旧名、插新名（避免 UNIQUE 冲突残留）
                     conn.execute("UPDATE candidate_articles SET status=? WHERE status=?", (name, old))
+                    conn.execute("DELETE FROM candidate_statuses WHERE name=?", (old,))
+                    conn.execute("INSERT OR IGNORE INTO candidate_statuses (name) VALUES (?)", (name,))
                 else:
                     conn.execute("INSERT OR IGNORE INTO candidate_statuses (name) VALUES (?)", (name,))
                 conn.commit()
