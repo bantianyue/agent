@@ -118,18 +118,6 @@ def migrate_from_json(conn):
 
 
 def init_db():
-    # 强制使用 DELETE 日志模式（避免 WAL 多连接视图不一致），并对旧 WAL 做 checkpoint
-    raw = sqlite3.connect(DB_FILE, timeout=30)
-    try:
-        raw.execute("PRAGMA journal_mode=WAL")
-        raw.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        raw.execute("PRAGMA journal_mode=DELETE")
-        raw.execute("VACUUM")
-        raw.commit()
-    except Exception:
-        pass
-    finally:
-        raw.close()
     conn = get_conn()
     cur = conn.execute("SELECT COUNT(*) FROM candidate_articles")
     if cur.fetchone()[0] == 0:
