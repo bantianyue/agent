@@ -22,3 +22,4 @@
 
 创建时间: 2026-07-17
 来源: https://magazine.sebastianraschka.com/p/visual-attention-variants
+| Step 4d-i: 传送门 | completed |
