@@ -48,7 +48,7 @@ DATA = {
   ],
   "conclusion": [
     "Inkling 的发布验证了「一个模型、双厂原生 FP4、统一 kernel API」的跨平台推理路线：NVIDIA 走 CuteDSL 专用 decode kernel，AMD 走 Gluon persistent/split-K，底层却共享同一套模型逻辑与调度。",
-    "性能上，MTP 是这次最大的杠杆——B200 上 8 draft steps 把 decode 吞吐顶到 354.6 tok/s/用户，比关 MTP 提升 2.33×；MXFP4 则把 975B 模型塞进 4 张 MI355X 跑长上下文 agentic 负载。这些仍是早期数字，团队仍在持续压榨调度、缓存与厂商原生 kernel。",
+    "性能上，MTP 是这次最大的杠杆：B200 上 8 draft steps 把 decode 吞吐顶到 354.6 tok/s/用户，比关 MTP 提升 2.33×；MXFP4 则把 975B 模型塞进 4 张 MI355X 跑长上下文 agentic 负载。这些仍是早期数字（对照组仅 152.4 tok/s），团队仍在持续压榨调度、缓存与厂商原生 kernel，后续还有不小的提升空间。",
   ],
   "reference_url": "https://lightseek.org/blog/tokenspeed-inkling.html",
   "caption_translations": {},
