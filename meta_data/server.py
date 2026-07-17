@@ -29,8 +29,18 @@ def get_conn():
         priority TEXT NOT NULL DEFAULT 'mid',
         done INTEGER NOT NULL DEFAULT 0,
         done_locked INTEGER NOT NULL DEFAULT 0,
+        note TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT '未开始',
         created_at TEXT DEFAULT (datetime('now'))
     )""")
+    # 状态字典：可用户自定义的状态列表
+    conn.execute("""CREATE TABLE IF NOT EXISTS candidate_statuses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE
+    )""")
+    conn.execute("INSERT OR IGNORE INTO candidate_statuses (name) VALUES (?)", ("未开始",))
+    conn.execute("INSERT OR IGNORE INTO candidate_statuses (name) VALUES (?)", ("完成",))
+    conn.execute("INSERT OR IGNORE INTO candidate_statuses (name) VALUES (?)", ("失败",))
     # 已生成草稿的文章：含生成过程信息，预留扩展
     conn.execute("""CREATE TABLE IF NOT EXISTS article_drafts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,8 +108,8 @@ def migrate_from_json(conn):
             locked = 0 if done else 0
         try:
             conn.execute(
-                "INSERT OR IGNORE INTO candidate_articles (pos,title,url,priority,done,done_locked) VALUES (?,?,?,?,?,?)",
-                (i, title, url, priority, done, locked),
+                "INSERT OR IGNORE INTO candidate_articles (pos,title,url,priority,done,done_locked,note,status) VALUES (?,?,?,?,?,?,?,?)",
+                (i, title, url, priority, done, locked, "", "完成" if done else "未开始"),
             )
             seeded = True
         except Exception:
@@ -129,11 +139,11 @@ def init_db():
 def load_articles():
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id,pos,title,url,priority,done FROM candidate_articles ORDER BY pos DESC"
+        "SELECT id,pos,title,url,priority,done,note,status FROM candidate_articles ORDER BY pos DESC"
     ).fetchall()
     conn.close()
     out = []
-    for aid, pos, title, url, priority, done in rows:
+    for aid, pos, title, url, priority, done, note, status in rows:
         out.append({
             "id": aid,
             "pos": pos,
@@ -141,6 +151,8 @@ def load_articles():
             "url": url,
             "priority": priority,
             "done": bool(done),
+            "note": note or "",
+            "status": status or "未开始",
         })
     return out
 
@@ -158,9 +170,11 @@ def save_articles(arr):
             title = a.get("title", "") or ""
             priority = a.get("priority", "mid") or "mid"
             done = 1 if a.get("done") else 0
+            note = a.get("note", "") or ""
+            status = a.get("status", "") or "未开始"
             conn.execute(
-                "INSERT INTO candidate_articles (pos,title,url,priority,done,done_locked) VALUES (?,?,?,?,?,1)",
-                (i, title, url, priority, done),
+                "INSERT INTO candidate_articles (pos,title,url,priority,done,done_locked,note,status) VALUES (?,?,?,?,?,1,?,?)",
+                (i, title, url, priority, done, note, status),
             )
         conn.execute("COMMIT")
     except Exception:
@@ -186,23 +200,24 @@ def add_candidate(url, title="", priority="mid"):
         priority = "mid"
     conn = get_conn()
     row = conn.execute(
-        "SELECT id,pos,title,url,priority,done FROM candidate_articles WHERE url=?", (url,)
+        "SELECT id,pos,title,url,priority,done,note,status FROM candidate_articles WHERE url=?", (url,)
     ).fetchone()
     if row:
         conn.close()
         return {
             "id": row[0], "pos": row[1], "title": row[2],
             "url": row[3], "priority": row[4], "done": bool(row[5]),
+            "note": row[6] or "", "status": row[7] or "未开始",
         }, "already exists"
     max_pos = conn.execute("SELECT COALESCE(MAX(pos),-1) FROM candidate_articles").fetchone()[0]
     conn.execute(
-        "INSERT INTO candidate_articles (pos,title,url,priority,done,done_locked) VALUES (?,?,?,?,0,0)",
-        (max_pos + 1, title or "", url, priority),
+        "INSERT INTO candidate_articles (pos,title,url,priority,done,done_locked,note,status) VALUES (?,?,?,?,0,0,?,?)",
+        (max_pos + 1, title or "", url, priority, "", "未开始"),
     )
     cid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.commit()
     conn.close()
-    return {"id": cid, "pos": max_pos + 1, "title": title, "url": url, "priority": priority, "done": False}, "created"
+    return {"id": cid, "pos": max_pos + 1, "title": title, "url": url, "priority": priority, "done": False, "note": "", "status": "未开始"}, "created"
     handler.send_response(code)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.end_headers()
@@ -216,11 +231,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             self.send_response(302)
-            self.send_header("Location", "/%E6%96%87%E7%AB%A0.html")
+            self.send_header("Location", "/Blog.html")
             self.end_headers()
             return
         if self.path == "/api/articles":
             res_json(self, load_articles())
+            return
+        if self.path == "/api/statuses":
+            conn = get_conn()
+            rows = conn.execute("SELECT name FROM candidate_statuses ORDER BY id").fetchall()
+            conn.close()
+            res_json(self, [r[0] for r in rows])
             return
         if self.path == "/scan":
             # 手动触发：仅对未锁定的记录按 source.url 刷新 done
@@ -261,26 +282,58 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         res_json(self, {"ok": True})
 
     def do_POST(self):
-        if self.path != "/api/candidate":
-            self.send_error(404, "Not found")
+        if self.path == "/api/candidate":
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            try:
+                data = json.loads(body.decode("utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("expected object")
+            except Exception as e:
+                self.send_error(400, f"Invalid JSON: {e}")
+                return
+            url = (data.get("url") or "").strip()
+            if not url:
+                res_json(self, {"ok": False, "error": "url required"}, 400)
+                return
+            if not url.startswith("http://") and not url.startswith("https://"):
+                url = "https://" + url
+            rec, status = add_candidate(url, data.get("title", "") or "", data.get("priority", "mid") or "mid")
+            res_json(self, {"ok": True, "status": status, "record": rec}, 200)
             return
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length)
-        try:
-            data = json.loads(body.decode("utf-8"))
-            if not isinstance(data, dict):
-                raise ValueError("expected object")
-        except Exception as e:
-            self.send_error(400, f"Invalid JSON: {e}")
+        if self.path == "/api/statuses":
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            try:
+                data = json.loads(body.decode("utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("expected object")
+            except Exception as e:
+                self.send_error(400, f"Invalid JSON: {e}")
+                return
+            name = (data.get("name") or "").strip()
+            if not name:
+                res_json(self, {"ok": False, "error": "name required"}, 400)
+                return
+            old = (data.get("old") or "").strip()
+            conn = get_conn()
+            try:
+                if old and old != name:
+                    # 改名：更新字典 + 同步文章记录
+                    conn.execute("UPDATE candidate_statuses SET name=? WHERE name=?", (name, old))
+                    conn.execute("UPDATE candidate_articles SET status=? WHERE status=?", (name, old))
+                else:
+                    conn.execute("INSERT OR IGNORE INTO candidate_statuses (name) VALUES (?)", (name,))
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                conn.close()
+                res_json(self, {"ok": False, "error": str(e)}, 400)
+                return
+            conn.close()
+            res_json(self, {"ok": True, "name": name}, 200)
             return
-        url = (data.get("url") or "").strip()
-        if not url:
-            res_json(self, {"ok": False, "error": "url required"}, 400)
-            return
-        if not url.startswith("http://") and not url.startswith("https://"):
-            url = "https://" + url
-        rec, status = add_candidate(url, data.get("title", "") or "", data.get("priority", "mid") or "mid")
-        res_json(self, {"ok": True, "status": status, "record": rec}, 200)
+        self.send_error(404, "Not found")
 
     def log_message(self, fmt, *args):
         pass
@@ -291,7 +344,7 @@ if __name__ == "__main__":
     init_db()
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     with socketserver.ThreadingTCPServer(("", PORT), Handler) as httpd:
-        print(f"服务已启动： http://127.0.0.1:{PORT}/文章.html")
+        print(f"服务已启动： http://127.0.0.1:{PORT}/Blog.html")
         print("按 Ctrl+C 停止")
         try:
             httpd.serve_forever()
