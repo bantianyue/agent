@@ -139,7 +139,7 @@ def init_db():
 def load_articles():
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id,pos,title,url,priority,done,note,status FROM candidate_articles ORDER BY pos DESC"
+        "SELECT id,pos,title,url,priority,done,note,status FROM candidate_articles ORDER BY id DESC"
     ).fetchall()
     conn.close()
     out = []
