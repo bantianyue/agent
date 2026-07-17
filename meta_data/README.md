@@ -158,3 +158,12 @@ C:\Users\twfehh7\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe serve
    - 前端：时间列放在状态与备注之间，上下紧凑显示（上面创建时间、下面修改时间），`width:140px` 对齐时间串长度
    - 备注列缩窄：`flex:0 1 64px; min-width:60px`
 10. **前端布局更新务必写 README**：每次改前端/后端需求后必须同步更新 README.md，用户需求不要漏记（这次第 9 条就是漏补的）。
+
+## 时间字段规则（必须遵守）
+
+所有时间字段（`created_at` / `updated_at`）的写入逻辑必须遵守以下规则：
+
+- **后端全权控制**：时间字段只在 server.py 的 `cn_now()`（中国时区 UTC+8）中产生，**前端不传、不碰**。前端请求（PUT /api/articles、POST /api/candidate）不携带任何时间字段，后端自行赋值。
+- **insert**：`created_at = now`、`updated_at = now`（两者相同）
+- **update**：只改 `updated_at = now`，**不碰 created_at**（保留首次写入值）
+- **代码中禁止出现 `'2026-07-17 00:00:00'`** 之类的硬编码占位符。所有时间必须来自 `cn_now()`。
