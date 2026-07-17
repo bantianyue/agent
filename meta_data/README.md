@@ -161,9 +161,64 @@ C:\Users\twfehh7\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe serve
 
 ## 要求
 
-所有时间字段（`created_at` / `updated_at`）的写入逻辑必须遵守以下要求：
+### 1. 数据绝对不能丢
+- **禁止删除 `articles.db` 文件**（哪怕为了"从零重建干净库"也不行）。
+- 加字段用 `ALTER TABLE ... ADD COLUMN`（在线迁移），**绝不**删库重建。
+- 如果必须结构变更：先 `ALTER TABLE`，保留所有原数据行。
+- 已发生过的错误：2026-07-17 调试时误删 articles.db，虽导回但禁止再犯。
 
+### 2. 排序规则
+- **列表默认按 id 倒序（新→旧）**，顶部必须是最新添加的文章。
+- `pos` 字段**不可信**（历史重建/测试打乱过），排序真源用 **id**（自增 id 严格随添加时间递增）。
+- 后端 `load_articles` 的 `ORDER BY` 必须是 **id DESC**。
+- 前端 `sort==='time'` 排序必须按 `(b.id)-(a.id)`。
+
+### 3. 前端布局铁律
+- **每行所有字段必须横向一排从左到右排**（优先级 | 标题+URL | 状态 | 时间 | 备注 | Run | 保存 | 复制 | 删除）。
+- **禁止纵向堆叠 / 上下叠加**。
+- 列表整体可宽，但**不要上下滚动条**（`ul.list` 不加 `max-height` / `overflow-y`）。
+- 行高要紧凑（`padding:9px 12px; margin-bottom:7px`）。
+
+### 4. 标题 / URL 列宽
+- 标题和 URL 列宽限制为 **200px**（`max-width:200px` + `text-overflow:ellipsis` 截断）。
+
+### 5. 配色
+- **清爽浅色**（白卡片 / 浅灰蓝底 / 蓝紫强调色）。
+- **禁止暗色主题**（深黑底白字那种）。
+
+### 6. 按钮图标规范
+- **Run 按钮 = 执行图标**（▶ 播放三角 `<path d="M8 5v14l11-7z"/>`），**不是文字 "Run"**。
+- **保存按钮 = 软盘图标**（💾 `<path d="M19 21H5..."/>`），**不是对勾 ✓**。
+
+### 7. 状态下拉框
+- 用 `select` 下拉框替代 checkbox 完成态。
+- 默认选项：「未开始 / 完成 / 失败」，支持用户自定义。
+- 选「完成」时自动同步 `done=1`。
+- 提供「管理状态」按钮（prompt 输入 `/` 分隔列表，支持新增 + 改名）。
+- 改名时已使用该状态的文章会被同步更新。
+
+### 8. 编辑与保存
+- 每行可编辑：**标题（contentEditable）、优先级、备注、状态**；其他字段（id/url/pos）不可编辑。
+- 每行右侧有 **保存按钮（软盘图标）**，点击 PUT 全量落库。
+- 前端保存（`saveOne` / `persist`）通过 `PUT /api/articles` 全量覆盖后端。
+
+### 9. 删除
+- url 是去重的唯一键。删除按钮点击后，**后端必须真正删除该条记录**（DELETE FROM），不能再依赖"前端移除后 PUT 全量覆盖"的方式让记录自然消失。
+- 删除后前端**自动从后台重新拉取**（`GET /api/articles`）刷新页面显示，确保与后端数据一致。
+- url 在写入前需去除前后空格（`url.strip()`）。
+
+### 10. URL 唯一性
+- `url` 是候选文章的唯一键（UNIQUE），**不允许重复添加**。
+- 所有写入路径（POST /api/candidate、PUT /api/articles）在写入前必须对 url 做 `.strip()` 去除前后空格。
+- 后端 `add_candidate` 已做去重（url 已存在则返回已存在记录），`save_articles` 的 INSERT 分支同样需保证 url 唯一。
+
+### 11. 时间字段规则
 - **后端全权控制**：时间字段只在 server.py 的 `cn_now()`（中国时区 UTC+8）中产生，**前端不传、不碰**。前端请求（PUT /api/articles、POST /api/candidate）不携带任何时间字段，后端自行赋值。
 - **insert**：`created_at = now`、`updated_at = now`（两者相同）
 - **update**：只改 `updated_at = now`，**不碰 created_at**（保留首次写入值）
 - **代码中禁止出现 `'2026-07-17 00:00:00'`** 之类的硬编码占位符。所有时间必须来自 `cn_now()`。
+
+### 11. DB 备份
+- **启动热备**：server.py 启动时自动复制 `articles.db` → `articles.db.bak`（`backup_hot()`）。
+- **每日定时备份**：通过 Windows schtasks（`BlogBackupDaily`）每天 16:00 自动备份，保留 7 份。
+- 备份脚本 `backup_daily.py`：每天执行一次，保留最近 7 份备份。
