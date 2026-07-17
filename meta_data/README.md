@@ -4,6 +4,9 @@
 
 前端页面名为 **Blog**（原 `文章.html` 已重命名为 `Blog.html`，访问 `/Blog.html`）。
 
+后端代码: D:\06_Hermes\articles\meta_data\server.py
+前端: D:\06_Hermes\articles\meta_data\Blog.html
+
 ---
 
 ## ⚠️ 用户铁律（改这个项目前必读，勿重复踩坑）
