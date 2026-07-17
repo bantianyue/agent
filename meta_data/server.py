@@ -18,8 +18,7 @@ LEGACY_JSON = os.path.join(ROOT, "data.json")
 def get_conn():
     conn = sqlite3.connect(DB_FILE, timeout=30)
     conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA synchronous=FULL")
     # 候选文章：记录待生成公众号文章草稿的 URL
     conn.execute("""CREATE TABLE IF NOT EXISTS candidate_articles (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -119,6 +118,18 @@ def migrate_from_json(conn):
 
 
 def init_db():
+    # 强制使用 DELETE 日志模式（避免 WAL 多连接视图不一致），并对旧 WAL 做 checkpoint
+    raw = sqlite3.connect(DB_FILE, timeout=30)
+    try:
+        raw.execute("PRAGMA journal_mode=WAL")
+        raw.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        raw.execute("PRAGMA journal_mode=DELETE")
+        raw.execute("VACUUM")
+        raw.commit()
+    except Exception:
+        pass
+    finally:
+        raw.close()
     conn = get_conn()
     cur = conn.execute("SELECT COUNT(*) FROM candidate_articles")
     if cur.fetchone()[0] == 0:
@@ -241,6 +252,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             conn = get_conn()
             rows = conn.execute("SELECT name FROM candidate_statuses ORDER BY id").fetchall()
             conn.close()
+            import sys
+            sys.stderr.write(f"[DEBUG statuses] rows={rows}\n")
+            sys.stderr.flush()
             res_json(self, [r[0] for r in rows])
             return
         if self.path == "/scan":
