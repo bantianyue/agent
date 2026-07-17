@@ -91,6 +91,8 @@
 | done_locked | 完成态是否被手动锁定 |
 | note | 备注（可编辑，默认空） |
 | status | 状态：未开始 / 完成 / 失败 / 自定义 |
+| created_at | 创建时间，格式 `YYYY-MM-DD HH:MM:SS`，中国时区；首次创建时设为当前时间，之后永不变化 |
+| updated_at | 修改时间，格式 `YYYY-MM-DD HH:MM:SS`，中国时区；每次保存更新为当前时间 |
 
 ### candidate_statuses（状态字典）
 
@@ -148,3 +150,11 @@ C:\Users\twfehh7\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe serve
 6. **前端图标误用**：保存按钮原用对勾 ✓，Run 原用文字。已按铁律 5 改执行图标 / 软盘图标。
 7. **行纵向堆叠**：原 `li.item` 内元素默认块级上下排。已用 `.row { display:flex }` 包一层横向排布。
 8. **列表滚动条**：原 `ul.list` 加了 `max-height:62vh; overflow-y:auto`。已按铁律 2 去掉。
+9. **时间字段需求全记录**（2026-07-17）：新增 `created_at` / `updated_at` 字段，
+   - 格式 `YYYY-MM-DD HH:MM:SS`，中国时区（用 `datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")`）
+   - 旧数据默认 `2026-07-17 00:00:00`
+   - `created_at` 首次设当前时间后永不变化（INSERT 时写入，UPDATE 不碰它）
+   - `updated_at` 每次保存（UPSERT 的 UPDATE 分支）设为当前时间
+   - 前端：时间列放在状态与备注之间，上下紧凑显示（上面创建时间、下面修改时间），`width:140px` 对齐时间串长度
+   - 备注列缩窄：`flex:0 1 64px; min-width:60px`
+10. **前端布局更新务必写 README**：每次改前端/后端需求后必须同步更新 README.md，用户需求不要漏记（这次第 9 条就是漏补的）。

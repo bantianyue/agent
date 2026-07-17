@@ -2,8 +2,8 @@
 # 技术文章收藏 - 本地服务（SQLite 版）
 # 数据存于同目录 candidate_articles.db；对外提供 /api/articles 的 GET(返回数组)/PUT(整体保存) 接口
 # 用法：双击本文件，或终端 `python server.py`
-# 浏览器打开 http://127.0.0.1:8765/文章.html
-import http.server, socketserver, os, json, sqlite3
+# 浏览器打开 http://127.0.0.1:8765/Blog.html
+import http.server, socketserver, os, json, sqlite3, datetime
 
 PORT = 8765
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -13,6 +13,11 @@ ARTICLES_ROOT = r"D:\06_Hermes\articles"
 SKIP_DIRS = {"__pycache__", "_src_tmp", "_tmp"}
 # 兼容旧迁移：若存在 data.json 则导入
 LEGACY_JSON = os.path.join(ROOT, "data.json")
+
+
+def cn_now():
+    """中国时区时间字符串 YYYY-MM-DD HH:MM:SS"""
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def get_conn():
@@ -31,7 +36,8 @@ def get_conn():
         done_locked INTEGER NOT NULL DEFAULT 0,
         note TEXT NOT NULL DEFAULT '',
         status TEXT NOT NULL DEFAULT '未开始',
-        created_at TEXT DEFAULT (datetime('now'))
+        created_at TEXT NOT NULL DEFAULT '2026-07-17 00:00:00',
+        updated_at TEXT NOT NULL DEFAULT '2026-07-17 00:00:00'
     )""")
     # 状态字典：可用户自定义的状态列表
     conn.execute("""CREATE TABLE IF NOT EXISTS candidate_statuses (
@@ -108,8 +114,8 @@ def migrate_from_json(conn):
             locked = 0 if done else 0
         try:
             conn.execute(
-                "INSERT OR IGNORE INTO candidate_articles (pos,title,url,priority,done,done_locked,note,status) VALUES (?,?,?,?,?,?,?,?)",
-                (i, title, url, priority, done, locked, "", "完成" if done else "未开始"),
+                "INSERT OR IGNORE INTO candidate_articles (pos,title,url,priority,done,done_locked,note,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (i, title, url, priority, done, locked, "", "完成" if done else "未开始", "2026-07-17 00:00:00", "2026-07-17 00:00:00"),
             )
             seeded = True
         except Exception:
@@ -139,11 +145,11 @@ def init_db():
 def load_articles():
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id,pos,title,url,priority,done,note,status FROM candidate_articles ORDER BY id DESC"
+        "SELECT id,pos,title,url,priority,done,note,status,created_at,updated_at FROM candidate_articles ORDER BY id DESC"
     ).fetchall()
     conn.close()
     out = []
-    for aid, pos, title, url, priority, done, note, status in rows:
+    for aid, pos, title, url, priority, done, note, status, created_at, updated_at in rows:
         out.append({
             "id": aid,
             "pos": pos,
@@ -153,6 +159,8 @@ def load_articles():
             "done": bool(done),
             "note": note or "",
             "status": status or "未开始",
+            "created_at": created_at or "2026-07-17 00:00:00",
+            "updated_at": updated_at or "2026-07-17 00:00:00",
         })
     return out
 
@@ -160,6 +168,7 @@ def load_articles():
 def save_articles(arr):
     """逐条 UPSERT：按 id 存在则 UPDATE（保留 id/pos），否则 INSERT。done 视为手动维护 -> done_locked=1"""
     conn = get_conn()
+    now = cn_now()
     try:
         conn.execute("BEGIN")
         for a in arr:
@@ -174,14 +183,14 @@ def save_articles(arr):
             status = a.get("status", "") or "未开始"
             if aid:
                 conn.execute(
-                    "UPDATE candidate_articles SET title=?,url=?,priority=?,done=?,done_locked=1,note=?,status=? WHERE id=?",
-                    (title, url, priority, done, note, status, aid),
+                    "UPDATE candidate_articles SET title=?,url=?,priority=?,done=?,done_locked=1,note=?,status=?,updated_at=? WHERE id=?",
+                    (title, url, priority, done, note, status, now, aid),
                 )
             else:
                 pos = (a.get("pos") or 0)
                 conn.execute(
-                    "INSERT INTO candidate_articles (pos,title,url,priority,done,done_locked,note,status) VALUES (?,?,?,?,?,1,?,?)",
-                    (pos, title, url, priority, done, note, status),
+                    "INSERT INTO candidate_articles (pos,title,url,priority,done,done_locked,note,status,created_at,updated_at) VALUES (?,?,?,?,?,1,?,?,?,?)",
+                    (pos, title, url, priority, done, note, status, now, now),
                 )
         conn.execute("COMMIT")
     except Exception:
@@ -216,19 +225,16 @@ def add_candidate(url, title="", priority="mid"):
             "url": row[3], "priority": row[4], "done": bool(row[5]),
             "note": row[6] or "", "status": row[7] or "未开始",
         }, "already exists"
+    now = cn_now()
     max_pos = conn.execute("SELECT COALESCE(MAX(pos),-1) FROM candidate_articles").fetchone()[0]
     conn.execute(
-        "INSERT INTO candidate_articles (pos,title,url,priority,done,done_locked,note,status) VALUES (?,?,?,?,0,0,?,?)",
-        (max_pos + 1, title or "", url, priority, "", "未开始"),
+        "INSERT INTO candidate_articles (pos,title,url,priority,done,done_locked,note,status,created_at,updated_at) VALUES (?,?,?,?,0,0,?,?,?,?)",
+        (max_pos + 1, title or "", url, priority, "", "未开始", now, now),
     )
     cid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.commit()
     conn.close()
-    return {"id": cid, "pos": max_pos + 1, "title": title, "url": url, "priority": priority, "done": False, "note": "", "status": "未开始"}, "created"
-    handler.send_response(code)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.end_headers()
-    handler.wfile.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+    return {"id": cid, "pos": max_pos + 1, "title": title, "url": url, "priority": priority, "done": False, "note": "", "status": "未开始", "created_at": now, "updated_at": now}, "created"
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
