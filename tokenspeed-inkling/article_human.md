@@ -1,6 +1,6 @@
 要点速览
 
-- 975B MoE 首发：TML 开源 Inkling：975B 总参数、41B 激活参数，全/滑动窗口注意力交替。- 双厂 FP4 原生：NVFP4 跑 NVIDIA B200/B300，MXFP4（AMD Quark 量化）跑 AMD MI350X/MI355X。- 扁平 KV 缓存：单一分页池配异构视图，统一分配单元却不强制统一页大小，省显存不碎片。- 统一 kernel API：一套 API 横跨 NVIDIA/AMD，复用模型逻辑，只在关键处做专门优化。- MTP 提速 2.3×：B200 上 MTP(8 draft steps) 达 354.6 tok/s/用户，比关 MTP 提升 2.33×。
+- 975B MoE 首发：TML 开源 Inkling：975B 总参数、41B 激活参数，全/滑动窗口注意力交替。- 双厂 FP4 原生：NVFP4 跑 NVIDIA B200/B300，MXFP4（AMD Quark 量化）跑 AMD MI350X/MI355X。- 扁平 KV 缓存：单一分页池配异构视图，统一分配单元却不强制统一页大小，省显存不碎片。- 统一 kernel API：一套 API 横跨 NVIDIA/AMD，复用模型逻辑，只在关键处做专门优化。- MTP 提速 2.3×：B200 上 MTP(8 draft steps) 达 354.6 tok/s/用户，比关 MTP 提升 2.33×。（关 MTP 仅 152.4 tok/s，提升几乎全来自多 token 预测跳步）
 
 Thinking Machines Lab（TML）发布开源 MoE 模型 Inkling，总参数 975B、每 token 激活 41B。TokenSpeed 与 TML 合作，在首发日就为其提供跨 NVIDIA/AMD 的推理支持。本文梳理其架构、原生 FP4 检查点，以及支撑跨平台推理的引擎与 kernel 工作。
 
@@ -38,24 +38,6 @@ MXFP4 检查点也让 AMD 上的 agentic 服务切实可行：让 975B 模型在
 
 结语
 
-Inkling 的发布验证了「一个模型、双厂原生 FP4、统一 kernel API」的跨平台推理路线：NVIDIA 走 CuteDSL 专用 decode kernel，AMD 走 Gluon persistent/split-K，底层却共享同一套模型逻辑与调度。性能上，MTP 是这次最大的杠杆——B200 上 8 draft steps 把 decode 吞吐顶到 354.6 tok/s/用户，比关 MTP 提升 2.33×；MXFP4 则把 975B 模型塞进 4 张 MI355X 跑长上下文 agentic 负载。这些仍是早期数字，团队仍在持续压榨调度、缓存与厂商原生 kernel。
-
-【传送门】
-TokenSpeed-Kernel：把推理内核做成一等公民
-KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍
-【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解
-榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%
-小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读
-阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT
-万亿参数RL实战：如何用28个H200节点训GLM-5
-智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO
-NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题
-Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架
-RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'
-腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍
-Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能
-蚂蚁CausalMix: 将数据混合从超参搜索转换成因果推断
-小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成
-把KVCache变成可训练记忆：Context Tuning让LLM免权重微调
+回看全文，核心观察是：Inkling 的发布验证了「一个模型、双厂原生 FP4、统一 kernel API」的跨平台推理路线：NVIDIA 走 CuteDSL 专用 decode kernel，AMD 走 Gluon persistent/split-K，底层却共享同一套模型逻辑与调度。性能上，MTP 是这次最大的杠杆：B200 上 8 draft steps 把 decode 吞吐顶到 354.6 tok/s/用户，比关 MTP 提升 2.33×；MXFP4 则把 975B 模型塞进 4 张 MI355X 跑长上下文 agentic 负载。这些仍是早期数字（对照组仅 152.4 tok/s），团队仍在持续压榨调度、缓存与厂商原生 kernel，后续还有不小的提升空间。
 
 参考：https://lightseek.org/blog/tokenspeed-inkling.html
