@@ -2,6 +2,7 @@
 # Inkling 文章 (tokenspeed-inkling)
 
 DATA = {
+  "title": "TokenSpeed×TML：975B MoE模型Inkling如何同时跑在NVIDIA与AMD上",
   "summary": [
     {"key": "975B MoE 首发", "body": "TML 开源 Inkling：975B 总参数、41B 激活参数，全/滑动窗口注意力交替。"},
     {"key": "双厂 FP4 原生", "body": "NVFP4 跑 NVIDIA B200/B300，MXFP4（AMD Quark 量化）跑 AMD MI350X/MI355X。"},

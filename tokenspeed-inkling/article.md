@@ -1,43 +1,43 @@
 要点速览
 
-- 975B MoE 首发：TML 开源 Inkling：975B 总参数、41B 激活参数，全/滑动窗口注意力交替。- 双厂 FP4 原生：NVFP4 跑 NVIDIA B200/B300，MXFP4（AMD Quark 量化）跑 AMD MI350X/MI355X。- 扁平 KV 缓存：单一分页池配异构视图，统一分配单元却不强制统一页大小，省显存不碎片。- 统一 kernel API：一套 API 横跨 NVIDIA/AMD，复用模型逻辑，只在关键处做专门优化。- MTP 提速 2.3×：B200 上 MTP(8 draft steps) 达 354.6 tok/s/用户，比关 MTP 提升 2.33×。
+- 975B MoE首发：TML开源Inkling：975B总参数、41B激活参数，全/滑动窗口注意力交替。- 双厂FP4原生：NVFP4跑NVIDIA B200/B300，MXFP4（AMD Quark量化）跑AMD MI350X/MI355X。- 扁平KV缓存：单一分页池配异构视图，统一分配单元却不强制统一页大小，省显存不碎片。- 统一kernel API：一套API横跨NVIDIA/AMD，复用模型逻辑，只在关键处做专门优化。- MTP提速2.3×：B200上MTP(8 draft steps) 达354.6 tok/s/用户，比关MTP提升2.33×。
 
-Thinking Machines Lab（TML）发布开源 MoE 模型 Inkling，总参数 975B、每 token 激活 41B。TokenSpeed 与 TML 合作，在首发日就为其提供跨 NVIDIA/AMD 的推理支持。本文梳理其架构、原生 FP4 检查点，以及支撑跨平台推理的引擎与 kernel 工作。
+Thinking Machines Lab（TML）发布开源MoE模型Inkling，总参数975B、每token激活41B。TokenSpeed与TML合作，在首发日就为其提供跨NVIDIA/AMD的推理支持。本文梳理其架构、原生FP4检查点，以及支撑跨平台推理的引擎与kernel工作。
 
 核心亮点
-面向 AMD 的原生 MXFP4 权重：用 AMD Quark 生成并发布 Inkling MXFP4 检查点，提供 NVFP4 的 AMD 原生替代方案。
+面向AMD的原生MXFP4权重：用AMD Quark生成并发布Inkling MXFP4检查点，提供NVFP4的AMD原生替代方案。
 
-面向复杂注意力的扁平 KV 缓存架构：为全注意力、滑动窗口注意力与卷积状态设计异构视图的扁平缓存布局，分配与调度统一且不浪费显存。
-借助 TokenSpeed Kernel 统一多芯片开发：一个 kernel API 横跨 NVIDIA 与 AMD，复用模型逻辑、只在关键处专门优化。
-面向 NVIDIA 的更快 CuteDSL 解码 kernel：专为解码写的注意力 kernel，比 prefill 路径更高效映射短查询、长 KV 负载。
-面向 AMD 的高性能 Gluon 注意力：用 persistent prefill 与 split-K decode 设计，在 AMD GPU 上实现强劲性能。
-原生 FP4 量化的模型
-Inkling 是基于 transformer 的 MoE 模型，交替使用全注意力与滑动窗口注意力。模型共 66 层、256 个路由专家，每 token 激活 6 个路由专家与 2 个共享专家，总参数达 9750 亿。其基准测试成绩与其他开源模型相当。
+面向复杂注意力的扁平KV缓存架构：为全注意力、滑动窗口注意力与卷积状态设计异构视图的扁平缓存布局，分配与调度统一且不浪费显存。
+借助TokenSpeed Kernel统一多芯片开发：一个kernel API横跨NVIDIA与AMD，复用模型逻辑、只在关键处专门优化。
+面向NVIDIA的更快CuteDSL解码kernel：专为解码写的注意力kernel，比prefill路径更高效映射短查询、长KV负载。
+面向AMD的高性能Gluon注意力：用persistent prefill与split-K decode设计，在AMD GPU上实现强劲性能。
+原生FP4量化的模型
+Inkling是基于transformer的MoE模型，交替使用全注意力与滑动窗口注意力。模型共66层、256个路由专家，每token激活6个路由专家与2个共享专家，总参数达9750亿。其基准测试成绩与其他开源模型相当。
 
-参考检查点使用 BF16，NVFP4 量化版本在 NVIDIA GPU 上运行。为支持 AMD GPU，团队用 AMD Quark 将模型量化为面向 MI350X/MI355X 的 MXFP4，检查点发布于 lightseekorg/Inkling-MXFP4。评测中 NVFP4 与 MXFP4 检查点在质量上接近 BF16 基线，同时实现更高服务性能。
+参考检查点使用BF16，NVFP4量化版本在NVIDIA GPU上运行。为支持AMD GPU，团队用AMD Quark将模型量化为面向MI350X/MI355X的MXFP4，检查点发布于lightseekorg/Inkling-MXFP4。评测中NVFP4与MXFP4检查点在质量上接近BF16基线，同时实现更高服务性能。
 
-借助原生 Kernel 加速推理
-TokenSpeed 的模块化架构将模型层、调度器与 kernel 子系统在清晰边界后分离。启用 Inkling 因此是一个系统性过程：编写与加速器无关的模型逻辑、复用现有调度器、用统一 kernel API 从同一套模型集成拉起 NVIDIA 与 AMD 支持。在此共同基线之上，再加入针对每种加速器架构定制的推理引擎技术与原生 kernel。
+借助原生Kernel加速推理
+TokenSpeed的模块化架构将模型层、调度器与kernel子系统在清晰边界后分离。启用Inkling因此是一个系统性过程：编写与加速器无关的模型逻辑、复用现有调度器、用统一kernel API从同一套模型集成拉起NVIDIA与AMD支持。在此共同基线之上，再加入针对每种加速器架构定制的推理引擎技术与原生kernel。
 
 面向异构状态的扁平缓存布局
-Inkling 推理携带三种持久状态：全注意力层不断增长的 KV 状态、滑动窗口层有界的 KV 状态，以及卷积的窗口状态。为每个状态维护独立内存池会碎片化缓存并使调度复杂化；而单一池子配统一页形状又会把较小条目填充到最大页体积造成浪费。
+Inkling推理携带三种持久状态：全注意力层不断增长的KV状态、滑动窗口层有界的KV状态，以及卷积的窗口状态。为每个状态维护独立内存池会碎片化缓存并使调度复杂化；而单一池子配统一页形状又会把较小条目填充到最大页体积造成浪费。
 
-TokenSpeed 改用单一扁平分页池配合异构视图。类似原则也见于 vLLM 中的 Jenga（分离物理内存分配与逻辑内存组织）。Inkling 的 66 层构成 11 个重复单元，每单元含 5 个滑动窗口层与 1 个全注意力层，连同 6 个 KV 卷积与 6 个隐状态卷积，每个单元映射到一个 slab。一个 block ID 在所有 11 个 slab 中选相同大小的固定槽位；因各状态每 token 占用不同，该槽位可容纳 256 个全注意力 KV、128 个滑动窗口 KV 或 KV 侧卷积状态、或 16 个隐状态卷积状态。这保持了分配单元统一，又不必强制逻辑页大小统一。
-缓存管理层次中，一个协调器把每个请求分发给各缓存组，每组维护自己的按请求 BlockTable。表项持有指向共享块池的引用计数 BlockRef，page ID k 直接映射到物理 slab 第 k 行。组管理器控制匹配与淘汰策略，但内存所有权集中，使释放页能安全、立即跨组复用。物理布局与管理层次一起，在单一共享分配器与单一调度模型之上提供异构缓存视图。
-面向 NVIDIA GPU 的 CuteDSL 注意力
-注意力占据 Inkling 计算的很大一部分，但 prefill 与 decode 形态截然不同。prefill 时 Q 序列很长，FlashAttention 风格 kernel 有足够并行度沿 Q 长度分块，因此复用 TML 的 FlashAttention-4（FA4）路径（由 Colfax Research 开发）。
-decode 时查询通常只有一两个 token，KV 缓存却可能很长；偏好 prefill 的 kernel 围绕大 Q 分块组织，许多计算通道未被充分利用。专用 decode kernel 改为在长 KV 序列上流式处理，把小的查询/预测维度更高效地打包进每个 CTA 分块，提升了短查询 decode 的 GPU 利用率。
-为支持 softmax 前施加的相对偏置，FA4 prefill 路径用独立 ShearingBias 预处理 kernel（开销可在多查询行摊薄）；decode 时查询维度足够小，可直接在在线 softmax 循环内计算相对索引。
+TokenSpeed改用单一扁平分页池配合异构视图。类似原则也见于vLLM中的Jenga（分离物理内存分配与逻辑内存组织）。Inkling的66层构成11个重复单元，每单元含5个滑动窗口层与1个全注意力层，连同6个KV卷积与6个隐状态卷积，每个单元映射到一个slab。一个block ID在所有11个slab中选相同大小的固定槽位；因各状态每token占用不同，该槽位可容纳256个全注意力KV、128个滑动窗口KV或KV侧卷积状态、或16个隐状态卷积状态。这保持了分配单元统一，又不必强制逻辑页大小统一。
+缓存管理层次中，一个协调器把每个请求分发给各缓存组，每组维护自己的按请求BlockTable。表项持有指向共享块池的引用计数BlockRef，page ID k直接映射到物理slab第k行。组管理器控制匹配与淘汰策略，但内存所有权集中，使释放页能安全、立即跨组复用。物理布局与管理层次一起，在单一共享分配器与单一调度模型之上提供异构缓存视图。
+面向NVIDIA GPU的CuteDSL注意力
+注意力占据Inkling计算的很大一部分，但prefill与decode形态截然不同。prefill时Q序列很长，FlashAttention风格kernel有足够并行度沿Q长度分块，因此复用TML的FlashAttention-4（FA4）路径（由Colfax Research开发）。
+decode时查询通常只有一两个token，KV缓存却可能很长；偏好prefill的kernel围绕大Q分块组织，许多计算通道未被充分利用。专用decode kernel改为在长KV序列上流式处理，把小的查询/预测维度更高效地打包进每个CTA分块，提升了短查询decode的GPU利用率。
+为支持softmax前施加的相对偏置，FA4 prefill路径用独立ShearingBias预处理kernel（开销可在多查询行摊薄）；decode时查询维度足够小，可直接在在线softmax循环内计算相对索引。
 
-面向 AMD GPU 的 Gluon 注意力
-对 AMD GPU，团队扩展了 TokenSpeed 现有的 Gluon 注意力 kernel 以覆盖 Inkling 的 prefill 与 decode 负载：prefill 用 persistent 循环，decode 用 split-K。由于与 NVIDIA 后端一同实现统一 kernel API，模型代码保持加速器无关，而 AMD 路径能以最小集成工作量使用专门的高性能 kernel。
+面向AMD GPU的Gluon注意力
+对AMD GPU，团队扩展了TokenSpeed现有的Gluon注意力kernel以覆盖Inkling的prefill与decode负载：prefill用persistent循环，decode用split-K。由于与NVIDIA后端一同实现统一kernel API，模型代码保持加速器无关，而AMD路径能以最小集成工作量使用专门的高性能kernel。
 端到端性能预览
-在多轮 agentic 工作负载上（50K+ token 上下文、每对话 10–15 轮、缓存命中率约 90%），TokenSpeed 在 4 张 NVIDIA B200 上以 NVFP4 运行 Inkling：并发 1 时每用户 317 tokens/s，其中 MTP（多 token 预测，3 个 draft 步）每轮迭代推进约 3.3 个 token。关闭 MTP 时，并发 1 维持每用户 152 tokens/s（每迭代 6.6 ms），并发 4 维持每用户 122 tokens/s，此时系统吞吐量达 40K tokens/s。
-batch size 1 时，3/1/4、5/1/6、8/1/9 三种 MTP 配置（对应 3、5、8 个 draft 步）分别带来每用户 317.5、342.5、354.6 tokens/s；相比关闭 MTP 的 152.4 tokens/s，decode 吞吐提升 2.08×、2.25×、2.33×。
-MXFP4 检查点也让 AMD 上的 agentic 服务切实可行：让 975B 模型在 4 张 MI355X 上运行，同时保留足够缓存支撑 50K+ token 上下文与多轮对话。由于 TokenSpeed 将模型逻辑与调度同 kernel 分离，AMD 可复用与 NVIDIA 相同的 MTP 路径而无需改动模型层。早期 MI355X 运行中，batch size 1–4 范围内 MTP 将每用户 decode 速度从 2.4x 提升至 1.5x。
+在多轮agentic工作负载上（50K+ token上下文、每对话10–15轮、缓存命中率约90%），TokenSpeed在4张NVIDIA B200上以NVFP4运行Inkling：并发1时每用户317 tokens/s，其中MTP（多token预测，3个draft步）每轮迭代推进约3.3个token。关闭MTP时，并发1维持每用户152 tokens/s（每迭代6.6 ms），并发4维持每用户122 tokens/s，此时系统吞吐量达40K tokens/s。
+batch size 1时，3/1/4、5/1/6、8/1/9三种MTP配置（对应3、5、8个draft步）分别带来每用户317.5、342.5、354.6 tokens/s；相比关闭MTP的152.4 tokens/s，decode吞吐提升2.08×、2.25×、2.33×。
+MXFP4检查点也让AMD上的agentic服务切实可行：让975B模型在4张MI355X上运行，同时保留足够缓存支撑50K+ token上下文与多轮对话。由于TokenSpeed将模型逻辑与调度同kernel分离，AMD可复用与NVIDIA相同的MTP路径而无需改动模型层。早期MI355X运行中，batch size 1–4范围内MTP将每用户decode速度从2.4x提升至1.5x。
 
 结语
 
-Inkling 的发布验证了「一个模型、双厂原生 FP4、统一 kernel API」的跨平台推理路线：NVIDIA 走 CuteDSL 专用 decode kernel，AMD 走 Gluon persistent/split-K，底层却共享同一套模型逻辑与调度。性能上，MTP 是这次最大的杠杆：B200 上 8 draft steps 把 decode 吞吐顶到 354.6 tok/s/用户，比关 MTP 提升 2.33×；MXFP4 则把 975B 模型塞进 4 张 MI355X 跑长上下文 agentic 负载。这些仍是早期数字（对照组仅 152.4 tok/s），团队仍在持续压榨调度、缓存与厂商原生 kernel，后续还有不小的提升空间。
+Inkling的发布验证了「一个模型、双厂原生FP4、统一kernel API」的跨平台推理路线：NVIDIA走CuteDSL专用decode kernel，AMD走Gluon persistent/split-K，底层却共享同一套模型逻辑与调度。性能上，MTP是这次最大的杠杆：B200上8 draft steps把decode吞吐顶到354.6 tok/s/用户，比关MTP提升2.33×；MXFP4则把975B模型塞进4张MI355X跑长上下文agentic负载。这些仍是早期数字（对照组仅152.4 tok/s），团队仍在持续压榨调度、缓存与厂商原生kernel，后续还有不小的提升空间。
 
 参考：https://lightseek.org/blog/tokenspeed-inkling.html
