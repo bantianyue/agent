@@ -1,0 +1,69 @@
+Thinking Machines Lab (TML) has released Inkling, an open-source transformer-based mixture-of-experts (MoE) model with 975B total parameters and 41B active parameters per token. Its scale and strong benchmark results raise a practical serving challenge: delivering fast, efficient inference across accelerator platforms.
+
+TokenSpeed partnered with TML to deliver Day 0 inference support for Inkling. TokenSpeed’s modular architecture and unified kernel API enable support for both NVIDIA (G)B200/(G)B300 and AMD MI350X/MI355X in their native NVFP4 and MXFP4 formats, respectively. See the TokenSpeed deployment guide to get started.
+
+This post walks through Inkling’s architecture and native FP4 checkpoints, the inference-engine and kernel work behind cross-platform support, and an early end-to-end performance snapshot. We are continuing to optimize every layer of the stack—pushing tokens toward the speed of light.
+
+Highlights
+
+Native MXFP4 weights for AMD. We used AMD Quark to produce and publish an Inkling MXFP4 checkpoint for MI350X/MI355X, providing an AMD-native alternative to the NVFP4 release.
+
+A flat KV cache architecture for increasingly complex attention. We designed a flat cache layout with heterogeneous views for full attention, sliding-window attention, and convolution states, keeping allocation and scheduling unified without wasting memory on uniform page sizes.
+
+Unified multi-silicon development with TokenSpeed Kernel. One kernel API spans NVIDIA and AMD, letting us reuse model and integration logic, specialize only where it matters, and move quickly across accelerator architectures.
+
+A faster CuteDSL decode kernel for NVIDIA. We wrote a decode-specialized attention kernel that maps short-query, long-KV workloads onto the GPU more efficiently than a prefill-oriented path.
+
+High-performance Gluon attention for AMD. We built dedicated prefill and decode attention kernels in Gluon, using persistent prefill and split-K decode designs to deliver strong performance on AMD GPUs.
+
+Model with Native FP4 Quantization
+​
+
+Inkling is a transformer-based MoE model that interleaves full and sliding-window attention. The model comprises 66 layers with 256 routed experts, activating 6 routed experts and 2 shared experts per token, for a total of 975 billion parameters. Its benchmark results are competitive with other open-source models:
+
+The reference checkpoint uses BF16, and an NVFP4-quantized version runs on NVIDIA GPUs. To support AMD GPUs, we used AMD Quark to quantize the model to MXFP4 for MI350X/MI355X and published the resulting checkpoint at lightseekorg/Inkling-MXFP4. In our evaluations, the NVFP4 and MXFP4 checkpoints stayed close to the BF16 baseline in quality while enabling higher serving performance:
+
+Accelerated Inference with Native Kernels
+​
+
+TokenSpeed’s modular architecture separates the model layer, scheduler, and kernel subsystems behind clear boundaries. Enabling Inkling is therefore a systematic process: we write accelerator-agnostic model logic, reuse the existing scheduler, and use the unified kernel API to bring up NVIDIA and AMD support from the same model integration.
+
+From that common baseline, we add inference-engine techniques and native kernels tailored to each accelerator architecture.
+
+Flat cache layout for heterogeneous states
+​
+
+Inkling inference carries three persistent states: growing KV state for the full-attention layers, bounded KV state for the sliding-window layers, and window state for convolutions.
+
+Maintaining a separate memory pool for each state would fragment cache memory and complicate scheduling. A single pool with a uniform page shape, however, would pad smaller sliding-window and convolution entries to the footprint of the largest full-attention page.
+
+TokenSpeed instead uses a single flat paged pool with heterogeneous views. Similar high-level principles have also been explored in recent community work such as Jenga in vLLM, which separates physical memory allocation from logical memory organization. The figure below shows the resulting layout. Inkling’s 66 layers form 11 repeating units, each containing five sliding-window layers and one full-attention layer. Alongside six KV convolutions and six hidden-state convolutions, each unit maps to one slab. A block ID selects the same fixed-size slot across all 11 slabs. Because the states have different per-token footprints, that slot can hold 256 tokens of full-attention KV, 128 tokens of sliding-window KV or KV-side convolution state, or 16 tokens of hidden-state convolution state. This keeps the allocation unit uniform without forcing the logical page sizes to be uniform.
+
+The figure below shows the cache-management hierarchy. A coordinator fans each request out to the cache groups, and each group maintains its own per-request BlockTable. Table entries hold reference-counted BlockRefs into one shared block pool, while page ID k maps directly to row k in the physical slabs. The group managers control matching and eviction policy, but memory ownership remains centralized, allowing freed pages to be reused across groups safely and immediately.
+
+Together, the physical layout and management hierarchy provide heterogeneous cache views over one shared allocator and one scheduling model.
+
+CuteDSL attention for NVIDIA GPUs
+​
+
+Attention accounts for a significant share of Inkling’s compute, but prefill and decode present very different kernel shapes. During prefill, the query (Q) sequence is long, giving a FlashAttention-style kernel enough parallelism to tile along the Q sequence length. We therefore reuse TML’s FlashAttention-4 (FA4) attention path for prefill, which was developed by Colfax Research.
+
+During decode, the query is typically only one or a few tokens while the KV cache can be very long. A prefill-style kernel remains organized around large Q tiles, leaving many compute lanes underused. Our dedicated decode kernel instead streams over the long KV sequence and packs the small query/prediction dimension more efficiently into each CTA tile, improving GPU utilization for short-query decode.
+
+To support relative bias, which is applied before softmax, the FA4 prefill path uses a separate ShearingBias preprocessing kernel. Its cost can be amortized across many query rows. During decode, the query dimension is small enough to compute relative indices directly inside the online softmax loop.
+
+Gluon attention for AMD GPUs
+​
+
+For AMD GPUs, we extend TokenSpeed’s existing Gluon attention kernels to cover Inkling’s prefill and decode workloads. These kernels use a persistent loop for prefill and split-K for decode. Because they implement the unified kernel API alongside the NVIDIA backend, the model code remains accelerator-neutral while the AMD path can use specialized, high-performance kernels with minimal integration work.
+
+End-to-End Performance Preview
+​
+
+On a multi-turn agentic workload with 50K+ token contexts, 10–15 turns per conversation, and an approximately 90% cache-hit rate, TokenSpeed runs Inkling NVFP4 on four NVIDIA B200 GPUs at 317 tokens/s per user at concurrency 1, with MTP (multi-token prediction, 3 draft steps) advancing about 3.3 tokens per iteration. With MTP off, the engine sustains 152 tokens/s per user at concurrency 1 (6.6 ms per iteration) and 122 tokens/s per user at concurrency 4, where system throughput reaches 40K tokens/s.
+
+At batch size 1, the 3/1/4, 5/1/6, and 8/1/9 MTP configurations—corresponding to 3, 5, and 8 draft steps—deliver 317.5, 342.5, and 354.6 tokens/s per user, respectively. Compared with 152.4 tokens/s with MTP off, they improve decode throughput by 2.08×, 2.25×, and 2.33×.
+
+The MXFP4 checkpoint also makes it practical for agentic serving on AMD. It lets the 975B-parameter model run on four MI355X GPUs while preserving enough cache capacity for 50K+ token contexts and multi-turn conversations. Moreover, as TokenSpeed keeps the model logic and scheduling separate from the kernel implementation, AMD can reuse the same MTP path as NVIDIA, without touching the model layer. In our early MI355X run, MTP raises per-user decode speed from 2.4x to 1.5x across batch sizes 1–4:
+
+These early B200 and MI355X results are a starting point. We are continuing to optimize TokenSpeed’s scheduling, cache management, and vendor-native kernels across NVIDIA and AMD—pushing tokens toward the speed of light.
