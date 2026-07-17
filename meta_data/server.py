@@ -8,7 +8,7 @@ import http.server, socketserver, os, json, sqlite3, datetime
 PORT = 8765
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(ROOT, "articles.db")
-# 文章根目录（用于扫描 source.url 判断“已完成”）
+# 文章根目录（用于扫描 source.url 判断"已完成"）
 ARTICLES_ROOT = r"D:\06_Hermes\articles"
 SKIP_DIRS = {"__pycache__", "_src_tmp", "_tmp"}
 # 兼容旧迁移：若存在 data.json 则导入
@@ -47,6 +47,18 @@ def get_conn():
     conn.execute("INSERT OR IGNORE INTO candidate_statuses (name) VALUES (?)", ("未开始",))
     conn.execute("INSERT OR IGNORE INTO candidate_statuses (name) VALUES (?)", ("完成",))
     conn.execute("INSERT OR IGNORE INTO candidate_statuses (name) VALUES (?)", ("失败",))
+    # 安全 trigger：确保 created_at/updated_at 永远不为默认值 '00:00:00'
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS trg_candidate_articles_time_defaults
+        AFTER INSERT ON candidate_articles
+        FOR EACH ROW
+        WHEN NEW.created_at = '2026-07-17 00:00:00' OR NEW.updated_at = '2026-07-17 00:00:00'
+        BEGIN
+            UPDATE candidate_articles SET
+                created_at = COALESCE(NULLIF(NEW.created_at, '2026-07-17 00:00:00'), strftime('%Y-%m-%d %H:%M:%S', 'now', '+8 hours')),
+                updated_at = COALESCE(NULLIF(NEW.updated_at, '2026-07-17 00:00:00'), strftime('%Y-%m-%d %H:%M:%S', 'now', '+8 hours'))
+            WHERE id = NEW.id;
+        END
+    """)
     # 已生成草稿的文章：含生成过程信息，预留扩展
     conn.execute("""CREATE TABLE IF NOT EXISTS article_drafts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,6 +72,18 @@ def get_conn():
         created_at TEXT NOT NULL DEFAULT '2026-07-17 00:00:00',
         updated_at TEXT NOT NULL DEFAULT '2026-07-17 00:00:00'
     )""")
+    # 安全 trigger：确保 article_drafts 的 created_at/updated_at 不为默认值
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS trg_article_drafts_time_defaults
+        AFTER INSERT ON article_drafts
+        FOR EACH ROW
+        WHEN NEW.created_at = '2026-07-17 00:00:00' OR NEW.updated_at = '2026-07-17 00:00:00'
+        BEGIN
+            UPDATE article_drafts SET
+                created_at = COALESCE(NULLIF(NEW.created_at, '2026-07-17 00:00:00'), strftime('%Y-%m-%d %H:%M:%S', 'now', '+8 hours')),
+                updated_at = COALESCE(NULLIF(NEW.updated_at, '2026-07-17 00:00:00'), strftime('%Y-%m-%d %H:%M:%S', 'now', '+8 hours'))
+            WHERE id = NEW.id;
+        END
+    """)
     return conn
 
 
@@ -100,6 +124,7 @@ def migrate_from_json(conn):
         return
     done_set = scan_done_urls()
     seeded = False
+    now = cn_now()  # 导入时刻的真实时间，不允许写死占位符
     for i, a in enumerate(arr):
         url = a.get("url", "").strip()
         if not url:
@@ -115,7 +140,7 @@ def migrate_from_json(conn):
         try:
             conn.execute(
                 "INSERT OR IGNORE INTO candidate_articles (pos,title,url,priority,done,done_locked,note,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (i, title, url, priority, done, locked, "", "完成" if done else "未开始", "2026-07-17 00:00:00", "2026-07-17 00:00:00"),
+                (i, title, url, priority, done, locked, "", "完成" if done else "未开始", now, now),
             )
             seeded = True
         except Exception:
