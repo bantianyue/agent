@@ -37,7 +37,7 @@ DATA = {
         "Maya不是通过入职培训学会这些的。她是通过跟随一位优秀分析师、犯错、收反馈、遇到边缘案例、不再重复犯错来学会的。<strong>这是人类在公司里变得有用的方式。工程问题是：你怎么构建Agent版的Maya？</strong>"
       ],
       "figs": [
-        {"src": "fig01.jpg", "caption": "Maya：每个运营人员都会@她的那位分析师：来源：作者"}
+        {"src": "fig01.jpg", "caption": "Maya：每个运营人员都会圈她的那位分析师：来源：作者"}
       ]
     },
     {
@@ -179,7 +179,7 @@ DATA = {
       "title": "结语",
       "paras": [
         "软件工程在代码撞上这面墙时建立了自己的学科。上下文现在已经撞上这面墙了。<strong>在下一次Agent迁移提醒我们哪个层才是真正有价值的之前，我们应该有意识地构建这套工具链。</strong>",
-        "完整20分钟演讲（英文）：<a href=\"https://x.com/prukalpa/status/2077772169455530152\">WTF Is the Context Layer?</a>"
+        "完整20分钟演讲（英文）：https://x.com/prukalpa/status/2077772169455530152"
       ]
     }
   ],
