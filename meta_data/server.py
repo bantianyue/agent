@@ -290,6 +290,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Expires", "0")
         super().end_headers()
 
+    def do_DELETE(self):
+        if self.path.startswith("/api/articles/"):
+            try:
+                aid = int(self.path.split("/")[-1])
+            except (ValueError, IndexError):
+                self.send_error(400, "invalid id")
+                return
+            conn = get_conn()
+            conn.execute("DELETE FROM candidate_articles WHERE id=?", (aid,))
+            conn.commit()
+            conn.close()
+            res_json(self, {"ok": True})
+            return
+        self.send_error(404, "Not found")
+
     def do_PUT(self):
         if self.path != "/api/articles":
             self.send_error(403, "Only /data.json writable")
