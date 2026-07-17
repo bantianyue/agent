@@ -16,8 +16,8 @@ LEGACY_JSON = os.path.join(ROOT, "data.json")
 
 
 def cn_now():
-    """中国时区时间字符串 YYYY-MM-DD HH:MM:SS"""
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """中国时区（UTC+8）时间字符串 YYYY-MM-DD HH:MM:SS，强制 +8 不依赖系统时区"""
+    return (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S"))
 
 
 def get_conn():
@@ -57,8 +57,8 @@ def get_conn():
         wechat_url TEXT DEFAULT '',
         error TEXT DEFAULT '',
         steps TEXT DEFAULT '[]',
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
+        created_at TEXT NOT NULL DEFAULT '2026-07-17 00:00:00',
+        updated_at TEXT NOT NULL DEFAULT '2026-07-17 00:00:00'
     )""")
     return conn
 
@@ -124,7 +124,18 @@ def migrate_from_json(conn):
         conn.commit()
 
 
+def backup_hot():
+    """方案A：启动时热备，复制 articles.db -> articles.db.bak（防误删/损坏）"""
+    try:
+        if os.path.isfile(DB_FILE):
+            import shutil
+            shutil.copy2(DB_FILE, DB_FILE + ".bak")
+    except Exception:
+        pass
+
+
 def init_db():
+    backup_hot()  # 启动前先留一份上一状态
     conn = get_conn()
     cur = conn.execute("SELECT COUNT(*) FROM candidate_articles")
     if cur.fetchone()[0] == 0:
