@@ -17,6 +17,7 @@ LEGACY_JSON = os.path.join(ROOT, "data.json")
 
 def get_conn():
     conn = sqlite3.connect(DB_FILE, timeout=30)
+    conn.isolation_level = None  # 手动事务控制（autocommit），避免 BEGIN 嵌套
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA synchronous=FULL")
     # 候选文章：记录待生成公众号文章草稿的 URL
@@ -157,12 +158,12 @@ def load_articles():
 
 
 def save_articles(arr):
-    """整体替换：删除全部，按数组顺序（pos）重新插入。done 视为手动维护 -> done_locked=1"""
+    """逐条 UPSERT：按 id 存在则 UPDATE（保留 id/pos），否则 INSERT。done 视为手动维护 -> done_locked=1"""
     conn = get_conn()
     try:
         conn.execute("BEGIN")
-        conn.execute("DELETE FROM candidate_articles")
-        for i, a in enumerate(arr):
+        for a in arr:
+            aid = a.get("id")
             url = (a.get("url") or "").strip()
             if not url:
                 continue
@@ -171,10 +172,17 @@ def save_articles(arr):
             done = 1 if a.get("done") else 0
             note = a.get("note", "") or ""
             status = a.get("status", "") or "未开始"
-            conn.execute(
-                "INSERT INTO candidate_articles (pos,title,url,priority,done,done_locked,note,status) VALUES (?,?,?,?,?,1,?,?)",
-                (i, title, url, priority, done, note, status),
-            )
+            if aid:
+                conn.execute(
+                    "UPDATE candidate_articles SET title=?,url=?,priority=?,done=?,done_locked=1,note=?,status=? WHERE id=?",
+                    (title, url, priority, done, note, status, aid),
+                )
+            else:
+                pos = (a.get("pos") or 0)
+                conn.execute(
+                    "INSERT INTO candidate_articles (pos,title,url,priority,done,done_locked,note,status) VALUES (?,?,?,?,?,1,?,?)",
+                    (pos, title, url, priority, done, note, status),
+                )
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
