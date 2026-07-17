@@ -5,6 +5,7 @@ import json, os
 DIR = os.path.dirname(__file__)
 
 DATA = {
+  "title": "The GitHub for Context 还不存在：300个Agent技能背后的上下文工程教训",
   "summary": [
     {"key": "模型智能×上下文", "body": "模型性能 = 智能 × 上下文，两者是乘法关系。模型越来越聪明，但组织价值并未同比提升：仅约1/5的企业报告AI带来显著收益。"},
     {"key": "300个技能、40个Agent", "body": "Prukalpa的公司用300个技能支撑40个活跃Agent，但经验是：「Agent从来不是难的部分，上下文才是。」12个月内经历了5次Agent栈迁移。"},
