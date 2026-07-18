@@ -22,3 +22,4 @@
 
 创建时间: 2026-07-18
 来源: https://www.the-information-bottleneck.com/p/editing-a-compressed-memory
+| Step 4d-i: 传送门 | completed |
