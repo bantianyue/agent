@@ -74,3 +74,13 @@ caption_translations = {
     "fig05": "95B 模型训练收敛。95BT-8BA 基线、ℓ-MoE-eff、ℓ-MoE-acc（ℓ=1024，α=4）的验证损失曲线。ℓ-MoE-eff 匹配基线收敛，ℓ-MoE-acc 优于基线。",
     "fig06": "万亿参数规模下投影的吞吐–时延帕累托前沿。左：decode 密集流量（分块捎带服务建模）；右：prefill 密集流量（分离式服务建模）。Kimi-K2-1T-LatentMoE 取得精度高效的运行点；用标准 MoE 扩展达到同等精度需额外约 350B 参数，且前沿上慢 1.24×–3.46×。",
 }
+
+DATA = {
+    'title': title,
+    'summary': summary,
+    'lead': lead,
+    'sections': sections,
+    'conclusion': conclusion,
+    'reference_url': reference_url,
+    'caption_translations': caption_translations,
+}

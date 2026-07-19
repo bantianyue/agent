@@ -153,7 +153,7 @@ DATA = {
     'reference_url': 'https://siboehm.com/articles/22/CUDA-MMM',
     'caption_translations': {
         'fig00': 'tile quantization（块量化）',
-        'fig08': 'source（来源）',
-        'fig11': "V. Volkov 的博士论文",
+        'fig04': 'source（来源）',
+        'fig06': "V. Volkov 的博士论文",
     },
 }
