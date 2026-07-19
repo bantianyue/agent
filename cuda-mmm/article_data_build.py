@@ -152,6 +152,6 @@ DATA = {
     'caption_translations': {
         'fig01': 'tile quantization（块量化）',
         'fig09': 'source（来源）',
-        'fig18': "V. Volkov 的博士论文",
+        'fig12': "V. Volkov 的博士论文",
     },
 }
