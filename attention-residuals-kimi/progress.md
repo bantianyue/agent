@@ -1,4 +1,4 @@
-# 进度追踪 - utm_campaign-9115475-Blogs-20
+# 进度追踪 - attention-residuals-kimi
 
 | Step | 状态 |
 |------|------|
@@ -21,4 +21,4 @@
 | Step 6: 推送草稿 | pending |
 
 创建时间: 2026-07-19
-来源: https://datasciencedojo.com/blog/attention-residuals-kimi-ai-explained/?utm_campaign=9115475-Blogs%202025&utm_source=twitter&utm_medium=social&utm_term=attention_residuals_kimi_ai&utm_content=blog
+来源: https://datasciencedojo.com/blog/attention-residuals-kimi-ai-explained/
