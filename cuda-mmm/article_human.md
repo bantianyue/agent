@@ -108,6 +108,8 @@ Work in Progress：Kernel 11 与结语
 
 结语
 
+回看这条优化链，每一步的提升都来自同一个动作的反复强化：要么让数据在更近的存储层级多停留一会（共享内存、寄存器），要么让一次搬运喂饱更多计算（分块、向量化、warp 级并行）。当算术强度被推过 roofline 拐点，kernel 才真正从「等内存」变成「榨算力」。
+
 这篇 worklog 最值得借鉴的，不是最终那个逼近 cuBLAS 的 kernel，而是它把「为什么慢」这件事拆到了硬件层面：从全局内存的 548GB 无效流量，到合并访问、片上共享内存、每线程多结果摊薄访存、向量化、warp 级分块，每一步都用能跑的 benchmark 数字说话。
 
 真正串起所有优化的主线只有一条：提高算术强度（FLOPs/Byte），让每个被搬进来的数都尽量多算几次，把瓶颈从访存推向算力。当你理解到 cuBLAS 内部其实藏着几百种针对不同尺寸/GPU 的实现、而 autotuning 才是把性能推到极致的最后一块拼图时，也就明白了为什么 Triton、CUTLASS 这类库都要内置自动调优。
@@ -116,35 +118,35 @@ Work in Progress：Kernel 11 与结语
 
 【传送门】
 
-RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'
-
-阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT
-
-智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO
-
-【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解
+TokenSpeed-Kernel：把推理内核做成一等公民
 
 蚂蚁CausalMix: 将数据混合从超参搜索转换成因果推断
 
-Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架
+NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题
 
-万亿参数RL实战：如何用28个H200节点训GLM-5
-
-KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍
-
-腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍
-
-榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%
+智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO
 
 Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能
 
-NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题
+阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT
 
-TokenSpeed-Kernel：把推理内核做成一等公民
+榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%
+
+RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'
+
+小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成
+
+Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架
+
+腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍
 
 把KVCache变成可训练记忆：Context Tuning让LLM免权重微调
 
-小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成
+万亿参数RL实战：如何用28个H200节点训GLM-5
+
+【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解
+
+KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍
 
 小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读
 

@@ -1,4 +1,5 @@
 DATA = {
+    'title': '从 300 GFLOPs 到 21.7 TFLOPs：手搓一个逼近 cuBLAS 的 CUDA 矩阵乘法',
     'summary': [
         {'key': '300GF→21.7T', 'body': '从 naive kernel 的约 300 GFLOPs，迭代优化到 21.7 TFLOPs，逼近 cuBLAS 的 94%。'},
         {'key': '6 层优化', 'body': '全局内存合并、共享内存缓存块、寄存器分块、2D 分块、向量化访存、Warptiling 逐级叠加。'},
