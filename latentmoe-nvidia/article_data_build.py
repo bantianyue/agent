@@ -13,7 +13,13 @@ conclusion = ['LatentMoE 的本质是一次「腾挪」：将隐藏维度 d 压�
 
 reference_url = 'https://arxiv.org/src/2601.18089'
 
-caption_translations = {'fig00': '标准 MoE 与 LatentMoE 架构对比。在 LatentMoE 中，token 从模型隐藏维度 d 投影至更小的潜维度 ℓ 进行专家路由与计算，使路由参数量与全互联流量均降低 d/ℓ 倍；利用省下的效率将专家总数与每 token 的 top-k 同步放大同样的倍数 d/ℓ，在整体推理成本近似不变的同时提升精度。', 'fig01': 'Qwen3-235B-A22B 服务的 Roofline 分析。运行点对应不同的每专家 token 数 t_exp（即 MoE 路由后的有效专家批大小），映射至算术强度 I = 2·t_exp·d·m / (d·m + t_exp·(d+m))。在时延敏感的批大小（低 I）下，MoE 专家计算受 HBM 带宽而非算力约束，运行点落入带宽受限区。', 'fig04': 'LatentMoE 变体对比。基线 16BT-2BA 模型与 ℓ-MoE-eff、ℓ-MoE-acc（ℓ=512）的训练轨迹。ℓ-MoE-eff 匹配基线收敛，ℓ-MoE-acc 优于基线。', 'fig05': '95B 模型训练收敛。95BT-8BA 基线、ℓ-MoE-eff、ℓ-MoE-acc（ℓ=1024，α=4）的验证损失曲线。ℓ-MoE-eff 匹配基线收敛，ℓ-MoE-acc 优于基线。', 'fig06': '万亿参数规模下投影的吞吐–时延帕累托前沿。左：decode 密集流量（分块捎带服务建模）；右：prefill 密集流量（分离式服务建模）。Kimi-K2-1T-LatentMoE 取得精度高效的运行点；以标准 MoE 扩展达到同等精度需额外约 350B 参数，且前沿上慢 1.24×–3.46×。'}
+caption_translations = {
+    "fig00": "标准 MoE 与 LatentMoE 架构对比。在 LatentMoE 中，token 从模型隐藏维度 d 投影至更小的潜维度 ℓ 进行专家路由与计算，使路由参数量与全互联流量均降低 d/ℓ 倍；利用省下的效率将专家总数与每 token 的 top-k 同步放大同样的倍数 d/ℓ，在整体推理成本近似不变的同时提升精度。",
+    "fig01": "Qwen3-235B-A22B 服务的 Roofline 分析。运行点对应不同的每专家 token 数 t_exp（即 MoE 路由后的有效专家批大小），映射至算术强度 I = 2·t_exp·d·m / (d·m + t_exp·(d+m))。在时延敏感的批大小（低 I）下，MoE 专家计算受 HBM 带宽而非算力约束，运行点落入带宽受限区。",
+    "fig02": "LatentMoE 变体对比。基线 16BT-2BA 模型与 ℓ-MoE-eff、ℓ-MoE-acc（ℓ=512）的训练轨迹。ℓ-MoE-eff 匹配基线收敛，ℓ-MoE-acc 优于基线。",
+    "fig03": "95B 模型训练收敛。95BT-8BA 基线、ℓ-MoE-eff、ℓ-MoE-acc（ℓ=1024，α=4）的验证损失曲线。ℓ-MoE-eff 匹配基线收敛，ℓ-MoE-acc 优于基线。",
+    "fig04": "万亿参数规模下投影的吞吐–时延帕累托前沿。左：decode 密集流量（分块捎带服务建模）；右：prefill 密集流量（分离式服务建模）。Kimi-K2-1T-LatentMoE 取得精度高效的运行点；以标准 MoE 扩展达到同等精度需额外约 350B 参数，且前沿上慢 1.24×–3.46×。",
+}
 
 DATA = {
     'title': title,
