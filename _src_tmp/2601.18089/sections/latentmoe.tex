@@ -1,0 +1,53 @@
+\section{LatentMoE Architecture} \label{sec:latentmoe}
+Guided by the design principles outlined in Section~\ref{sec:design_choices}, we introduce LatentMoE, a new MoE architecture designed for efficient scaling. LatentMoE first projects each input token $x \in \R^d$ into a lower-dimensional latent space $\R^{\ell}$ using a learnable down-projection matrix $W_{\downarrow} \in \R^{\ell \times d}$. The resulting compressed representation is then routed to the selected experts. Each expert $E_i(\cdot; \ell)$ operates entirely within the latent space and is parameterized by weights $\wfconei, \wgatei \in \R^{m \times \ell}$ and $\wfctwoi \in \R^{\ell \times m}$. After expert computation, the outputs are aggregated and projected back to the original input dimension using a learnable up-projection matrix $W_\uparrow \in \R^{d \times \ell}$.
+
+
+Since we compress only the input dimension $d$ to $\ell$ while keeping the intermediate dimension $m$ constant, the effective nonlinear budget $U_\mathrm{eff}$ remains unchanged. While Design Principle III suggests this should theoretically preserve accuracy, in practice, larger models are often easier to train and more robust to hyperparameter variations~\citep{lottery_ticket_hypothesis, novak2018sensitivity, sensitivity_analysis}. To avoid extensive hyperparameter tuning for the compressed model, we leverage Design Principle V by scaling the total number of experts $N$ by a factor $\alpha = d/\ell$, thereby expanding the combinatorial specialization space.
+Crucially, since neither the memory bandwidth cost (in latency-oriented scenarios) nor the communication cost (in throughput-oriented scenarios) depends on $N$, this scaling adheres to Design Principles I and II, incurring no additional inference overhead. Hereafter, we refer to this architecture modification as $\lmoeeff$, formally defined as follows:
+\begin{equation}
+\label{eq:latent_moe_eff}
+\lmoeeff(x) := W_{\uparrow} \cdot \left( \sum_{i \in \mathcal{T}_{K,N'}} p'_i E_i(W_\downarrow \cdot x; \ell) \right) + \sum_{j=N'+1}^{N'+S} E_j(x; d).
+\end{equation}
+Here, $N' = \alpha \cdot N$ denotes the expanded set of routed experts. The routed experts $E_i(\cdot; \ell)$ function within the latent space, while the shared experts $E_j(\cdot; d)$ operate in the original input space. The routing weights $p' = \softmax(W'_r \cdot x)$ are computed from the original token $x \in \R^d$ using a learnable weight matrix $W'_r \in \R^{N' \times d}$, and $\mathcal{T}_{K,N'}$ denotes the indices of the top-$K$ experts (out of $N'$ total) selected based on their routing scores. For simplicity, all operations outside the routed experts---including the MoE routing mechanism and shared experts---continue to operate in the original hidden dimension $d$, as they do not significantly contribute to the identified memory and communication bottlenecks.
+
+Following the down-projection $W_\downarrow$, token dispatch and aggregation occur in the latent space $\R^\ell$. This reduces the communication volume by a factor of $\alpha$ relative to a standard MoE. Similarly, because the expert weights lie in the latent space ($\R^{m \times \ell}$ and $\R^{\ell \times m}$), the memory bandwidth cost for weight loading is also reduced by a factor of $\alpha$.
+
+Design Principle V further suggests that scaling both $N$ and $K$ by a factor $\alpha$ exponentially increases expert diversity, thereby enhancing model quality. Following this principle, the default LatentMoE configuration (a.k.a., $\lmoeacc$) is defined as follows: 
+\begin{equation}
+\label{eq:latent_moe_acc}
+\lmoeacc(x) := W_{\uparrow} \cdot \left( \sum_{i \in \mathcal{T}_{K',N'}} p'_i E_i(W_\downarrow \cdot x; \ell) \right) + \sum_{j=N'+1}^{N'+S} E_j(x; d),
+\end{equation}
+where $K' = \alpha \cdot K$. This formulation differs from $\lmoeeff$ solely in the number of active experts, utilizing the top-k selection function $\mathcal{T}_{K',N'}$.
+
+Since $K$ is increased by a factor of $\alpha = d / \ell$, this variant keeps communication cost and memory bandwidth requirements constant relative to a standard MoE. The increased expert diversity and non-linearity budget per token, however, lead to superior model accuracy at iso-inference cost, thereby pushing the Pareto frontier of models to a new level. Table~\ref{tbl:moe_costs} summarizes the costs and benefits of the two configurations, $\lmoeeff$ and $\lmoeacc$. For completeness, we evaluate both setups in Section~\ref{sec:results}.
+
+
+
+\begin{table}[t]
+\centering
+\caption{Comparison of asymptotic communication and memory bandwidth costs per GPU. Costs are normalized by hardware constants. $T_{\text{exp}}$ denotes the average number of tokens per expert, and $\ep$ is the expert-parallel level. Arrows indicate improvement ($\uparrow$), maintenance ($\rightarrow$), or baseline (--).}
+\label{tbl:moe_costs}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Architecture} & \textbf{\makecell{Communication\\Cost}} & \textbf{\makecell{Weight Loading\\Memory Cost\\per Expert}} & \textbf{\makecell{Model\\Accuracy}} & \textbf{\makecell{Inference\\Efficiency}} \\
+\midrule
+Standard MoE
+  & $(N / \ep) \cdot \, \texp \cdot d$
+  & $d \cdot m$
+  & --
+  & -- \\
+\addlinespace
+$\lmoeeff$
+  & $(N / \ep) \cdot \, \texp \cdot \ell$
+  & $\ell \cdot m$
+  & $\rightarrow$
+  & \textcolor{green!50!black}{$\uparrow$} \\
+\addlinespace
+$\lmoeacc$ (recommended)
+  & $(N / \ep) \cdot \, \texp \cdot d$
+  & $d \cdot m$
+  & \textcolor{green!50!black}{$\uparrow$}
+  & $\rightarrow$ \\
+\bottomrule
+\end{tabular}
+\end{table}
