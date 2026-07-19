@@ -22,3 +22,4 @@
 
 创建时间: 2026-07-19
 来源: https://datasciencedojo.com/blog/attention-residuals-kimi-ai-explained/
+| Step 4d-i: 传送门 | completed |
