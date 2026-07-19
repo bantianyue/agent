@@ -4,86 +4,86 @@
 <strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">瓶颈诊断</strong>：mHC 把 N（残差流数）从 4 提到 16，loss 只降 0.006、FLOPs 却涨 32%——根因是写入信息不足 + 残差混合的立方代价。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">双重设计</strong>：xHC 用「时序特征增强」丰富写回信号，用「稀疏残差流架构」只更新 k 条活跃流，把混合代价从 O(N³C) 降到 O(k³C)。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">18B 实测</strong>：18B MoE 上平均下游分从 mHC 的 44.8 提到 48.8，训练 loss 1.758 vs 1.776，仅多 4.1% FLOPs。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">缩放法则</strong>：达到同等 loss，vanilla 需 xHC 的 1.50× 算力、mHC 需 1.19×——提升是系统性的，不限于某个尺寸。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">xHC-Flash</strong>：跨子层共享路由与稠密读，每子层访存从 73.5C 压到 40C，接近 mHC@N=4 的 34C，几乎不掉点。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">兼容 Muon</strong>：换用 Muon 优化器仍显著优于基线，说明增益不依赖 AdamW，是架构层面的。</div>
+- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">瓶颈诊断</strong>：mHC把N（残差流数）从4提到16，loss只降0.006、FLOPs却涨32%：根因是写入信息不足 + 残差混合的立方代价。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">双重设计</strong>：xHC用「时序特征增强」丰富写回信号，用「稀疏残差流架构」只更新k条活跃流，把混合代价从O(N³C) 降到O(k³C)。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">18B实测</strong>：18B MoE上平均下游分从mHC的44.8提到48.8，训练loss 1.758 vs 1.776，仅多4.1% FLOPs。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">缩放法则</strong>：达到同等loss，vanilla需xHC的1.50× 算力、mHC需1.19×。提升是系统性的，不限于某个尺寸。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">xHC-Flash</strong>：跨子层共享路由与稠密读，每子层访存从73.5C压到40C，接近mHC@N=4的34C，几乎不掉点。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">兼容Muon</strong>：换用Muon优化器仍显著优于基线，说明增益不依赖AdamW，是架构层面的。</div>
 </div>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">残差流（residual stream）是 Transformer 跨层传递信息的主干，但它几十年来基本就是「一条恒等通路」，对跨层信息流没有可学习的控制。Hyper-Connections 把它扩成 N 条并行流，但现有方法（含最强的 mHC）卡在 N=4 就上不去了。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">xHC（Expanded Hyper-Connections）第一次把 HC 家族模型的扩展率 N 真正推过 4：18B/28B MoE 上全面超越 mHC 与 vanilla 基线，且只多百分之几的 FLOPs。本文拆解它为什么有效、以及工程上如何压住访存开销。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">残差流（residual stream）是Transformer跨层传递信息的主干，但它几十年来基本就是「一条恒等通路」，对跨层信息流没有可学习的控制。Hyper-Connections把它扩成N条并行流，但现有方法（含最强的mHC）卡在N=4就上不去了。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">xHC（Expanded Hyper-Connections）第一次把HC家族模型的扩展率N真正推过4：18B/28B MoE上全面超越mHC与vanilla基线，且只多百分之几的FLOPs。本文拆解它为什么有效、以及工程上如何压住访存开销。</p>
 
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">一句话背景：残差流为什么值得「扩」</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">大模型架构在注意力、MoE、宽度/深度/数据上进步神速，但承载 token 表示的残差流几乎没变：它仍是一条单一恒等通路，对跨层信息流没有任何可学习的控制。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Hyper-Connections（HC）挑战了这个设计——用 N 条可学习的并行残差流取代单流，每条流由一个可学习混合矩阵控制。在其基础上，Manifold-Constrained HC（mHC）让多流残差在大规模下训练稳定，是当前最强的 HC 变体。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">残差流扩展用很少的额外 FLOPs 就增加了模型的「持久状态」，等于在宽度和深度之外提供了一条新的记忆缩放轴。先前把 N 从 1 扩到 4 收益明显，说明这是个有前途的方向。但现有 HC 家族方法普遍停在 N=4。我们的实验（图 1）显示：继续加大 N，收益迅速饱和——N 从 4 到 16，loss 只微降，训练 FLOPs 却涨了 32%。这条缩放轴基本没被释放出来。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">大模型架构在注意力、MoE、宽度/深度/数据上进步神速，但承载token表示的残差流几乎没变：它仍是一条单一恒等通路，对跨层信息流没有任何可学习的控制。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Hyper-Connections（HC）挑战了这个设计：用N条可学习的并行残差流取代单流，每条流由一个可学习混合矩阵控制。在其基础上，Manifold-Constrained HC（mHC）让多流残差在大规模下训练稳定，是当前最强的HC变体。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">残差流扩展用很少的额外FLOPs就增加了模型的「持久状态」，等于在宽度和深度之外提供了一条新的记忆缩放轴。先前把N从1扩到4收益明显，说明这是个有前途的方向。但现有HC家族方法普遍停在N=4。我们的实验（图1）显示：继续加大N，收益迅速饱和：N从4到16，loss只微降，训练FLOPs却涨了32%。这条缩放轴基本没被释放出来。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">两个瓶颈：为什么简单地加流没用</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们认为这种「收益-成本」失衡不是偶然，而是来自两个截然不同的瓶颈：一个限制大 N 的收益，一个抬高大 N 的成本。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">其一是信息瓶颈：每条流本应存下不同的层输出加权历史，但每一层只往多流状态里注入一个写回（write-back）信号。N 越大，要形成有意义且多样的流历史，需要的写回信息就越丰富，而单个信号给不了——多余流越来越冗余。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">其二是计算瓶颈：在 mHC 中，主导成本来自用「依赖输入的投影」生成残差映射 ℋ_res ∈ ℝ^{N×N}。这个投影要从 N·C 维残差状态预测 N² 个系数，成本随 O(N³C) 增长，比性能收益快得多。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两个瓶颈叠加：信息瓶颈限制了大 N 的收益，成本瓶颈抬高了它的代价。这也说清了「要让扩展率成为真正的缩放轴」需要什么——模型必须提供更丰富的写回信息，同时避免 ℋ_res 缩放的立方代价。</p>
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">xHC 的核心：两个互补设计</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">xHC 在 mHC 稳定的多流公式基础上，用两个互补设计让大 N 扩展既有效又便宜。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为了提高大 N 的收益，xHC 沿因果 token 序列引入时序特征增强：用多尺度因果卷积，从邻近 token 借来低成本特征，丰富写回信号——随着流数变多，写回信息也更多样。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为了控制大 N 的成本，xHC 引入稀疏残差流架构：残差混合与写回只激活 N 条流中的 k 条，而读路径保持稠密，每一层仍能访问完整的 N 流状态。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这两个设计结构上解耦却高度协同：N 越大，时序增强越有用（因为额外流需要更丰富的写回信息）；同时稀疏残差更新越值钱（因为它大幅削减大 N 扩展引入的额外 FLOPs）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们认为这种「收益-成本」失衡不是偶然，而是来自两个截然不同的瓶颈：一个限制大N的收益，一个抬高大N的成本。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">其一是信息瓶颈：每条流本应存下不同的层输出加权历史，但每一层只往多流状态里注入一个写回（write-back）信号。N越大，要形成有意义且多样的流历史，需要的写回信息就越丰富，而单个信号给不了：多余流越来越冗余。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">其二是计算瓶颈：在mHC中，主导成本来自用「依赖输入的投影」生成残差映射 ℋ_res ∈ ℝ^{N×N}。这个投影要从N·C维残差状态预测N² 个系数，成本随O(N³C) 增长，比性能收益快得多。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两个瓶颈叠加：信息瓶颈限制了大N的收益，成本瓶颈抬高了它的代价。这也说清了「要让扩展率成为真正的缩放轴」需要什么：模型必须提供更丰富的写回信息，同时避免 ℋ_res缩放的立方代价。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">xHC的核心：两个互补设计</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">xHC在mHC稳定的多流公式基础上，用两个互补设计让大N扩展既有效又便宜。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为了提高大N的收益，xHC沿因果token序列引入时序特征增强：用多尺度因果卷积，从邻近token借来低成本特征，丰富写回信号；随着流数变多，写回信息也更多样。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为了控制大N的成本，xHC引入稀疏残差流架构：残差混合与写回只激活N条流中的k条，而读路径保持稠密，每一层仍能访问完整的N流状态。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这两个设计结构上解耦却高度协同：N越大，时序增强越有用（因为额外流需要更丰富的写回信息）；同时稀疏残差更新越值钱（因为它大幅削减大N扩展引入的额外FLOPs）。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">设计一：丰富写回信号（时序特征增强）</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如第 3.2 节分析，大 N 扩展之所以饱和，是因为每一层只给所有流提供一个写回分量。最直接的修法是给每条流单独算一个输出，但那会把层 FLOPs 乘上 N。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">xHC 改从邻近 token 借低成本局部上下文来丰富写回基。自回归预测本就依赖周围上下文，邻近隐藏输出与当前 token 语义兼容，可以并入睡回信号。我们用轻量的因果逐通道 1D 卷积聚合这些信息，既保住自回归顺序又只加很小开销。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">具体做法：对层输出做 r 个因果逐通道卷积，核大小各不相同（如 {4,8,12}），在不同上下文范围捕捉邻近 token 信息，提供多粒度的写回分量，把写回基从「单个层输出」扩展开来。主设置 r=3，故 K_r=4。卷积逐通道且因果，每层只加 C·Σκ_j 个参数，且仅在 MLP（MoE FFN）之后做——注意力已经混了位置，在其后加时序增强会让训练不稳。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">由于逐通道卷积的输出可能与原始层输出强相关，直接组合会被 ℋ_post 放大原方向、让写回缩放不可控。于是我们对 K_r 个分量做修正 Gram–Schmidt 正交化，保证写回基多样且可控。</p>
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">设计二：稀疏残差流架构（只更新 k 条活跃流）</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">成本瓶颈来自对所有 N 条流做残差混合。xHC 只更新 N 条中的 k 条活跃流，同时保持对完整 N 流状态的稠密读访问。前向分三步：路由、读、写。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">流路由：路由器从归一化的完整 N 流状态产出每条流的重要性分数（用 sigmoid 而非 softmax，避免赢者通吃）。为稳定，采用「固定+路由」方案：m 条流永远激活（路由权重 1），其余 k−m 条由 TopK 在非固定流里选出。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">稠密读：朴素稀疏变体会把读和写都稀疏化，但这会切断跨层信息流——某层更新的流下一层可能不被选读，缩短了路由信息传播的等效路径。xHC 因此保留稠密读路径：每一层都能访问完整 N 流状态，即使只有 k 条被更新，跨层信息流也不断。消融实验确认了稠密读的重要性。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">稀疏残差更新：mHC 的 ℋ_res 和 ℋ_post 从完整 N 流状态生成；xHC 只作用于活跃状态 X_active。后映射从 ℝ^{N×1} 推广到 ℝ^{k×K_r}，让每条活跃流独立组合 K_r 个增强写回分量。这把主导的残差映射生成成本从 O(N³C) 降到 O(k³C)，同时保留对活跃流子集的 Sinkhorn 约束。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如第3.2节分析，大N扩展之所以饱和，是因为每一层只给所有流提供一个写回分量。最直接的修法是给每条流单独算一个输出，但那会把层FLOPs乘上N。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">xHC改从邻近token借低成本局部上下文来丰富写回基。自回归预测本就依赖周围上下文，邻近隐藏输出与当前token语义兼容，可以并入睡回信号。我们用轻量的因果逐通道1D卷积聚合这些信息，既保住自回归顺序又只加很小开销。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">具体做法：对层输出做r个因果逐通道卷积，核大小各不相同（如 {4,8,12}），在不同上下文范围捕捉邻近token信息，提供多粒度的写回分量，把写回基从「单个层输出」扩展开来。主设置r=3，故K_r=4。卷积逐通道且因果，每层只加C·Σκ_j个参数，且仅在MLP（MoE FFN）之后做：注意力已经混了位置，在其后加时序增强会让训练不稳。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">由于逐通道卷积的输出可能与原始层输出强相关，直接组合会被 ℋ_post放大原方向、让写回缩放不可控。于是我们对K_r个分量做修正Gram–Schmidt正交化，保证写回基多样且可控。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">设计二：稀疏残差流架构（只更新k条活跃流）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">成本瓶颈来自对所有N条流做残差混合。xHC只更新N条中的k条活跃流，同时保持对完整N流状态的稠密读访问。前向分三步：路由、读、写。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">流路由：路由器从归一化的完整N流状态产出每条流的重要性分数（用sigmoid而非softmax，避免赢者通吃）。为稳定，采用「固定+路由」方案：m条流永远激活（路由权重1），其余k−m条由TopK在非固定流里选出。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">稠密读：朴素稀疏变体会把读和写都稀疏化，但这会切断跨层信息流：某层更新的流下一层可能不被选读，缩短了路由信息传播的等效路径。xHC因此保留稠密读路径：每一层都能访问完整N流状态，即使只有k条被更新，跨层信息流也不断。消融实验确认了稠密读的重要性。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">稀疏残差更新：mHC的 ℋ_res和 ℋ_post从完整N流状态生成；xHC只作用于活跃状态X_active。后映射从 ℝ^{N×1} 推广到 ℝ^{k×K_r}，让每条活跃流独立组合K_r个增强写回分量。这把主导的残差映射生成成本从O(N³C) 降到O(k³C)，同时保留对活跃流子集的Sinkhorn约束。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么两个设计缺一不可</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两个设计针对的是互补的瓶颈。时序特征增强让额外流更有信息量，但单独用仍留下昂贵的稠密残差混合；稀疏残差更新让大 N 变便宜，但单独用写回信号仍信息受限。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">只有合在一起，大 N 扩展才既「有意义」又「便宜」。第 4.5 节的消融证实：任何一个设计单独都拿不回 xHC 的完整收益。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两个设计针对的是互补的瓶颈。时序特征增强让额外流更有信息量，但单独用仍留下昂贵的稠密残差混合；稀疏残差更新让大N变便宜，但单独用写回信号仍信息受限。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">只有合在一起，大N扩展才既「有意义」又「便宜」。第4.5节的消融证实：任何一个设计单独都拿不回xHC的完整收益。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">实验设置与主要结果</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们在 MoE Transformer 上做语言模型预训练。主干用 DeepSeekMoE 风格：GQA + 144 专家 top-8 路由，每个专家是 SwiGLU FFN。主结果在两个 MoE 规模报告：18B 总参数/1.7B 激活，以及 28B 总参数/2.7B 激活。除非特别说明，xHC 用 N=16 总流、k=4 活跃流，上下文长度 8192，用 AdamW。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">基线：主要与 mHC（N=4）对比（训练 FLOPs 与 xHC 相当，是规模最大的最强 HC 方法），并加入标准残差流 Transformer 作 vanilla 基线。下游评测覆盖理解/知识（MMLU 系列）、推理/数学（BBH、GSM8K 等）、代码（HumanEval、LCBench）、中文（CMMLU、CEval、C3）。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">xHC 在两个规模上都优于 mHC 和 vanilla 基线。18B 上平均分从 mHC 的 44.8 升到 48.8，代表增益 ARC-Challenge +5.9、BBH +5.8、C3 +5.6、HumanEval +6.1；28B 上从 50.5 到 53.6（+3.1），代表增益 CommonsenseQA +5.7、HumanEval +4.3、C3 +3.8、MMLU +3.7。28B 上的一致提升说明 xHC 在更大预训练规模仍有效。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们在MoE Transformer上做语言模型预训练。主干用DeepSeekMoE风格：GQA + 144专家top-8路由，每个专家是SwiGLU FFN。主结果在两个MoE规模报告：18B总参数/1.7B激活，以及28B总参数/2.7B激活。除非特别说明，xHC用N=16总流、k=4活跃流，上下文长度8192，用AdamW。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">基线：主要与mHC（N=4）对比（训练FLOPs与xHC ，是规模最大的最强HC方法），并加入标准残差流Transformer作vanilla基线。下游评测覆盖理解/知识（MMLU系列）、推理/数学（BBH、GSM8K等）、代码（HumanEval、LCBench）、中文（CMMLU、CEval、C3）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">xHC在两个规模上都优于mHC和vanilla基线。18B上平均分从mHC的44.8升到48.8，代表增益ARC-Challenge +5.9、BBH +5.8、C3 +5.6、HumanEval +6.1；28B上从50.5到53.6（+3.1），代表增益CommonsenseQA +5.7、HumanEval +4.3、C3 +3.8、MMLU +3.7。28B上的一致提升说明xHC在更大预训练规模仍有效。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">缩放法则：把扩展率变成实用缩放轴</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为看优势是否跨更大算力范围成立，我们为每个方法训了 4 个模型套件，算力从 1.7×10¹⁹ 到 4.0×10²⁰ FLOPs，拟合计移幂律。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">图 4 显示 xHC 拟出的拟合 loss 曲线低于 mHC 和 vanilla。在最大算力点，xHC 相对 mHC 降约 1.1%、相对 vanilla 降约 2.4%。用最大 vanilla 与 mHC 模型的 loss 作目标，反查 xHC 曲线所需算力：基线需 xHC 的约 1.50×，mHC 需约 1.19×。这说明 xHC 的算力效率提升是系统性的，而非只在某些评测点。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为看优势是否跨更大算力范围成立，我们为每个方法训了4个模型套件，算力从1.7×10¹⁹ 到4.0×10²⁰ FLOPs，拟合计移幂律。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">图4显示xHC拟出的拟合loss曲线低于mHC和vanilla。在最大算力点，xHC相对mHC降约1.1%、相对vanilla降约2.4%。用最大vanilla与mHC模型的loss作目标，反查xHC曲线所需算力：基线需xHC的约1.50×，mHC需约1.19×。这说明xHC的算力效率提升是系统性的，而非只在某些评测点。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png">
-<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">图 4：缩放律对比。xHC 拟合出的 loss 曲线低于 mHC 与 vanilla；达到同等 loss，vanilla 需 1.50× 算力、mHC 需 1.19× 算力。</figcaption></figure>
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">图4：缩放律对比。xHC拟合出的loss曲线低于mHC与vanilla；达到同等loss，vanilla需1.50× 算力、mHC需1.19× 算力。</figcaption></figure>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png">
-<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">图 5：信息瓶颈消融。单独给 mHC 加时序特征增强后，loss 相对 mHC 的差距随 N 增大越来越负，印证扩展率越大信息瓶颈越严重。</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">扩展率扫描更直接：在 2.5B MoE 上扫 N∈{2,4,8,16}。mHC 里 N 从 4 到 16 只降 0.006 loss 却多 32% FLOPs；xHC 同区间降 0.012 loss 仅多 4% FLOPs。xHC 让更大的 N 在实用算力预算下真正有用。</p>
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">图5：信息瓶颈消融。单独给mHC加时序特征增强后，loss相对mHC的差距随N增大越来越负，印证扩展率越大信息瓶颈越严重。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">扩展率扫描更直接：在2.5B MoE上扫N∈{2,4,8,16}。mHC里N从4到16只降0.006 loss却多32% FLOPs；xHC同区间降0.012 loss仅多4% FLOPs。xHC让更大的N在实用算力预算下真正有用。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">消融：两个瓶颈都坐实了</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">增量构建：从 mHC@N=16 起步，逐步加两个成分。加时序特征增强，验证 loss 从 1.998 降到 1.984（证明确实缓解了信息瓶颈）；再加稀疏残差流架构，loss 基本保持（1.983）却把 FLOPs 开销从 20.1% 压到 3.3%——说明稀疏更新让「被丰富了的大 N 残差状态」变便宜。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">信息瓶颈消融：单独给稠密 mHC 加时序增强，loss 相对 mHC 的差距随 N 增大越来越负，与「扩展率越大、信息瓶颈越严重」的诊断一致。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">稀疏架构消融：去掉稠密读和固定流会暴露信息断连风险（loss 退化到 1.997）；保留固定流、去掉稠密读只从 1.983 升到 1.985。活跃流预算 k：k=2 欠配（1.991），k=8 成本高收益边际（1.982），k=4 最平衡。Sigmoid 路由优于 Softmax（1.983 vs 1.988），避免赢者通吃导致流长期不激活。</p>
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">兼容 Muon 优化器</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">前述实验用 AdamW。我们进一步在 Muon 下测 xHC（Muon 用 Newton–Schulz 迭代构造正交化矩阵更新，在 Transformer 预训练上表现强）。这检验 xHC 是否只在 AdamW 下有效。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两个实用改动：一是去掉时序增强里的 Gram–Schmidt 正交化——AdamW 下 GS 是稳定机制（卷积分支常与原输出强相关，不正交化会被 ℋ_post 放大同方向、引发激活增长与梯度尖峰）；Muon 本身对主干矩阵更新做 Newton–Schulz 正交化，已抑制这种敏感度，故可去掉。二是 Muon 只用于主干注意力/MLP 投影矩阵，xHC 专属的路由与映射投影仍用 AdamW（这些矩阵高度不均衡、输出维远小于输入维，不适合 Muon）。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">18B MoE 上 xHC 相对 Muon 基线仍大幅领先，说明该架构与 Muon 兼容、在 AdamW 之外依然有效。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">增量构建：从mHC@N=16起步，逐步加两个成分。加时序特征增强，验证loss从1.998降到1.984（证明确实缓解了信息瓶颈）；再加稀疏残差流架构，loss基本保持（1.983）却把FLOPs开销从20.1% 压到3.3%。说明稀疏更新让「被丰富了的大N残差状态」变便宜。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">信息瓶颈消融：单独给稠密mHC加时序增强，loss相对mHC的差距随N增大越来越负，与「扩展率越大、信息瓶颈越严重」的诊断一致。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">稀疏架构消融：去掉稠密读和固定流会暴露信息断连风险（loss退化到1.997）；保留固定流、去掉稠密读只从1.983升到1.985。活跃流预算k：k=2欠配（1.991），k=8成本高收益边际（1.982），k=4最平衡。Sigmoid路由优于Softmax（1.983 vs 1.988），避免赢者通吃导致流长期不激活。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">兼容Muon优化器</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">前述实验用AdamW。我们进一步在Muon下测xHC（Muon用Newton–Schulz迭代构造正交化矩阵更新，在Transformer预训练上表现强）。这检验xHC是否只在AdamW下有效。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两个实用改动：一是去掉时序增强里的Gram–Schmidt正交化：AdamW下GS是稳定机制（卷积分支常与原输出强相关，不正交化会被 ℋ_post放大同方向、引发激活增长与梯度尖峰）；Muon本身对主干矩阵更新做Newton–Schulz正交化，已抑制这种敏感度，故可去掉。二是Muon只用于主干注意力/MLP投影矩阵，xHC专属的路由与映射投影仍用AdamW（这些矩阵高度不均衡、输出维远小于输入维，不适合Muon）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">18B MoE上xHC相对Muon基线仍大幅领先，说明该架构与Muon兼容、在AdamW之外依然有效。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig00.png">
-<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">图 1：扩展效率——在 2.5B MoE 上，loss 随训练 FLOPs 的变化。mHC 把 N 从 4 提到 16 只微降 loss 却多 32% FLOPs；xHC 同区间降更多 loss 且仅多 4% FLOPs。</figcaption></figure>
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">图1：扩展效率：在2.5B MoE上，loss随训练FLOPs的变化。mHC把N从4提到16只微降loss却多32% FLOPs；xHC同区间降更多loss且仅多4% FLOPs。</figcaption></figure>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png">
-<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">图 3：xHC 总览。(a) 标准 Transformer；(b) mHC 的多流残差；(c) xHC：时序特征增强丰富写回信号，稀疏残差流架构只更新 k 条活跃流、保留稠密读。</figcaption></figure>
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">工程落地：xHC-Flash 与融合内核</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">xHC 只加少量 FLOPs，但维护多残差流会增加访存、影响实际吞吐。主设置 N=16、k=4 下，xHC 平均每子层 55C 读 + 18.5C 写 = 73.5C，约为 mHC@N=4（34C）的 2.2×——主要因为每子层对 16C 表示做了两次全状态读。这催生了两个优化。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">xHC-Flash：跨连续子层分摊全状态操作。共享路由让 Attention 与 MLP 子层共用一次路由决策；联合生成子层专属预映射，用轻量修正更新后续输入，避免重复全状态读。两子层版把每子层访存从 73.5C 降到 51C；其四子层扩展 xHC-Flash-4sub 进一步降到 40C——与 mHC@N=4 的 34C 相当，且几乎保住 xHC 全部性能增益（验证 loss 1.984 vs mHC 2.004）。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">基础设施：我们把许多小的、访存受限的算子融合。残差状态存 bfloat16，归一化统计/路由/映射系数/Sinkhorn 用 float32。映射生成阶段把路由与预映射投影拼进一次矩阵乘、共享统计；映射应用阶段用两个融合 Triton 核分别做「稠密读+稀疏混合」和「后映射+路由缩放+残差加+稀疏散回」，省掉中间张量与核启动开销。时序增强用专用核联合算 3 个因果卷积分支，复用缓存。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">端到端吞吐：18B MoE 上，我们重实现的 mHC 融合核比基线多约 15% 训练开销；xHC-Flash-4sub 在 mHC 之上多加约 11%（主要来自扩展的 16C 全状态投影与双稠密读）。用 DualPipe 类流水线通信重叠可进一步压低有效开销。推理 prefill（2K token）上，xHC-Flash-4sub 比 mHC 仅多 1.3% 总延迟。</p>
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">图3：xHC总览。(a) 标准Transformer；(b) mHC的多流残差；(c) xHC：时序特征增强丰富写回信号，稀疏残差流架构只更新k条活跃流、保留稠密读。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">工程落地：xHC-Flash与融合内核</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">xHC只加少量FLOPs，但维护多残差流会增加访存、影响实际吞吐。主设置N=16、k=4下，xHC平均每子层55C读 + 18.5C写 = 73.5C，约为mHC@N=4（34C）的2.2×：主要因为每子层对16C表示做了两次全状态读。这催生了两个优化。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">xHC-Flash：跨连续子层分摊全状态操作。共享路由让Attention与MLP子层共用一次路由决策；联合生成子层专属预映射，用轻量修正更新后续输入，避免重复全状态读。两子层版把每子层访存从73.5C降到51C；其四子层扩展xHC-Flash-4sub进一步降到40C：与mHC@N=4的34C ，且几乎保住xHC全部性能增益（验证loss 1.984 vs mHC 2.004）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">基础设施：我们把许多小的、访存受限的算子融合。残差状态存bfloat16，归一化统计/路由/映射系数/Sinkhorn用float32。映射生成阶段把路由与预映射投影拼进一次矩阵乘、共享统计；映射应用阶段用两个融合Triton核分别做「稠密读+稀疏混合」和「后映射+路由缩放+残差加+稀疏散回」，省掉中间张量与核启动开销。时序增强用专用核联合算3个因果卷积分支，复用缓存。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">端到端吞吐：18B MoE上，我们重实现的mHC融合核比基线多约15% 训练开销；xHC-Flash-4sub在mHC之上多加约11%（主要来自扩展的16C全状态投影与双稠密读）。用DualPipe类流水线通信重叠可进一步压低有效开销。推理prefill（2K token）上，xHC-Flash-4sub比mHC仅多1.3% 总延迟。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png">
-<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">(a) 训练 loss。xHC 在 18B MoE 上达到比 mHC 与 vanilla 基线更低的终训 loss。</figcaption></figure>
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">(a) 训练loss。xHC在18B MoE上达到比mHC与vanilla基线更低的终训loss。</figcaption></figure>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png">
-<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">(b) 平均下游得分。xHC 将平均分从 mHC 的 44.8 提升到 48.8。</figcaption></figure>
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">(b) 平均下游得分。xHC将平均分从mHC的44.8提升到48.8。</figcaption></figure>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png">
-<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">(c) 基准级增益。多个基准上 xHC 相对 mHC 与 vanilla 均取得正向提升。</figcaption></figure>
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">(c) 基准级增益。多个基准上xHC相对mHC与vanilla均取得正向提升。</figcaption></figure>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">结论</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们提出 xHC，让 HC 家族模型的残差流扩展在常见的 N=4 之外既有效又便宜。直接放大 mHC 的 N 受两个瓶颈限制：写回信息不足，以及残差映射生成的立方代价。xHC 用时序特征增强 + 稀疏残差流架构（保留稠密读、只更新 k 条活跃流）解决它们。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在语言模型预训练实验中，xHC 扩到 N=16、k=4，在 18B/28B MoE 上显著超越 mHC 与 vanilla 基线，提升同等 loss 的算力效率，且在 Muon 下依然有效。xHC-Flash 与融合核进一步压低了大 N 训练所需的内存与实现开销。这些结果支持把「扩展率」作为 HC 家族模型一条实用的缩放维度。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们提出xHC，让HC家族模型的残差流扩展在常见的N=4之外既有效又便宜。直接放大mHC的N受两个瓶颈限制：写回信息不足，以及残差映射生成的立方代价。xHC用时序特征增强 + 稀疏残差流架构（保留稠密读、只更新k条活跃流）解决它们。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在语言模型预训练实验中，xHC扩到N=16、k=4，在18B/28B MoE上显著超越mHC与vanilla基线，提升同等loss的算力效率，且在Muon下依然有效。xHC-Flash与融合核进一步压低了大N训练所需的内存与实现开销。这些结果支持把「扩展率」作为HC家族模型一条实用的缩放维度。</p>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
@@ -92,28 +92,28 @@
 <strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-xHC 的核心洞察很朴素：残差流扩展卡在 N=4，不是因为「加流没用」，而是因为「加流的同时没给流喂更丰富的信息、也没压住混合的立方代价」。时序增强解决前者，稀疏更新解决后者，二者缺一不可。<br  /><br  />对工程者的启发：如果你在预训练里想在不堆宽度/深度的情况下换取更顺滑的缩放曲线，HC 家族是条被低估的轴；xHC 把它从「N=4 就饱和」推进到「N=16 仍划算」，配合 xHC-Flash 的访存优化，已经接近可落地的开销区间。</div>
+xHC的核心洞察很朴素：残差流扩展卡在N=4，不是因为「加流没用」，而是因为「加流的同时没给流喂更丰富的信息、也没压住混合的立方代价」。时序增强解决前者，稀疏更新解决后者，二者缺一不可。<br  /><br  />对工程者的启发：如果你在预训练里想在不堆宽度/深度的情况下换取更顺滑的缩放曲线，HC家族是条被低估的轴；xHC把它从「N=4就饱和」推进到「N=16仍划算」，配合xHC-Flash的访存优化，已经接近可落地的开销区间。<br  /><br  />一个可落地的判断：若你的预训练预算卡在「加宽/加深边际收益递减」的区间，且显存带宽不是硬约束，把残差流扩到N=16、配xHC-Flash-4sub（访存40C，仅比mHC@N=4多6C）是性价比很高的尝试；论文18B上 +4.0平均分的代价只是4.1% 额外FLOPs，远低于再堆一档宽度的成本。</div>
 </div>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"/>
 
 <span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/L6krDtAzuCiX4y2KNYYvfQ" target="_blank" data-linktype="2">万亿参数RL实战：如何用28个H200节点训GLM-5</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/pCRjhls1WFaiRglb2MtjBw" target="_blank" data-linktype="2">蚂蚁CausalMix: 将数据混合从超参搜索转换成因果推断</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/pCRjhls1WFaiRglb2MtjBw" target="_blank" data-linktype="2">蚂蚁CausalMix: 将数据混合从超参搜索转换成因果推断</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
 </span>
 
 
