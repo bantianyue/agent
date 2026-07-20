@@ -55,6 +55,7 @@ DATA = {
             ],
             "figs": [
                 {"src": "x3.png", "caption": "图 3：Token 级信号对比。蓝色=促进，红色=抑制。Delta 信号在错误推理步骤（如 \"multiply\" 处）显示更强的抑制信号，而 OPD 在这类位置仍保持正信号。"},
+                {"src": "x4.png", "caption": "图 4：Token 级信号对比（续）。Delta 信号在 \"into steam\" 等关键推理节点上给出负信号，OPD 则保持正信号，说明 Delta 对错误推理更加敏感。"},
             ],
         },
         {
@@ -134,7 +135,9 @@ DATA = {
                 "<strong>OPD² 在早期达到更高峰值，并且在后续训练中始终维持这个优势</strong>，不会像其他方法那样一路下滑。这意味着 OPD² 不需要精挑 checkpoint——直接在最后一轮就能拿到最好结果。",
             ],
             "figs": [
-                {"src": "x6.png", "caption": "图 4：Qwen3-4B 在 non-thinking 模式下的训练动态曲线。OPD² 在三个领域均保持持续领先，而 OPD 和 ExOPD 在早期峰值后性能衰减。"},
+                {"src": "x6.png", "caption": "图 4：Qwen3-4B 在 non-thinking 模式下的训练动态曲线（Math 领域）。OPD² 维持明显优势，OPD 和 ExOPD 在早期峰值后衰减。"},
+                {"src": "x7.png", "caption": "图 5：训练动态曲线（Code 领域）。OPD² 在 CodeContests 上保持大幅领先。"},
+                {"src": "x8.png", "caption": "图 6：训练动态曲线（Science 领域）。OPD² 同样持续领先。"},
             ],
         },
         {
