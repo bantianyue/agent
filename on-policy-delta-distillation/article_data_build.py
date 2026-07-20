@@ -2,7 +2,13 @@ import json, os, sys
 
 DATA = {
     "title": "OPD²：用 Delta 信号重新定义知识蒸馏，数学暴涨 10+ 分",
-    "summary": "NAVER AI 提出 On-Policy Delta Distillation (OPD²)，用教师模型与其基础模型的差值构建蒸馏信号，在 Qwen3 和 Gemma4 上全面超越标准 OPD 和 ExOPD。",
+    "summary": [
+        {"key": "核心思路", "body": "用教师模型与其基础模型的差值（Delta 信号）作为蒸馏奖励，取代 OPD 的 teacher-student 对数概率差"},
+        {"key": "关键改进", "body": "Delta 信号自动过滤教师模型的语言风格偏好，只保留推理能力增量——逻辑连接词增强 39-60%"},
+        {"key": "实验覆盖", "body": "Qwen3 1.7B/4B/8B + Gemma4，14 个基准覆盖数学/科学/代码，non-thinking 和 thinking 双模式"},
+        {"key": "核心结果", "body": "4B 模型数学 70.3 超 8B+ExOPD 的 67.8；Thinking 模式唯一持续正向提升的方法"},
+        {"key": "额外开销", "body": "仅增加 8-28% 训练时间（多一次 base model forward），100 步收敛"},
+    ],
     "lead": [
         "知识蒸馏（Knowledge Distillation）是大模型后训练的核心手段之一。传统的 OPD（On-Policy Distillation）让教师模型给学生模型生成的 token 打分，但一个被长期忽视的问题是：**教师模型的「能力」和「风格偏好」是混杂在一起的**——它既包含推理能力的提升，也保留了预训练阶段的语言习惯。",
         "NAVER AI 团队的这篇论文提出了一种极其简洁的改进方案：**用教师模型和其基础模型（Base Model）的差值作为蒸馏信号**，称之为 Delta Signal。基于此的 OPD² 方法，在 Qwen3 1.7B-8B 和 Gemma4 上，数学基准平均提升 3-6 分，Code 和 Science 领域同样全面超越现有方法。",
