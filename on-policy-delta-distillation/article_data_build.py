@@ -26,12 +26,6 @@ DATA = {
                 "具体地，Delta 信号的公式为：R_t^Δ = log π*(y_t) - log π_base*(y_t)。这里的 π_base* 是教师模型在推理调优之前的 Base 版本。",
                 "论文通过三个维度的分析，展示了 Delta 信号和标准 OPD 信号的本质差异：",
             ],
-            "figs": [
-                "imgs/x2.png",
-            ],
-            "caption_translation": {
-                "x2": "图 2：三种蒸馏信号的词云对比。OPD（左）增强的词语偏向教师模型的通用偏好，Base（中）显示基础模型的偏好，Delta（右）则显著增强了推理连接词，如 \"hence\"\"however\"\"note\"。",
-            }
         },
         {
             "type": "h3",
@@ -40,6 +34,9 @@ DATA = {
                 "论文让 Qwen3-1.7B 作为学生、Qwen3-4B-Thinking 作为教师，采样 10K 数学题，产出了三组词云。结果清晰得惊人：",
                 "<strong>标准 OPD 增强的词偏向通用偏好</strong>——如 \"see\"\"try\"\"verify\"\"confirm\"，这些词更多是教师对答案的验证行为，而非推理本身。",
                 "<strong>Delta 信号则精密地「炼」出了推理连接词</strong>——\"hence\"\"note\"\"instead\"\"however\"\"yet\"——这些都是逻辑推理中的转折和连接要害。原本在教师预训练中吸收的验证性语言习惯，被 Delta 信号干净地过滤掉了。",
+            ],
+            "figs": [
+                {"src": "x2.png", "caption": "图 2：三种蒸馏信号的词云对比。OPD（左）增强的词语偏向教师模型的通用偏好，Base（中）显示基础模型的偏好，Delta（右）则显著增强了推理连接词，如 \"hence\"\"however\"\"note\"。"},
             ],
         },
         {
@@ -51,11 +48,8 @@ DATA = {
                 "<strong>Delta 信号则完全不同</strong>——教师和基础模型同源，推理调优后的教师对错误 token 更敏感，两者形成「正确-错误」的优劣关系。Delta 信号在错误推理上给出负奖励，在正确推导上给出正奖励，信号与推理正确性的相关度远高于 OPD。",
             ],
             "figs": [
-                "imgs/x3.png",
+                {"src": "x3.png", "caption": "图 3：Token 级信号对比。蓝色=促进，红色=抑制。Delta 信号在错误推理步骤（如 \"multiply\" 处）显示更强的抑制信号，而 OPD 在这类位置仍保持正信号。"},
             ],
-            "caption_translation": {
-                "x3": "图 3：Token 级信号对比。蓝色=促进，红色=抑制。Delta 信号在错误推理步骤（如 \"multiply\" 处）显示更强的抑制信号，而 OPD 在这类位置仍保持正信号。",
-            }
         },
         {
             "type": "h3",
@@ -66,11 +60,8 @@ DATA = {
                 "这意味着 Delta 信号正在系统地剔除教师模型中那些「与推理无关的语言杂质」，只保留真正属于推理能力的增量。",
             ],
             "figs": [
-                "imgs/x5.png",
+                {"src": "x5.png", "caption": "表 1：不同领域中 OPD 切换到 Delta 信号后的词级信号强度变化。Enhanced=增强，Suppressed=抑制。逻辑连接词全面增强，模糊词和通用叙述词被抑制。"},
             ],
-            "caption_translation": {
-                "x5": "表 1：不同领域中 OPD 切换到 Delta 信号后的词级信号强度变化。Enhanced=增强，Suppressed=抑制。逻辑连接词全面增强，模糊词和通用叙述词被抑制。",
-            }
         },
         {
             "type": "h2",
@@ -84,7 +75,7 @@ DATA = {
             "type": "h3",
             "title": "Centering：减去期望奖励，让信号零中心化",
             "paras": [
-                "利用 on-policy 采样的特性，对 Delta 信号和 OPD 信号分别减去它们在当前策略分布下的期望值。这类似于 RL 中的advantage 函数——<strong>某个 token 的奖励不是看绝对大小，而是看它相对于「平均token」好多少</strong>。",
+                "利用 on-policy 采样的特性，对 Delta 信号和 OPD 信号分别减去它们在当前策略分布下的期望值。这类似于 RL 中的 advantage 函数——**某个 token 的奖励不是看绝对大小，而是看它相对于「平均 token」好多少**。",
                 "实现上，论文通过计算 top-1024 token 的期望奖励来完成 centering，既节省 GPU 内存，又保证了中心化的精度。",
             ],
         },
@@ -137,11 +128,8 @@ DATA = {
                 "<strong>OPD² 在早期达到更高峰值，并且在后续训练中始终维持这个优势</strong>，不会像其他方法那样一路下滑。这意味着 OPD² 不需要精挑 checkpoint——直接在最后一轮就能拿到最好结果。",
             ],
             "figs": [
-                "imgs/x6.png",
+                {"src": "x6.png", "caption": "图 4：Qwen3-4B 在 non-thinking 模式下的训练动态曲线。OPD² 在三个领域均保持持续领先，而 OPD 和 ExOPD 在早期峰值后性能衰减。"},
             ],
-            "caption_translation": {
-                "x6": "图 4：Qwen3-4B 在 non-thinking 模式下的训练动态曲线。OPD² 在三个领域均保持持续领先，而 OPD 和 ExOPD 在早期峰值后性能衰减。",
-            }
         },
         {
             "type": "h2",
@@ -157,16 +145,12 @@ DATA = {
         "这种「Delta 思维」的泛化潜力让人期待——其他多阶段训练场景（如 RLHF 中的 reward model 增量、instruction tuning 中的能力增量）是否也能受益于类似的 Delta 蒸馏？代码已开源在 https://github.com/naver-ai/opd2。",
     ],
     "reference_url": "https://arxiv.org/html/2607.15161v1",
-    "caption_translations": {
-        "x2": "图 2：三种蒸馏信号的词云对比。OPD（左）增强的词语偏向教师模型的通用偏好，Base（中）显示基础模型的偏好，Delta（右）则显著增强了推理连接词，如 \"hence\"\"however\"\"note\"。",
-        "x3": "图 3：Token 级信号对比。蓝色=促进，红色=抑制。Delta 信号在错误推理步骤（如 \"multiply\" 处）显示更强的抑制信号，而 OPD 在这类位置仍保持正信号。",
-        "x5": "表 1：不同领域中 OPD 切换到 Delta 信号后的词级信号强度变化。Enhanced=增强，Suppressed=抑制。逻辑连接词全面增强，模糊词和通用叙述词被抑制。",
-        "x6": "图 4：Qwen3-4B 在 non-thinking 模式下的训练动态曲线。OPD² 在三个领域均保持持续领先，而 OPD 和 ExOPD 在早期峰值后性能衰减。",
-    },
 }
 
-# 写入
-out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "article_data.json")
+# 写入（write-article-data.py 通过 exec 执行此文件，__file__ 不可用，用脚本传入的目录）
+import sys
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
+out_path = os.path.join(_article_dir, "article_data.json")
 with open(out_path, "w", encoding="utf-8") as f:
     json.dump(DATA, f, ensure_ascii=False, indent=2)
 print(f"Wrote {len(json.dumps(DATA, ensure_ascii=False))} chars to article_data.json")
