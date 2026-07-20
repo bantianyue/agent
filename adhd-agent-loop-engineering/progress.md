@@ -5,4 +5,4 @@
 ## step2 — 写文章 ✅
 ## step3 — Humanizer 润色 ✅
 ## step4 — 预发布检查 ✅
-## step5 — 推送草稿 ⬜
+## step5 — 推送草稿 ✅
