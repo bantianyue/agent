@@ -1,0 +1,95 @@
+# On-Policy Delta Distillation
+
+## Abstract
+
+On-policy distillation is an alternative post-training method in reinforcement learning that alleviates the constraints imposed by reward models by providing token-level supervision from a teacher model. Although on-policy distillation has been studied and applied across various settings, its fundamental design remains underexplored. In this paper, we introduce a new distillation reward, termed delta signal, instead of directly imitating the teacher's output distribution. The delta signal is defined as the difference between the teacher model and its base model prior to instruction tuning for reasoning capability. It therefore captures the changes induced by reasoning tuning and provides a more direct signal for transferring reasoning capabilities. Using extensive empirical evidence, we show that the delta signal substantially improves on-policy distillation and refer to the new distillation method as On-Policy Delta Distillation (OPD2). Experiments across mathematics, science, and code-reasoning benchmarks demonstrate that OPD2 consistently outperforms conventional on-policy distillation, enabling reasoning LLMs to achieve strong performance with only a short post-training period. Code will be available at https://github.com/naver-ai/opd2.
+
+## 1 Introduction
+
+On-Policy Distillation (OPD) is a variant of knowledge distillation (KD) similar to RL. Traditional KD is designed to transfer outputs from a high-performing teacher model to a student model. It is combined with the generative nature of LLMs and splits into two sub-categories. The first way is to distill from teacher-generated sequences (Sequence-KD). The second way is the on-policy distillation of student-generated sequences — it generates sequences using the student network and uses the teacher to score the sampled tokens.
+
+Despite its importance, OPD's fundamental design remains underexplored. The rewards for OPD are simply set to log the difference in probability between the teacher and the student. We focus on the learning trace of reasoning tuning. Most LLMs have multiple stages for training: pre-training, then post-training (SFT and RL). As a post-training method, OPD only requires knowledge from the post-training phase.
+
+**Key insight (Figure 1):** We design a new loss function for on-policy distillation based on the difference between the base model and the reasoning tuning model of the teacher network. The reasoning-tuned teacher retains natural preferences and stylistic tendencies acquired before reasoning tuning. Distilling the reasoning-tuned teacher alone does not necessarily reveal the learning trajectory that led the teacher to acquire reasoning capabilities. We propose On-Policy Delta Distillation (OPD2), defining the delta signal using it as the main reward for OPD.
+
+**x1.png** — Figure 1: Conceptual diagram showing OPD vs OPD2. OPD uses log-probability difference between teacher and student as reward. OPD2 uses the difference between teacher and teacher-base (the "delta signal") as reward.
+
+We introduce two reward designs: centering and joint conditioning, to effectively utilize the delta signal for OPD. Our extensive verification covers various sizes of Qwen3 (1.7B-8B), both non-thinking and thinking modes, and Gemma-4. OPD2 consistently outperforms other on-policy distillation methods.
+
+## 2 Method
+
+### 2.1 Preliminary
+
+On-Policy Distillation (OPD) is a post-training method that provides token-level supervision. The loss function of OPD is defined as:
+
+L_OPD(θ) = E[D_KL(π_θ(y|x) || π*(y|x))]
+
+For a given question x, OPD generates a student response y ~ π_θ(·|x) and trains the student to mimic the teacher by minimizing KL divergence. In RL-like form, the token-level reward is:
+
+R_t = log π*(y_t | x, y_<t) - log π_θ(y_t | x, y_<t)
+
+The student is trained to maximize these token-level rewards.
+
+### 2.2 Delta Signal for Distillation
+
+We go one step further with the base model (the model prior to post-training) of the teacher. The delta signal is defined as:
+
+R_t^Δ = log π*(y_t | x, y_<t) - log π_base*(y_t | x, y_<t)
+
+R_t^Δ represents the learning trace of the teacher model from its own base model.
+
+**Three analyses of the delta signal:**
+
+**Word clouds (Figure 2, x2.png):** Compared to OPD, Δ enhances reasoning connection words such as "hence", "note", "instead", "however", and "yet". Words that verify and explore the solution are degraded: "see", "try", "verify", "confirm".
+
+**Token-level signals (Figures 3-4, x3.png-x4.png):** OPD shows positive signals even in incorrect reasoning traces, because both teacher and student produce strong negative signals on those parts, but student signals are stronger. With Δ, the teacher and base model originate from the same weights, making Δ more robust in correlating distillation signal with reasoning correctness.
+
+**Statistical Analysis (Table 1, x5.png):** Search over 10k questions across Math, Code, and Science domains. Δ enhances explicit logical connection words (hence, thus, however, regardless) and suppresses vague expression of uncertainty (perhaps) and generic problem-solving narration (tackle, look, consider).
+
+### 2.3 On-policy Delta Distillation (OPD2)
+
+The delta signal may have a convergence issue — it doesn't consider the student signal in the reward computation. We design centering and joint conditioning:
+
+First, centering subtracts the expected reward under the on-policy distribution (Eq. 6, 7). Then, the joint condition ensures the delta signal only applies when it agrees with the original distillation signal:
+
+A_t^D2 = { A_t^Δ if A_t^Δ * A_t^OPD > 0, 0 otherwise }
+
+This prevents the student from being over-trained by the trace signal. When the student matches the teacher, the advantage is turned off.
+
+## 3 Experiment
+
+We test on Qwen3 (1.7B, 4B, 8B) and Gemma4-E4B-it, across 7 Math, 3 Science, and 4 Code benchmarks, in both non-thinking and thinking modes.
+
+### Non-thinking mode results
+
+|x1.png| — Table 2 (non-thinking Math): OPD2 achieves highest average across all model sizes. Qwen3-4B + OPD2 (70.3) surpasses Qwen3-8B + ExOPD (67.8) on Math.
+|x2.png| — Table 3 (non-thinking Code & Science): OPD2 achieves 29.4, 40.1, 39.9 average Code scores for 1.7B/4B/8B respectively.
+
+### Thinking mode results
+
+|x3.png| — Table 4 (thinking Math): OPD2 improves 1.7B from 59.2→62.7, 4B from 73.3→74.8, 8B from 73.7→75.9.
+|x4.png| — Table 5 (thinking Code & Science): OPD2 consistently highest average.
+
+### Gemma4 results (Table 6-7)
+
+OPD2 achieves Math average 67.8 vs OPD 58.9 and ExOPD 65.3. OPD substantially degrades Gemma4 performance, while OPD2 preserves most capability.
+
+### Training dynamics (Figure 4, x6-x8.png)
+
+OPD and ExOPD reach peak early and degrade. OPD2 maintains higher performance throughout training.
+
+### Ablation (Table 8)
+
+Removing delta signal causes the largest degradation — it is the primary source of OPD2's gains.
+
+### Computational costs (Table 9)
+
+OPD2 adds 24-28% training time for Qwen3, 8% for Gemma4 — comparable to ExOPD.
+
+## 4 Related Work
+
+Standard OPD vs variants: learning signal modifications, self-distillation, and ExOPD (which amplifies teacher-base difference with λ>1 for extrapolation). OPD2 differs by using the delta signal as the main reward rather than extrapolation.
+
+## 5 Conclusion
+
+The delta signal is an effective way to transfer reasoning knowledge. OPD2 achieves substantial improvements over conventional on-policy distillation across all settings. OPD2 can serve as an important milestone in the development of on-policy distillation.
