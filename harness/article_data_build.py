@@ -121,17 +121,7 @@ DATA = {
     ],
 
     "reference_url": "https://alexzhang13.github.io/blog/2026/harness/",
-
-    "caption_translations": {
-        "fig00": "图 1：训练 Qwen3-30B-A3B-Instruct-2507 作为 RLM 和基础 Transformer，在短任务上训练、长任务上评估的平均 Δ lift 对比。",
-        "fig01": "图 2：RLM harness 的示意图——通过上下文卸载和编程式子调用，不同任务的 root LM 轨迹呈现出同构现象。",
-        "fig02": "图 3：人类定义的任务及其用于训练模型的 artifacts。",
-        "fig03": "图 4：好的 harness 使得每个单独的 LM 调用都在分布内（locally in-distribution, LID）。",
-        "fig04": "图 5：上下文卸载与编程式子调用对比的效果。",
-        "fig05": "图 6：6 个基准上的长度泛化曲线——仅训练短任务，RLM 在 8–32 倍长的任务上的表现。",
-        "fig06": "图 7：3 个基准上的策略泛化曲线——跨领域迁移的表现。",
-        "fig07": "图 8：RLM 与基础 Transformer 的 eval 轨迹与训练轨迹之间的相似性对比。",
-    },
+    # ⚠️ 图注已直接嵌入 sections[].figs[] 中，不设 caption_translations（避免 write-article-data 校验冲突）
 }
 
 out_path = os.path.join(_article_dir, "article_data.json")
