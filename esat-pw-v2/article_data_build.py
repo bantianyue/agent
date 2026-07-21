@@ -1,83 +1,62 @@
 #!/usr/bin/env python3
-"""
-article_data_build.py 模板
-=====================
-写新文章时：cp 到文章目录下，填入 DATA 字典内容，然后：
-    python write-article-data.py <文章目录>
-    python render-article.py <文章目录>
-    python add-portal.py <文章目录>
-
-字段说明：
-  - summary: 要点速览，列表格式 [{key, body}]。每条 key 是一两个词的标题，body 是一条结论（≤50字）。
-            ⚠️ 必须为 [{key, body}] 列表，不能是字符串！template.html 用 {% for item in summary %} 遍历。
-  - lead: 导语段落列表，每段用 **加粗** 标核心句
-  - sections: 正文章节。type 为 'h2'（大标题）或 'h3'（子标题）。
-              figs 可选，每个 {src: 文件名, caption: 图注文字}
-  - conclusion: 结语段落列表
-  - reference_url: 原文出处 URL
-"""
-
 import json, os, sys
 
-# 获取文章目录（兼容 write-article-data.py 的 exec 调用）
 _article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
 
 DATA = {
-    # ⚠️ 要点速览：必须为 [{key, body}] 列表，不可为字符串
-    "summary": [
-        {"key": "核心观点", "body": "一句话说清论文/文章最关键的结论"},
-        {"key": "关键数据", "body": "支撑核心结论的具体数字或对比"},
-        {"key": "方法创新", "body": "区别于已有工作的核心创新点"},
-        {"key": "覆盖范围", "body": "方法适用的模型规模/场景/约束条件"},
-        {"key": "额外成本", "body": "相比基线方法增加的计算/部署开销（如有）"},
-    ],
+    "title": "无需真实环境：Apple 提出 ESAT 用 LLM 直接合成 API 调用智能体训练数据",
 
-    "lead": [
-        "引导段第一句。介绍背景和问题定位。",
-        "引导段第二句。点明本文核心内容。",
+    "summary": [
+        {"key": "核心方法", "body": "Apple 提出 ESAT 无环境智能体轨迹生成流水线，仅需 API 规范即可生成高质量训练数据"},
+        {"key": "创新架构", "body": "三阶段：分桶任务合成→LLM 模拟器合成轨迹→裁判过滤，完全不需要可执行环境"},
+        {"key": "性能表现", "body": "AppWorld 最高 50.5%，OfficeBench 最高 60.5%，超过使用真实环境数据训练的模型"},
     ],
 
     "sections": [
         {
             "type": "h2",
-            "title": "第一节标题",
-            "paras": [
-                "段落一正文。**加粗** 标核心结论。",
-                "段落二正文。",
-            ],
-            # 可选：图嵌入。src 是文件名（相对文章目录），caption 是图注
-            "figs": [
-                {"src": "fig01.png", "caption": "图 1：说明文字"},
-            ],
-        },
-        {
-            "type": "h3",
-            "title": "子节标题",
-            "paras": [
-                "子节段落。",
-            ],
+            "title": "研究背景",
+            "paras": ["训练 API 调用型 LLM 智能体需要海量高质量轨迹数据。大规模收集此类数据通常需要具备可执行 API 的完整环境，造成严重可扩展性瓶颈。", "ESAT（Environment-Free Synthetic Agentic Trajectory）流水线通过将 LLM 作为数字世界模型来模拟真实环境，无需构建任何物理运行环境即可直接合成高质量的 API 调用智能体训练数据。"],
+            "figs": [{"src": "fig00.png", "caption": "API 覆盖范围对比"}],
         },
         {
             "type": "h2",
-            "title": "第二节标题",
-            "paras": [
-                "段落正文。",
-            ],
+            "title": "ESAT 流水线架构",
+            "paras": ["ESAT 流水线包含三个阶段：任务合成、轨迹合成和轨迹过滤。每个阶段都充分利用了现代 LLM 的推理能力。", "该流水线的核心创新在于将智能体训练数据生成从需要完整基础设施的复杂工程问题简化成只需要 API 规范文档的轻量级数据生成任务，大幅降低了智能体训练生产门槛。"],
+            "figs": [{"src": "fig30.png", "caption": "合成 API 覆盖范围对比"}],
+        },
+        {
+            "type": "h2",
+            "title": "任务合成方法",
+            "paras": ["在任务合成阶段，ESAT 采用分桶生成策略来实现全面的场景覆盖。系统将任务空间划分为由多个维度定义的配置桶，包括难度等级、操作类型、任务重心、所需应用数量等。", "为了解决生成数据的不均衡问题，ESAT 引入了基于逆频率的采样策略，优先从使用次数较少的 API 中生成任务，保证训练数据覆盖所有可用 API 能力。"],
+        },
+        {
+            "type": "h2",
+            "title": "轨迹合成机制",
+            "paras": ["轨迹合成是 ESAT 的核心环节。教师智能体与基于 LLM 的 API 模拟器进行交互：教师发出 API 调用请求，模拟器根据请求参数和历史交互记录生成合理的模拟响应。", "这种交互过程完整模拟了真实 API 调用的状态演进，使得生成的轨迹不仅包含正确的操作序列，还包含了 API 调用的返回值变化、错误处理和状态更新等。"],
+        },
+        {
+            "type": "h2",
+            "title": "轨迹过滤机制",
+            "paras": ["在轨迹过滤阶段，ESAT 使用专门的 LLM 裁判对生成轨迹的质量进行评估。裁判会检查每一条轨迹的正确性、完整性和冗余度，丢弃明显不可行或质量较低的训练样本。", "为了确保过滤结果的可靠性，每条轨迹都会经过多次独立评判，只有当多数评委认可时才将其纳入最终数据集。"],
+        },
+        {
+            "type": "h2",
+            "title": "实验结果",
+            "paras": ["ESAT 在 AppWorld 和 OfficeBench 两个数据集上进行了系统评估。实验表明使用 ESAT 合成数据训练的模型在多种指标上均获得了显著提升。", "在 AppWorld 数据集中模型在使用 ESAT 数据微调后任务完成率提升了高达 50.5%，表现甚至超过使用真实环境数据训练的模型。OfficeBench 上最高提升达到 60.5%。"],
+            "figs": [{"src": "fig07.png", "caption": "模拟器失败率随输出 token 长度变化"}],
+        },
+        {
+            "type": "h2",
+            "title": "总结与展望",
+            "paras": ["ESAT 提出了一种轻量化、可扩展的智能体训练数据合成方案。通过将复杂的 API 环境模拟简化为 LLM 的条件生成问题，大幅降低了智能体训练门槛。", "未来工作方向包括：探索更先进的模拟器模型以提升长序列模拟的准确性，扩展对更多复杂 API 场景的支持，以及开发自动化覆盖度分析工具。"],
         },
     ],
 
     "conclusion": [
-        "结语第一段。总结核心结论。",
-        "结语第二段。行业影响或展望。",
+        "ESAT 通过结合覆盖感知的任务生成、状态一致的基于 LLM 的 API 模拟器和轨迹级 LLM 裁判，无需使用任何功能性环境即可生成高质量的多步轨迹。实验表明该方法在多个基准数据集上取得了显著成效。",
+        "该流水线将智能体训练的复杂性从基础设施搭建转移到了 API 规范编写上，为更大范围的智能体应用提供了可行的解决方案。",
     ],
 
-    "reference_url": "https://arxiv.org/html/XXXX.XXXXXv1",
-    # ⚠️ 必须设置！push-draft.py 从此字段读取公众号标题
-    "title": "公众号文章标题",
+    "reference_url": "https://arxiv.org/abs/2607.16900",
 }
-
-# ── 写入 article_data.json ──
-out_path = os.path.join(_article_dir, "article_data.json")
-with open(out_path, "w", encoding="utf-8") as f:
-    json.dump(DATA, f, ensure_ascii=False, indent=2)
-print(f"✅ 写入 {out_path} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA.get('sections', []))} sections)")
