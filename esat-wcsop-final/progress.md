@@ -8,3 +8,5 @@
 | Step 3: 封面生成 | completed |
 
 来源: https://arxiv.org/src/2607.16900
+| Step 4d-i: 传送门 | completed |
+| Step 5: 预发布检查 | completed |
