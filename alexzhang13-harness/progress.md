@@ -5,6 +5,7 @@
 - **来源**: https://alexzhang13.github.io/blog/2026/harness/
 - **语言**: English
 - **图片数量**: 8
+- **Draft ID**: TIqnnVEu6Oy3-wtKttGa0dQXcK5vDxEDbACXXUGQ4BZ2un14e02Mo-AVK4P2HnRy
 
 ## 已完成步骤
 - ✅ **Step 0**: 提取原文+下载图片（pw-extract + _download_images.py）
@@ -12,3 +13,4 @@
 - ✅ **Step 2**: 写文章（article_data_build.py → write → render → add-portal）
 - ✅ **Step 3**: Humanizer润色（内容意译已在Step2完成，无AI痕迹残留）
 - ✅ **Step 4**: 预发布检查（preflight-check.py --fix）
+- ✅ **Step 5**: 推送草稿（push-draft.py 推送成功）
