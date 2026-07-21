@@ -36,19 +36,6 @@ Reweight the values with those weights: matmul(attn, v)
 
 So attention is really a collection of primitive operations. Some of them we already know (the matmuls), and the rest are easy to spot. Let's write a naive attention module in PyTorch and profile it.
 
-class NaiveCausalAttention(nn.Module):
-    def __init__(self, head_dim):
-        super().__init__()
-        self.scale = 1.0 / math.sqrt(head_dim)
-
-    def forward(self, q, k, v, mask):
-        scores = torch.matmul(q, k.transpose(-2, -1))
-        scores = scores * self.scale
-        scores = scores.masked_fill(mask, float("-inf"))
-        attn = torch.softmax(scores, dim=-1)
-        out = torch.matmul(attn, v)
-        return out
-
 Before opening the trace, let's do our usual exercise and guess what we should see. Tracing the forward of this module, we expect:
 
 a matmul kernel (q . k.T)
@@ -60,9 +47,6 @@ an operation for the masking
 a softmax kernel
 
 a matmul kernel (atten . v)
-
-uv run 04_a_naive_attention.py
-uvx trace-util -f traces/ -b <hf_uname>/traces
 
 Figure 1 shows the CPU lane of the profile (the GPU lane is folded so it does not overwhelm us). Inside attn_fwd (our annotated forward call) we can see exactly the operations we guessed. The matmul is an old friend by now, and the new operations are easy to spot:
 
@@ -98,20 +82,7 @@ Naive attention with inplace causal masking
 
 All we change is masked_fill to masked_fill_ (note the trailing underscore, PyTorch's convention for in-place operations), and we run the same script.
 
-def forward(self, q, k, v, mask):
-    # q, k, v: [batch, heads, seq, head_dim]
-    scores = torch.matmul(q, k.transpose(-2, -1))  # [batch, heads, seq, seq]
-    scores = torch.mul(scores, self.scale)
--    scores = scores.masked_fill(mask, float("-inf"))
-+    scores.masked_fill_(mask, float("-inf"))
-    attn = torch.softmax(scores, dim=-1)
-    out = torch.matmul(attn, v)  # [batch, heads, seq, head_dim]
-    return out
-
 Let's look at the trace and see if something changed.
-
-uv run 04_b_inplace_ops_attention.py
-uvx trace-util -f traces/ -b <hf_uname>/traces
 
 The in-place version (Figure 5) wraps far fewer CPU ops inside the masking step than the out-of-place version (Figure 4). This is an encouraging signal. Let's unfold the GPU lane to confirm what happened there.
 
@@ -125,29 +96,13 @@ Scaled Dot Product Attention
 
 We just built attention from primitives, and even shaved off a Memcpy. The good news is that the PyTorch team has done all of this for us, and packaged the whole pipeline into a single function:
 
-from torch.nn import functional as F
-
-F.scaled_dot_product_attention(q, k, v, is_causal=True)
-
 This one line replaces our hand written module, and is_causal=True even saves us from building the mask by hand. It is worth pausing to appreciate how much this one call hides. And it hides more than just code lines. Scaled Dot Product Attention (SDPA) does not have a single implementation. Under the hood it dispatches to one of the several backends and picks the fastest one that supports our inputs (dtype, head dimension, mask, hardware, etc.).
 
 The official SDPA tutorial walks us through this selection, and the backends themselves are listed in the torch.nn.attention.SDPBackend enum:
 
-from torch.nn.attention import SDPBackend
-
-BACKENDS = {
-    "math": SDPBackend.MATH,
-    "flash": SDPBackend.FLASH_ATTENTION,
-    "efficient": SDPBackend.EFFICIENT_ATTENTION,
-    "cudnn": SDPBackend.CUDNN_ATTENTION,
-}
-
 Normally SDPA chooses for us, but we can pin a specific backend with the torch.nn.attention.sdpa_kernel context manager. This is what we do in our scripts. This lets us profile each backend on its own and read how differently they show up in the trace. Let's go one at a time.
 
 Math backend
-
-uv run 04_c_sdpa_attention.py --backend math
-uvx trace-util -f traces/ -b <hf_uname>/traces
 
 Before we open anything, let's guess. We have replaced hand written attention (matmul, mul, mask, softmax, matmul) with a single one liner, so we should expect the trace to get simpler and faster. Fewer kernels, less CPU dispatch, maybe even a fused kernel. Let's check the profiler table first.
 
@@ -169,10 +124,6 @@ In the naive version we built the causal mask once and reused it. Here we passed
 
 Here is what we see in Figure 12
 
-aten::ones -> aten::tril            build a [seq, seq] lower-triangular matrix
-aten::scalar_tensor -> aten::fill_  make the -inf fill value
-aten::where                         turn it into an additive bias (0 or -inf)
-
 On the GPU this shows up as a triu_tril_kernel, several where kernels, and an add_. The convenience flag that let us stop thinking about the mask did not remove the work, it just moved it one layer down, where the mask is rebuilt from scratch every forward.
 
 The safe softmax
@@ -188,9 +139,6 @@ Put together, the math backend is the reference implementation. It is a straight
 Its job is not to be fast, but to always work. This makes it the perfect baseline. Every backend we profile next (flash, efficient, cudnn) is trying to collapse the 20 GPU kernels into essentially one fused kernel that stays in bf16 and never materializes the intermediate matrices at all.
 
 Efficient backend
-
-uv run 04_c_sdpa_attention.py --backend efficient
-uvx trace-util -f traces -b <hf_uname>/traces
 
 Where the math backend launched 20 kernels across one profiler step, the efficient backend launches only one fmha_cutlassF_bf16_aligned_64x64_rf_sm80 (as seen in Figure 14).
 
@@ -211,9 +159,6 @@ sm80: compiled for Ampere (the A100's compute capability 8.0).
 This is the memory efficient attention kernel that grew out of Meta's xformers library and was upstreamed into PyTorch. When people say "the xformers backend," this fmha_cutlassF kernel is what they mean.
 
 Flash backend
-
-uv run 04_c_sdpa_attention.py --backend flash
-uvx trace-util -f traces -b <hf_uname>/traces
 
 The void pytorch_flash kernel (Figure 15) is FlashAttention-2 (Tri Dao's implementation), vendored into PyTorch.
 
@@ -247,16 +192,11 @@ And that is the whole point. High occupancy helps hide latency by keeping many w
 
 cuDNN backend
 
-uv run 04_c_sdpa_attention.py --backend cudnn
-uvx trace-util -f traces -b <hf_uname>/traces
-
 By now the pattern is familiar. Like flash and efficient, cuDNN gives us one fused, flash-style kernel per forward (Figure 18). So the natural question is: if flash already fuses attention, why does PyTorch ship yet another flash backend? The answer is who writes the kernel and how it is built, and that difference is what makes the trace look different.
 
 How is cuDNN kernel different
 
 Flash and efficient are fixed, pre-compiled kernels vendored into PyTorch. You get the same binary every time. cuDNN is NVIDIA's own deep learning library, and its attention kernel is generated and tuned for the specific problem at hand. It is closer in spirit to torch.compile's codegen than to a fixed cuBLAS binary. You can read that straight off the (very long) kernel name:
-
-cudnn_generated_fort_native_sdpa_sm80_flash_fprop_wmma_f16_knob_6_128x64x64_4x1x1_cga1x1x1_kernel0_0
 
 cudnn_generated: not a pre-shipped binary, it was generated by cuDNN.
 
