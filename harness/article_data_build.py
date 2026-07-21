@@ -121,6 +121,7 @@ DATA = {
     ],
 
     "reference_url": "https://alexzhang13.github.io/blog/2026/harness/",
+    "title": "语言模型的组合泛化能力，在于 Harness 框架设计",
     # ⚠️ 图注已直接嵌入 sections[].figs[] 中，不设 caption_translations（避免 write-article-data 校验冲突）
 }
 
