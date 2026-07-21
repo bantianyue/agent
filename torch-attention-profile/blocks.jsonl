@@ -1,0 +1,181 @@
+{"type": "text", "content": "Profiling in PyTorch (Part 3): Attention is all you profile"}
+{"type": "text", "content": "+30"}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/profile-3-thumbnail.png", "caption": "", "after_para": 1, "hero": true}
+{"type": "text", "content": "This is the third post of Profiling in PyTorch, a series where we slowly build the skill of reading profiler traces and use it to drive optimization:"}
+{"type": "text", "content": "Profiling in PyTorch (Part 1): A Beginner's Guide to torch.profiler"}
+{"type": "text", "content": "Profiling in PyTorch (Part 2): From nn.Linear to a Fused MLP"}
+{"type": "text", "content": "Profiling in PyTorch (Part 3): Attention is all you profile (current)"}
+{"type": "text", "content": "The series \"Profiling in PyTorch\" is meant to make you comfortable reading profiler traces and tables. In Part 1 we profiled basic math operations like addition and multiplication. We saw how the profiler table uncovers hotspots, and how the profiler trace shows the order in which an algorithm runs over time."}
+{"type": "text", "content": "In Part 2 we wrapped that addition and multiplication into a torch linear layer. We then stacked several linear layers on top of each other (a multilayer perceptron) and profiled that. Along the way we also profiled fused and hand-tuned kernels."}
+{"type": "text", "content": "From the perspective of the Transformer architecture, the next logical step for us to profile is yet another fundamental algorithm, attention. While being infamous for its quadratic-time complexity, many clever tricks exist to mitigate that issue and make it fast. Our goal here is not to cover every trick in detail. Instead, we want to see how each one looks different under the profiler."}
+{"type": "text", "content": "The scripts for this blog post live here: 04_a_naive_attention.py, 04_b_inplace_ops_attention.py, 04_c_sdpa_attention.py, and 04_d_kernels_attention.py. Like before, it helps to open them in a separate tab and walk through the code as you read. We use an NVIDIA A100-SXM4-80GB GPU to run the scripts. It is really easy to set up a GPU on the Hugging Face infrastructure and experiment with the scripts using Dev Mode with Spaces. One could also run the scripts with the Hugging Face Jobs pipeline."}
+{"type": "text", "content": "The scripts for this blog post live here: 04_a_naive_attention.py, 04_b_inplace_ops_attention.py, 04_c_sdpa_attention.py, and 04_d_kernels_attention.py. Like before, it helps to open them in a separate tab and walk through the code as you read. We use an NVIDIA A100-SXM4-80GB GPU to run the scripts. It is really easy to set up a GPU on the Hugging Face infrastructure and experiment with the scripts using Dev Mode with Spaces. One could also run the scripts with the Hugging Face Jobs pipeline."}
+{"type": "text", "content": "Naive attention"}
+{"type": "text", "content": "Attention works with Queries (q), Keys (k), and Values (v). The interaction between them can be written as a short sequence of steps:"}
+{"type": "text", "content": "Build the attention scores scores: matmul(q, k.T)"}
+{"type": "text", "content": "Scale the scores: scores * scale"}
+{"type": "text", "content": "Apply a causal mask to the scores: scores.masked_fill(mask, \"-inf\")"}
+{"type": "text", "content": "Normalize the scores with softmax to get the attention weights attn: softmax(scores)"}
+{"type": "text", "content": "Reweight the values with those weights: matmul(attn, v)"}
+{"type": "text", "content": "So attention is really a collection of primitive operations. Some of them we already know (the matmuls), and the rest are easy to spot. Let's write a naive attention module in PyTorch and profile it."}
+{"type": "text", "content": "class NaiveCausalAttention(nn.Module):\n    def __init__(self, head_dim):\n        super().__init__()\n        self.scale = 1.0 / math.sqrt(head_dim)\n\n    def forward(self, q, k, v, mask):\n        scores = torch.matmul(q, k.transpose(-2, -1))\n        scores = scores * self.scale\n        scores = scores.masked_fill(mask, float(\"-inf\"))\n        attn = torch.softmax(scores, dim=-1)\n        out = torch.matmul(attn, v)\n        return out"}
+{"type": "text", "content": "Before opening the trace, let's do our usual exercise and guess what we should see. Tracing the forward of this module, we expect:"}
+{"type": "text", "content": "a matmul kernel (q . k.T)"}
+{"type": "text", "content": "a mul kernel (the scaling)"}
+{"type": "text", "content": "an operation for the masking"}
+{"type": "text", "content": "a softmax kernel"}
+{"type": "text", "content": "a matmul kernel (atten . v)"}
+{"type": "text", "content": "uv run 04_a_naive_attention.py\nuvx trace-util -f traces/ -b <hf_uname>/traces"}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/cpu-profile-naive.png", "caption": "", "after_para": 26, "hero": true}
+{"type": "text", "content": "Figure 1 shows the CPU lane of the profile (the GPU lane is folded so it does not overwhelm us). Inside attn_fwd (our annotated forward call) we can see exactly the operations we guessed. The matmul is an old friend by now, and the new operations are easy to spot:"}
+{"type": "text", "content": "mul: the scaling"}
+{"type": "text", "content": "masked_fill: the causal masking"}
+{"type": "text", "content": "softmax: the softmax kernel"}
+{"type": "text", "content": "Now let's unfold the GPU lane and see which kernels were actually launched."}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/gpu-profile-naive.png", "caption": "", "after_para": 31, "hero": true}
+{"type": "text", "content": "Figure 2 shows the GPU lane next to the CPU lane. Let's zoom into a single attn_fwd block on the GPU lane to look at the kernels one by one."}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/each-kernels-naive.png", "caption": "", "after_para": 32, "hero": true}
+{"type": "text", "content": "Figure 3 lets us read off the individual kernels for one profiler step:"}
+{"type": "text", "content": "matmul (query and key)"}
+{"type": "text", "content": "mul (scaling)"}
+{"type": "text", "content": "memory copy 🤔"}
+{"type": "text", "content": "causal masking"}
+{"type": "text", "content": "softmax (produces the attention weights)"}
+{"type": "text", "content": "matmul (attention weights and values)"}
+{"type": "text", "content": "Five of these are expected. The memory copy is the odd one out, so where does this come from? The clue is that PyTorch has in-place operations. When you operate on a tensor the ordinary (out-of-place) way, PyTorch often makes a copy, applies the requested operation to it, and returns the copy. Following the sequence of operations, the culprit here is our masked_fill."}
+{"type": "text", "content": "What if we replaced this with an in-place operation?"}
+{"type": "text", "content": "Naive attention with inplace causal masking"}
+{"type": "text", "content": "All we change is masked_fill to masked_fill_ (note the trailing underscore, PyTorch's convention for in-place operations), and we run the same script."}
+{"type": "text", "content": "def forward(self, q, k, v, mask):\n    # q, k, v: [batch, heads, seq, head_dim]\n    scores = torch.matmul(q, k.transpose(-2, -1))  # [batch, heads, seq, seq]\n    scores = torch.mul(scores, self.scale)\n-    scores = scores.masked_fill(mask, float(\"-inf\"))\n+    scores.masked_fill_(mask, float(\"-inf\"))\n    attn = torch.softmax(scores, dim=-1)\n    out = torch.matmul(attn, v)  # [batch, heads, seq, head_dim]\n    return out"}
+{"type": "text", "content": "Let's look at the trace and see if something changed."}
+{"type": "text", "content": "uv run 04_b_inplace_ops_attention.py\nuvx trace-util -f traces/ -b <hf_uname>/traces"}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/cpu-profile-naive.png", "caption": "", "after_para": 46, "hero": true}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/cpu-profile-inplace.png", "caption": "", "after_para": 46, "hero": true}
+{"type": "text", "content": "The in-place version (Figure 5) wraps far fewer CPU ops inside the masking step than the out-of-place version (Figure 4). This is an encouraging signal. Let's unfold the GPU lane to confirm what happened there."}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/each-kernels-naive.png", "caption": "", "after_para": 47, "hero": true}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/each-kernels-inpace.png", "caption": "", "after_para": 47, "hero": true}
+{"type": "text", "content": "On the GPU lane the Memcpy kernel is gone for good (Figures 6 and 7). With a one line change we shaved a whole kernel off each forward pass. This may not look like much on its own, but remember this is a single attention operation. In the context of a transformer based large model (LLMs, Diffusion models, etc.), it repeats once per layer, and there are many layers, so the saving adds up quickly (and if it earns you a raise, sharing at least 10% with us feels only fair)."}
+{"type": "text", "content": "Out-of-place is PyTorch's default for a reason. To compute gradients, autograd has to remember the tensor values it saw on the forward pass, because many backward formulas reuse them. An in-place operation overwrites those values in memory, so the backward pass would read the wrong numbers. Due to the fact that we run forward under torch.no_grad, in-place is safe for us, with no backward pass and nothing to corrupt. It is also noteworthy that in-place operations do not only save time (like we see in our case) but also memory (due to no extra copy) which is great for large tensors like logits!"}
+{"type": "text", "content": "Out-of-place is PyTorch's default for a reason. To compute gradients, autograd has to remember the tensor values it saw on the forward pass, because many backward formulas reuse them. An in-place operation overwrites those values in memory, so the backward pass would read the wrong numbers. Due to the fact that we run forward under torch.no_grad, in-place is safe for us, with no backward pass and nothing to corrupt. It is also noteworthy that in-place operations do not only save time (like we see in our case) but also memory (due to no extra copy) which is great for large tensors like logits!"}
+{"type": "text", "content": "Scaled Dot Product Attention"}
+{"type": "text", "content": "We just built attention from primitives, and even shaved off a Memcpy. The good news is that the PyTorch team has done all of this for us, and packaged the whole pipeline into a single function:"}
+{"type": "text", "content": "from torch.nn import functional as F\n\nF.scaled_dot_product_attention(q, k, v, is_causal=True)"}
+{"type": "text", "content": "This one line replaces our hand written module, and is_causal=True even saves us from building the mask by hand. It is worth pausing to appreciate how much this one call hides. And it hides more than just code lines. Scaled Dot Product Attention (SDPA) does not have a single implementation. Under the hood it dispatches to one of the several backends and picks the fastest one that supports our inputs (dtype, head dimension, mask, hardware, etc.)."}
+{"type": "text", "content": "The official SDPA tutorial walks us through this selection, and the backends themselves are listed in the torch.nn.attention.SDPBackend enum:"}
+{"type": "text", "content": "from torch.nn.attention import SDPBackend\n\nBACKENDS = {\n    \"math\": SDPBackend.MATH,\n    \"flash\": SDPBackend.FLASH_ATTENTION,\n    \"efficient\": SDPBackend.EFFICIENT_ATTENTION,\n    \"cudnn\": SDPBackend.CUDNN_ATTENTION,\n}"}
+{"type": "text", "content": "Normally SDPA chooses for us, but we can pin a specific backend with the torch.nn.attention.sdpa_kernel context manager. This is what we do in our scripts. This lets us profile each backend on its own and read how differently they show up in the trace. Let's go one at a time."}
+{"type": "text", "content": "Math backend"}
+{"type": "text", "content": "uv run 04_c_sdpa_attention.py --backend math\nuvx trace-util -f traces/ -b <hf_uname>/traces"}
+{"type": "text", "content": "Before we open anything, let's guess. We have replaced hand written attention (matmul, mul, mask, softmax, matmul) with a single one liner, so we should expect the trace to get simpler and faster. Fewer kernels, less CPU dispatch, maybe even a fused kernel. Let's check the profiler table first."}
+{"type": "text", "content": "This is our first surprise, the one liner is 3.7x slower."}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/inplace-kernel-launches.png", "caption": "", "after_para": 61, "hero": true}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/math-kernel-launches.png", "caption": "", "after_para": 61, "hero": true}
+{"type": "text", "content": "Opening the trace (Figure 9) shows why the alarm bells ring, the math backend launches 20 GPU kernels per forward instead of the 5 launched with our naive attention implementation (Figure 8). This is the opposite of what we guessed. Let's figure out why this happens."}
+{"type": "text", "content": "Tensor cores left vacant"}
+{"type": "text", "content": "In Part 2 we learned to read a kernel name like a fingerprint. Let's use that habit here:"}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/tensor-core-kernels.png", "caption": "", "after_para": 64, "hero": true}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/cuda-core-kernels.png", "caption": "", "after_para": 64, "hero": true}
+{"type": "text", "content": "The A100s we used to capture these traces ship with Tensor Cores, specialised hardware for accelerated matmuls that is known to be far faster than the ordinary CUDA cores. To see why that matters here, it helps to know what lives inside a GPU. A Streaming Multiprocessor (SM) is the compute unit of a GPU, and each SM has two kinds of arithmetic units, the CUDA cores and the Tensor Cores. CUDA cores are general purpose and process a handful of elements at a time, while Tensor Cores multiply and accumulate a whole small matrix tile in a single instruction. So the question is simple, \"Is each backend actually using the fast path?\""}
+{"type": "text", "content": "The kernel names answer it. The s16816 in the naive kernel (Figure 10) is the signature of a bfloat16 Tensor Core matmul (the 16x8x16 Tensor Core instruction), so the naive version is on the fast path. sgemm (Figure 11) is the classic single precision (FP32) matmul that runs on the ordinary CUDA cores. In other words, the math backend never touches the Tensor Cores at all: to trade speed for numerical accuracy it upcasts tensors to FP32 (doubling the data moved, even when the inputs are in bf16) and falls back to the slower CUDA cores."}
+{"type": "text", "content": "Causal masks built"}
+{"type": "text", "content": "In the naive version we built the causal mask once and reused it. Here we passed is_causal=True and the math backend materialized one for us, on every single call. You can watch it happen on the CPU lane:"}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/mask-math.png", "caption": "", "after_para": 68, "hero": true}
+{"type": "text", "content": "Here is what we see in Figure 12"}
+{"type": "text", "content": "aten::ones -> aten::tril            build a [seq, seq] lower-triangular matrix\naten::scalar_tensor -> aten::fill_  make the -inf fill value\naten::where                         turn it into an additive bias (0 or -inf)"}
+{"type": "text", "content": "On the GPU this shows up as a triu_tril_kernel, several where kernels, and an add_. The convenience flag that let us stop thinking about the mask did not remove the work, it just moved it one layer down, where the mask is rebuilt from scratch every forward."}
+{"type": "text", "content": "The safe softmax"}
+{"type": "text", "content": "Our hand written version called plain aten::softmax. The math backend calls aten::_safe_softmax, and the difference is again visible as extra kernels (Figure 13):"}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/safe-softmax-extra-kernels.png", "caption": "", "after_para": 73, "hero": true}
+{"type": "text", "content": "A row that is fully masked (every entry -inf) would make an ordinary softmax compute exp(-inf)/sum(exp(-inf)) = 0/0 = NaN. _safe_softmax guards against exactly that. Our naive kernel never bothered, and would have quietly produced NaNs in that corner case."}
+{"type": "text", "content": "So what is the math backend for?"}
+{"type": "text", "content": "Put together, the math backend is the reference implementation. It is a straightforward, dtype-safe, NaN-safe decomposition of attention into primitive ATen ops. It is essentially the naive attention we wrote by hand, but more careful. That carefulness is exactly what makes it extremely slow."}
+{"type": "text", "content": "Its job is not to be fast, but to always work. This makes it the perfect baseline. Every backend we profile next (flash, efficient, cudnn) is trying to collapse the 20 GPU kernels into essentially one fused kernel that stays in bf16 and never materializes the intermediate matrices at all."}
+{"type": "text", "content": "Efficient backend"}
+{"type": "text", "content": "uv run 04_c_sdpa_attention.py --backend efficient\nuvx trace-util -f traces -b <hf_uname>/traces"}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/efficient-backend.png", "caption": "", "after_para": 79, "hero": true}
+{"type": "text", "content": "Where the math backend launched 20 kernels across one profiler step, the efficient backend launches only one fmha_cutlassF_bf16_aligned_64x64_rf_sm80 (as seen in Figure 14)."}
+{"type": "text", "content": "Let's decode the name of the kernel:"}
+{"type": "text", "content": "fmha (fused multi-head attention): All the primitive ops in attention is \"fused\" in one op now."}
+{"type": "text", "content": "cutlassF: built on CUTLASS (NVIDIA's open-source templates for tensor-core GEMMs), F for forward."}
+{"type": "text", "content": "bf16_aligned: runs in bfloat16 (no FP32 upcast, unlike math)."}
+{"type": "text", "content": "64x64: the tile size."}
+{"type": "text", "content": "rf (register file): the working set is kept in registers, the fastest memory on the chip."}
+{"type": "text", "content": "sm80: compiled for Ampere (the A100's compute capability 8.0)."}
+{"type": "text", "content": "This is the memory efficient attention kernel that grew out of Meta's xformers library and was upstreamed into PyTorch. When people say \"the xformers backend,\" this fmha_cutlassF kernel is what they mean."}
+{"type": "text", "content": "Flash backend"}
+{"type": "text", "content": "uv run 04_c_sdpa_attention.py --backend flash\nuvx trace-util -f traces -b <hf_uname>/traces"}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/flash-backend.png", "caption": "", "after_para": 90, "hero": true}
+{"type": "text", "content": "The void pytorch_flash kernel (Figure 15) is FlashAttention-2 (Tri Dao's implementation), vendored into PyTorch."}
+{"type": "text", "content": "Before we read the trace any further, it is worth answering the question you should be asking by now: why is there a whole backend named \"flash\", and why does it matter so much?"}
+{"type": "text", "content": "Why flash attention exists?"}
+{"type": "text", "content": "Let's go back to the math backend for a moment. Its real problem was not the count of 20 kernels, it was what those kernels handed to each other."}
+{"type": "text", "content": "Step 1 builds the full score matrix attn = q . k.T, which is [seq, seq] per head. For a sequence length of 4096 that is 4096 x 4096 ≈ 16 million numbers for a single head. That matrix is written out to the HBM (the GPU's main memory), if there is even enough space to do so. Then, it is read back to be scaled, written again for the mask, read again for the softmax, and so on. Attention's cost is dominated by this back and forth traffic to HBM, not by the matmuls themselves."}
+{"type": "text", "content": "FlashAttention attacks exactly this. Instead of computing the whole s matrix and only then reducing it, it walks over k and v in tiles, keeps a running softmax as it goes (the \"online softmax\" trick), and accumulates the output one tile at a time. The full [seq, seq] score matrix is never written to HBM, it only ever lives on-chip. This is the single idea that lets the entire attention pipeline collapse into one fused kernel that stays in bf16 on the Tensor cores."}
+{"type": "text", "content": "Why flash looks \"wrong\" under the profiler"}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/flash-occupancy.png", "caption": "", "after_para": 97, "hero": false}
+{"type": "text", "content": "Here is where flash surprises people who read profiler footprints. It is the fastest backend, yet the profiler reports it with very low occupancy (shown in Figure 16). To see why that is fine, we need three quick definitions."}
+{"type": "text", "content": "A GPU kernel is essentially a series of instructions executed by many small execution units. These individual execution units (threads) take care of loading variables, adding them together, storing them back, etc. For each kernel, we launch many, many threads, and to keep track of them, we group them by blocks."}
+{"type": "text", "content": "Blocks are scheduled onto Streaming Multiprocessors (SMs), the main compute units of a GPU. A block lives entirely on one SM, and an SM can host multiple blocks at once if it has enough resources. Those resources include registers, shared memory, maximum resident threads, and maximum resident warps. So when we say a kernel has low occupancy, we mean each SM has fewer resident warps than it could theoretically support."}
+{"type": "text", "content": "If you want to know more about threads, blocks, grids, etc. here is a great resource."}
+{"type": "text", "content": "If you want to know more about threads, blocks, grids, etc. here is a great resource."}
+{"type": "text", "content": "If you click the flash kernel in the trace, its footprint tells the story (Figure 17)."}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/flash-reg-count.png", "caption": "", "after_para": 103, "hero": false}
+{"type": "text", "content": "Flash uses a lot of per-thread registers and a large amount of shared memory per block. For example, if a block has 128 threads and each thread uses 255 registers, that block needs 128 × 255 = 32,640 registers. On an Ampere SM with 65,536 registers, only two such blocks fit at once. Each 128-thread block has 128 / 32 = 4 warps, so two blocks give only 8 resident warps. Against a maximum of 64 resident warps, that is roughly 13% occupancy. Flash has low occupancy not because it is poorly optimized, but because each block is deliberately very \"heavy\" in on-chip resource usage."}
+{"type": "text", "content": "And that is the whole point. High occupancy helps hide latency by keeping many warps ready to run, but it does not make the work itself efficient. Flash spends those registers and that shared memory on purpose, to keep attention tiles on-chip, reuse data aggressively, and avoid ever materializing the full attention matrix in global memory."}
+{"type": "text", "content": "cuDNN backend"}
+{"type": "text", "content": "uv run 04_c_sdpa_attention.py --backend cudnn\nuvx trace-util -f traces -b <hf_uname>/traces"}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/cudnn-backend.png", "caption": "", "after_para": 107, "hero": true}
+{"type": "text", "content": "By now the pattern is familiar. Like flash and efficient, cuDNN gives us one fused, flash-style kernel per forward (Figure 18). So the natural question is: if flash already fuses attention, why does PyTorch ship yet another flash backend? The answer is who writes the kernel and how it is built, and that difference is what makes the trace look different."}
+{"type": "text", "content": "How is cuDNN kernel different"}
+{"type": "text", "content": "Flash and efficient are fixed, pre-compiled kernels vendored into PyTorch. You get the same binary every time. cuDNN is NVIDIA's own deep learning library, and its attention kernel is generated and tuned for the specific problem at hand. It is closer in spirit to torch.compile's codegen than to a fixed cuBLAS binary. You can read that straight off the (very long) kernel name:"}
+{"type": "text", "content": "cudnn_generated_fort_native_sdpa_sm80_flash_fprop_wmma_f16_knob_6_128x64x64_4x1x1_cga1x1x1_kernel0_0"}
+{"type": "text", "content": "cudnn_generated: not a pre-shipped binary, it was generated by cuDNN."}
+{"type": "text", "content": "flash_fprop: a flash attention style forward pass. So the algorithm is the same family as the flash backend."}
+{"type": "text", "content": "wmma_f16: it uses the warp-level matrix multiply-accumulate (WMMA) API, the Tensor-core path on the 16-bit float pipeline."}
+{"type": "text", "content": "knob_6: cuDNN picks from a set of pre-tuned configurations (\"knobs\"). Different shapes select different knobs, much like cuBLAS picking a tile variant."}
+{"type": "text", "content": "128x64x64: the tile dimensions it chose."}
+{"type": "text", "content": "That one fact, generated per problem, explains everything else that looks unusual in the trace."}
+{"type": "text", "content": "No transposes: The CPU lane goes from _cudnn_attention_forward straight to a couple of aten::empty allocations and then the kernel, with zero aten::transpose (Figures 19, 20 and 21). Flash and efficient each insert four (metadata) transposes to reshape the tensors while cuDNN consumes the native [B, H, S, D] layout directly because its generator emits a kernel for that layout.\n\nVariant\tTrace\nFigure 19: Flash\t\n\nFigure 20: Efficient\t\n\nFigure 21: cuDNN"}
+{"type": "text", "content": "No transposes: The CPU lane goes from _cudnn_attention_forward straight to a couple of aten::empty allocations and then the kernel, with zero aten::transpose (Figures 19, 20 and 21). Flash and efficient each insert four (metadata) transposes to reshape the tensors while cuDNN consumes the native [B, H, S, D] layout directly because its generator emits a kernel for that layout."}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/flash-transpose.png", "caption": "", "after_para": 119, "hero": true}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/efficient-trasnpose.png", "caption": "", "after_para": 119, "hero": true}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/cudnn-backend.png", "caption": "", "after_para": 119, "hero": true}
+{"type": "text", "content": "It launches through cuLaunchKernelEx, not cudaLaunchKernel: Every other kernel in this whole series went through the runtime API cudaLaunchKernel. cuDNN uses the driver-level extended launch, which carries launch attributes (Figure 22).\n\n\nFigure 22: CPU lane of the cuDNN backend showing the cuLaunchKernelEx driver-level launch instead of cudaLaunchKernel"}
+{"type": "text", "content": "It launches through cuLaunchKernelEx, not cudaLaunchKernel: Every other kernel in this whole series went through the runtime API cudaLaunchKernel. cuDNN uses the driver-level extended launch, which carries launch attributes (Figure 22)."}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/cudnn-launch.png", "caption": "", "after_para": 121, "hero": true}
+{"type": "text", "content": "The profiler reports 0% achieved occupancy: Do not take that at face value, it is a measurement gap, not a stalled GPU. CUPTI (the profiling backend) cannot attribute occupancy to a driver-API (cuLaunchKernelEx) launch the way it does for cudaLaunchKernel, so the field reads 0. The footprint fills in the truth (Figure 23): 240 registers × 256 threads = 61,440 registers per block against the SM's 65,536, so only one block fits per SM (8 warps ≈ 12.5%), right in line with flash.\n\n\nFigure 23: cuDNN kernel reporting 0% achieved occupancy, with 240 registers per thread and 256 threads per block"}
+{"type": "text", "content": "The profiler reports 0% achieved occupancy: Do not take that at face value, it is a measurement gap, not a stalled GPU. CUPTI (the profiling backend) cannot attribute occupancy to a driver-API (cuLaunchKernelEx) launch the way it does for cudaLaunchKernel, so the field reads 0. The footprint fills in the truth (Figure 23): 240 registers × 256 threads = 61,440 registers per block against the SM's 65,536, so only one block fits per SM (8 warps ≈ 12.5%), right in line with flash."}
+{"type": "figure", "img": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/blog/torch-attention-profile/cudnn-footprint.png", "caption": "", "after_para": 123, "hero": false}
+{"type": "text", "content": "The cost moved to the CPU"}
+{"type": "text", "content": "The \"no transposes\" story tempts us to expect cuDNN to be the leanest backend on the CPU. It is the opposite."}
+{"type": "text", "content": "Even with zero transpose ops, cuDNN spends about 214 µs per forward on the CPU, more than flash (138) or efficient (117). Almost all of it sits in aten::scaled_dot_product_attention self time (26% of the whole run) and _cudnn_attention_forward. That is cuDNN's runtime engine selecting and preparing the plan (the \"knob\" search) on every call."}
+{"type": "text", "content": "Fewer visible ATen ops did not mean less CPU work, it moved the work into the library, where the profiler can only show it as one fat, opaque bar. When a trace suddenly gets cleaner, the work has not always disappeared, sometimes it has just moved somewhere the profiler cannot break down."}
+{"type": "text", "content": "On the GPU, cuDNN (186.3 µs) lands between efficient and flash. On this very flash-friendly shape, hand-written FlashAttention-2 edges it out. cuDNN often wins on other shapes (larger head dimensions, different sequence lengths) precisely because its generator retunes per problem, but that retuning is also what you just paid for on the CPU."}
+{"type": "text", "content": "Everything we covered, at a glance"}
+{"type": "text", "content": "Before we wrap up, here is a single table to review every attention variant we profiled and the one lesson each trace taught us."}
+{"type": "text", "content": "Concluding the series"}
+{"type": "text", "content": "If you take away only one thing from the whole series, let it be the habit we repeated before every single trace which is to guess first, then look."}
+{"type": "text", "content": "State out loud what you expect the trace to contain, open it, and treat any mismatch as the most interesting thing on the screen. Every real insight in these three posts, the hidden Memcpy, the addmm epilogue, the 20 kernel math backend, flash's \"wrong-looking\" occupancy, cuDNN's fat CPU bar, came from a guess that did not match the trace."}
+{"type": "text", "content": "Profiling is not a separate, intimidating skill reserved for GPU experts. It is just the discipline of looking closely and asking \"wait, why is that happening?\" until the answer clicks. You now have the vocabulary and the reflexes to do that on your own models. Open a trace, form a guess, and go find the mismatch."}
+{"type": "text", "content": "Thanks for reading the Profiling in PyTorch series. Now go profile something. 🤗"}
+{"type": "text", "content": "Thanks to Noe Flandre for their reviews on the early draft of the post!"}
+{"type": "text", "content": "The blog post was polished using an LLM. This in no way means that we have let an agent run in the background and let it generate the blog. Some of us in the team are non-english speakers and think LLMs (which are mostly trained in the English Language) can rectify silly grammar mistakes or rephrase sentences that sound less intimidating and cleaner. Hope this helps with the idea of \"why should I read, if this was LLM generated\". 🤗"}
+{"type": "text", "content": "The blog post was polished using an LLM. This in no way means that we have let an agent run in the background and let it generate the blog. Some of us in the team are non-english speakers and think LLMs (which are mostly trained in the English Language) can rectify silly grammar mistakes or rephrase sentences that sound less intimidating and cleaner. Hope this helps with the idea of \"why should I read, if this was LLM generated\". 🤗"}
+{"type": "text", "content": "Datasets mentioned in this article 1"}
+{"type": "text", "content": "More Articles from our Blog"}
+{"type": "figure", "img": "https://huggingface.co/blog/assets/torch-mlp-fusion/thumbnail.png", "caption": "", "after_para": 140, "hero": false}
+{"type": "text", "content": "Profiling in PyTorch (Part 2): From nn.Linear to a Fused MLP"}
+{"type": "text", "content": "+1"}
+{"type": "figure", "img": "https://huggingface.co/blog/assets/torch-profiler/thumbnail.png", "caption": "", "after_para": 142, "hero": true}
+{"type": "text", "content": "Profiling in PyTorch (Part 1): A Beginner's Guide to torch.profiler"}
+{"type": "text", "content": "+1"}
+{"type": "text", "content": "Community"}
+{"type": "text", "content": "Thanks for the series, really delightful!"}
+{"type": "text", "content": "forward for Chinese version"}
+{"type": "text", "content": "hello Aritra (@ariG23498 ), thanks a lot for this series!\none doubt which i had: how were you able to know for sure that Memcpy (memory copy) operation in GPU was indeed because of out of place masked_fill?"}
+{"type": "text", "content": "one way i'm able to think it is because that occured exactly before the masked_fill kernel op? but how did you actually validated that is something i'm not able to understand."}
+{"type": "text", "content": "edit:\ni figured it out while i was tinkering - but keeping this comment here incase someone else has the same doubt. the arrow mapping in perfetto maps exactly that which op in cpu invoked the kernel at gpu."}
+{"type": "figure", "img": "https://cdn-uploads.huggingface.co/production/uploads/637875538bfb575b63398fde/MbbLjY0g2M00lELq-9OMa.png", "caption": "", "after_para": 150, "hero": true}
+{"type": "text", "content": "· Sign up or log in to comment"}
+{"type": "text", "content": "+24"}
+{"type": "text", "content": "Datasets mentioned in this article\n1"}
