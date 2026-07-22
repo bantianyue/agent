@@ -333,3 +333,10 @@
 |--------|------|------|
 | 2026-07-22 22:45 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-22 23:01 | ✅ 已推送 | 推送草稿成功，media_id: TIqnnVEu6Oy3-wtKttGa0d8GwjuEJIpRQrK2aIyx5-Q5K7nJF49pSZuFfdh5EvsS |
+
+### #1 - measuring-reward-seeking
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-22 23:11 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-22 23:15 | ✅ 已推送 | 推送草稿成功，media_id: TIqnnVEu6Oy3-wtKttGa0Vm5TTjh8oUmw9EbrcnOGX28EPJ4SzYVX1LCmOBLkjCu |
