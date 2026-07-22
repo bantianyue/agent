@@ -5,31 +5,31 @@
       "key": "要点 1",
       "body": {
         "key": "核心发现",
-        "body": "使用纯原生PyTorch可将文本到图像扩散模型（如SDXL）推理速度提升高达3倍，无需依赖第三方库或C++代码。"
+        "body": "使用纯原生PyTorch可将Stable Diffusion XL的文本到图像生成延迟从7.36秒降至2.43秒，实现高达3倍的加速，且无需依赖第三方库或C++代码。"
       }
     },
     {
       "key": "要点 2",
       "body": {
         "key": "优化技术",
-        "body": "通过scaled_dot_product_attention、torch.compile（配合max-autotune模式）、动态int8量化和组合投影等原生方法，逐步将SDXL延迟从7.36秒降至2.43秒。"
+        "body": "关键优化包括：使用bfloat16精度、scaled_dot_product_attention (SDPA)、torch.compile（配合max-autotune和CUDA graphs）、组合QKV投影、动态int8量化，以及避免CPU-GPU通信同步。"
       }
     },
     {
       "key": "要点 3",
       "body": {
-        "key": "通用性验证",
-        "body": "该方法不仅适用于SDXL，还成功加速了Stable Diffusion v1-5和PixArt-Alpha等模型，且生成质量不下降，可与DeepCache等社区优化互补使用。"
+        "key": "设计原则",
+        "body": "所有优化均基于PyTorch原生特性，通过Diffusers库仅需几行代码即可启用，且不降低生成质量。这些技术可推广至其他文本到图像扩散系统，如Stable Diffusion v1-5和PixArt-Alpha。"
       }
     }
   ],
   "lead": [
-    "本文为技术文章完整翻译版本，共 16 节，130 段正文，代码块自动保留原样。"
+    "本文为技术文章完整翻译版本，共 8 节，151 段正文，代码块自动保留原样。"
   ],
   "sections": [
     {
       "type": "h2",
-      "title": "Setup",
+      "title": "Tutorials",
       "paras": [
         "加速生成式AI第三部分：扩散，快速",
         "本文是一个多系列博客的第三部分，重点介绍如何使用纯原生PyTorch加速生成式AI模型。我们很高兴分享一系列新发布的PyTorch性能特性，并结合实际示例，看看能将PyTorch原生性能推到何种程度。在第一部分中，我们展示了仅使用纯原生PyTorch如何将Segment Anything加速超过8倍。在第二部分中，我们展示了仅使用原生PyTorch优化如何将Llama-7B加速近10倍。在本博客中，我们将重点介绍如何将文本到图像扩散模型加速高达3倍。",
@@ -37,86 +37,76 @@
         "使用bfloat16精度运行",
         "scaled_dot_product_attention (SPDA)",
         "torch.compile",
-        "合并注意力计算的q、k、v投影",
+        "合并q、k、v投影以进行注意力计算",
         "动态int8量化",
-        "我们将主要聚焦于 Stable Diffusion XL (SDXL)，展示 3 倍的延迟改善。这些技术是 PyTorch 原生的，这意味着你无需依赖任何第三方库或任何 C++ 代码即可利用它们。",
+        "我们将主要聚焦于 Stable Diffusion XL (SDXL)，展示 3 倍的延迟提升。这些技术是 PyTorch 原生的，这意味着你无需依赖任何第三方库或任何 C++ 代码即可利用它们。",
         "使用 Diffusers 库启用这些优化只需几行代码。如果你已经感到兴奋并迫不及待想跳转到代码部分，请查看随附的代码仓库：https://github.com/huggingface/diffusion-fast。",
         "（所讨论的技术并非 SDXL 专属，也可用于加速其他文本到图像的扩散系统，如下文所示。）",
         "以下是一些关于类似主题的博客文章：",
-        "使用 PyTorch 2.0 加速 Diffusers",
-        "探索 SDXL 的简单优化",
-        "使用 PyTorch 2 加速生成式扩散模型"
-      ]
-    },
-    {
-      "type": "h3",
-      "title": "Resources",
-      "paras": [
-        "我们将使用 Diffusers 库演示这些优化及其各自的加速效果。除此之外，我们还将使用以下 PyTorch 原生库和环境：",
-        "Torch nightly（以受益于最快的 kernel，实现高效 attention；2.3.0.dev20231218+cu121）",
+        "Accelerated Diffusers with PyTorch 2.0",
+        "Exploring simple optimizations for SDXL",
+        "Accelerated Generative Diffusion Models with PyTorch 2",
+        "设置",
+        "我们将使用 Diffusers 库演示各项优化及其对应的加速效果。此外，我们还将使用以下 PyTorch 原生库和环境：",
+        "Torch nightly（以利用最高效的 attention 内核获得最快速度；2.3.0.dev20231218+cu121）",
         "PEFT（版本：0.7.1）",
         "torchao（commit SHA：54bcd5a10d0abbe7b0c045052029257099f83fd9）",
         "CUDA 12.1",
-        "为便于复现环境，你也可以参考此 Dockerfile。本文中的基准测试数据来自一块 400W 80GB A100 GPU（其时钟频率已设置为最大容量）。",
-        "由于我们在此使用 A100 GPU（Ampere 架构），可以指定 torch.set_float32_matmul_precision(\"high\") 以受益于 TF32 精度格式。",
+        "为方便复现环境，你也可以参考此 Dockerfile。本文中的基准测试数据来自一块 400W 80GB A100 GPU（时钟频率设置为最大值）。",
+        "由于我们在此使用 A100 GPU（Ampere 架构），可以指定 torch.set_float32_matmul_precision(\"high\") 以利用 TF32 精度格式。",
         "使用降低的精度运行推理",
         "在 Diffusers 中运行 SDXL 只需几行代码：",
         "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>from diffusers import StableDiffusionXLPipeline\n\n## Load the pipeline in full-precision and place its model components on CUDA.\npipe = StableDiffusionXLPipeline.from_pretrained(&quot;stabilityai/stable-diffusion-xl-base-1.0&quot;).to(&quot;cuda&quot;)\n\n## Run the attention ops without efficiency.\npipe.unet.set_default_attn_processor()\npipe.vae.set_default_attn_processor()\n\nprompt = &quot;Astronaut in a jungle, cold color palette, muted colors, detailed, 8k&quot;\nimage = pipe(prompt, num_inference_steps=30).images[0]</code></pre>",
-        "但这并不太实用，因为生成一张30步的单张图像需要7.36秒。这是我们的基线，我们将尝试逐步优化它。",
-        "这里，我们以全精度运行pipeline。通过使用降低的精度（如bfloat16），我们可以立即缩短推理时间。此外，现代GPU配备了专用核心，可利用降低的精度来运行加速计算。要以bfloat16精度运行pipeline的计算，我们只需在初始化pipeline时指定数据类型：",
+        "但这并不实用，因为生成一张 30 步的图像需要 7.36 秒。这是我们的基线，我们将逐步尝试优化。",
+        "这里，我们以全精度运行 pipeline。通过使用降低的精度（如 bfloat16），我们可以立即缩短推理时间。此外，现代 GPU 配备专用内核，可利用降低的精度加速计算。要在 bfloat16 精度下运行 pipeline 的计算，我们只需在初始化 pipeline 时指定数据类型：",
         "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>from diffusers import StableDiffusionXLPipeline\n\npipe = StableDiffusionXLPipeline.from_pretrained(\n\t&quot;stabilityai/stable-diffusion-xl-base-1.0&quot;, torch_dtype=torch.bfloat16\n).to(&quot;cuda&quot;)\n\n## Run the attention ops without efficiency.\npipe.unet.set_default_attn_processor()\npipe.vae.set_default_attn_processor()\nprompt = &quot;Astronaut in a jungle, cold color palette, muted colors, detailed, 8k&quot;\nimage = pipe(prompt, num_inference_steps=30).images[0]</code></pre>",
-        "通过使用降低的精度，我们能够将推理延迟从7.36秒缩短到4.63秒。",
-        "关于使用bfloat16的一些说明",
-        "使用降低的数值精度（如float16、bfloat16）运行推理不会影响生成质量，但能显著改善延迟。",
-        "与float16相比，使用bfloat16数值精度的优势取决于硬件。现代GPU倾向于支持bfloat16。",
-        "此外，在我们的实验中，我们发现bfloat16在与量化一起使用时比float16更具鲁棒性。",
-        "（我们后来在float16下运行了实验，发现最新版本的torchao不会因float16引发数值问题。）",
+        "通过使用降低的精度，我们能够将推理延迟从 7.36 秒缩短至 4.63 秒。",
+        "关于使用 bfloat16 的一些说明",
+        "使用降低的数值精度（如 float16、bfloat16）运行推理不会影响生成质量，但能显著改善延迟。",
+        "与 float16 相比，使用 bfloat16 数值精度的优势取决于硬件。现代 GPU 代次倾向于支持 bfloat16。",
+        "此外，在我们的实验中，与 float16 相比，bfloat16 在与量化结合使用时表现出更强的鲁棒性。",
+        "（我们后来在 float16 下运行了实验，发现最新版本的 torchao 不会因 float16 引发数值问题。）",
         "使用 SDPA 执行注意力计算",
-        "默认情况下，当使用 PyTorch 2 时，Diffusers 使用 scaled_dot_product_attention (SDPA) 执行与注意力相关的计算。SDPA 提供更快、更高效的内核来运行密集的注意力相关操作。要运行 SDPA 流水线，我们只需不设置任何注意力处理器，如下所示：",
+        "默认情况下，当使用 PyTorch 2 时，Diffusers 使用 scaled_dot_product_attention (SDPA) 执行与注意力相关的计算。SDPA 提供了更快、更高效的内核来运行密集的注意力相关操作。要运行 SDPA 流水线，我们只需不设置任何注意力处理器，如下所示：",
         "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>from diffusers import StableDiffusionXLPipeline\n\npipe = StableDiffusionXLPipeline.from_pretrained(\n\t&quot;stabilityai/stable-diffusion-xl-base-1.0&quot;, torch_dtype=torch.bfloat16\n).to(&quot;cuda&quot;)\n\nprompt = &quot;Astronaut in a jungle, cold color palette, muted colors, detailed, 8k&quot;\nimage = pipe(prompt, num_inference_steps=30).images[0]</code></pre>",
         "SDPA 带来了显著的性能提升，从 4.63 秒降至 3.31 秒。",
         "编译 UNet 和 VAE",
-        "我们可以通过使用 torch.compile 让 PyTorch 执行一些底层优化（例如算子融合和使用 CUDA graphs 启动更快的内核）。对于 StableDiffusionXLPipeline，我们编译去噪器 (UNet) 和 VAE：",
+        "我们可以通过使用 torch.compile 让 PyTorch 执行一些底层优化（例如算子融合和通过 CUDA graphs 启动更快的内核）。对于 StableDiffusionXLPipeline，我们编译去噪器 (UNet) 和 VAE：",
         "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>from diffusers import StableDiffusionXLPipeline\nimport torch\n\npipe = StableDiffusionXLPipeline.from_pretrained(\n    &quot;stabilityai/stable-diffusion-xl-base-1.0&quot;, torch_dtype=torch.bfloat16\n).to(&quot;cuda&quot;)\n\n## Compile the UNet and VAE.\npipe.unet = torch.compile(pipe.unet, mode=&quot;max-autotune&quot;, fullgraph=True)\npipe.vae.decode = torch.compile(pipe.vae.decode, mode=&quot;max-autotune&quot;, fullgraph=True)\n\nprompt = &quot;Astronaut in a jungle, cold color palette, muted colors, detailed, 8k&quot;\n\n## First call to `pipe` will be slow, subsequent ones will be faster.\nimage = pipe(prompt, num_inference_steps=30).images[0]</code></pre>",
-        "使用 SDPA 注意力并同时编译 UNet 和 VAE，可将延迟从 3.31 秒降低至 2.54 秒。",
+        "使用 SDPA 注意力并同时编译 UNet 和 VAE 可将延迟从 3.31 秒降低至 2.54 秒。",
         "关于 torch.compile 的说明",
-        "torch.compile 提供不同的后端和模式。由于我们的目标是最大化推理速度，我们选择使用“max-autotune”的 inductor 后端。“max-autotune”使用 CUDA graphs 并专门针对延迟优化编译图。使用 CUDA graphs 可大幅降低启动 GPU 操作的开销。它通过一种机制节省时间，即通过单个 CPU 操作启动多个 GPU 操作。",
-        "将 `fullgraph` 设置为 `True` 可确保底层模型中没有图断裂，从而充分发挥 `torch.compile` 的潜力。在我们的案例中，显式设置以下编译器标志也至关重要：",
+        "torch.compile 提供不同的后端和模式。由于我们追求最大推理速度，因此选择使用“max-autotune”的 inductor 后端。“max-autotune”使用 CUDA graphs 并专门针对延迟优化编译图。使用 CUDA graphs 可大幅减少启动 GPU 操作的开销。它通过一种机制，用单个 CPU 操作启动多个 GPU 操作，从而节省时间。",
+        "将 fullgraph 设置为 True 可确保底层模型中没有图断裂，从而充分发挥 torch.compile 的潜力。在我们的案例中，以下编译器标志也需要显式设置：",
         "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>torch._inductor.config.conv_1x1_as_mm = True\ntorch._inductor.config.coordinate_descent_tuning = True\ntorch._inductor.config.epilogue_fusion = False\ntorch._inductor.config.coordinate_descent_check_all_directions = True</code></pre>",
-        "完整的编译器标志列表，请参阅此文件。",
-        "我们还将 UNet 和 VAE 的内存布局更改为“channels_last”，以在编译时确保最高速度：",
+        "完整的编译器标志列表，请参考此文件。",
+        "在编译 UNet 和 VAE 时，我们还将它们的内存布局更改为“channels_last”，以确保最高速度：",
         "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>pipe.unet.to(memory_format=torch.channels_last)\npipe.vae.to(memory_format=torch.channels_last)</code></pre>",
         "在下一节中，我们将展示如何进一步降低延迟。",
         "额外优化",
-        "`torch.compile` 期间无图断裂",
-        "确保底层模型/方法能够被完全编译对于性能至关重要（使用 `fullgraph=True` 的 `torch.compile`）。这意味着不能有图断裂。我们通过改变访问返回变量的方式，对 UNet 和 VAE 实现了这一点。请参考以下示例：",
+        "torch.compile 期间无图断裂",
+        "确保底层模型/方法能够被完全编译对于性能至关重要（使用 fullgraph=True 的 torch.compile）。这意味着不能有图断裂。我们通过改变访问返回变量的方式，对 UNet 和 VAE 实现了这一点。请参考以下示例：",
         "消除编译后的 GPU 同步",
-        "在迭代式反向扩散过程中，每次去噪器预测出噪声更少的潜在嵌入后，我们都会调用调度器上的 `step()`。在 `step()` 内部，会对 `sigmas` 变量进行索引。如果 `sigmas` 数组位于 GPU 上，索引操作会导致 CPU 与 GPU 之间产生通信同步。这会造成延迟，当去噪器已被编译时，这种延迟会更加明显。",
-        "但如果 `sigmas` 数组始终保留在 CPU 上（参见这一行），就不会发生这种同步，从而改善延迟。一般来说，任何 CPU <-> GPU 通信同步都应避免或保持在最低限度，因为它会影响推理延迟。",
+        "在迭代式反向扩散过程中，每次去噪器预测出噪声更少的潜在嵌入后，我们都会调用调度器上的 `step()`。在 `step()` 内部，会对 `sigmas` 变量进行索引操作。如果 `sigmas` 数组位于 GPU 上，索引操作会导致 CPU 与 GPU 之间产生通信同步。这会造成延迟，当去噪器已被编译时，该问题会变得更加明显。",
+        "但如果 `sigmas` 数组始终保留在 CPU 上（参见此代码行），则不会发生这种同步，从而改善延迟。通常来说，任何 CPU <-> GPU 通信同步都应避免或保持在最低限度，因为它会影响推理延迟。",
         "对注意力操作使用组合投影",
         "SDXL 中使用的 UNet 和 VAE 都采用了类似 Transformer 的模块。一个 Transformer 模块由注意力模块和前馈模块组成。",
-        "在注意力模块中，输入通过三个不同的投影矩阵——Q、K 和 V——投影到三个子空间。在朴素实现中，这些投影是分别对输入进行的。但我们可以将投影矩阵水平组合成一个矩阵，并一次性完成投影。这会增大输入投影的矩阵乘法规模，并提升量化效果（将在下文中讨论）。",
+        "在注意力模块中，输入通过三个不同的投影矩阵（Q、K 和 V）被投影到三个子空间。在朴素实现中，这些投影是对输入分别执行的。但我们可以将投影矩阵水平组合成一个单一矩阵，并一次性完成投影。这会增大输入投影的矩阵乘法规模，并提升量化效果（将在下文讨论）。",
         "在 Diffusers 中启用这种计算只需一行代码：",
         "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>pipe.fuse_qkv_projections()</code></pre>",
-        "这将使 UNet 和 VAE 的注意力操作都利用组合投影。对于交叉注意力层，我们只组合键矩阵和值矩阵。要了解更多信息，你可以参考此处的官方文档。值得注意的是，我们在内部利用了 PyTorch 的 `scaled_dot_product_attention`。",
-        "这些额外技术将推理延迟从 2.54 秒降低到了 2.52 秒。",
+        "这将使 UNet 和 VAE 的注意力操作都利用组合投影。对于交叉注意力层，我们仅组合键矩阵和值矩阵。要了解更多信息，可参考此处的官方文档。值得注意的是，我们在内部利用了 PyTorch 的 `scaled_dot_product_attention`。",
+        "这些额外技术将推理延迟从 2.54 秒降低到 2.52 秒。",
         "动态 int8 量化",
-        "我们选择性地对 UNet 和 VAE 应用动态 int8 量化。这是因为量化会为模型增加额外的转换开销，但希望更快的矩阵乘法（动态量化）能够弥补这一开销。如果矩阵乘法规模过小，这些技术可能会降低性能。",
-        "通过实验，我们发现 UNet 和 VAE 中的某些线性层并未从动态 int8 量化中受益。您可以在此处查看过滤这些层的完整代码（下文称为 dynamic_quant_filter_fn）。",
+        "我们选择性地对 UNet 和 VAE 应用动态 int8 量化。这是因为量化会给模型增加额外的转换开销，但希望更快的矩阵乘法（动态量化）能够弥补这一开销。如果矩阵乘法规模太小，这些技术可能会降低性能。",
+        "通过实验，我们发现 UNet 和 VAE 中的某些线性层并未从动态 int8 量化中受益。你可以在此处查看过滤这些层的完整代码（下文称为 dynamic_quant_filter_fn）。",
         "我们利用超轻量级的纯 PyTorch 库 torchao，使用其用户友好的 API 进行量化：",
         "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>from torchao.quantization import apply_dynamic_quant\n\napply_dynamic_quant(pipe.unet, dynamic_quant_filter_fn)\napply_dynamic_quant(pipe.vae, dynamic_quant_filter_fn)</code></pre>",
-        "由于此量化支持仅限于线性层，我们还将合适的逐点卷积层转换为线性层，以最大化收益。在使用此选项时，我们还指定了以下编译器标志：",
+        "由于此量化支持仅限于线性层，我们还将合适的逐点卷积层转换为线性层，以最大化收益。使用此选项时，我们还指定了以下编译器标志：",
         "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>torch._inductor.config.force_fuse_int_mm_with_mul = True\ntorch._inductor.config.use_mixed_mm = True</code></pre>",
-        "为防止量化导致的数值问题，我们以 bfloat16 格式运行所有操作。",
-        "通过这种方式应用量化，延迟从 2.52 秒降低到了 2.43 秒。"
-      ]
-    },
-    {
-      "type": "h3",
-      "title": "Acknowledgements",
-      "paras": [
-        "我们欢迎您查看以下代码库，以复现这些数值，并将这些技术扩展到其他文本到图像扩散系统中：",
-        "diffusion-fast（提供上述数字和图表复现所需全部代码的仓库）",
+        "为防止量化导致的任何数值问题，我们以 bfloat16 格式运行所有内容。",
+        "通过这种方式应用量化，延迟从 2.52 秒降低到 2.43 秒。",
+        "资源",
+        "我们欢迎您查看以下代码库，以复现这些数据并将相关技术扩展到其他文本到图像扩散系统中：",
+        "diffusion-fast（提供所有代码以复现上述数据和图表的仓库）",
         "torchao 库",
         "Diffusers 库",
         "PEFT 库",
@@ -124,60 +114,42 @@
         "SDXL：改进潜在扩散模型以实现高分辨率图像合成",
         "快速扩散文档",
         "其他流水线的改进",
-        "我们将这些技术应用于其他 pipeline（流水线），以测试我们方法的通用性。以下是我们发现的结果：",
+        "我们将这些技术应用于其他流水线，以测试我们方法的通用性。以下是我们发现的结果：",
         "SSD-1B",
         "Stable Diffusion v1-5",
         "PixArt-alpha/PixArt-XL-2-1024-MS",
-        "值得注意的是，PixArt-Alpha 使用基于 Transformer（Transformer）架构的 denoiser（去噪器）进行反向扩散过程，而非 UNet。",
-        "请注意，对于 Stable Diffusion v1-5 和 PixArt-Alpha，我们并未探索应用动态 int8 量化时的最佳形状组合标准。通过更优的组合，可能获得更好的数值结果。",
-        "总体而言，我们提出的方法在生成质量不下降的前提下，相比基线实现了显著的加速。此外，我们相信这些方法应与社区中流行的其他优化方法（如 DeepCache、Stable Fast 等）互补使用。",
+        "值得注意的是，PixArt-Alpha 使用基于 Transformer 的架构作为其反向扩散过程的去噪器，而非 UNet。",
+        "请注意，对于 Stable Diffusion v1-5 和 PixArt-Alpha，我们并未探索应用动态 int8 量化的最佳形状组合标准。通过更优的组合，或许能获得更好的数值。",
+        "总体而言，我们提出的方法在不降低生成质量的前提下，相比基线实现了显著的加速。此外，我们相信这些方法应与社区中流行的其他优化方法（如 DeepCache、Stable Fast 等）互补使用。",
         "结论与后续步骤",
-        "在本文中，我们介绍了一组简单而有效的技术，有助于在纯 PyTorch 中改善文生图 Diffusion 模型的推理延迟。总结如下：",
+        "在本文中，我们介绍了一系列简单而有效的技术，可帮助在纯 PyTorch 中改善文生图 Diffusion 模型的推理延迟。总结如下：",
         "使用降低精度进行计算",
-        "使用 scaled-dot product attention 高效运行注意力模块",
-        "使用 torch.compile 配合 “max-autotune” 优化延迟",
-        "合并不同的投影矩阵以计算注意力",
+        "使用 Scaled-dot product attention 高效运行注意力模块",
+        "使用 torch.compile 配合“max-autotune”优化延迟",
+        "合并不同的投影以计算注意力",
         "动态 int8 量化",
-        "我们相信，在如何将量化应用于文生图扩散系统方面，还有很多值得探索的空间。我们并未详尽研究 UNet 和 VAE 中哪些层更受益于动态量化。通过更优地组合待量化层，可能还有进一步加速的机会。",
-        "我们仅以 bfloat16 精度运行 SDXL 的文本编码器，未做其他改动。优化它们也可能带来延迟的改善。"
+        "我们认为，在如何将量化应用于文本到图像扩散系统方面，还有很多值得探索的空间。我们并未详尽研究 UNet 和 VAE 中哪些层更倾向于从动态量化中受益。通过更好地组合目标量化层，或许还有进一步提升速度的机会。",
+        "除了以 bfloat16 精度运行外，我们未对 SDXL 的文本编码器做任何改动。优化这些编码器也可能带来延迟方面的改进。",
+        "致谢",
+        "感谢 Ollin Boer Bohan，其 VAE 在整个基准测试过程中被使用，因为它在降低数值精度时数值稳定性更好。",
+        "感谢 Hugging Face 的 Hugo Larcher 在基础设施方面的帮助。",
+        "文档",
+        "获取 PyTorch 的全面开发者文档",
+        "查看文档 ›"
       ]
     },
     {
       "type": "h3",
-      "title": "Docs",
+      "title": "Tutorials",
       "paras": [
-        "感谢 Ollin Boer Bohan，其 VAE 在整个基准测试过程中被使用，因为在降低数值精度下它数值上更稳定。",
-        "感谢 Hugging Face 的 Hugo Larcher 在基础设施方面的帮助。"
-      ]
-    },
-    {
-      "type": "h3",
-      "title": "View Docs ›",
-      "paras": [
-        "获取 PyTorch 的全面开发者文档"
-      ]
-    },
-    {
-      "type": "h3",
-      "title": "View Tutorials ›",
-      "paras": [
-        "获取面向初学者和高级开发者的深入教程"
-      ]
-    },
-    {
-      "type": "h3",
-      "title": "View Resources ›",
-      "paras": [
-        "查找开发资源并解答您的疑问"
-      ]
-    },
-    {
-      "type": "h3",
-      "title": "Get Started",
-      "paras": [
+        "获取面向初学者和高级开发者的深入教程",
+        "查看教程 ›",
+        "资源",
+        "查找开发资源并获取问题解答",
+        "查看资源 ›",
         "保持联系，获取更新、活动信息及最新资讯",
-        "提交此表单即表示我同意接收 LF 及其项目发送的关于其活动、培训、研究、开发及相关公告的营销邮件。我理解我可以随时通过所收邮件页脚中的链接取消订阅。隐私政策",
-        "提交此表单即表示我同意接收 LF 及其项目发送的关于其活动、培训、研究、开发及相关公告的营销邮件。我理解我可以随时通过所收邮件页脚中的链接取消订阅。隐私政策。",
+        "提交此表单即表示我同意接收 LF 及其项目发送的关于其活动、培训、研究、开发及相关公告的营销邮件。我理解可随时通过所收邮件页脚中的链接取消订阅。隐私政策",
+        "提交此表单即表示我同意接收 LF 及其项目发送的关于其活动、培训、研究、开发及相关公告的营销邮件。我理解可随时通过所收邮件页脚中的链接取消订阅。隐私政策。",
         "x-twitter",
         "facebook",
         "linkedin",
@@ -186,75 +158,73 @@
         "slack",
         "discord",
         "© 2026 PyTorch。版权所有 © The Linux Foundation®。保留所有权利。The Linux Foundation 拥有注册商标并使用商标。更多信息，包括使用条款、隐私政策和商标使用，请参阅我们的 Policies 页面。商标使用。隐私政策。",
-        "学习\n\n\t入门\n\t教程\n\t基础学习\n\tPyTorch 秘籍\n\tPyTorch 入门 – YouTube 系列\n\t网络研讨会\n\tPyTorch 认证"
+        "学习\n\n\t开始使用\n\t教程\n\t学习基础\n\tPyTorch 秘籍\n\tPyTorch 入门 – YouTube 系列\n\t网络研讨会\n\tPyTorch 认证"
       ]
     },
     {
       "type": "h3",
-      "title": "Webinars",
+      "title": "Forums",
       "paras": [
-        "基础学习",
+        "学习基础",
         "PyTorch 秘籍",
-        "PyTorch 入门 – YouTube 系列"
-      ]
-    },
-    {
-      "type": "h3",
-      "title": "Landscape",
-      "paras": [
+        "PyTorch 入门 – YouTube 系列",
+        "网络研讨会",
         "PyTorch 认证",
-        "社区\n\n\t全景图\n\t加入生态系统\n\t社区中心\n\t论坛\n\t开发者资源\n\t活动\n\t工作组\n\t会议日历\n\t贡献者奖项\n\t大使"
+        "社区\n\n\t全景\n\t加入生态系统\n\t社区中心\n\t论坛\n\t开发者资源\n\t活动\n\t工作组\n\t会议日历\n\t贡献者奖项\n\t大使",
+        "全景概览",
+        "加入生态系统",
+        "社区中心"
       ]
     },
     {
       "type": "h3",
-      "title": "Community Hub",
+      "title": "Safetensors",
       "paras": [
-        "加入生态系统"
-      ]
-    },
-    {
-      "type": "h3",
-      "title": "Executorch",
-      "paras": [
-        "项目\n\n\tPyTorch\n\t\n\t\tExecutorch\n\t\n\n\tvLLM\n\tDeepSpeed\n\tRay\n\tHelion\n\tSafetensors\n\t托管你的项目",
-        "PyTorch\n\t\n\t\tExecutorch"
-      ]
-    },
-    {
-      "type": "h3",
-      "title": "Helion",
-      "paras": [
+        "项目\n\n\tPyTorch\n\t\n\t\tExecutorch\n\t\n\n\tvLLM\n\tDeepSpeed\n\tRay\n\tHelion\n\tSafetensors\n\t托管您的项目",
+        "PyTorch\n\t\n\t\tExecutorch",
+        "Executorch",
         "vLLM",
         "DeepSpeed",
-        "Ray"
+        "Ray",
+        "Helion"
       ]
     },
     {
       "type": "h3",
-      "title": "Domains",
+      "title": "Announcements",
       "paras": [
-        "文档\n\n\tPyTorch\n\t领域"
+        "文档\n\n\tPyTorch\n\t领域",
+        "博客与新闻\n\n\t博客\n\t公告\n\t案例研究\n\t新闻通讯"
       ]
     },
     {
       "type": "h3",
-      "title": "Members",
+      "title": "Governing Board",
       "paras": [
-        "关于\n\n\tPyTorch 基金会\n\t成员\n\t理事会\n\t技术顾问委员会\n\t云积分计划\n\t员工\n\t联系方式\n\t品牌指南",
-        "PyTorch 基金会"
+        "新闻通讯",
+        "关于\n\n\tPyTorch 基金会\n\t成员\n\t管理委员会\n\t技术顾问委员会\n\t云积分计划\n\t员工\n\t联系我们\n\t品牌指南",
+        "PyTorch 基金会",
+        "成员"
+      ]
+    },
+    {
+      "type": "h3",
+      "title": "Brand Guidelines",
+      "paras": [
+        "员工",
+        "联系我们"
       ]
     },
     {
       "type": "h3",
       "title": "正文",
       "paras": [
-        "JOIN"
+        "加入"
       ]
     }
   ],
   "conclusion": [
-    "本文展示了仅使用纯原生PyTorch即可将Stable Diffusion XL等文生图扩散模型加速高达3倍，且无需依赖第三方库或C++代码。通过结合SDPA注意力、torch.compile编译优化与动态int8量化等轻量级技术，读者可以在保证生成质量的前提下显著降低推理延迟。我们鼓励开发者将这些方法应用于自己的扩散系统，并期待社区在量化策略与模型优化上探索更多可能性。",
+    "通过纯原生PyTorch技术，本文展示了如何在不依赖第三方库的情况下，将文本到图像扩散模型的推理速度提升高达3倍，同时保持生成质量。这些优化方法（如SDPA、torch.compile、动态量化）不仅适用于SDXL，还可推广至其他扩散系统，为开发者提供了高效、可复现的加速方案。未来，随着量化策略和文本编码器优化的进一步探索，PyTorch原生性能仍有更大潜力可挖，建议读者结合社区工具（如DeepC",
     "代码段均完整保留，可直接参考执行。"
   ],
   "reference_url": ""
