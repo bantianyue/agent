@@ -1,0 +1,386 @@
+{
+  "title": "Efficient Moe",
+  "summary": [
+    {
+      "key": "核心发现",
+      "body": "AMD与Meta合作，在1024块MI325X GPU上实现DeepSeek-V3-671B训练扩展效率达96%，并通过Primus-Turbo内核优化获得2.77倍加速。"
+    },
+    {
+      "key": "架构设计",
+      "body": "TorchTitan提供统一配置，支持流水线、张量、数据和专家并行，结合Primus-Turbo的FP8 grouped GEMM和attention内核，解决MoE训练中的小矩阵瓶颈和通信过重问题。"
+    },
+    {
+      "key": "设计原则",
+      "body": "通过MI325X大内存减少专家分散、Primus-Turbo的DeepEP优化All-to-All通信，以及VPP减少流水线气泡，实现计算受限而非带宽受限的高效MoE训练。"
+    }
+  ],
+  "lead": [
+    "本文为技术文章完整翻译版本，共 24 节，85 段正文，代码块自动保留原样。"
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "概览",
+      "paras": [
+        "基于 TorchTitan 在 1K AMD GPU 上实现大规模高效 MoE 预训练",
+        "高效训练像 DeepSeek-V3 和 Llama 4-Scout 这样的大规模 MoE（混合专家）模型，是现代 AI 面临的挑战之一。这些模型将 GPU、网络和编译器推向了极限。为此，AMD 与 Meta 的 PyTorch 团队联手，针对全新的 Instinct MI325X GPU 优化了 TorchTitan 和 AMD 的开源 kernel 库 Primus-Turbo。双方合作在 1,024 块 GPU 上实现了接近理想的扩展，证明了效率与规模并非不可兼得。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "Llama 4-Scout（32 → 512 GPU）的完美线性扩展",
+      "paras": [
+        "通过利用 TorchTitan、Primus-Turbo kernels 以及 MI325X 硬件能力，我们实现了：",
+        "通过 kernel 级优化，DeepSeek-V3-671B 获得 2.77 倍加速",
+        "DeepSeek-V3-671B 从 128 块 GPU 扩展到 1,024 块 GPU 时，扩展效率达到 96%"
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": [
+              "https://pytorch.org/wp-content/uploads/2025/12/1.png"
+            ],
+            "caption": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "配置优先扩展",
+      "paras": [
+        "什么是 TorchTitan？",
+        "TorchTitan 是 Meta 基于 PyTorch 原生构建的蓝图，用于跨多 GPU 和多节点集群的大规模训练。它将现代 LLM（大语言模型）和 MoE 模型经过验证的配方打包成一个可配置的训练栈，使你能够从早期实验到全规模运行复用同一套代码路径。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "广泛的架构覆盖",
+      "paras": [
+        "在单个 TOML 文件中设置流水线并行、张量并行、数据并行或专家并行的度数，TorchTitan 会自动构建任务、连接 NCCL/RCCL 通信组，并在单块 GPU 或上千块 GPU 上运行相同的脚本。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "模块化设计",
+      "paras": [
+        "通过统一的 TorchTitan 配置，训练密集模型（Llama 3）、混合模型（Qwen 3）和稀疏 MoE 模型（DeepSeek-V3、Llama 4）。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": [
+              "https://pytorch.org/wp-content/uploads/2025/12/2.png"
+            ],
+            "caption": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "理解混合专家模型",
+      "paras": [
+        "像 AMD 的 FP8 Primus-Turbo 这样的优化 kernel 无需修改代码即可直接使用，相同的钩子（hook）也能兼容未来的训练后工作流。",
+        "简而言之，TorchTitan 提供了一条统一、可组合的路径，用于扩展任何模型——无论是密集还是稀疏——从笔记本电脑原型到集群生产环境。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "图1：Dense Layer（密集层）与 MoE Layer（混合专家层）架构对比",
+      "paras": [
+        "混合专家模型（Mixture-of-Experts）是密集 Transformer 的一种稀疏激活替代方案。在标准模型中，每个 token 都流经同一个前馈块，因此参数翻倍意味着计算量翻倍。MoE 层用一个由多个专家组成的池替换了单个 MLP。一个学习到的路由器（router）检查每个 token，并将其发送给其中少数（例如 k 个）专家。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "MoE 预训练的挑战",
+      "paras": [
+        "由于每个 token 只运行少数几个专家，每个 token 的计算预算现在随这个小 k 值而非专家总数扩展。内存遵循相同的模式：如果应用专家并行（expert parallelism），每个 GPU 只存储其拥有的专家的参数，从而为扩展隐藏维度、序列长度或词表大小留出空间，而不会超出设备限制。专家本身是普通的 MLP 块，因此增加容量只需复制更多副本，而无需加宽每一层。",
+        "这种经济性使得 MoE 模型能够达到数千亿参数规模，同时以密集模型的速度进行训练。DeepSeek-v3 和 Llama 4 展示了这种回报，它们混合使用 MoE 和密集层，以在当今硬件上平衡容量、准确性和效率。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": [
+              "https://pytorch.org/wp-content/uploads/2025/12/3.png"
+            ],
+            "caption": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "内核效率",
+      "paras": [
+        "虽然 MoE 模型提供了引人注目的优势，但大规模训练它们会带来独特的挑战，必须加以解决才能实现高效的分布式训练。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "通信",
+      "paras": [
+        "小矩阵乘法（GEMM）→ GPU 利用率不足：路由后，每个专家只处理少量 token，因此产生的矩阵乘法（GEMM）操作变得非常小。这些微 GEMM（micro-GEMM）无法让 GPU 的计算单元完全满载，并引入了显著的启动和数据移动开销。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "并行性",
+      "paras": [
+        "全对全通信过重 → 网络瓶颈：专家并行（Expert Parallelism）将 token 嵌入分散到拥有所选专家的 GPU 上。因此，每次前向传播都会触发大量的全对全集合通信，随着集群规模扩大，通信时间可能超过计算时间，成为主要瓶颈。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": [
+              "https://pytorch.org/wp-content/uploads/2025/12/4.png"
+            ],
+            "caption": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "路由与稳定性",
+      "paras": [
+        "并行策略复杂 → 流水线不同步导致的空闲气泡：现代训练通常同时使用全分片数据并行（FSDP）以节省内存、流水线并行（Pipeline Parallelism）以增加深度，以及专家并行（Expert Parallelism）以扩展宽度。如果它们的微批次或调度不同步，就会出现“气泡”——部分 GPU 工作时其他 GPU 空闲的时段——导致利用率低下。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "并行策略设计",
+      "paras": [
+        "路由不稳定 → 专家负载不均：学习型路由器必须在遵守容量限制的前提下，将 token 均匀分配给各个专家。token 计数偏斜、专家过载或 token 被丢弃，都可能减慢收敛速度或降低最终模型质量。",
+        "我们从三个方面应对这些预训练挑战：AMD Instinct MI325X GPU 提供 256GB HBM3E 内存、超过 6TB/s 带宽以及 FP8 张量核心，使 MoE 专家保持本地化且计算密集；TorchTitan 并行策略（FSDP + PP/VPP + EP）平衡计算与通信；Primus-Turbo 的 FP8 注意力机制和分组 GEMM 内核将 MoE 的小型 GEMM 转化为高占用率、高吞吐量的运算。",
+        "AMD Instinct™ MI325X：硬件与软件栈",
+        "图 2：AMD Instinct MI325X 规格",
+        "Instinct MI325X 配备 256 GB HBM3E 内存、超过 6 TB/s 的片上带宽以及千万亿次级别的 FP8/BF16 矩阵核心。如此大容量的高速内存使得 MoE 可以在本地设备上运行大部分专家，而无需将它们分散到整个集群，这同时带来了三个好处：",
+        "每块 GPU 可容纳更多专家——容量增长无需将模型分割成更小的碎片。",
+        "更高的容量因子，更少的 token 丢弃——路由器可以将额外的 token 分配给繁忙的专家而不会耗尽内存，从而稳定训练。",
+        "更少的 All-to-All 通信——更小的 Expert-Parallel 度缩小了集合通信的规模，因此通信不再主导挂钟时间。",
+        "在实践中，MI325X 的内存余量和带宽将通常的网络瓶颈转变为套接字内的工作负载，即使在大规模下也能使 MoE 训练保持计算受限。"
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": [
+              "https://pytorch.org/wp-content/uploads/2025/12/Screenshot-2025-12-01-at-10.26.07-AM.png"
+            ],
+            "caption": ""
+          }
+        ],
+        "6": [
+          {
+            "src": [
+              "https://pytorch.org/wp-content/uploads/2025/12/5.png"
+            ],
+            "caption": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Primus-Turbo：AMD 加速库",
+      "paras": [
+        "Expert Parallelism (EP) 将专家池划分到节点内的 GPU 上，并且当模型无法再容纳在单个节点上时，跨节点划分。这使我们能够增加专家数量，同时保持每个 GPU 的专家状态有界，并避免过小的专家分片。",
+        "Fully-Sharded Data Parallelism (FSDP) 将参数、梯度和优化器状态切片到数据并行组中，将每个 GPU 的模型占用空间减少大约数据并行度，从而使大型检查点能够舒适地容纳在 MI325X 的 256 GB HBM 中。",
+        "Pipeline + Virtual Pipeline Parallelism (PP + VPP) 将层拆分为阶段，并交错执行前向和后向步骤；VPP 进一步将每个阶段细分为虚拟块，以便微批次交错排列，减少流水线空闲时间。",
+        "通过 EP 吸收宽度、FSDP 处理内存以及 PP + VPP 重叠前向和后向传递以减少流水线气泡，该技术栈协调了 GPU 算术、HBM 带宽和 400 Gb RoCE 流量——因此没有任何单一维度成为瓶颈。",
+        "图 3：PP 调度——蓝色/橙色热力图展示了 VPP 如何重叠前向/后向传递"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": [
+              "https://pytorch.org/wp-content/uploads/2025/12/6.png"
+            ],
+            "caption": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "图 4：Primus-Turbo 架构",
+      "paras": [
+        "Primus-Turbo 是一个高性能加速库，专用于在 AMD GPU 上进行大规模模型训练。在该技术栈中，Primus-Turbo 是经过 ROCm 优化的 kernel 库，用于此项工作。它提供了高性能算子（GEMM、attention、grouped GEMM）、通信原语（包括 All-to-All/DeepEP）、优化器工具，以及低精度 kernel（如 FP8），以在 AMD Instinct™ GPU 上实现高效训练。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": [
+              "https://pytorch.org/wp-content/uploads/2025/12/7.png"
+            ],
+            "caption": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "集成示例：",
+      "paras": [
+        "– 支持 FP8（E4M3/E5M2），提供 tensor-wise、row-wise 和 block-wise 量化\n– FP6 和 FP4（针对 MI350 及后续型号正在开发中）",
+        "– 支持 FP8（E4M3/E5M2）等低精度，提供 tensor-wise、row-wise 和 block-wise 量化",
+        "– 支持 FP8（E4M3/E5M2）等低精度，提供 block-wise 量化",
+        "– 支持 Mellanox；Broadcom NIC 和 AMD AINIC（两者均在开发中）"
+      ],
+      "fig_after": {
+        "3": [
+          {
+            "src": [
+              "https://pytorch.org/wp-content/uploads/2025/12/8.png"
+            ],
+            "caption": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "实验配置：",
+      "paras": [
+        "在 MI325X 集群上进行大规模预训练",
+        "所有实验均在配备 1024 块 AMD Instinct MI325X GPU 的 TensorWave 集群上运行。每块 GPU 连接一个 400Gb RoCE v2 Broadcom Thor 2 NIC，节点采用三层 fat-tree 拓扑结构布线。该设计提供全对分带宽，因此 Expert-Parallel All-to-All 流量永远不会遇到网络瓶颈。软件栈由 TorchTitan 和 Primus-Turbo 提供。",
+        "图 5：采用三层 Fat-Tree 网络拓扑的 MI325X 集群",
+        "通过 Primus-Turbo 实现 DeepSeekV3-671B 性能优化",
+        "首先，我们在 64 个 MI325X 节点上对 DeepSeek-V3-671B 进行全运行性能分析，以识别内核热点，例如图 6 中的 attention kernel 和 grouped GEMM。"
+      ],
+      "fig_after": {
+        "3": [
+          {
+            "src": [
+              "https://pytorch.org/wp-content/uploads/2025/12/8-1.png"
+            ],
+            "caption": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Llama4-Scout 预训练扩展",
+      "paras": [
+        "图 6：内核性能分析显示 attention kernel 和 FP8 grouped GEMM kernel 优化目标",
+        "我们使用 Primus-Turbo 解决了这些问题，并在每一步之后测量吞吐，如图 7 的柱状图所示。",
+        "图 7：在 64 个节点（512 个 GPU）上的逐步性能优化",
+        "启用 AITER attention，吞吐提升约 15%。（了解更多关于 AITER 的信息：AITER blog）",
+        "密集层的 FP8 GEMM。将线性层切换为 tensorwise FP8 减少了内存流量并使有效 flops 翻倍，相比前一次运行额外提升约 102%。",
+        "专家层的 FP8 grouped GEMM。最后，一个融合了排列和计算的融合 kernel 消除了 micro-GEMM 瓶颈，并进一步带来约 60% 的提升。",
+        "将这些优化叠加在一起，与基线相比，端到端训练速度提升了 2.77 倍，将 MI325X 集群转变为一个计算受限（compute-bound）而非带宽受限（bandwidth-bound）的 MoE 训练机器。",
+        "DeepSeekV3-671B 预训练扩展",
+        "图 8：MI325 集群上的 DeepSeekV3-671B 扩展效率",
+        "从 256 个 GPU 开始，吞吐量始终接近理想值：512 个 GPU 时为 97%，在完整的 1024 个 GPU 规模下为 96%，这证明了软硬件协同栈能够协调八级流水线阶段、专家路由和 FP8 内核，而不会浪费计算周期。",
+        "DeepSeekV3 预训练收敛",
+        "图 9：MI325X 集群上的 DeepSeek-V3 损失",
+        "为了验证速度提升不会损害质量，我们在 32 个 MI325X 节点（256 个 GPU）上，使用 allenai/c4 数据集跟踪了 DeepSeek-V3 FP8 的训练损失。该曲线在 900 次迭代中显示出平滑、单调的下降，与其他平台上的参考行为一致，并确认了 FP8 内核、专家路由和并行调度策略按预期收敛。"
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": [
+              "https://pytorch.org/wp-content/uploads/2025/12/10.png"
+            ],
+            "caption": ""
+          }
+        ],
+        "6": [
+          {
+            "src": [
+              "https://pytorch.org/wp-content/uploads/2025/12/12.png"
+            ],
+            "caption": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "# DeepEP — 掌控专家流量",
+      "paras": [
+        "图 10：MI325X 集群上的 Llama4-Scout 扩展效率",
+        "通过将 FSDP 与 EP=8 结合使用，Llama-4 Scout 在集群规模从 32 块 GPU 扩展到 512 块 GPU 时，保持了 100–102% 的扩展效率，证明了相同的优化方案可以干净地迁移到其他 MoE 架构上。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "结论与后续步骤",
+      "paras": [
+        "在上述实验中，我们采用了 EP=8，因为增加专家并行度会使 All-to-All 通信步骤变得过于昂贵。为了在扩展 EP 度时缓解这一影响，Primus-Turbo 还提供了 DeepEP 来加速 All-to-All 性能。下图比较了在 16 节点 MI325X 集群上训练 DeepSeek-V3 671B（24 层，PP 4 + VPP 3，local batch 16）时，标准 All-to-All 实现（红色）与 DeepEP（蓝色）的性能。当专家并行度（EP）从 8 提升到 32 时，普通 All-to-All 的吞吐量从大约 2000 TPS 下降到约 750 TPS，其在总运行时间中的占比从 10% 激增到近 50%。DeepEP 将吞吐量稳定维持在 2000–2100 TPS 左右，即使在 EP=32 时，通信占总运行时间的比例也限制在约 18%，使得可扩展性曲线变得平坦。",
+        "图 11：不同 EP 度下的 DeepEP 性能分析（DeepSeek-V3 671B，EP=8/16/32，LBS=16，PP=4，VPP=3，24 层，16 节点）",
+        "Primus-Turbo 构建于 ROCm DeepEP（https://github.com/ROCm/DeepEP）之上，并进行了额外的性能改进，例如在训练工作负载中无需 CPU/GPU 同步（可在 https://github.com/AMD-AGI/Primus-Turbo 获取）。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "接下来是什么？",
+      "paras": [
+        "我们与 Meta 的联合工作表明，AMD Instinct MI325X 硬件，结合 TorchTitan 和开源 Primus-Turbo 库，为现代预训练 MoE 模型提供了生产就绪的吞吐量。DeepSeek-V3 在多达 1024 块 GPU 上实现了超过 96% 的扩展效率；Llama-4 Scout 则展现出更高的线性扩展效率。内核级调优——FP8 GEMM、grouped GEMM 和 Aiter attention——将端到端性能提升了 2.77 倍，并且我们所有的实现均已开源。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "开源仓库",
+      "paras": [
+        "流水线演进。DualPIPE 和其他高级调度方案将进一步缩小深度流水线中的空闲气泡。",
+        "更广泛的内核覆盖。正在进行的 FP6/FP4 支持和新算子旨在应对下一波 MoE 和稀疏张量架构。",
+        "下一代硬件。针对 MI450 GPU 和 Helios AI 机架的准备工作正在进行中，以将当前的成果扩展到更大的集群。",
+        "开源扩展。持续支持 TorchTitan，并为 Monarch、TorchForge 等项目做出贡献。",
+        "这些努力共同旨在使 AMD 平台保持在大规模、高性价比 MoE 训练的前沿。",
+        "了解更多"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "免责声明",
+      "paras": [
+        "AMD 优化的 torchtitan 分支：github.com/AMD-AGI/torchtitan-amd",
+        "文档",
+        "Primus-Turbo 简介：https://rocm.blogs.amd.com/software-tools-optimization/primus-large-models/README.html",
+        "流水线并行可视化：https://github.com/AMD-AGI/Primus/tree/main/tools/visualization/pp_vis",
+        "ROCm 文档：https://rocm.docs.amd.com/en/latest/ https://rocm.docs.amd.com/",
+        "AMD Instinct MI325X：https://www.amd.com/en/products/accelerators/instinct/mi300/mi325x.html"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "正文",
+      "paras": [
+        "第三方内容由拥有该内容的第三方直接授权给您，而非由 AMD 授权给您。所有链接的第三方内容均按“原样”提供，不附带任何形式的保证。使用此类第三方内容由您自行决定，在任何情况下，AMD 均不对您承担任何与第三方内容相关的责任。您承担所有风险，并对因使用第三方内容可能产生的任何损害负全部责任。",
+        "文档",
+        "获取 PyTorch 的全面开发者文档",
+        "查看文档 ›",
+        "教程",
+        "获取面向初学者和高级开发者的深入教程",
+        "查看教程 ›",
+        "资源",
+        "查找开发资源并获取问题解答",
+        "查看资源 ›",
+        "保持联系，获取更新、活动信息及最新资讯",
+        "提交此表单即表示我同意接收 LF 及其项目发送的关于其活动、培训、研究、开发及相关公告的营销邮件。我理解可随时通过所收邮件页脚中的链接取消订阅。隐私政策"
+      ],
+      "fig_after": {}
+    }
+  ],
+  "conclusion": [
+    "本文展示了AMD与Meta联合优化的TorchTitan与Primus-Turbo方案，在1K AMD Instinct MI325X GPU上实现了MoE模型的高效预训练，验证了规模与效率可以兼得。对于追求大规模稀疏模型训练的开发者而言，这意味着无需在硬件投入与训练速度之间妥协——通过开源工具链即可复现接近线性的扩展性能。未来，随着FP6/FP4内核与更先进调度策略的加入，AMD平台有望进一步降",
+    "代码段均完整保留，可直接参考执行。"
+  ],
+  "reference_url": "https://pytorch.org"
+}
