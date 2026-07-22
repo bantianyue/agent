@@ -10,8 +10,8 @@
 - 要点速览: 3 条
 - 图片: 12 张
 
-## Step 3: 构建+推送
+## Step 3: 构建+推送 ✅
 - render-article.py: ✅
 - add-portal.py: ✅ (16 篇)
-- preflight-check.py: 待运行
+- preflight-check.py: ✅
 - push-draft.py: 待运行
