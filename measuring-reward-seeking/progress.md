@@ -15,3 +15,4 @@
 - add-portal.py: ✅ (16 篇)
 - preflight-check.py: 待运行
 - push-draft.py: 待运行
+| Step 4d-i: 传送门 | completed |
