@@ -15,3 +15,4 @@
 - add-portal.py: ✅ (16 篇)
 - preflight-check.py: ✅
 - push-draft.py: 待运行
+| Step 5: 预发布检查 | completed |
