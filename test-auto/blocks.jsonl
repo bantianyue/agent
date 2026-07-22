@@ -1,0 +1,179 @@
+{"type": "text", "content": "Accelerating Generative AI Part III: Diffusion, Fast"}
+{"type": "text", "content": "This post is the third part of a multi-series blog focused on how to accelerate generative AI models with pure, native PyTorch. We are excited to share a breadth of newly released PyTorch performance features alongside practical examples to see how far we can push PyTorch native performance. In part one, we showed how to accelerate Segment Anything over 8x using only pure, native PyTorch. In part two, we showed how to accelerate Llama-7B by almost 10x using only native PyTorch optimizations. In this blog, we’ll focus on speeding up text-to-image diffusion models by upto 3x."}
+{"type": "text", "content": "We will leverage an array of optimizations including:"}
+{"type": "text", "content": "Running with the bfloat16 precision"}
+{"type": "text", "content": "scaled_dot_product_attention (SPDA)"}
+{"type": "text", "content": "torch.compile"}
+{"type": "text", "content": "Combining q,k,v projections for attention computation"}
+{"type": "text", "content": "Dynamic int8 quantization"}
+{"type": "text", "content": "We will primarily focus on Stable Diffusion XL (SDXL), demonstrating a latency improvement of 3x. These techniques are PyTorch-native, which means you don’t have to rely on any third-party libraries or any C++ code to take advantage of them."}
+{"type": "text", "content": "Enabling these optimizations with the Diffusers library takes just a few lines of code. If you’re already feeling excited and cannot wait to jump to the code, check out the accompanying repository here: https://github.com/huggingface/diffusion-fast."}
+{"type": "figure", "img": "https://pytorch.org/wp-content/uploads/2024/11/fg1-11.png", "caption": "", "after_para": 9, "hero": false}
+{"type": "text", "content": "(The discussed techniques are not SDXL-specific and can be used to speed up other text-to-image diffusion systems, as shown later.)"}
+{"type": "text", "content": "Below, you can find some blog posts on similar topics:"}
+{"type": "text", "content": "Accelerated Diffusers with PyTorch 2.0"}
+{"type": "text", "content": "Exploring simple optimizations for SDXL"}
+{"type": "text", "content": "Accelerated Generative Diffusion Models with PyTorch 2"}
+{"type": "text", "content": "Setup"}
+{"type": "text", "content": "We will demonstrate the optimizations and their respective speed-up gains using the Diffusers library. Apart from that, we will make use of the following PyTorch-native libraries and environments:"}
+{"type": "text", "content": "Torch nightly (to benefit from the fastest kernels for efficient attention; 2.3.0.dev20231218+cu121)"}
+{"type": "text", "content": "PEFT (version: 0.7.1)"}
+{"type": "text", "content": "torchao (commit SHA: 54bcd5a10d0abbe7b0c045052029257099f83fd9)"}
+{"type": "text", "content": "CUDA 12.1"}
+{"type": "text", "content": "For an easier reproduction environment, you can also refer to this Dockerfile. The benchmarking numbers presented in this post come from a 400W 80GB A100 GPU (with its clock rate set to its maximum capacity)."}
+{"type": "text", "content": "Since we use an A100 GPU (Ampere architecture) here, we can specify torch.set_float32_matmul_precision(\"high\") to benefit from the TF32 precision format."}
+{"type": "text", "content": "Run inference using a reduced precision"}
+{"type": "text", "content": "Running SDXL in Diffusers just takes a few lines of code:"}
+{"type": "code", "content": "from diffusers import StableDiffusionXLPipeline\n\n## Load the pipeline in full-precision and place its model components on CUDA.\npipe = StableDiffusionXLPipeline.from_pretrained(\"stabilityai/stable-diffusion-xl-base-1.0\").to(\"cuda\")\n\n## Run the attention ops without efficiency.\npipe.unet.set_default_attn_processor()\npipe.vae.set_default_attn_processor()\n\nprompt = \"Astronaut in a jungle, cold color palette, muted colors, detailed, 8k\"\nimage = pipe(prompt, num_inference_steps=30).images[0]\n"}
+{"type": "text", "content": "But this isn’t very practical as it takes 7.36 seconds to generate a single image with 30 steps. This is our baseline which we will try to optimize one step at a time."}
+{"type": "figure", "img": "https://pytorch.org/wp-content/uploads/2024/11/fg2-10.png", "caption": "", "after_para": 26, "hero": false}
+{"type": "text", "content": "Here, we’re running the pipeline with the full precision. We can immediately cut down the inference time by using a reduced precision such as bfloat16. Besides, modern GPUs come with dedicated cores for running accelerated computation benefiting from reduced precision. To run the computations of the pipeline in the bfloat16 precision, we just need to specify the data type while initializing the pipeline:"}
+{"type": "code", "content": "from diffusers import StableDiffusionXLPipeline\n\npipe = StableDiffusionXLPipeline.from_pretrained(\n\t\"stabilityai/stable-diffusion-xl-base-1.0\", torch_dtype=torch.bfloat16\n).to(\"cuda\")\n\n## Run the attention ops without efficiency.\npipe.unet.set_default_attn_processor()\npipe.vae.set_default_attn_processor()\nprompt = \"Astronaut in a jungle, cold color palette, muted colors, detailed, 8k\"\nimage = pipe(prompt, num_inference_steps=30).images[0]\n"}
+{"type": "figure", "img": "https://pytorch.org/wp-content/uploads/2024/11/fg3-10.png", "caption": "", "after_para": 28, "hero": false}
+{"type": "text", "content": "By using a reduced precision, we’re able to cut down the inference latency from 7.36 seconds to 4.63 seconds."}
+{"type": "text", "content": "Some notes on the use of bfloat16"}
+{"type": "text", "content": "Using a reduced numerical precision (such as float16, bfloat16) to run inference doesn’t affect the generation quality but significantly improves latency."}
+{"type": "text", "content": "The benefits of using the bfloat16 numerical precision as compared to float16 are hardware-dependent. Modern generations of GPUs tend to favor bfloat16."}
+{"type": "text", "content": "Furthermore, in our experiments, we bfloat16 to be much more resilient when used with quantization in comparison to float16."}
+{"type": "text", "content": "(We later ran the experiments in float16 and found out that the recent versions of torchao do not incur numerical problems from float16.)"}
+{"type": "text", "content": "Use SDPA for performing attention computations"}
+{"type": "text", "content": "By default, Diffusers uses scaled_dot_product_attention (SDPA) for performing attention-related computations when using PyTorch 2. SDPA provides faster and more efficient kernels to run intensive attention-related operations. To run the pipeline SDPA, we simply don’t set any attention processor like so:"}
+{"type": "code", "content": "from diffusers import StableDiffusionXLPipeline\n\npipe = StableDiffusionXLPipeline.from_pretrained(\n\t\"stabilityai/stable-diffusion-xl-base-1.0\", torch_dtype=torch.bfloat16\n).to(\"cuda\")\n\nprompt = \"Astronaut in a jungle, cold color palette, muted colors, detailed, 8k\"\nimage = pipe(prompt, num_inference_steps=30).images[0]\n"}
+{"type": "text", "content": "SDPA gives a nice boost from 4.63 seconds to 3.31 seconds."}
+{"type": "figure", "img": "https://pytorch.org/wp-content/uploads/2024/11/fg4-5.png", "caption": "", "after_para": 38, "hero": false}
+{"type": "text", "content": "Compiling the UNet and VAE"}
+{"type": "text", "content": "We can ask PyTorch to perform some low-level optimizations (such as operator fusion and launching faster kernels with CUDA graphs) by using torch.compile. For the StableDiffusionXLPipeline, we compile the denoiser (UNet) and the VAE:"}
+{"type": "code", "content": "from diffusers import StableDiffusionXLPipeline\nimport torch\n\npipe = StableDiffusionXLPipeline.from_pretrained(\n    \"stabilityai/stable-diffusion-xl-base-1.0\", torch_dtype=torch.bfloat16\n).to(\"cuda\")\n\n## Compile the UNet and VAE.\npipe.unet = torch.compile(pipe.unet, mode=\"max-autotune\", fullgraph=True)\npipe.vae.decode = torch.compile(pipe.vae.decode, mode=\"max-autotune\", fullgraph=True)\n\nprompt = \"Astronaut in a jungle, cold color palette, muted colors, detailed, 8k\"\n\n## First call to `pipe` will be slow, subsequent ones will be faster.\nimage = pipe(prompt, num_inference_steps=30).images[0]\n"}
+{"type": "text", "content": "Using SDPA attention and compiling both the UNet and VAE reduces the latency from 3.31 seconds to 2.54 seconds."}
+{"type": "figure", "img": "https://pytorch.org/wp-content/uploads/2024/11/fg5-7.png", "caption": "", "after_para": 42, "hero": false}
+{"type": "text", "content": "Notes on torch.compile"}
+{"type": "text", "content": "torch.compile offers different backends and modes. As we’re aiming for maximum inference speed, we opt for the inductor backend using the “max-autotune”. “max-autotune” uses CUDA graphs and optimizes the compilation graph specifically for latency. Using CUDA graphs greatly reduces the overhead of launching GPU operations. It saves time by using a mechanism to launch multiple GPU operations through a single CPU operation."}
+{"type": "text", "content": "Specifying fullgraph to be True ensures that there are no graph breaks in the underlying model, ensuring the fullest potential of torch.compile. In our case, the following compiler flags were also important to be explicitly set:"}
+{"type": "code", "content": "torch._inductor.config.conv_1x1_as_mm = True\ntorch._inductor.config.coordinate_descent_tuning = True\ntorch._inductor.config.epilogue_fusion = False\ntorch._inductor.config.coordinate_descent_check_all_directions = True\n"}
+{"type": "text", "content": "For the full list of compiler flags, refer to this file."}
+{"type": "text", "content": "We also change the memory layout of the UNet and the VAE to “channels_last” when compiling them to ensure maximum speed:"}
+{"type": "code", "content": "pipe.unet.to(memory_format=torch.channels_last)\npipe.vae.to(memory_format=torch.channels_last)\n"}
+{"type": "text", "content": "In the next section, we’ll show how to improve the latency even further."}
+{"type": "text", "content": "Additional optimizations"}
+{"type": "text", "content": "No graph breaks during torch.compile"}
+{"type": "text", "content": "Ensuring that the underlying model/method can be fully compiled is crucial for performance (torch.compile with fullgraph=True). This means having no graph breaks. We did this for the UNet and VAE by changing how we access the returning variables. Consider the following example:"}
+{"type": "figure", "img": "https://pytorch.org/wp-content/uploads/2024/11/fg5b.jpg", "caption": "", "after_para": 53, "hero": true}
+{"type": "text", "content": "Getting rid of GPU syncs after compilation"}
+{"type": "text", "content": "During the iterative reverse diffusion process, we call step() on the scheduler each time after the denoiser predicts the less noisy latent embeddings. Inside step(), the sigmas variable is indexed. If the sigmas array is placed on the GPU, indexing causes a communication sync between the CPU and GPU. This causes a latency, and it becomes more evident when the denoiser has already been compiled."}
+{"type": "text", "content": "But if the sigmas array always stays on the CPU (refer to this line), this sync doesn’t take place, hence improved latency. In general, any CPU <-> GPU communication sync should be none or be kept to a bare minimum as it can impact inference latency."}
+{"type": "text", "content": "Using combined projections for attention ops"}
+{"type": "text", "content": "Both the UNet and the VAE used in SDXL make use of Transformer-like blocks. A Transformer block consists of attention blocks and feed-forward blocks."}
+{"type": "text", "content": "In an attention block, the input is projected into three sub-spaces using three different projection matrices – Q, K, and V. In the naive implementation, these projections are performed separately on the input. But we can horizontally combine the projection matrices into a single matrix and perform the projection in one shot. This increases the size of the matmuls of the input projections and improves the impact of quantization (to be discussed next)."}
+{"type": "text", "content": "Enabling this kind of computation in Diffusers just takes a single line of code:"}
+{"type": "code", "content": "pipe.fuse_qkv_projections()\n"}
+{"type": "text", "content": "This will make the attention operations for both the UNet and the VAE take advantage of the combined projections. For the cross-attention layers, we only combine the key and value matrices. To learn more, you can refer to the official documentation here. It’s worth noting that we leverage PyTorch’s scaled_dot_product_attention here internally."}
+{"type": "text", "content": "These additional techniques improved the inference latency from 2.54 seconds to 2.52 seconds."}
+{"type": "figure", "img": "https://pytorch.org/wp-content/uploads/2024/11/fg6-7.png", "caption": "", "after_para": 63, "hero": false}
+{"type": "text", "content": "Dynamic int8 quantization"}
+{"type": "text", "content": "We selectively apply dynamic int8 quantization to both the UNet and the VAE. This is because quantization adds additional conversion overhead to the model that is hopefully made up for by faster matmuls (dynamic quantization). If the matmuls are too small, these techniques may degrade performance."}
+{"type": "text", "content": "Through experimentation, we found that certain linear layers in the UNet and the VAE don’t benefit from dynamic int8 quantization. You can check out the full code for filtering those layers here (referred to as dynamic_quant_filter_fn below)."}
+{"type": "text", "content": "We leverage the ultra-lightweight pure PyTorch library torchao to use its user-friendly APIs for quantization:"}
+{"type": "code", "content": "from torchao.quantization import apply_dynamic_quant\n\napply_dynamic_quant(pipe.unet, dynamic_quant_filter_fn)\napply_dynamic_quant(pipe.vae, dynamic_quant_filter_fn)\n"}
+{"type": "text", "content": "Since this quantization support is limited to linear layers only, we also turn suitable pointwise convolution layers into linear layers to maximize the benefit. We also specify the following compiler flags when using this option:"}
+{"type": "code", "content": "torch._inductor.config.force_fuse_int_mm_with_mul = True\ntorch._inductor.config.use_mixed_mm = True\n"}
+{"type": "text", "content": "To prevent any numerical issues stemming from quantization, we run everything in the bfloat16 format."}
+{"type": "text", "content": "Applying quantization this way improved the latency from 2.52 seconds to 2.43 seconds."}
+{"type": "figure", "img": "https://pytorch.org/wp-content/uploads/2024/11/fg7-6.png", "caption": "", "after_para": 72, "hero": false}
+{"type": "text", "content": "Resources"}
+{"type": "text", "content": "We welcome you to check out the following codebases to reproduce these numbers and extend the techniques to other text-to-image diffusion systems as well:"}
+{"type": "text", "content": "diffusion-fast (repository providing all the code to reproduce the numbers and plots above)"}
+{"type": "text", "content": "torchao library"}
+{"type": "text", "content": "Diffusers library"}
+{"type": "text", "content": "PEFT library"}
+{"type": "text", "content": "Other links"}
+{"type": "text", "content": "SDXL: Improving Latent Diffusion Models for High-Resolution Image Synthesis"}
+{"type": "text", "content": "Fast diffusion documentation"}
+{"type": "text", "content": "Improvements in other pipelines"}
+{"type": "text", "content": "We applied these techniques to other pipelines to test the generality of our approach. Below are our findings:"}
+{"type": "text", "content": "SSD-1B"}
+{"type": "figure", "img": "https://pytorch.org/wp-content/uploads/2024/11/fg8-5.png", "caption": "", "after_para": 84, "hero": false}
+{"type": "text", "content": "Stable Diffusion v1-5"}
+{"type": "figure", "img": "https://pytorch.org/wp-content/uploads/2024/11/fg9-5.png", "caption": "", "after_para": 85, "hero": false}
+{"type": "text", "content": "PixArt-alpha/PixArt-XL-2-1024-MS"}
+{"type": "text", "content": "It’s worth noting that PixArt-Alpha uses a Transformer-based architecture as its denoiser for the reverse diffusion process instead of a UNet."}
+{"type": "figure", "img": "https://pytorch.org/wp-content/uploads/2024/11/fg10-2.png", "caption": "", "after_para": 87, "hero": false}
+{"type": "text", "content": "Note that for Stable Diffusion v1-5 and PixArt-Alpha, we didn’t explore the best shape combination criteria for applying dynamic int8 quantization. It might be possible to get better numbers with a better combination."}
+{"type": "text", "content": "Collectively, the methods we presented offer substantial speedup over the baseline without degradation in the generation quality. Furthermore, we believe that these methods should complement other optimization methods popular in the community (such as DeepCache, Stable Fast, etc.)."}
+{"type": "text", "content": "Conclusion and next steps"}
+{"type": "text", "content": "In this post, we presented a basket of simple yet effective techniques that can help improve the inference latency of text-to-image Diffusion models in pure PyTorch. In summary:"}
+{"type": "text", "content": "Using a reduced precision to perform our computations"}
+{"type": "text", "content": "Scaled-dot product attention for running the attention blocks efficiently"}
+{"type": "text", "content": "torch.compile with “max-autotune” to improve for latency"}
+{"type": "text", "content": "Combining the different projections together for computing attention"}
+{"type": "text", "content": "Dynamic int8 quantization"}
+{"type": "text", "content": "We believe there’s a lot to be explored in terms of how we apply quantization to a text-to-image diffusion system. We didn’t exhaustively explore which layers in the UNet and the VAE tend to benefit from dynamic quantization. There might be opportunities to further speed things up with a better combination of the layers being targeted for quantization."}
+{"type": "text", "content": "We kept the text encoders of SDXL untouched other than just running them in bfloat16. Optimizing them might also lead to improvements in latency."}
+{"type": "text", "content": "Acknowledgements"}
+{"type": "text", "content": "Thanks to Ollin Boer Bohan whose VAE was used throughout the benchmarking process as it is numerically more stable under reduced numerical precisions."}
+{"type": "text", "content": "Thanks to Hugo Larcher from Hugging Face for helping with infrastructure."}
+{"type": "text", "content": "Docs"}
+{"type": "text", "content": "Access comprehensive developer documentation for PyTorch"}
+{"type": "text", "content": "View Docs ›"}
+{"type": "text", "content": "Tutorials"}
+{"type": "text", "content": "Get in-depth tutorials for beginners and advanced developers"}
+{"type": "text", "content": "View Tutorials ›"}
+{"type": "text", "content": "Resources"}
+{"type": "text", "content": "Find development resources and get your questions answered"}
+{"type": "text", "content": "View Resources ›"}
+{"type": "text", "content": "Stay in touch for updates, event info, and the latest news"}
+{"type": "text", "content": "By submitting this form, I consent to receive marketing emails from the LF and its projects regarding their events, training, research, developments, and related announcements. I understand that I can unsubscribe at any time using the links in the footers of the emails I receive. Privacy Policy"}
+{"type": "text", "content": "By submitting this form, I consent to receive marketing emails from the LF and its projects regarding their events, training, research, developments, and related announcements. I understand that I can unsubscribe at any time using the links in the footers of the emails I receive. Privacy Policy."}
+{"type": "text", "content": "x-twitter"}
+{"type": "text", "content": "facebook"}
+{"type": "text", "content": "linkedin"}
+{"type": "text", "content": "youtube"}
+{"type": "text", "content": "github"}
+{"type": "text", "content": "slack"}
+{"type": "text", "content": "discord"}
+{"type": "text", "content": "© 2026 PyTorch. Copyright © The Linux Foundation®. All rights reserved. The Linux Foundation has registered trademarks and uses trademarks. For more information, including terms of use, privacy policy, and trademark usage, please see our Policies page. Trademark Usage. Privacy Policy."}
+{"type": "text", "content": "Learn\n\n\tGet Started\n\tTutorials\n\tLearn the Basics\n\tPyTorch Recipes\n\tIntro to PyTorch – YouTube Series\n\tWebinars\n\tPyTorch Certification"}
+{"type": "text", "content": "Get Started"}
+{"type": "text", "content": "Tutorials"}
+{"type": "text", "content": "Learn the Basics"}
+{"type": "text", "content": "PyTorch Recipes"}
+{"type": "text", "content": "Intro to PyTorch – YouTube Series"}
+{"type": "text", "content": "Webinars"}
+{"type": "text", "content": "PyTorch Certification"}
+{"type": "text", "content": "Community\n\n\tLandscape\n\tJoin the Ecosystem\n\tCommunity Hub\n\tForums\n\tDeveloper Resources\n\tEvents\n\tWorking Groups\n\tMeeting Calendar\n\tContributor Awards\n\tAmbassadors"}
+{"type": "text", "content": "Landscape"}
+{"type": "text", "content": "Join the Ecosystem"}
+{"type": "text", "content": "Community Hub"}
+{"type": "text", "content": "Forums"}
+{"type": "text", "content": "Developer Resources"}
+{"type": "text", "content": "Events"}
+{"type": "text", "content": "Working Groups"}
+{"type": "text", "content": "Meeting Calendar"}
+{"type": "text", "content": "Contributor Awards"}
+{"type": "text", "content": "Ambassadors"}
+{"type": "text", "content": "Projects\n\n\tPyTorch\n\t\n\t\tExecutorch\n\t\n\n\tvLLM\n\tDeepSpeed\n\tRay\n\tHelion\n\tSafetensors\n\tHost Your Project"}
+{"type": "text", "content": "PyTorch\n\t\n\t\tExecutorch"}
+{"type": "text", "content": "Executorch"}
+{"type": "text", "content": "vLLM"}
+{"type": "text", "content": "DeepSpeed"}
+{"type": "text", "content": "Ray"}
+{"type": "text", "content": "Helion"}
+{"type": "text", "content": "Safetensors"}
+{"type": "text", "content": "Host Your Project"}
+{"type": "text", "content": "Docs\n\n\tPyTorch\n\tDomains"}
+{"type": "text", "content": "PyTorch"}
+{"type": "text", "content": "Domains"}
+{"type": "text", "content": "Blog & News\n\n\tBlog\n\tAnnouncements\n\tCase Studies\n\tNewsletter"}
+{"type": "text", "content": "Blog"}
+{"type": "text", "content": "Announcements"}
+{"type": "text", "content": "Case Studies"}
+{"type": "text", "content": "Newsletter"}
+{"type": "text", "content": "About\n\n\tPyTorch Foundation\n\tMembers\n\tGoverning Board\n\tTechnical Advisory Council\n\tCloud Credit Program\n\tStaff\n\tContact\n\tBrand Guidelines"}
+{"type": "text", "content": "PyTorch Foundation"}
+{"type": "text", "content": "Members"}
+{"type": "text", "content": "Governing Board"}
+{"type": "text", "content": "Technical Advisory Council"}
+{"type": "text", "content": "Cloud Credit Program"}
+{"type": "text", "content": "Staff"}
+{"type": "text", "content": "Contact"}
+{"type": "text", "content": "Brand Guidelines"}
+{"type": "text", "content": "JOIN"}
