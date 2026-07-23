@@ -340,3 +340,10 @@
 |--------|------|------|
 | 2026-07-22 23:11 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-07-22 23:15 | ✅ 已推送 | 推送草稿成功，media_id: TIqnnVEu6Oy3-wtKttGa0Vm5TTjh8oUmw9EbrcnOGX28EPJ4SzYVX1LCmOBLkjCu |
+
+### #1 - mlps-are-hebbians
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-07-23 07:57 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-07-23 08:16 | ✅ 已推送 | 推送草稿成功（compact 模式），media_id: TIqnnVEu6Oy3-wtKttGa0Zl4teFAOtTkep9i80uDffFSqB97b53sPkF4z86u4Ju6 |
