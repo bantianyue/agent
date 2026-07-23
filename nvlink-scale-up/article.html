@@ -1,0 +1,108 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py 动态注入时引用此 class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心发现</strong>：纵向扩展网络（如NVLink）通过紧密连接处理器使其像整体运行，与横向扩展（购买更多机器）形成对比。NVLink是现代GPU机器内部的关键互连技术。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">技术演进</strong>：NVLink从P100的混合立方体网格发展到NVSwitch交换机，再到GH200/GB200将CPU纳入统一内存空间。NVL72实现72个GPU和36个CPU的任意对任意带宽达130 TB/s，被NVIDIA称为“一个单一的、巨大的GPU”。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">设计权衡</strong>：高速信号传输面临时序、功耗和距离约束：NRZ与PAM4调制各有优劣，PAM4需前向纠错但增加延迟；每比特能耗从板内1.3 pJ/bit到光通信约20 pJ/bit，无源铜缆限制纵向扩展在单个机架内。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本文为技术文章完整翻译版本，共 4 节，30 段正文，代码块自动保留原样。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">快，还是远</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我之前写过关于‘横向扩展’网络——InfiniBand、RoCE，以及更广义的RDMA——这些网络和范式将数千台机器连接成一个数据中心集群。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本文讨论的是另一种类型。这些名称源于关于服务器的一个古老争论：当需要更多算力时，你可以购买更多机器进行横向扩展（scale out），或者购买一台更大的机器进行纵向扩展（scale up）。纵向扩展网络（scale-up fabric）试图将处理器紧密连接，使其能够像一个整体一样运行。在现代（NVIDIA）GPU机器内部，这种网络就是NVLink。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">我们如何走到今天 & 未来的方向</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">让我们从物理层面追踪字节在链路上的传输过程。在最底层：一个NVLink是一束导线，以差分对的形式排列。每个差分对由一个SerDes驱动：这是一种将芯片内部宽而慢的数据转换为导线上极快信号的电路。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">导线上的信号只是随时间变化的电压。要将其还原为0和1，接收端必须在正确的时刻对其进行采样。在决定往导线上发送什么之前，我们必须先确定接收端的时间基准从何而来。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">长度匹配的蛇形走线紧邻BGA封装（来源）。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="https://fergusfinn.com/blog-images/nvlink-scale-up/serpentine-traces-bga.jpg">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">source</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一种方案是发送一个与数据分离的时钟脉冲，通过独立的导线传输，并在时钟滴答时进行采样（前向时钟）。这是DDR内存和HBM的工作方式。但这仅在时钟滴答到达所有信号比特的时间足够接近，使得接收端能够清晰采样时才有效。接收端可以消除微小的偏差，但每条数据线仍需要大致相同的延迟，实际上也就是大致相同的长度。这就是PCB上布满蛇形走线的原因。在每秒一百吉比特的速率下，一个比特占据大约十皮秒：相当于一到两毫米的走线长度。这种匹配在厘米级距离内是可行的，但在米级距离上就变得困难得多。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">另一种方案是单独同步每条导线，将其时钟嵌入到每条信号线本身中。我们知道信号中的每一次跳变（每个0到1或1到0的转换）都标志着一个比特边界。因此，我们可以在接收端使用一个电路（时钟数据恢复，CDR），该电路使本地振荡器锁定在这些跳变上。问题在于，这仅在跳变持续发生时有效。如果你连续发送一百万个0，振荡器可能会开始漂移。为了保持数据持续跳变，我们将其与一个两端都能生成的伪随机序列进行异或运算（加扰）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">上图：数据中的每个边沿都会重新校准接收端的时钟，但在连续零的序列中，时钟会自由运行（图中画得稍快了几个百分点），采样点逐渐偏离中心，直到某个采样点落入错误的比特位。下图：相同的有效载荷经过加扰后，边沿从未停止。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一旦我们能够承载时序信号，就需要将1和0放到线路上。最简单的方法之一是：高电压表示1，低电压表示0。这种方案称为NRZ。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="https://blog.doubleword.ai/doubleword-icon.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">ABOUT DOUBLEWORD</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在NRZ下，要在单根线上实现更快的信号传输，就必须提高时钟频率。板上的走线相当于一个低通滤波器：铜及其周围的绝缘材料在高频下会吸收更多能量，增加衰减，接收端必须补偿这一衰减。它通过滤波器重新增强高频端来实现，但这种增强会同时放大高频噪声和信号。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">与其不断补偿不断增加的衰减，不如在某个节点尝试在每个时钟周期内发送更多比特。PAM4使用四个电压电平而非两个，因此每个时钟周期携带2比特信息。代价是电平间距缩小到原来的三分之一。随着电平间距变小，解码错误的可能性开始增加。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">PAM4链路的目标是纠错前错误率约为万分之一，而无需纠错的NRZ链路可以达到万亿分之一以下。在如此高速下，万亿分之一的错误率意味着大约每十秒出现一次错误，这足够罕见，可以在链路层通过校验和与重传来处理。而万分之一意味着每秒数百万次错误，远非重传所能处理。因此PAM4通常与前向纠错配合使用。这会带来延迟代价，因为解码器必须收集整个数据块后才能进行纠错。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">与其在单根线上拼命传输信号，为什么不直接增加更多线呢？可以，但有限度。高速信号必须从芯片边缘引出：埋在芯片中部的SerDes需要将其走线绕过周围所有元件引出。因此片外带宽随芯片周长（其海岸线）扩展，而计算能力随面积扩展。掩模版限制将芯片尺寸限制在大约26×33毫米：约120毫米的海岸线。HBM接口、NVLink、PCIe和C2C都在争夺这有限的边缘资源。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">另一个变量是距离。更高频率的信号传输距离更短：无源铜线每对可承载100 Gb/s约两米，200 Gb/s约一米。要传输更远距离需要额外的硬件步骤。Redriver是一种模拟放大器，而Retimer是一种数字放大器：一个完整的接收器和发射器背靠背连接，解码比特并重新发射信号。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">所有这些技术的衡量标准是每比特传输的能量。在同一块板上的芯片之间，信道足够干净，可以使用许多低速、简单的线路：NVLink-C2C（Grace CPU与其Hopper GPU之间的链路）使用转发时钟，以1.3 pJ/bit的能耗实现900 GB/s的传输速率。GPU之间的NVLink使用上述SerDes方案，能耗约为4 pJ/bit：在Blackwell的1.8 TB/s NVLink带宽下，每个GPU大约消耗58 W用于将比特传输到封装外。超出无源铜线范围，每个电缆端口的Retimer将能耗提升到约十，而光通信则接近二十（光通信的代价在于电子到光子的转换，与传输距离基本无关）¹。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每比特能量与传输距离的关系，每种链路技术一个柱状条。这些数值相当模糊，但趋势是正确的。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>约束瓶颈在于能耗成本由谁承担。链路消耗的每一焦耳能量，都来自机架功率和冷却预算，与计算资源形成竞争。就目前而言，这意味着必须使用无源铜缆，因此纵向扩展（scale-up）只能局限在单个机架内。</strong></p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">扩展规模故事的另一面</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">通过普通加载指令读取另一颗芯片的内存，对CPU而言是一个古老的想法。到2001年，SGI的NUMAlink已将多达512个处理器整合到单一内存空间中，而一致性HyperTransport（相干超传输）则在Opteron主板上为数个插槽实现了同样的功能。商用集群（commodity clusters）终结了大型机，但板级规模的方案却无处不在：每一台多路服务器本质上仍是一台小型NUMA机器。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在GPU方面，NVIDIA在CUDA 4.0（2011年）中引入了跨GPU的单一虚拟地址空间，支持通过PCIe进行对等访问。到2016年，一条gen3 x16插槽每方向可传输16 GB/s，而本地HBM2带宽为720 GB/s：前者仅为后者的四十五分之一。同年，NVLink随P100推出，试图拓宽通道：每个GPU配备四条链路，聚合双向带宽达160 GB/s。第一代NVLink还将CPU与GPU连接起来：IBM销售的POWER8服务器中，CPU通过NVLink与P100相连。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">四条链路无法完全连接八个GPU，因此DGX-1将其P100连接成混合立方体网格（hybrid cube mesh），每个GPU直接与另外四个GPU相连。数据传输根据配对情况需要一跳或两跳，NCCL则围绕物理布线组织其环状结构。2018年，NVIDIA改用交换机连接GPU：NVSwitch是一款18端口芯片，能以全链路速率同时在其所有端口间传输流量。DGX-2包含12个这样的交换机，其16个V100中的任意一对都能以300 GB/s的全速传输，且所有16个GPU可同时通信。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第三代交换机（随Hopper于2022年推出）集成了用于网内归约（in-network reduction）的ALU：在执行allreduce操作时，每个GPU只需向交换机发送一次数据并接收一次求和结果，而无需在环状结构中来回传递部分结果。这使每个GPU移动的字节数减半，并将集合通信的有效带宽大致提升了一倍。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">自2023年中期投产的GH200将CPU纳入了这一领域。它由一个Grace CPU与一个Hopper GPU通过NVLink-C2C配对组成，CPU的120 GB LPDDR5X和GPU的96 GB HBM处于同一地址空间中。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GB200于2024年问世，每两个Blackwell GPU配一个Grace CPU。NVL72将36个这样的单元连接到一个机架中，72个GPU和36个CPU通过18个交换芯片和一个铜脊（copper spine）相连，它们之间的任意对任意带宽达到130 TB/s。NVIDIA称这个机架为“一个单一的、巨大的GPU”。72个GPU中的任何一个线程，都可以对其13.4 TB HBM中的任意字节发起加载指令。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">各代链路对比
+配对计数为每方向数据；每GPU数据为NVIDIA的双向聚合值。
+:</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">NVIDIA 还公布了接下来的三步规划
+来自 NVIDIA 的 Vera Rubin 材料及其 GTC 2026 路线图。空白单元格是 NVIDIA 尚未为这些名称分配的具体数字。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Vera Rubin 保持机架不变——72 个 GPU，由五千根铜缆组成的 spine——并将带宽翻倍，达到总计 260 TB/s。时钟速率和调制方式与 NVLink 5 相同，且 spine 没有空间容纳更多线缆。带宽翻倍是通过每对线缆同时双向传输实现的。两端同时向同一对导线发送信号，因此每个接收端的电压是两个信号之和，其中一个是接收端自身已知的信号。接收端合成一份其发送器正在发送的副本并减去它；剩下的就是远端信号。减法是一个时序问题：一个时钟周期持续不到十皮秒，副本必须与实际回波对齐到该周期的几分之一以内，否则残留信号会淹没远端信号。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">NVL576 是第一个大于单个机架的 NVLink 域：由八个机架组成，机架之间通过铜缆和光缆连接。Kyber 是接替 72-GPU 机架的设计，也是 Feynman 时代 NVL1152 的基础。它在一个机柜中容纳 144 个 GPU，并将线缆 spine 替换为 midplane——一块大型电路板，GPU 托盘从两侧插入，链路以走线形式内嵌于板中。2026 年 7 月，SemiAnalysis 报道称，这块 78 层的电路板制造难度较大，该机架已推迟至 2028 年。NVIDIA 的回应是路线图保持不变。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">正文</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">内存语义被嵌入 NVIDIA 的 scale-up 方案中。但这并非所有人的选择。Google 展示了编译器调度的通信可以通过另一条路径创建紧密耦合的 scale-up 系统。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Google 将其 TPU 直接相互连接，之间没有交换机。其网络是一个 torus（最近是 64 芯片机架，排列为 4×4×4 立方体），每个芯片的 ICI（芯片间互连）带宽为 1.2 TB/s。与 NVIDIA 的模型不同，TPU 没有从其他芯片内存加载数据的指令。通信被显式写入程序，XLA 在编译时将集合操作与计算一起调度。训练步骤中集合操作的参与者和张量形状在程序运行前已知，XLA 利用这一先验知识将通信与计算重叠，保持直接链路繁忙。</p>
+<pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code>@misc{doubleword-nvlink-scale-up,
+  title        = {NVLink, NVSwitch, and all that},
+  author       = {Fergus Finn},
+  year         = {2026},
+  howpublished = {Doubleword Blog},
+  url          = {https://blog.doubleword.ai/nvlink-scale-up},
+}</code></pre>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+纵向扩展网络（scale-up fabric）通过物理层创新与系统级协同设计，将数十乃至数百颗GPU整合为单一计算实体，其核心价值在于以极致的带宽和能效突破传统集群的通信瓶颈。对于读者而言，理解NVLink、PAM4、时钟恢复等底层技术，有助于把握AI算力演进中“机架即计算机”这一关键趋势。展望未来，随着铜缆与光缆的混合部署、网内归约等技术的成熟，纵向扩展的边界将从单机架延伸至多机架，但能耗与物理<br  /><br  />代码段均完整保留，可直接参考执行。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/pCRjhls1WFaiRglb2MtjBw" target="_blank" data-linktype="2">蚂蚁CausalMix: 将数据混合从超参搜索转换成因果推断</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/L6krDtAzuCiX4y2KNYYvfQ" target="_blank" data-linktype="2">万亿参数RL实战：如何用28个H200节点训GLM-5</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://fergusfinn.com</span></p>
+</section>
