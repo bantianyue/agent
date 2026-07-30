@@ -1,0 +1,120 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心问题</strong>：异步RL将rollout与训练解耦，生成token的策略可能已不同于消费它的训练策略：陈旧度越高，策略改进近似越不可靠<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心方法</strong>：SAT（Staleness-Adaptive Trust Region）：将观测到的 |log rb,t| 作为陈旧度代理，对高陈旧度token自动收窄方向性裁剪半径，抑制未来分布漂移<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">实验结果</strong>：Qwen3-30B-A3B-Base上SAT-GSPO w/ R3在lag=1时AIME24 avg8达35.83，lag=8时达34.79；固定裁剪基线在lag=8时全部崩溃</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">异步强化学习将rollout（由SGLang执行）与训练（由Megatron执行）解耦，让两者并行运行，大幅提升训练效率。但代价是产生token级重要性比rb,t：当前训练策略相对rollout策略的采样概率比，它不可避免地偏离1。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">腾讯混元HY大模型团队从理论根源剖析了异步RL中的陈旧度问题，并提出了Staleness-Adaptive Trust Region（SAT）。在Qwen3-30B-A3B-Base上，SAT-GSPO w/ R3在lag=1和lag=8两种配置下都达到了最高AIME24最佳检查点avg8，而固定裁剪基线的lag=8配置在训练后期崩溃。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">异步RL的三种范式</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">将rollout与训练解耦后，版本滞后分布可以形式化为三种范式。同步RL中rollout与训练完全串行，两个引擎从不重叠，一个优化步的耗时是rollout + 训练 + 广播的串行总和。优势是严格on-policy，rb,t≡1，不需要离策略校正，但吞吐受限。同步RL流水线架构如下图所示：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="sync_rl_pipeline.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">同步RL流水线：rollout与训练串行，陈旧度=0，但吞吐受限。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">批式异步与完全异步RL</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">批式异步RL中所有token共用一个行为检查点，实际lag为Nb,t=n+h：批次交接时的lag加上消费时的局部更新偏移。观测陈旧度可拆为策略版本差项与实现失配项。完全异步RL中token行为随时间变化，μb,t可以随token改变，每个token的实际lag取决于到达调度器的时刻。完全异步流水线如下图所示：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fully_async_rl.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">完全异步RL流水线：rollout与训练完全解耦，陈旧度为随机变量。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">陈旧度与策略改进的关系</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">核心理论线：inference policy μ 与training policy π 之间的divergence越大，策略改进近似越不可靠。对状态s，divergence可以定义为DTV(μ,π)[s]=½Ea∼μ(·|s)|r(a)−1|。若对每个动作都有硬约束 |r(a)−1|≤ε，则可得DTV≤ε/2。但PPO裁剪只观测采样动作并改变其损失，不会执行全动作硬约束：它只是采样目标上的一道截断，不是针对divergence本身的硬约束。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">陈旧度加剧的实证证据</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">vanilla GRPO基线在配置lag=8时的IS偏移比lag=1时大约高一个数量级。更大的失配与训练在首个epoch结束前、仅取得几个较好检查点后失稳相关。下图展示了不同lag下的训练-推理对数概率差异：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="section_2_1_logprob_mismatch.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">不同lag下训练-推理对数概率差异。lag=8时的失配比lag=1时大约高一个数量级。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">KL散度与AIME24训练崩溃</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">高lag场景下KL散度显著增大，AIME24 pass@1在训练早期冲到峰值后迅速崩溃。下图1展示了不同lag下的KL散度对比：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下图2展示了AIME24 pass@1随训练进度的变化曲线：训练在早期取得几个较好检查点后快速失稳，而SAT有效抑制了这种趋势。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="section_2_1_kl_magnitude.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">不同lag下KL散度大小对比。高lag场景下散度显著增大。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="section_2_1_aime24_pass1.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">AIME24 pass@1随训练进度变化。高lag场景下训练在早期峰值后崩溃。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">SAT：陈旧度自适应信任域</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SAT是面向PPO类目标、由信任域思想驱动的采样比率裁剪插件。它把静态的固定裁剪半径 (εlow, εhigh) 改成逐token的方向性半径，使用观测陈旧度代理 |db,t| = |log rb,t|。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下图1展示了PPO的固定裁剪区间：对于所有token使用相同的裁剪半径。下图2展示了SAT的自适应裁剪区间：对高陈旧度token收窄方向性半径，另一侧保持不变。这种不对称设计让裁剪只在需要时收紧，保持普通token行为不变。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="asymmetric_clip_PPO.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">PPO的固定名义裁剪区间。对于所有token使用相同的裁剪半径。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="asymmetric_clip_SATR.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">SAT的自适应裁剪区间。对高陈旧度token收窄方向性半径，另一侧保持不变。</figcaption></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">Token-level陈旧度信号</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">较大的 |db,t| 往往意味着更高的训练陈旧度，并与训练不稳定性相关。SAT在构造门控和裁剪边界前，先在采样动作上测量陈旧度并停止梯度（stop-gradient），避免梯度穿越陈旧度、分位数和移动裁剪边界。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">方向希尔核函数与核函数缩放</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">将停止梯度后的失配转成平滑的方向性裁剪缩放规则。通过停止梯度的经验0.90分位数将缩放锚定到当前批次的长尾：严格门控 |db,t|>q针对上侧长尾，只在失配对当前批次而言异常偏大的位置施加收缩。固定q时，ψ(0;q)=1、ψ(q;q)=½，且 ∂ψ/∂u≤0。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">基于陈旧度的有效收缩因子</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对触发门控的token，db,t的符号所选方向上的名义区间端点严格收缩，另一侧端点保持不变。在PPO尚未裁剪的新增裁剪向外带上，SAT已把发散梯度置零，而收敛方向的梯度通道保持完整。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">实验验证</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在Qwen3-30B-A3B-Base上的单种子实验中，lag=1时SAT-GSPO w/ R3达到AIME24最佳检查点avg8为35.83，SAT维持了较低的训练失配水平。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">lag=8时SAT-GSPO w/ R3达到34.79，而多个固定裁剪基线在训练后期全部崩溃。SAT在高异步场景下保持了训练稳定性，训练失配信号远低于固定裁剪基线。自适应裁剪与MoE路由重放呈现互补效应，两者结合（SAT w/ R3）效果最好。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="result_3_4_3a_training_mismatch_lag1.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">lag=1时训练失配对比。SAT维持较低的失配水平。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="result_3_4_3b_training_mismatch_lag8.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">lag=8时训练失配对比。固定裁剪基线失配爆炸，SAT保持稳定。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">异步RL稳定方法的统一视角</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在同一信任域视角下梳理了现有异步RL稳定方法，将它们视为对同一个log rb,t的不同选择：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>行为策略选择</strong>：使用更保守的行为策略来减少策略差异。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>目标策略定义</strong>：如何定义训练阶段的目标策略，影响比率计算。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>比率截断与掩码</strong>：通过截断或掩码操作限制极端比率的影响。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>裁剪半径与阈值</strong>：固定vs自适应裁剪半径，以及如何设定阈值。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这些方法在SAT的框架下可以被统一理解为不同形式的信任域约束。DPPO等方法的裁剪策略如下图所示，与PPO和SAT形成对比。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="asymmetric_clip_DPPO.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">DPPO的裁剪策略。与PPO和SAT形成对比，展示不同信任域约束的实现方式。</figcaption></figure>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+核心贡献是：从理论根源出发，将异步RL中的陈旧度问题形式化，并提出了一个简洁有效的自适应解决方案。<br  /><br  />SAT不改变PPO类算法的基本结构，仅通过替换固定裁剪半径为陈旧度自适应半径，就能在高异步场景下显著提升训练稳定性和最终性能。它把 |log rb,t| 作为可观测陈旧度代理，对高陈旧度长尾收缩方向性半径，让向外裁剪更早生效，抑制未来DTV增长。<br  /><br  />对于需要大规模异步RL训练的团队来说，SAT提供了一个低侵入、高回报的改进方向：只需要在现有PPO/GRPO实现中替换裁剪逻辑即可。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/L6krDtAzuCiX4y2KNYYvfQ" target="_blank" data-linktype="2">万亿参数RL实战：如何用28个H200节点训GLM-5</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/pCRjhls1WFaiRglb2MtjBw" target="_blank" data-linktype="2">蚂蚁CausalMix: 将数据混合从超参搜索转换成因果推断</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://jyyang26.github.io/stable_async_analysis/</span></p>
+</section>

@@ -1,0 +1,97 @@
+NVFP4 on Blackwell: What 4-Bit Floating Point Actually Delivers
+
+NVIDIA's Blackwell GPUs introduced native hardware support for 4-bit floating-point computation through a format called NVFP4. The results are concrete: 2 to 3 times higher throughput than FP8, 3.5 times less memory than BF16, and accuracy within 1 to 2 percentage points on large models. This is not a marketing claim. Independent benchmarks, preprint research, and community testing all confirm it.
+
+ 
+
+The practical impact: a 478-billion-parameter model that needs 960 GB in BF16 fits in 270 GB with NVFP4. That means four 96 GB workstation cards can serve it with room left for a 200,000-token context window. On consumer hardware, an RTX 5090 runs Qwen3.6-35B at 175 tokens per second with 41 percent lower energy use than BF16.
+
+How Four Bits Represent Neural Network Values
+
+NVFP4 uses the E2M1 floating-point format: 1 sign bit, 2 exponent bits, 1 mantissa bit. That gives 16 bit patterns encoding 15 distinct values: zero, plus or minus 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, and 6.0.
+
+ 
+
+Four bits alone cannot cover the range of values in a neural network. NVFP4 solves this with a two-level scaling strategy. Every 16-element block shares one FP8 E4M3 scaling factor. The entire tensor has one FP32 global scale. The actual value is:
+
+ 
+
+ 
+
+The storage cost is 9 bytes per 16 values, or 4.5 bits per element. Compared to the OCP MXFP4 standard at 4.25 bits, NVFP4 has 6 percent storage overhead. That overhead buys two things: smaller blocks (16 vs 32 elements) give tighter scales for non-uniform distributions, and FP8 scales have 8 times the mantissa precision of MXFP4's power-of-two-only E8M0 scales. The result is 0.3 to 0.5 lower perplexity on LLM benchmarks.
+
+ 
+
+Vendor lock-in caveat: NVFP4 is NVIDIA-proprietary. MXFP4 is an open OCP standard supported by AMD, Intel, and ARM. Both run on Blackwell Tensor Cores, but NVFP4 checkpoints are not portable to non-NVIDIA hardware.
+
+ 
+
+Blackwell Tensor Cores: Native FP4 Hardware
+
+Blackwell's fifth-generation Tensor Cores execute FP4 matrix multiply-accumulate operations natively. They consume NVFP4 inputs and produce FP32, BF16, or FP8 outputs. Dequantization happens inside the Tensor Core itself, with no separate dequant kernel. Both datacenter (B200, GB200) and consumer (RTX 5090, RTX PRO 6000) Blackwell GPUs use the same Tensor Core hardware for NVFP4.
+
+ 
+
+The second-generation Transformer Engine manages FP4 quantization with micro-tensor scaling, dynamically adjusting precision at the sub-tensor level. This effectively doubles FP4 Tensor Core performance, parameter bandwidth, and model size per GPU compared to FP8.
+
+The throughput numbers are real but nuanced. NVIDIA cites 2 to 3 times higher throughput for NVFP4 versus FP8. An independent microbenchmark study found Blackwell achieves 1.56 times higher mixed-precision throughput than H200. An independent GEMM kernel benchmark on B200 hit 1,547 TFLOPS, which is 24 percent of the theoretical peak of 6,553 TFLOPS. Current kernels have substantial room for optimization.
+
+Memory: Fitting Bigger Models in the Same VRAM
+
+ 
+
+NVFP4 reduces memory by 3.5 times versus BF16 and 1.8 times versus FP8. Four 96 GB workstation cards (384 GB total) can serve models up to 700 billion parameters with room for KV cache. Qwen3.6-35B shrinks from 70 GB to 25 GB, fitting on a single consumer GPU.
+
+NVFP4 also applies to the KV cache. KV cache quantization provides 50 percent reduction compared to FP8, enabling 2 times the context length or batch size under the same memory budget, and up to 3 times better time-to-first-token in prefill-heavy scenarios.
+
+Accuracy: What 4 Bits Cost
+
+ 
+
+For large models, the news is good. DeepSeek-R1-0528 quantized to NVFP4 via post-training quantization shows less than 1 percent degradation across seven benchmarks. DeepSeek R1 671B shows 0 to 1.2 percentage point degradation across MATH500, AIME24, GPQA-D, and GSM8K. A 12-billion-parameter model pretrained entirely in NVFP4 on 10 trillion tokens achieved MMLU-pro accuracy of 62.58 percent, nearly matching 62.62 percent from FP8 pretraining.
+
+Smaller models show more loss. Consumer GPU benchmarks report 2 to 4 percent quality degradation. Post-training quantization on smaller models with complex training pipelines (supervised fine-tuning, reinforcement learning, model merging) causes non-negligible accuracy drops.
+
+NVIDIA's solution is Quantization-Aware Distillation (QAD). A frozen BF16 teacher model trains an NVFP4 student by minimizing KL divergence between output token distributions. QAD reliably recovers near-BF16 accuracy across both LLMs and vision-language models. Interestingly, using the original model as the teacher outperforms using a larger teacher, contrary to traditional distillation intuition.
+
+Training in 4 Bits
+
+NVFP4 is not just for inference. NVIDIA demonstrated stable 4-bit pretraining of a 12-billion-parameter model on 10 trillion tokens, the longest publicly documented training run in 4-bit precision. Four algorithmic components make this work, and all four are necessary:
+
+ 
+
+Random Hadamard Transforms bound block-level outliers by smearing outlier information across the entire vector before quantization. 2D block scaling applies both row-wise and column-wise scales to weight matrices. Stochastic rounding on gradients provides unbiased estimation: rounding errors cancel over many operations. Selective high-precision layers keep the last four transformer blocks in BF16.
+
+Without all four, training diverges early. Stochastic rounding must be applied to gradients specifically, not activations or weights. When NVFP4 training does not fully match higher-precision loss, switching to BF16 near the end of training (shortly before learning rate decay) closes the gap.
+
+The Software Stack
+
+NVFP4 support spans the full inference and training stack:
+
+TensorRT-LLM supports NVFP4 on both datacenter and workstation Blackwell with expanding model coverage. vLLM offers NVFP4 through the llm-compressor library, with per-tensor global scales and per-group local scales. Hugging Face hosts prequantized checkpoints for a variety of flagship open models, including GLM-5.2, the Nemotron series, DeepSeek V4 Pro and Flash, Qwen3.6 and MiniMax-M3.
+
+For training, TransformerEngine provides fused FP4 quantization-and-GEMM kernels. CUTLASS offers NVFP4 GEMM templates. PyTorch's torchao supports NVFP4 for diffusion models through the diffusers integration.
+
+A practical constraint: NVFP4 on GeForce Blackwell (SM120/SM121) requires CUDA 13.0+ and driver 580+. DeepGEMM FP4 kernels are currently datacenter-only (SM100) and incompatible with consumer and workstation cards (SM12x).
+
+Limitations: Where NVFP4 Falls Short
+
+The advantages are real but bounded. In decode-phase workloads (memory-bound), NVFP4 activation quantization provides limited benefit. On RTX 5090, weight-only NVFP4-W4A16 can outperform fully quantized NVFP4-W4A4 in decode because mature FP16 GEMM kernels beat early-stage FP4 kernels.
+
+Scale layout incompatibilities are a recurring engineering problem. CUTLASS, DeepGEMM, and FlashInfer use different scale layouts. Loading weights in the wrong layout produces silently incorrect results. The MX-FP4 versus NVFP4 confusion compounds this: a kernel coded for MX-FP4 may expect NVFP4 layout, and reading FP8 scales as FP6 corrupts every block.
+
+FP4 attention remains an active research area. SageAttention3 achieves 99.52 percent cosine similarity with NVFP4 attention, but the accuracy risk is higher than for FP4 GEMMs. When attention dominates or prefill is the bottleneck, lower precision provides limited benefit.
+
+The hardware cost of NVFP4's smaller block size is not zero. The 16-element block (versus MXFP4's 32) incurs approximately 12 percent relative area overhead for Tensor Cores. NVIDIA accepted this trade-off in exchange for accuracy.
+
+When to Use NVFP4 (and When Not To)
+
+Use NVFP4 when: memory pressure limits your deployment, KV-cache capacity constrains context length, or compute-bound prefill dominates your workload. The 3.5x memory reduction enables models that would otherwise require multi-GPU setups. The throughput gain matters most in large-batch and prefill scenarios.
+
+Stick with FP8 when: accuracy confidence and kernel maturity matter more than peak throughput. FP8 has longer production deployment history, more mature kernels, and does not require the four algorithmic interventions that NVFP4 training demands.
+
+The strongest use cases are fitting very large models on workstation hardware, serving long-context workloads via KV cache quantization, and maximizing throughput on compute-bound inference. 
+
+The weakest cases are small-model inference, decode-heavy workloads, and custom kernel development where scale layout incompatibilities create engineering risk.
+
+Overall NVFP4 is a big step forward that Nvidia Blackwell GPUs can take advantage of to reduce memory overhead at a minimal accuracy loss. 

@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""
+article_data_build.py — Macaron-V1-Preview: 749B MoL Agent Model post-trained from GLM5.1
+精简编译模式，基于 Mind Lab 博客。
+"""
+import json, os, sys
+
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+
+DATA = {
+    "title": "Macaron-V1-Preview 发布：749B MoL Agent 模型，基于 GLM5.1 后训练",
+
+    "summary": [
+        {"key": "MoL 架构", "body": "Mixture-of-LoRA：5 个 LoRA 专家（L0-L4）分别负责 Chat、个人生活任务、Coding、A2UI 和 OpenClaw，共享 744B 冻结基座，避免能力冲突"},
+        {"key": "Router 工具", "body": "通过 tool call 显式路由选择专家，L0 发出 change_model 调用切换到对应专家，完成后自动切回 L0，可调试、可服务、可扩展"},
+        {"key": "LivingBench", "body": "自研动态 Agent 评测：融合动态噪声、动态环境和动态用户，任务在过程中可漂移，评判标准是用户世界的最终状态"},
+    ],
+
+    "lead": [
+        "Mind Lab 发布了 **Macaron-V1-Preview**，一个 749B（744B 基座 + 5×1B LoRA）的 Agent 模型，基于 GLM5.1 后训练。该模型采用创新的 **Mixture-of-LoRA（MoL）架构**，将不同能力隔离到独立的 LoRA 空间中，解决了一个模型同时训练多项 Agent 能力时的优化干扰问题。",
+        "MoL 的核心思想是：**将共享相似技能和思维模式的任务聚类到一个 LoRA 中，将技能差异大的任务放在不同的 LoRA 中**。Macaron-V1-Preview 发布了 5 个专家：L0（通用 Chat）、L1（个人生活任务）、L2（Coding）、L3（A2UI 生成式 UI）、L4（OpenClaw 任务）。新能力只需训练并注册一个 LoRA，无需触碰基座或已有专家。",
+    ],
+
+    "sections": [
+        {
+            "type": "h2",
+            "title": "Router 工具：比 MoE 更简单的专家路由方案",
+            "paras": [
+                "与通常训练专用路由模型的 MoE 方法不同，Macaron 将模型选择暴露为**工具调用（tool call）**，直接放在 harness 层。默认入口是 L0，它挂载一个 `change_model` 工具，通过标准 OpenAI 兼容的 tool-call API 暴露。",
+                "路由分为两个阶段：**显式路由**——L0 在收到用户输入时发出 `change_model` 调用，切换到正确的专家；**隐式路由**——专家完成后自动返回 L0，让下一个用户消息从默认入口开始。",
+                "这种设计使路由可调试（在 trace 中直接看到 tool call），可服务（vLLM 的 OpenAI server 模式直接支持），可扩展（新专家只需注册一条元数据）。",
+            ],
+            "figs": [
+                {"src": "fig1.png", "caption": "Macaron-V1-Preview 的 MoL 架构概览：5 个 LoRA 专家共享 744B 冻结基座，通过 Router Tool 切换。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "LivingBench：活的动态 Agent 评测",
+            "paras": [
+                "Macaron LivingBench 是 Mind Lab 自研的 Agent 评测，针对真实生活场景和动态任务设计。与静态基准不同，LivingBench 包含**三层耦合的动态性**：",
+                "**动态噪声**：数据源可能不完整、过时或跨应用矛盾。**动态环境**：餐厅没座位了，路线因天气和交通变了，用户想起了预算限制。**动态用户**：用户的需求是逐步透露的，信任是逐步建立的。",
+                "评测包含三层架构：**数据层**从真实用户需求出发，角色和环境一起生成，矛盾被设计性地嵌入；**沙箱层**运行高保真用户模拟器，包含模块化认知架构（情绪、近期事件、认知负载），基于 agent 是否赢得信任来渐进式共享信息；**评估层**以用户世界的最终状态判断成功，同时按 UX 维度（延迟、侵入性、错误恢复）聚合过程级评分。",
+                "LivingBench 不是冻结的测试集，它与产品紧密耦合，新场景持续从生产中的真实用户需求和 AI-人类摩擦中蒸馏。",
+            ],
+            "figs": [
+                {"src": "fig2.png", "caption": "Macaron LivingBench 的评测架构图：数据层、沙箱层、评估层的三层设计。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "生成式 UI：A2UI 协议与实时推理优化",
+            "paras": [
+                "Macaron 将生成式 UI（Generative UI）视为**个人模型的核心能力**——没有它，模型能回答得好但不能展示、选择、调整或交还控制权。",
+                "模型直接针对 Google 的 **A2UI 协议**训练，并构建了 **A2UI-Bench** 进行评测。评测分三层：协议正确性（A2UI 动作是否格式良好）、任务构建正确性（动作是否构成回答用户请求的 UI）、真实用户体验提升（交互是否比纯文本响应更有效）。此外还有**视觉侧评估**：在真实客户端渲染每个负载，检查溢出的内容、打乱的布局、隐藏的控制等语言模型看不到的问题。",
+                "通过与 **TileRT** 团队的合作，Macaron 将 A2UI 推理速度优化到 **3 ms TPOT** 的动态交互式 UI 生成场景。同时，团队扩展了 A2UI 协议本身，使其更灵活、更通用，能覆盖个人 agent 真正需要的交互面。",
+            ],
+            "figs": [
+                {"src": "fig3.png", "caption": "A2UI 生成式 UI 的示例：模型实时生成交互界面，包含协议正确性和视觉保真度的评估。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "MoL 架构详解：为什么 Chat、Tool Use、Coding 需要不同 LoRA",
+            "paras": [
+                "现代后训练流水线将单个模型推过许多非常不同的任务，并试图将结果能力合并到一组最终权重中。但 Macaron 团队的发现是：**Chat、Tool Use、Reasoning 和 Coding 依赖不同的技能和非常不同的思维链模式。**当这些技能共享同一参数空间时，它们开始冲突：一个方向的改进悄悄损害另一个方向的能力。",
+                "MoL 通过设计解决了这个冲突。每个专家沿着自己的轨迹发展，新能力只需训练并注册一个 LoRA。L0 用于默认 Chat 和通用目的，L1 用于个人生活任务，L2 用于 Coding，L3 用于 A2UI，L4 用于 OpenClaw 任务。",
+                "三明治训练策略（Rollout Routing Replay, R3）保持每个 LoRA 上的 RL 稳定：先冻结基座，只在 LoRA 上进行 RL 训练，通过路由 replay 确保每个专家在其对应的数据上训练而不干扰其他专家。",
+            ],
+            "figs": [
+                {"src": "fig4.png", "caption": "MoL 架构的 LoRA 专家训练流程图：5 个专家各自独立训练，通过 R3 策略保持 RL 稳定。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "个人 Agent 的核心：Chat 质量的四维训练",
+            "paras": [
+                "Macaron 团队认为**伟大的 Chat 是无可还原地主观的**——它由用户的偏好、表达风格、互动习惯以及他们对语言本身的阅读和评价方式塑造。两个用户遇到相同的情绪时刻可能需要完全不同的回应。",
+                "因此团队同时训练了 Chat 的四个耦合维度：**人格**（模型持有自己的立场并分享）、**角色**（在压力、冲突和长时间对话中保持一致的行为）、**思考深度**（以真正角度处理难题，同时保持对其他可能性的开放）、**聊天体验**（真实对话的节奏——知道何时安静，何时用一个好句子而不是三个要点）。",
+                "在 Macaron 的评估中，这些维度在 SWE-Bench Verified 和 Terminal-Bench 2 上保持基础能力不下降的前提下，通过 LivingBench 和 VitaBench 等重点评测验证了 Agent 能力的提升。",
+            ],
+            "figs": [
+                {"src": "fig5.png", "caption": "Macaron 在多个基准上的评测结果：LivingBench、VitaBench、PinchBench 等 Agent 评测的详细得分。"},
+            ],
+        },
+    ],
+
+    "conclusion": [
+        "Macaron-V1-Preview 的发布标志着**个人 Agent 模型在架构设计上的一次重要探索**。MoL 架构通过冻结 744B 基座、在 5 个 1B LoRA 上独立优化不同能力，提供了一个可扩展、资源高效的 Agent 模型基础。",
+        "模型权重已开源在 Hugging Face（mindlab-research/Macaron-V1-Preview-749B），同时提供托管预览环境。团队计划在 V1 正式版中发布 30B 和 200B 的开源版本，以及完整的可复现评测套件。",
+    ],
+
+    "reference_url": "https://macaron.im/mindlab/research/macaron-v1-preview",
+}
+
+# ── 写入 article_data.json ──
+out_path = os.path.join(_article_dir, "article_data.json")
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 {out_path} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA.get('sections', []))} sections)")

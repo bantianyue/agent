@@ -1,0 +1,198 @@
+{
+  "title": "Code Mode 就是一切：为什么 Agent 写代码比调工具更强",
+  "summary": [
+    {
+      "key": "核心论点",
+      "body": "对于大多数 Agent 任务，最好的「工具」是一个小型代码执行环境，而非大量特定工具"
+    },
+    {
+      "key": "效率对比",
+      "body": "Code mode 可节省约 88% 的上下文 token——40 个工具的描述消耗 ~12,000 tokens"
+    },
+    {
+      "key": "浏览器 Agent 启示",
+      "body": "页面交互的最通用工具是 JavaScript，而非逐个定义 extract/click 工具"
+    },
+    {
+      "key": "安全架构",
+      "body": "安全边界应设在生成程序下方——让模型在盒内随便写，盒子物理上禁止越界行为"
+    }
+  ],
+  "lead": [
+    "Agent 的工具箱正在变得越来越臃肿。一个 MCP 服务器暴露 12 个工具，下一个暴露 30 个。",
+    "再加一个 CLI、沙箱、数据库、CRM、浏览器……最终模型把大量上下文花在学习接口上，而不是干活。",
+    "Browserbase 的 Kyle Jeong 提出了一个截然不同的方向：**让 Agent 写代码**。",
+    "本文将解析这一思路的核心逻辑、优势对比，以及 Browserbase 内部 Agent「bb」的实际架构。"
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "工具面在下沉：从显式动词到代码执行",
+      "paras": [
+        "第一代 Agent 需要显式的动词。`search_customer`、`get_invoice`、`click_element`、`query_logs`、`download_file`——每个动作对应一个精心描述的工具。这在模型不可靠、上下文窗口小的时代是合理的：给 Agent 10 个精心描述的工具，希望它在正确顺序中选择正确的那一个。",
+        "**Code mode 彻底改变了这个交互形态。**",
+        "不再为每个动作教模型一个新的 JSON schema。取而代之的是，你在执行环境内暴露一组有类型的能力接口，让模型自己写胶水代码。",
+        "模型可以并行调用 3 个服务、过滤 20MB 的响应再返回上下文、重试失败的分支、将中间结果写入磁盘、用一门它已经烂熟于心的语言组合整个工作流。"
+      ],
+      "figs": [
+        {
+          "src": "fig01.png",
+          "caption": "图 1：示例代码——模型并行调用 CRM、客服工单和数据仓库，组合结果后写入文件"
+        }
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "代码 vs 工具：一个示例",
+      "paras": [
+        "原文给出了一个示例代码块，展示模型如何用 TypeScript 并行查询三个服务，并将结果整合后写入文件："
+      ],
+      "figs": []
+    },
+    {
+      "type": "h3",
+      "title": "代码示例：并行工作流",
+      "paras": [
+        "此代码块来自原文，原样呈现："
+      ]
+    },
+    {
+      "type": "code",
+      "title": "",
+      "paras": [
+        "<pre>// Models would execute something like this \nconst [account, tickets, usage] = await Promise.all([\n  tools.crm.getAccount({ domain }),\n  tools.support.searchTickets({ domain, limit: 50 }),\n  tools.warehouse.query({\n    sql: \"SELECT day, sessions FROM usage WHERE account_id = ?\",\n    params: [accountId],\n  }),\n]);\nconst summary = {\n  account: account.name,\n  openTickets: tickets.filter((ticket) => ticket.status === \"open\"),\n  sevenDaySessions: usage.slice(-7).reduce((sum, row) => sum + row.sessions, 0),\n};\nawait tools.files.writeJson(\"/workspace/account-summary.json\", summary);\nreturn summary;</pre>"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "惊人的上下文节省",
+      "paras": [
+        "对这个工作流的粗略估算显示：**三次工具调用（CRM+客服+数仓）的 schema 定义消耗 ~1,200 tokens，加上返回上下文、中间结果和下一步指令，总计约 2,000 tokens。**",
+        "而同样逻辑用代码实现：类型一次声明 ~250 tokens，执行环境描述 ~50 tokens，生成的代码本身 ~270 tokens。**整体减少约 88% 的上下文消耗。**",
+        "**一次代码执行可以替代一长串工具调用序列。** 更重要的是，调用之间的逻辑变成了确定性的：JavaScript 处理 join、filter、loop 和错误路径，模型只负责决定写什么程序。"
+      ],
+      "figs": [
+        {
+          "src": "fig02.png",
+          "caption": "图 2：上下文消耗对比——Code mode 约节省 88% 的上下文 token"
+        }
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "模型天生就懂代码",
+      "paras": [
+        "每个自定义工具都在强迫模型学新的「行话」。名字是全新的，参数和错误格式也是全新的。模型必须猜测 `customer_search`、`find_customer` 和 `lookup_account` 是同义词还是语义相近但不同的操作。",
+        "**代码给了模型一门它已经熟悉的通用语法。** 类型提供词汇表，编译器捕获格式错误的调用，运行时错误形成反馈循环，文件提供工作记忆。标准编程语言特性提供分支、并发、解析和变换——这些都不需要再走一次模型推理。",
+        "这就是为什么 code mode 与「多加一个工具」有质的不同。模型可以把一个模糊的任务变成临时的、任务专属的工具。它写出所需的精确抽象，使用它，检查结果，然后可以决定丢弃它或保存为可复用的 skill。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "浏览器场景将这个模式展现得更明显",
+      "paras": [
+        "Browserbase 构建浏览器 Agent，因此更早看到这一转变。",
+        "**每个网页本身就已经有一个编程接口。** DOM 描述其结构，浏览器 API 暴露状态，JavaScript 可以查询元素、读取应用数据、派发事件、调用页面本地函数、检查性能条目、再转换结果后返回。",
+        "下面的代码展示了 Agent 如何用一行 `page.evaluate()` 就完成了原本需要一个 `extract_product_cards` 工具的提取任务："
+      ],
+      "figs": []
+    },
+    {
+      "type": "code",
+      "title": "",
+      "paras": [
+        "<pre>const products = await page.evaluate(() => {\n  return Array.from(document.querySelectorAll(\"[data-product]\"))\n    .map((element) => ({\n      name: element.querySelector(\"h2\")?.textContent?.trim(),\n      price: element.querySelector(\"[data-price]\")?.textContent?.trim(),\n      href: (element.querySelector(\"a\") as HTMLAnchorElement | null)?.href,\n    }))\n    .filter((product) => product.name && product.price);\n});</pre>"
+      ]
+    },
+    {
+      "type": "h3",
+      "title": "交互模式同样适用",
+      "paras": [
+        "同一个模式也适用于网页交互。Agent 用代码找到按钮并点击，无需定义一个 `click_add_to_cart` 工具："
+      ],
+      "figs": []
+    },
+    {
+      "type": "code",
+      "title": "",
+      "paras": [
+        "<pre>await page.evaluate(() => {\n  const button = Array.from(document.querySelectorAll(\"button\")).find(\n    (element) => element.textContent?.trim() === \"Add to cart\",\n  );\n  if (!button) throw new Error(\"Add to cart button not found\");\n  button.click();\n});</pre>"
+      ]
+    },
+    {
+      "type": "h2",
+      "paras": [
+        "你怎么可能为每个网站上的每个交互定义一个通用工具？",
+        "**你不需要。让模型写代码，让它用自己需要的方式控制浏览器。**"
+      ],
+      "title": ""
+    },
+    {
+      "type": "h3",
+      "paras": [
+        "当然，JavaScript 在页面内也有局限性：无法控制浏览器 chrome 的每个部分、无法跨域边界、不能安全处理所有凭据、不能保证合成事件行为与用户真实输入一致。视觉界面、canvas、跨域 iframe、下载请求和原生权限弹窗（例如广告弹窗）仍然需要专门的原语。",
+        "**但对绝大部分浏览器工作而言，最通用的浏览器工具就是 JavaScript。**"
+      ],
+      "title": "仍然存在的边界"
+    },
+    {
+      "type": "h2",
+      "title": "一个程序胜过 20 轮对话",
+      "paras": [
+        "Code mode 的优势远不止接口熟悉程度。",
+        "**压缩上下文。** 工具密集型循环往往把每个中间结果都返回给模型。代码可以在返回真正重要的 10 行之前，先过滤、聚合、将大值写入磁盘。",
+        "**组合成本极低。** 一个程序可以同时控制浏览器、查询数仓、规范化 CSV、更新 CRM。控制流全部在 TypeScript 中，不用每次通过模型决策。",
+        "**产生持久化产物。** 一次成功的运行可以变成脚本、测试或 skill。下一次运行从已有的代码出发，而不是从对话记录中重建工作流。",
+        "**自我调试。** 编译器和运行时生成结构化反馈，Agent 利用反馈编辑程序并快速重跑。",
+        "一旦 Agent 发现一个可行的工作流，每次运行都重新推理就是浪费。**保存代码并确定性执行，只在环境变化时调回模型修复。**"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "Browserbase 内部 Agent「bb」的实际应用",
+      "paras": [
+        "Browserbase 的内部 Agent **bb** 横跨工程、支持、销售、市场和运营。它调查浏览器会话、查询内部数据、读取文件、记录功能请求、编写代码。",
+        "他们本可以给它一个巨大的扁平工具目录。但实际设计中，核心接口保持很小。**最重要的能力是 `exec`：对类型化服务接口的 JavaScript 执行。**",
+        "Agent 可以写代码来调用数仓、CRM、支持系统、可观测性堆栈或浏览器。它可以并行请求、在结果进入上下文前进行转换、将大输出移动到文件。Skills 教它某个领域的手册，代码负责执行。",
+        "完整架构（包括沙箱、skill 系统和凭据代理）在[另一篇文章](https://www.browserbase.com/blog/internal-agents)中有详细描述。"
+      ],
+      "figs": [
+        {
+          "src": "fig03.png",
+          "caption": "图 3：bb 的工具箱设计——核心接口很小，`exec` 是中心，skill 提供领域知识，代码负责执行"
+        }
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "沙箱只是一个开始",
+      "paras": [
+        "如果你对安全性有疑虑，这些顾虑是合理的。**任意代码执行的爆炸半径远大于工具调用。** 把它「放进沙箱」是必要条件，但远远不够。",
+        "沙箱限制代码在运行环境内能接触什么。它不能自动阻止 Agent 窃取凭据、调用破坏性 API、向未经批准的域名发送数据、或在部分失败后重复副作用。",
+        "**安全边界必须设在生成程序的下方。**",
+        "让模型在盒子里随便写。然后让盒子在物理上无法执行当前运行未授权的操作。",
+        "这是专用工具最适合的地方。支付操作、权限变更、生产部署等操作应该承载一个小而明确的合约。Code mode 应该编排读和转换表面，而高后果的写操作保持严格管控。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "Agent 即工程师",
+      "paras": [
+        "工具目录会继续增长，但模型面对的表面不应该。",
+        "SDK、MCP 服务器和 CLI 仍然可以提供传输、发现、认证、可观测性和人工访问。对有能力的 Agent 来说，更多的接口将位于可编程执行层之下的位置。",
+        "**Agent 看到类型和代码，运行时看到权限和策略，服务看到普通的经过认证的请求。**",
+        "每一代新模型都在写出更好的代码、调试更长的工作流、更有效地利用执行反馈。我们不应该再把这种能力强行塞进数百个小而陌生的 schema 里。",
+        "给模型一门它已经会说的语言，给这门语言一个安全运行的环境，然后把严格的护栏放在两者之下。",
+        "最好的 Agent 框架会同时使用工具和代码——将少量高后果工具置于通用执行表面之侧。",
+        "**条条大路通罗马，让 Agent 写代码。**"
+      ]
+    }
+  ],
+  "conclusion": [
+    "Code mode 的核心主张是：**不要把 Agent 的能力淹没在数百个微小而陌生的工具 schema 中，而是给它一个代码执行环境，让会写代码的模型写代码。**",
+    "这种方法带来了显著的上下文节省（~88%）、更低的组合成本、更高质量的产物（可持久化为脚本/skill）、以及内置的自我调试能力。",
+    "安全性方面，合理的架构是「在代码层放开，在运行层严控」——让模型在沙箱内随便写，但沙箱物理上禁止越界行为，高后果操作封装为显式合约工具。",
+    "**正如作者所说：条条大路通罗马，让 Agent 写代码。**"
+  ],
+  "reference_url": "https://www.browserbase.com/blog/code-mode-is-all-you-need"
+}

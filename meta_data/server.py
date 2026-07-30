@@ -381,6 +381,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    # 单实例检测：如果端口已被占用，直接退出
+    import socket
+    _sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _sock.settimeout(1)
+    try:
+        _sock.bind(("127.0.0.1", PORT))
+        _sock.close()
+    except OSError:
+        print(f"端口 {PORT} 已被占用，server.py 已在运行，退出")
+        exit(0)
+
     os.chdir(ROOT)
     init_db()
     socketserver.ThreadingTCPServer.allow_reuse_address = True

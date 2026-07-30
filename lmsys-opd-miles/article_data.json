@@ -1,0 +1,100 @@
+{
+  "summary": [
+    {
+      "key": "核心功能",
+      "body": "Miles 框架新增 On-Policy Distillation（OPD）作为一等训练原语，支持纯蒸馏和 RL 增强蒸馏"
+    },
+    {
+      "key": "工程优化",
+      "body": "稀疏逐位置 scoring 避免 O(R²K) 稠密 payload，top-k OPD 支持可配置候选策略"
+    },
+    {
+      "key": "验证结果",
+      "body": "Qwen3.5 自蒸馏实验：纯 OPD 将推理长度从 18.6k 降到 5.5-6.7k token，同时 DAPO 性能从 0.846 提升到 0.895"
+    }
+  ],
+  "lead": [
+    "LMSYS 旗下的开源 RL 训练框架 **Miles** 近期新增了对 **On-Policy Distillation（OPD，在线策略蒸馏）**的重要支持。OPD 现已集成到 Miles 的 rollout 和训练流程中，用户可以让 student 模型仅通过 teacher 指导训练，也可以将 teacher 指导与 GRPO/PPO 风格的强化学习目标结合。",
+    "本文介绍 Miles 中的 OPD 实现、稀疏 teacher-scoring 工作流，以及在单台 **8×NVIDIA B200** 节点上使用 Qwen3.5-35B-A3B 进行的自蒸馏实验。实验表明，无需任何任务特定奖励，OPD 就能将 teacher 模型的短推理行为迁移到 base student 模型，同时保持 student 的原有性能。"
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "OPD 作为 Miles 训练原语",
+      "paras": [
+        "Miles 将 OPD 实现为一种**加性的反向 KL 散度训练信号**，支持两种重要模式：",
+        "**纯蒸馏（Pure distillation）**：student 仅通过 teacher 信号训练，任务奖励设为零，更新完全由逐 token 的学生-教师反向 KL 散度驱动。",
+        "**RL 增强蒸馏（RL-augmented distillation）**：将 OPD 信号与任务奖励和 GRPO/PPO 风格的优势估计器结合，让 student 同时从环境反馈和 teacher 指导中学习。",
+        "Rollout 方面，Miles 通过 SGLang 托管的 teacher 支持 **sampled-token OPD** 和 **top-k OPD**。Sampled-token OPD 中，teacher 对学生实际采样的 token 进行评分；Top-k OPD 则在每个位置保留多个候选 token 及其 logprob，teacher 对这些候选评分，Miles 将其对齐后计算反向 KL 信号。"
+      ],
+      "figs": [
+        {
+          "src": "fig00.png",
+          "caption": "图 1：Miles 与 OPD 工作流概览"
+        }
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "稀疏 Student-to-Teacher Scoring",
+      "paras": [
+        "OPD 中一个关键系统优化是**稀疏 student-to-teacher scoring 工作流**。",
+        "在初始实现中，scoring 工作流需要构建所有位置 top-k token ID 的全局并集，然后让 teacher 在每个响应位置对这个完整并集进行评分。这在长响应推理中会产生 **R × |U| 的稠密中间 payload**（R 是响应长度，U 是全局 token ID 并集），即 **O(R²K)** 的 JSON 传输量，而 OPD 计算只需要 **O(RK)** 的值。",
+        "**新工作流用稀疏逐位置候选 token scoring 替代了稠密全局并集路径。** Miles 向 teacher 发送每个位置的 token ID 表，teacher 只返回每个位置自己候选集所需的 logprob。这使得 teacher 响应 payload 与实际的 OPD 计算对齐——Miles 只携带 OPD 所需的稀疏 R × K 值。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "实验：Qwen3.5 自蒸馏",
+      "paras": [
+        "为了验证实现，团队在单台 **8×NVIDIA B200** 节点上使用 **Qwen3.5-35B-A3B** 进行了一组受控自蒸馏实验。",
+        "**设置：** Teacher 先用 RLVR（基于可验证奖励的强化学习）训练，学会用**大幅缩短的响应**解决 DAPO 数学问题。Student 是对应的 RL 前 base checkpoint。为了隔离 OPD 的效果，使用纯蒸馏模式——任务奖励设为零，训练信号为 top-1 学生-教师反向 KL。",
+        "**对比起点：**",
+        "| 模型 | DAPO 性能 | 平均响应长度 |",
+        "| RLVR teacher | 0.8870 | 6,248 tokens |",
+        "| 初始 base student | 0.8457 | 18,675 tokens |"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "结果：推理缩短，性能不降",
+      "paras": [
+        "实验结果清晰证明了 OPD 能高效传输短推理行为：",
+        "**Held-out DAPO 性能**从 0.8457 **提升到 0.8945**。",
+        "**采样 rollout 长度**在第一次更新后大幅下降，从约 18.6k tokens 稳定到 5.5k–6.7k tokens。",
+        "**逐 token OPD 反向 KL**从约 0.045 降至 0.010，说明 student 分布正在向 teacher 分布靠近。",
+        "由于实验中原始任务奖励为零，行为变化完全由 OPD teacher 信号驱动。**核心结论：纯 OPD 能将 teacher 的高效推理行为迁移到 base student，同时 held-out DAPO 性能不降反升。**"
+      ],
+      "figs": [
+        {
+          "src": "fig01.png",
+          "caption": "图 2：DAPO held-out 性能随评估步数的变化"
+        },
+        {
+          "src": "fig02.png",
+          "caption": "图 3：采样 rollout 长度随 rollout 步数的变化——快速下降"
+        },
+        {
+          "src": "fig03.png",
+          "caption": "图 4：逐 token OPD 反向 KL 随 rollout 步数的变化——持续下降"
+        }
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "对 Miles 的意义",
+      "paras": [
+        "OPD 的实现让 Miles 能够应用在**仅靠可验证任务奖励不够的场景**中。许多实际工作流不仅需要优化任务成功率，还需要优化模型行为——推理长度、响应风格、领域习惯、与参考模型的分布对齐等。",
+        "OPD 还提供了**多 teacher 整合**的路径：不同领域的专家 teacher 可以为不同能力提供指导，让单个 student 模型吸收互补行为。由于 Miles 将 OPD 视为可复用的原语，同一套 student 训练流程可以支持不同的 teacher 和蒸馏方案。",
+        "实现上，**OPD 与 RL 目标可组合**——用户可以运行纯蒸馏，也可以将 OPD 作为辅助信号与 GRPO/PPO 结合。稀疏逐位置 scoring 和 top-k OPD 确保了长响应工作负载下的高效性。"
+      ]
+    }
+  ],
+  "conclusion": [
+    "Miles 现以一等训练特征支持 OPD：包括加性反向 KL 训练、SGLang teacher scoring、top-k OPD、可配置候选和加权策略、以及稀疏逐位置 teacher scoring。",
+    "在单台 8×NVIDIA B200 节点上的 Qwen3.5-35B-A3B 自蒸馏实验中，纯 OPD 将 RLVR teacher 的短推理行为迁移到 base student：DAPO 性能从 0.846 提升到 0.895，采样 rollout 长度从约 18.6k tokens 降至 5.5k–6.7k tokens，逐 token 反向 KL 从 0.045 降至 0.010。",
+    "**这些初步结果表明，纯 OPD 可以在保持强任务性能的同时迁移有用的行为属性。** 更广泛的实验仍在进行中，以验证这一结果在不同模型、任务和师生配置下的泛化能力。"
+  ],
+  "reference_url": "https://www.lmsys.org/blog/2026-07-18-opd-support-in-miles",
+  "title": "Miles 框架新增 OPD 支持：在线策略蒸馏的高效实现"
+}

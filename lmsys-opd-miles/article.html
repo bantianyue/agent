@@ -1,0 +1,98 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心功能</strong>：Miles框架新增On-Policy Distillation（OPD）作为一等训练原语，支持纯蒸馏和RL增强蒸馏<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">工程优化</strong>：稀疏逐位置scoring避免O(R²K) 稠密payload，top-k OPD支持可配置候选策略<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">验证结果</strong>：Qwen3.5自蒸馏实验：纯OPD将推理长度从18.6k降到5.5-6.7k token，同时DAPO性能从0.846提升到0.895</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">LMSYS旗下的开源RL训练框架 <strong>Miles</strong> 近期新增了对 <strong>On-Policy Distillation（OPD，在线策略蒸馏）</strong>的重要支持。OPD现已集成到Miles的rollout和训练流程中，用户可以让student模型仅通过teacher指导训练，也可以将teacher指导与GRPO/PPO风格的强化学习目标结合。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本文介绍Miles中的OPD实现、稀疏teacher-scoring工作流，以及在单台 <strong>8×NVIDIA B200</strong> 节点上使用Qwen3.5-35B-A3B进行的自蒸馏实验。实验表明，无需任何任务特定奖励，OPD就能将teacher模型的短推理行为迁移到base student模型，同时保持student的原有性能。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">OPD作为Miles训练原语</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Miles将OPD实现为一种<strong>加性的反向KL散度训练信号</strong>，支持两种重要模式：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>纯蒸馏（Pure distillation）</strong>：student仅通过teacher信号训练，任务奖励设为零，更新完全由逐token的学生-教师反向KL散度驱动。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>RL增强蒸馏（RL-augmented distillation）</strong>：将OPD信号与任务奖励和GRPO/PPO风格的优势估计器结合，让student同时从环境反馈和teacher指导中学习。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Rollout方面，Miles通过SGLang托管的teacher支持 <strong>sampled-token OPD</strong> 和 <strong>top-k OPD</strong>。Sampled-token OPD中，teacher对学生实际采样的token进行评分；Top-k OPD则在每个位置保留多个候选token及其logprob，teacher对这些候选评分，Miles将其对齐后计算反向KL信号。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig00.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">图1：Miles与OPD工作流概览</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">稀疏Student-to-Teacher Scoring</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">OPD中一个关键系统优化是<strong>稀疏student-to-teacher scoring工作流</strong>。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在初始实现中，scoring工作流需要构建所有位置top-k token ID的全局并集，然后让teacher在每个响应位置对这个完整并集进行评分。这在长响应推理中会产生 <strong>R × |U| 的稠密中间payload</strong>（R是响应长度，U是全局token ID并集），即 <strong>O(R²K)</strong> 的JSON传输量，而OPD计算只需要 <strong>O(RK)</strong> 的值。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>新工作流用稀疏逐位置候选token scoring替代了稠密全局并集路径。</strong> Miles向teacher发送每个位置的token ID表，teacher只返回每个位置自己候选集所需的logprob。这使得teacher响应payload与实际的OPD计算对齐：Miles只携带OPD所需的稀疏R × K值。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">实验：Qwen3.5自蒸馏</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为了验证实现，团队在单台 <strong>8×NVIDIA B200</strong> 节点上使用 <strong>Qwen3.5-35B-A3B</strong> 进行了一组受控自蒸馏实验。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>设置：</strong> Teacher先用RLVR（基于可验证奖励的强化学习）训练，学会用<strong>大幅缩短的响应</strong>解决DAPO数学问题。Student是对应的RL前base checkpoint。为了隔离OPD的效果，使用纯蒸馏模式：任务奖励设为零，训练信号为top-1学生-教师反向KL。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>对比起点：</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">| 模型 | DAPO性能 | 平均响应长度 |</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">| RLVR teacher | 0.8870 | 6,248 tokens |</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">| 初始base student | 0.8457 | 18,675 tokens |</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">结果：推理缩短，性能不降</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">实验结果清晰证明了OPD能高效传输短推理行为：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Held-out DAPO性能</strong>从0.8457 <strong>提升到0.8945</strong>。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>采样rollout长度</strong>在第一次更新后大幅下降，从约18.6k tokens稳定到5.5k–6.7k tokens。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>逐token OPD反向KL</strong>从约0.045降至0.010，说明student分布正在向teacher分布靠近。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">由于实验中原始任务奖励为零，行为变化完全由OPD teacher信号驱动。<strong>核心结论：纯OPD能将teacher的高效推理行为迁移到base student，同时held-out DAPO性能不降反升。</strong></p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">图2：DAPO held-out性能随评估步数的变化</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">图3：采样rollout长度随rollout步数的变化：快速下降</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:8px;">图4：逐token OPD反向KL随rollout步数的变化：持续下降</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">对Miles的意义</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">OPD的实现让Miles能够应用在<strong>仅靠可验证任务奖励不够的场景</strong>中。许多实际工作流不仅需要优化任务成功率，还需要优化模型行为：推理长度、响应风格、领域习惯、与参考模型的分布对齐等。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">OPD还提供了<strong>多teacher整合</strong>的路径：不同领域的专家teacher可以为不同能力提供指导，让单个student模型吸收互补行为。由于Miles将OPD视为可复用的原语，同一套student训练流程可以支持不同的teacher和蒸馏方案。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">实现上，<strong>OPD与RL目标可组合</strong>：用户可以运行纯蒸馏，也可以将OPD作为辅助信号与GRPO/PPO结合。稀疏逐位置scoring和top-k OPD确保了长响应工作负载下的高效性。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+Miles现以一等训练特征支持OPD：包括加性反向KL训练、SGLang teacher scoring、top-k OPD、可配置候选和加权策略、以及稀疏逐位置teacher scoring。<br  /><br  />在单台8×NVIDIA B200节点上的Qwen3.5-35B-A3B自蒸馏实验中，纯OPD将RLVR teacher的短推理行为迁移到base student：DAPO性能从0.846提升到0.895，采样rollout长度从约18.6k tokens降至5.5k–6.7k tokens，逐token反向KL从0.045降至0.010。<br  /><br  /><strong>这些初步结果表明，纯OPD可以在保持强任务性能的同时迁移有用的行为属性。</strong> 更广泛的实验仍在进行中，以验证这一结果在不同模型、任务和师生配置下的泛化能力。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/L6krDtAzuCiX4y2KNYYvfQ" target="_blank" data-linktype="2">万亿参数RL实战：如何用28个H200节点训GLM-5</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/pCRjhls1WFaiRglb2MtjBw" target="_blank" data-linktype="2">蚂蚁CausalMix: 将数据混合从超参搜索转换成因果推断</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://www.lmsys.org/blog/2026-07-18-opd-support-in-miles</span></p>
+</section>

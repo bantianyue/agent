@@ -1,0 +1,172 @@
+TL;DR: For a large class of agent tasks, the best "tool" is a small code-execution surface. Let the model write ordinary code against typed capabilities, then enforce security below the model instead of wrapping every action in another bespoke tool call.
+
+## Your agent probably needs fewer tools
+
+We keep giving agents bigger toolboxes, when in reality they just need better tools.
+
+One MCP server exposes 12 tools. The next exposes 30. Add a CLI, a sandbox, a database, a CRM, a browser, and suddenly the model spends a meaningful part of its context learning interfaces instead of doing the job.
+
+Meanwhile, frontier models have spent years getting frighteningly good at one interface already: **code**.
+
+## The tool surface is moving down a layer
+
+The first generation of agents needed explicit verbs.
+
+`search_customer`. `get_invoice`. `click_element`. `query_logs`. `download_file`.
+
+That made sense; Models were unreliable, context windows were smaller, and every allowed action needed tight guardrails. If you wanted an agent to complete a 10-step workflow, you gave it 10 carefully described tools and hoped it picked the right one in the right order.
+
+"Code mode" changes the shape of that interface.
+
+Instead of teaching the model a new JSON schema for every action, you expose a small set of typed capabilities inside an execution environment. The model writes the glue itself.
+
+It can call 3 services in parallel, filter a 20 MB response before it reaches context, retry one failed branch, write an intermediate result to disk, and compose the whole workflow in a language it already knows by heart.
+
+```
+// Models would execute something like this 
+const [account, tickets, usage] = await Promise.all([
+  tools.crm.getAccount({ domain }),
+  tools.support.searchTickets({ domain, limit: 50 }),
+  tools.warehouse.query({
+    sql: "SELECT day, sessions FROM usage WHERE account_id = ?",
+    params: [accountId],
+  }),
+]);
+const summary = {
+  account: account.name,
+  openTickets: tickets.filter((ticket) => ticket.status === "open"),
+  sevenDaySessions: usage.slice(-7).reduce((sum, row) => sum + row.sessions, 0),
+};
+await tools.files.writeJson("/workspace/account-summary.json", summary);
+return summary;
+```
+
+### The context difference
+
+For this workflow, a rough estimate looks like this: [FIGURE: context comparison chart]
+
+**Roughly 88% less context.** Scale the toolbox to 40 always-loaded tools and schemas alone can consume ~12,000 tokens before the agent starts working.
+
+One single code execution can replace a long sequence of tool calls. More importantly, the logic between calls becomes deterministic. JavaScript handles the join, filter, loop, and error path. The model only has to decide what program to write.
+
+## Models already speak code
+
+Every custom tool asks the model to learn new slang.
+
+The name is completely new, so are the arguments and error shape. The model has to infer whether `customer_search`, `find_customer`, and `lookup_account` are synonyms or subtly different operations. Multiply that across every vendor and every internal service.
+
+Code gives the model a familiar grammar for all of them.
+
+Types provide the vocabulary, the compiler catches malformed calls, runtime errors create a feedback loop, files provide working memory, and standard programming language features provide branching, concurrency, parsing, and transformations without another trip through the model.
+
+**An individual tool call is a decision, a program is a decision tree.**
+
+This is why code mode feels qualitatively different from adding one more tool. The model can turn a fuzzy task into a temporary, task-specific tool. It writes the exact abstraction it needs, uses it, inspects the result, and can decide to throw it away or saves it as a reusable skill.
+
+## Browsers make the pattern more obvious
+
+At Browserbase, we're seeing this shift even earlier because we build browser agents.
+
+Every single web page already has a programming interface. The DOM describes its structure, Browser APIs expose state, and JavaScript can query elements, read application data, dispatch events, call page-local functions, inspect perf. entries, and transform results before returning them.
+
+`page.evaluate()` runs JavaScript in the page context, where `window`, `document`, and the application's own runtime are available.
+
+```
+const products = await page.evaluate(() => {
+  return Array.from(document.querySelectorAll("[data-product]"))
+    .map((element) => ({
+      name: element.querySelector("h2")?.textContent?.trim(),
+      price: element.querySelector("[data-price]")?.textContent?.trim(),
+      href: (element.querySelector("a") as HTMLAnchorElement | null)?.href,
+    }))
+    .filter((product) => product.name && product.price);
+});
+```
+
+The agent does not need an `extract_product_cards` tool. It writes the extraction logic (and the extraction logic ONLY) the page requires.
+
+The same pattern works for interaction:
+
+```
+await page.evaluate(() => {
+  const button = Array.from(document.querySelectorAll("button")).find(
+    (element) => element.textContent?.trim() === "Add to cart",
+  );
+  if (!button) throw new Error("Add to cart button not found");
+  button.click();
+});
+```
+
+How on earth do you define a universal tool for every interaction on every single website?
+
+You don't, just let the model's write code to control the browser in the exact way they need.
+
+There are still limits. The JS inside the page cannot control every piece of browser chrome, bypass origin boundaries, safely handle every credential, or guarantee that synthetic events behave like trusted user input. Visual interfaces, canvases, cross-origin frames, downloads, and native permission prompts (ie. ad popups) still benefit from specialized primitives.
+
+**For a huge share of browser work, the most general browser tool is JavaScript.**
+
+## 1 program beats 20 turns
+
+Code mode improves more than interface familiarity.
+
+### It compresses context
+
+A tool-heavy loop often returns every intermediate result to the model. Code can filter, aggregate, and write large values to disk before returning the 10 lines that matter.
+
+### It makes composition cheap
+
+A program can control a browser, query a warehouse, normalize a CSV, and update a CRM in one execution. The control flow lives in TypeScript instead of being re-decided one model turn at a time.
+
+### It creates durable artifacts
+
+A successful run can become a script, test, or skill. The next run starts from working code instead of reconstructing the workflow from a transcript.
+
+### It debugs itself
+
+Compilers and runtimes produce structured feedback, which the agent uses to edit the program and rerun it in a tight loop.
+
+The progression looks something like: Once an agent discovers a working workflow, paying for fresh reasoning on every run is waste. Save the code then run it deterministically. Bring the model back for repair when the environment changes.
+
+## We use this pattern inside our internal agent BB
+
+Our internal agent, **bb**, works across engineering, support, sales, marketing, and operations. It investigates browser sessions, queries internal data, reads files, logs feature requests, and writes code.
+
+We could have given it a giant flat catalog of tools. Instead, its core surface stays small. The most important capability is `exec`: JS execution against typed service interfaces.
+
+The agent can write code to call a warehouse, CRM, support system, observability stack, or browser. It can parallelize requests, transform results before they enter context, and move large outputs to files. Skills teach it the playbook for a domain, while code handles the execution.
+
+I wrote about the full architecture, including the sandbox, skill system, and credential proxy, [here](https://www.browserbase.com/blog/internal-agents).
+
+This design also makes new integrations cheaper. We define a typed capability once, place it behind the execution boundary, and add a small skill describing when to use it. The agent writes the task-specific composition.
+
+The toolbox grows without making the top-level harness grow at the same time. [FIGURE: tool composition diagram]
+
+## The sandbox is only the start
+
+If you had security doubts, they are valid. Arbitrary code execution creates a much larger blast radius than a tool call. "Running it in a sandbox" is necessary, but nowhere near sufficient.
+
+A sandbox limits what code can touch in the execution environment. It doesn't automatically prevent the agent from exfiltrating a credential, calling a destructive API, sending data to an unapproved domain, or repeating a side effect after a partial failure.
+
+The safety boundary has to sit below the generated program.
+
+Let the model write anything inside the box. Then make the box physically incapable of doing what the run is not authorized to do.
+
+This is where specialized tools belong. Things like a payment action, permission change, or prod deploy should carry a small but explicit contract. Code mode should orchestrate read and transformation surfaces, while high-consequence writes stay tightly governed.
+
+## Agents as engineers
+
+Tool catalogs will keep growing, but the model-facing surface shouldn't.
+
+SDKs, MCP servers, and CLIs can still provide transport, discovery, authentication, observability, and human access. For capable agents, more of those interfaces will sit underneath a programmable execution layer.
+
+The agent will see types and code, and the runtime will see permissions and policy. The service will see a normal authenticated request.
+
+Each new generation of models writes better code, can debug longer workflows, and uses execution feedback more effectively. We should stop forcing that capability through hundreds of tiny, unfamiliar schemas.
+
+Give the model a language it already speaks, give the language a safe place to run, then put the strict guardrails beneath both.
+
+The best agent harnesses will use both tools and code, pairing a small number of high-consequence tools beside a general execution surface.
+
+All roads lead to Rome, let the Agents write code.
+
+→ Kyle

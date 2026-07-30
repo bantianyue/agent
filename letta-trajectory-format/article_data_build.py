@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""
+article_data_build.py — Trajectory: A Standard Format for Agent Experience Data
+精简编译模式，基于 Letta Blog。
+"""
+import json, os, sys
+
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+
+DATA = {
+    "title": "Trajectory：Letta 发布的标准化 Agent 经验数据格式，跨 Harness 统一",
+
+    "summary": [
+        {"key": "统一格式", "body": "Trajectory 是一种标准化、token 高效的 Agent 经验数据格式，兼容 Claude Code、Codex、Letta Code 等主流 harness"},
+        {"key": "Token 压缩", "body": "相比原生会话格式可减少约 5 倍 token 消耗，保留 Agent 理解会话所需的最小信息量"},
+        {"key": "跨 Harness 学习", "body": "Agent 可以通过 Trajectory 格式读取其他 harness 的会话历史，实现跨平台的记忆和学习"},
+    ],
+
+    "lead": [
+        "Agent 今天面临一个根本问题：**它们无法从过去的经验中学习来改进未来的表现**。更糟糕的是，Agent 的经验分散在不同的 harness 中——Claude Code、Codex、Letta Code——每个都有自己独特的日志格式。",
+        "Letta 团队推出了 [`trajectory`](https://github.com/letta-ai/trajectory) 开源包，定义了一种**跨 harness 统一的 Agent 经验数据格式**。目标是让 Agent 能够像人类阅读日志一样，跨平台读取和理解过去的会话，从中提取记忆、更新系统提示词、优化技能。",
+    ],
+
+    "sections": [
+        {
+            "type": "h2",
+            "title": "为什么需要统一的经验格式",
+            "paras": [
+                "当前 Agent 的学习主要在 token 空间中进行：Agent 自己处理会话记录来学习系统提示词、技能甚至 harness 级别的修改。因此，理想的经验数据格式需要满足两个条件：**跨 harness 标准化**（避免格式差异带来的干扰），以及 **token 高效**（让 Agent 尽可能高效地处理经验）。",
+                "现有的方案如 Harbor 的 ATIF 格式针对的是全保真回放和基准测试——它们保留每步的 token 指标、结构化工具载荷和未截断的输出。但当经验的消费者是 Agent 本身时，数据应该以 token 高效的方式呈现，只包含理解会话所需的最小信息量。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "Trajectory 格式",
+            "paras": [
+                "Trajectory 是一个标准化的记录列表，包含五种角色类型：",
+                "**meta**：元数据，记录产生该轨迹的 harness 信息（来源、工作目录、git 分支、模型）。",
+                "**user**：用户消息，包含内容和时间戳。",
+                "**reasoning**：Agent 的推理过程（当 harness 暴露时）。",
+                "**assistant**：Agent 调用工具的动作，包含工具名称和参数。",
+                "**tool**：工具执行结果，通过 tool_call_id 关联到对应的 assistant 消息。",
+                "格式设计的关键原则是：**只保留理解 Agent 经验所需的信息**。它丢弃了 harness 的簿记数据（逐行信封、重复载荷、UI 事件流、加密推理 blob），并可选地截断长工具结果。",
+            ],
+            "figs": [
+                {"src": "trajectory-normalization.png", "caption": "Trajectory 格式的标准化过程：从不同 Harness 的原生格式统一转换为标准化的轨迹记录。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "Token 效率：约 5 倍压缩",
+            "paras": [
+                "在真实编码会话上的测试显示，Trajectory 格式相比原生会话格式实现了显著的 token 压缩：",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "Claude Code 会话示例",
+            "paras": [
+                "原生格式 951,115 tokens → Trajectory（默认截断）170,934 tokens，**压缩比 5.6×**。Harbor ATIF 格式仅压缩到 835,187 tokens（1.1×），远不及 Trajectory 的 token 效率。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "Codex 会话示例",
+            "paras": [
+                "原生格式 3,919,385 tokens → Trajectory（默认截断）727,516 tokens，**压缩比 5.4×**。Harbor ATIF 格式压缩到 2,371,530 tokens（1.7×）。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "如何使用：列举与转换",
+            "paras": [
+                "Trajectory 包提供了两个核心 API：`listTrajectories()` 用于发现本地任何 harness 的会话，`normalizeTranscript()` 用于将原生会话格式转换为标准化的轨迹记录。这两个 API 跨 harness 统一，开发者可以用同一套代码处理 Claude Code、Codex 和 Letta Code 的会话数据。",
+                "可以聚合多个 harness 的数据进行索引，或接入记忆 Agent 进行处理。通过分页 API 可以遍历所有历史会话，建立一个跨 harness 的统一经验数据库。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "Letta 的实践：跨 Harness 学习与做梦",
+            "paras": [
+                "Letta 团队已经在自己的产品中应用了 Trajectory 格式：",
+                "**跨 Harness 学习**：Letta Code 现在使用 Trajectory 格式读取 Claude Code 和 Codex 的会话数据，用来初始化 Agent 记忆。Agent 可以搜索 Trajectory 文件来查找历史会话中的信息，即使这些会话来自其他 harness。",
+                "**「做梦」（Dreaming）**：Letta Code 的后台「做梦」进程会审查最近的会话，将 Agent 学到的内容整合到持久记忆中。有了 Trajectory 格式，做梦不再局限于 Letta Code 自己的会话——它可以选择和标准化机器上每个 harness 的会话，让在 Claude Code 或 Codex 中学到的经验同样影响 Agent 的记忆。",
+            ],
+        },
+    ],
+
+    "conclusion": [
+        "Trajectory 解决了一个看似简单但实际影响深远的问题：**Agent 的经验数据需要一种统一的、Agent 友好的格式**。",
+        "当 Agent 跨 Harness 学习和记忆成为现实，每个工具的使用经验都不会被浪费——Claude Code 中发现的最佳实践可以提升 Letta Code 中的表现，Codex 中的调试经验可以防止未来的 Agent 重复同样的错误。这种跨平台的记忆共享，可能是 Agent 系统从「单次会话工具」进化为「持续学习伙伴」的关键一步。",
+    ],
+    "reference_url": "https://www.letta.com/blog/trajectory/",
+}
+
+# ========== 写入逻辑 ==========
+os.makedirs(_article_dir, exist_ok=True)
+out = os.path.join(_article_dir, "article_data.json")
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 {out} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA['sections'])} sections)")

@@ -1,0 +1,620 @@
+
+Bridging the Gap Between Latent and Explicit Reasoning with Looped Transformers
+Ying Fan1∗Anej Svete2Kangwook Lee3,4
+1Microsoft Research2ETH Zürich3KRAFTON4Ludo Robotics
+Abstract
+Language models typically reason via explicit chain-of-thought (CoT), generating intermediate steps token-by-token.
+Latent CoT offers an alternative: it performs multi-step reasoning in the model’s hidden states, replacing decoded tokens with continuous representations for greater efficiency.
+However, existing latent CoT methods underperform explicit CoT beyond11B parameters, and the gap widens with scale.Looped, or recurrent-depth, Transformers, which reuse their weights to increase computation depth without adding parameters, are a natural fit for latent reasoning.
+We therefore ask whether looped Transformers can bridge this gap.
+We answer affirmatively with a simple recipe: alooped padded Transformerthat processesKKlatent blocks in parallel forRRiterations, with a cross-entropy loss on each latent position’s gold CoT-step token, similar to explicit CoT supervision.
+We instantiate it asLOTUS(LoopedTransformers with parallel supervision on latents).
+LOTUS is, to our knowledge, the first latent-CoT method to bridge the gap to explicit CoT at the 3B scale, while cutting thought-phase latency by2.5×2.5\times–6.9×6.9\timesfrom compact math expressions to natural language.
+Projecting LOTUS’s post-loop latents through the base LM head recovers the gold reasoning steps and even surfaces alternative valid intermediate steps, evidence that its latent space is interpretable and CoT-aligned.
+Ablations confirm that both the looped backbone and the parallel supervision on gold CoT tokens are essential. Code is available athttps://github.com/yingfan-bot/lotus.
+
+1IntroductionFigure 1:LOTUS bridges the latent–explicit CoT accuracy gap across scale on GSM8K test.(a)Math-expression CoT across model sizes: prior latent methods fall further below explicit CoT as the backbone grows, whereas LOTUS tracks the explicit-CoT ceiling while cutting thought-phase latency by2.5×2.5\timesat 3B.(b)Natural-language CoT at 3B: LOTUS matches explicit CoT and outperforms the latent baselines while reducing thought-phase latency by6.9×6.9\times.
+
+Scaling inference compute, i.e., letting a model “think” before it answers, has become a dominant lever for increasing language model capabilities, with stronger performance now coming from longer reasoning chains rather than from model size alone(DeepSeek-AI,2025; OpenAI,2026).
+Chain-of-thought (CoT) reasoning(Weiet al.,2022), where the model emits intermediate reasoning steps, drives this trend.
+However, since each token must be decoded sequentially, generating a CoT of lengthN{N}takesN{N}sequential model evaluations, making reasoning costly.
+
+Latent reasoningaims to achieve the same at a fraction of the cost: it carries out the intermediate computation in continuous hidden states rather than decoded tokens, condensing many steps into fewer model evaluations.
+On small backbones such asGPT-2(Radfordet al.,), latent methods(Haoet al.,2025; Shenet al.,2025; Weiet al.,2025)already match CoT accuracy.
+Yet at the scales where CoT matters most, the promise breaks down: beyond11B parameters, no existing latent method matches explicit CoT on math reasoning, and the gap widens with model size(Weiet al.,2025).
+
+We identify two common issues in latent methods.(P1)Sequential generation: methods like Coconut(Haoet al.,2025), CODI(Shenet al.,2025), and SIM-CoT(Weiet al.,2025)produce latent thoughts in a pure autoregressive way, so the number of sequential forward passes still scales linearly with the number of latent tokens, keeping CoT’s sequential generation bottleneck while giving up the readable intermediate steps that explicit CoT provides.(P2)Lack of CoT grounding: Explicit CoT gives every reasoning step a direct, position-aligned token target.
+Without similarly grounded supervision, latent traces can drift from meaningful computation and destabilize training at scale(Liet al.,2026b; Zouet al.,2026).
+Methods like PCCoT(Wuet al.,2025)and KaVa(Kuzinaet al.,2026)mitigate the sequential bottleneck with Jacobi-style iteration but still ground their latents through indirect signals that fall short of CoT-aligned target, such as hidden-state distillation from a teacher CoT model or a compressed teacher key–value cache.
+
+An architecture that resolves both issues at once would refine its latents in a few parallel passes rather than one autoregressive step per token, and would ground them in a target as direct as explicit CoT’s.Looped, or recurrent-depth, Transformers are a natural fit for the first requirement: they reuse the same weights across iterations to add computation depth without extra parameters, a design that recent work scales to billion-parameter pretraining(Geipinget al.,2025a; Zhuet al.,2025c; Zenget al.,2026b).
+On parallelizable problems, they can provably reach a solution in fewer model iterations CoT(Saunshiet al.,2025); for example, LPTs solve graph reachability in a logarithmic number of iterations(Merrill and Sabharwal,2025a)—an exponential improvement over sequential latent methods.
+This raises the question we study:can a looped Transformer bridge the gap to explicit CoT while reasoning in fewer sequential steps?
+
+We find that pairing a looped padded backbone with simple supervision on the gold CoT tokens is surprisingly effective. We presentLOTUS(LoopedTransformers with parallel supervision on latents).
+LOTUS placesK{K}learnable padded latent blocks ofc{c}tokens each between the question and answer, and processes the sequence with the base modelR{R}times. An explicit CoT of lengthN{N}is thus processed inR≪N{R}\!\ll\!{N}iterations of dense parallel computation rather thanN{N}sequential per-token generations, which addressesP1.
+To addressP2, LOTUS supervises the latents directly through the base model’s own LM head: a cross-entropy loss aligns each latent position to its corresponding gold CoT-step token, all in parallel. The supervision target can also be routed through an auxiliary decoder that is conditioned on all latents and scores the gold CoT tokens under teacher forcing, which we instantiate on the identical looped backbone as LOTUS-aux. Both routings reach near-CoT accuracy at the 3B scale.
+LOTUS is, to our knowledge, the first latent reasoning method at theLlama-3.2-3B-Instructscale to bridge the in-domain gap to explicit CoT on GSM8k (Figure˜1), while surpassing CoT on the out-of-domain average and cutting thinking time by2.5×\mathbf{2.5\times}. On a more verbose natural-language CoT stress test, LOTUS is on par with explicit CoT in accuracy while reducing thought-phase latency by6.9×\mathbf{6.9\times}.
+LOTUS’s latent space is also interpretable: reading the post-loop latents through the base LM head recovers the gold reasoning steps, and even surfaces alternative valid intermediate steps the model was never trained on, evidence that the latents are genuinely CoT-aligned rather than opaque.
+We summarize our contributions as follows:
+•
+
+We propose the recipe of looped padded Transformers with parallel cross-entropy supervision on gold CoT tokens. The method uses a padded latent prefix (Section˜3.1), refines it with a looped backbone (Section˜3.2), and supervises the post-loop latents through the base LM head (Section˜3.3). We also instantiate LOTUS-aux, which routes the same latent supervision through an auxiliary decoder used only during training (Section˜3.4).
+•
+
+We show that LOTUS is, to our knowledge, the first latent reasoning method to bridge the latent–explicit CoT gap on math reasoning at the 3B scale: onLlama-3.2-3B-Instruct, it brings the GSM8K test accuracy to within11point of explicit CoT and surpasses explicit CoT on the out-of-domain math average. It also cuts thought-phase latency by2.5×2.5\timesin the math-expression setting and by6.9×6.9\timesin the natural-language CoT stress test (Section˜4.2).
+•
+
+Ablations show that both the parallel supervision design (Section˜4.3.1) and the looped architecture design (with enough block width and loop depth,Section˜4.3.2) are important. The direct LM-head routing is robust across scale, whereas the auxiliary decoder routing matches it at 3B but degrades on smaller backbones (Section˜4.2).
+•
+
+LOTUS yields a transparent, CoT-aligned latent space. Reading the post-loop latents recovers most of the gold intermediate tokens (Section˜5.1) while assigning nontrivial mass to unseen-but-valid alternatives (Section˜5.2). A loss ablation shows that the CoT supervision anchors the readout to the gold chain, while answer supervision helps select the coherent joint (Section˜5.3).
+
+2Preliminaries
+
+A glossary of all notation is provided inTable˜12inAppendix˜B.
+
+Explicit CoT.
+
+Alanguage model(LM)f𝜽{f_{{{{\bm{\theta}}}}}}can map a questionQ{{Q}}to an answerA{{A}}via multi-step reasoning: generatingS{S}intermediate stepsT1,…,TS{T_{1}},\ldots,{T_{{S}}}before the answer, whereTi{T_{{i}}}(i∈{1,…,S}{i}\in\{1,\dots,{S}\}) may span multiple tokens. We writeN{N}for the total number of CoT tokens across allS{S}steps.
+Standard CoT supervision trains all CoT tokens in parallel via teacher forcing, but at inference time the tokens must be generated sequentially, increasing latency.
+We refer to this setup asExplicitCoT.
+
+Latent reasoning
+
+replaces decoded CoT tokens with multi-step inference in the model’s hidden states, which are commonly referred to as latent thoughts.Zhuet al.(2025a)show latent thoughts carry strictly more information than discrete tokens: linearly many latent steps in a Transformer can solve graph reachability that would otherwise require quadratically many explicit CoT steps.
+
+Looped padded Transformers.
+
+Alooped Transformer(Dehghaniet al.,2019)appliesf𝜽{f_{{{{\bm{\theta}}}}}}’s backbone multiple times, gaining depth without adding parameters.Paddingthe input with extra learnable tokens(Goyalet al.,2024; Pfauet al.,2024)adds parallel computation to each iteration. The combination of the two createslooped padded Transformers(LPTs), which are more capable than either component alone.
+
+Prior latent reasoning methods.
+
+We contrast LOTUS against the most closely related latent reasoning methods, which we summarize here (details inAppendix˜C).Coconut(Haoet al.,2025)replaces each CoT step with ac{c}latent tokens generated autoregressively from the previous one, under a curriculum, and supervises only the answer.
+CODI(Shenet al.,2025)keeps this autoregressive latent decoding but adds a distillation target, aligning one designated latent’s hidden state with the corresponding hidden state of a teacher CoT model.
+SIM-CoT(Weiet al.,2025)instead trains an auxiliary autoregressive decoder that aligns each latent with its CoT token.
+PCCoT(Wuet al.,2025)and KaVa(Kuzinaet al.,2026)drop the autoregressive nature, refining a fixed budget of latent tokens in parallel over a few Jacobi iterations; they ground the latents indirectly, through CODI-style distillation and a compressed teacher key–value cache, respectively.
+We refer the reader toAppendix˜Afor an extended discussion of related work on latent reasoning and looped Transformers, and toAppendix˜Cfor a detailed comparison with the related latent reasoning methods.
+
+3Method
+
+Although LPTs are expressive enough to carry out efficient parallel reasoning, without structured supervision they often fail to generalize out-of-distribution(Altabaaet al.,2025).
+This motivates our central design choice: grounding the latent computation directly in the gold CoT tokens.
+We turn a standard LM into a latent reasoner with a recipe built from two ingredients:(i)apadded latent prefix processed by an LPT, and(ii)parallel cross-entropy supervision on exact gold CoT tokens.We instantiate this recipe asLOTUS(LoopedTransformers with parallel supervision on latents,Figure˜2), which reads the supervision directly through the base model’s LM head. We also study LOTUS-aux (Figure˜3), which instead routes the supervision through an auxiliary decoder.
+We detail the padded latent prefix inSection˜3.1, the looped computation inSection˜3.2, and LOTUS’s objective—together with an analysis of why it works (Section˜3.3.2)—inSection˜3.3, then introduce the LOTUS-aux variant inSection˜3.4.Figure 2:LOTUS architecture. (a) Looped forward: the looped LMf𝜽{f_{{{{\bm{\theta}}}}}}is iteratedR{R}times over[⟨BoT⟩,⟨lat⟩​⋯​⟨lat⟩,⟨EoT⟩][{\langle\texttt{BoT}\rangle},{\langle\texttt{lat}\rangle}\!\cdots\!{\langle\texttt{lat}\rangle},{\langle\texttt{EoT}\rangle}], producing post-loop hidden states𝒉(R){{{\bm{h}}}^{({R})}}at the latent positions, andℒstep{\mathcal{L}_{\mathrm{step}}}supervises these states through the LM head, in parallel, against the corresponding CoT tokensTi,jT_{i,j}. (b) Final forward: the post-loop latents𝒉(R){{{\bm{h}}}^{({R})}}are inserted at the latent positions and the answer suffixA{{A}}is supervised by next-token prediction (ℒans{\mathcal{L}_{\mathrm{ans}}}) through the LM head.
+
+3.1Padded Latent Prefix
+
+For a questionQ{{Q}},S{S}chain-of-thought (CoT) stepsT1,…,TS{T_{1}},\dots,{T_{{S}}}, and answerA=(A1,…,A|A|){{A}}=(A_{1},\dots,A_{|{{A}}|})(withA|A|=⟨EoS⟩A_{|{{A}}|}=\langle\text{EoS}\rangle), we construct an input𝒙=[Q,⟨BoT⟩,⟨lat⟩​⋯​⟨lat⟩⏟block​1​(c​tokens),⋯,⟨lat⟩​⋯​⟨lat⟩⏟block​K​(c​tokens),⟨EoT⟩,A],{\bm{x}}\;=\;\big[\,{{Q}},\;{\langle\texttt{BoT}\rangle},\;\underbrace{{\langle\texttt{lat}\rangle}\cdots{\langle\texttt{lat}\rangle}}_{\text{block }1\;({c}\text{ tokens})},\;\cdots,\;\underbrace{{\langle\texttt{lat}\rangle}\cdots{\langle\texttt{lat}\rangle}}_{\text{block }{K}\;({c}\text{ tokens})},\;{\langle\texttt{EoT}\rangle},\;{{A}}\,\big],(1)
+where⟨lat⟩{\langle\texttt{lat}\rangle}is a learnable latent token shared across positions, and⟨BoT⟩,⟨EoT⟩{\langle\texttt{BoT}\rangle},{\langle\texttt{EoT}\rangle}are learnable special tokens that delimit the latent region. The block budgetK{K}and per-block widthc{c}are fixed hyperparameters, so the latent region containsK​c{K}{c}latent tokens plus the two delimiters. The latent prefix follows prior work on padding or pause tokens(Goyalet al.,2024; Pfauet al.,2024), with each blocki{i}intended to encode the latent representation of CoT stepTi{T_{{i}}},i∈{1,…,K}{i}\in\{1,\dots,{K}\}.
+Unlike the example-dependent step countS{S}ofSection˜2, the block budgetK{K}is fixed across examples; we choose it to cover the step counts in our data, so thatK≥S{K}\geq{S}on almost all examples and each block can align to one CoT step (Appendix˜D).
+
+3.2Looped Latent Computation
+
+Letf𝜽{f_{{{{\bm{\theta}}}}}}be the base causal LM and𝑬∈ℝK​c×d{{{{\bm{E}}}}}\in{{\mathbb{R}}}^{{K}{c}\times{d}}the learnable latent embeddings, indexed as𝑬i,j{{{{\bm{E}}}}}_{{i},j}for blocki∈{1,…,K}{i}\in\{1,\dots,{K}\}and intra-block positionj∈{1,…,c}j\in\{1,\dots,{c}\}.
+LOTUS first runs a single forward pass over the prefix[Q,⟨BoT⟩][{{Q}},{\langle\texttt{BoT}\rangle}]to populate a KV cache𝒞pre{\mathcal{C}}_{\text{pre}}, which is reused throughout training and inference without recomputation. It then iteratesf𝜽{f_{{{{\bm{\theta}}}}}}forR{R}iterations, each refining the latent embeddings while attending to𝒞pre{\mathcal{C}}_{\text{pre}}(the trailing⟨EoT⟩{\langle\texttt{EoT}\rangle}and the answer suffixA{{A}}do not enter the loop). Writing𝒉(t)∈ℝK​c×d{{{\bm{h}}}^{({t})}}\in{{\mathbb{R}}}^{{K}{c}\times{d}}for the hidden states at the latent positions after iterationt{t}, with entries𝒉i,j(t){{{\bm{h}}}^{({t})}_{{i},j}}:𝒉(0)\displaystyle{{{\bm{h}}}^{(0)}}=f𝜽(𝑬|𝒞pre),\displaystyle=\;{f_{{{{\bm{\theta}}}}}}\!\left({{{{\bm{E}}}}}\;\middle|\;{\mathcal{C}}_{\text{pre}}\right),(2)𝒉(t)\displaystyle{{{\bm{h}}}^{({t})}}=f𝜽(𝑬+𝒉(t−1)|𝒞pre),t=1,…,R.\displaystyle=\;{f_{{{{\bm{\theta}}}}}}\!\left({{{{\bm{E}}}}}+{{{\bm{h}}}^{({t}-1)}}\;\middle|\;{\mathcal{C}}_{\text{pre}}\right),\quad{t}=1,\dots,{R}.
+where the brackets denote subsequence concatenation. This is a finite-unroll, input-injected recurrence over a looped
+Transformer(Dehghaniet al.,2019; Fanet al.,2025),
+with a fixed unroll depthR{R}and gradients
+propagated through allR{R}iterations.
+
+3.3Direct Step-Aligned Supervision
+
+3.3.1Objective
+
+Step CoT supervision loss.
+
+AfterR{R}iterations of looping (Section˜3.2), we supervise each latent position(i,j)({i},j)in the grid with the corresponding CoT step token. LetTi=(Ti,1,…,Ti,c){T_{{i}}}=({T_{{i},1}},\dots,{T_{{i},{c}}})be the tokenized CoT stepi{i}padded or truncated toc{c}tokens. We apply a single batched cross-entropy that directly aligns each block to its target step:ℒstep=1Nstep​∑i=1K∑j=1cCE​(fhead​(𝒉i,j(R)),Ti,j),{\mathcal{L}_{\mathrm{step}}}\;=\;\frac{1}{{N_{\mathrm{step}}}}\sum_{{i}=1}^{{K}}\sum_{j=1}^{{c}}{\mathrm{CE}}\!\left({f_{\mathrm{head}}}({{{\bm{h}}}^{({R})}_{{i},j}}),\,{T_{{i},j}}\right),(3)
+wherefhead{f_{\mathrm{head}}}is the LM head andNstep=∑i|Ti|{N_{\mathrm{step}}}=\sum_{{i}}|{T_{{i}}}|is the total number of supervised (non-padding) CoT tokens.111Padding tokens used to pad CoT steps to lengthc{c}are ignored by the cross-entropy (and excluded fromNstep{N_{\mathrm{step}}}).
+
+Answer supervision loss.
+
+ℒans{\mathcal{L}_{\mathrm{ans}}}is computed in a separatefinal forwardoff𝜽{f_{{{{\bm{\theta}}}}}}that reuses the prefix cache𝒞pre{\mathcal{C}}_{\text{pre}}and inserts the post-loop latent hidden states𝒉(R){{{\bm{h}}}^{({R})}}at the latent rows:𝒛=f𝜽([⟨EoT⟩,A]|[𝒞pre,𝒉(R)]),{{{\bm{z}}}}\;=\;{f_{{{{\bm{\theta}}}}}}\!\left([{\langle\texttt{EoT}\rangle},\,{{A}}]\;\middle|\;[{\mathcal{C}}_{\text{pre}},\,{{{\bm{h}}}^{({R})}}]\right),(4)
+where𝒛m∈ℝd{{{\bm{z}}}}_{m}\in{{\mathbb{R}}}^{{d}}collects the resulting hidden state at each answer-suffix positionm∈{0,1,…,|A|−1}m\in\{0,1,\dots,|{{A}}|-1\}(m=0m=0being the trailing⟨EoT⟩{\langle\texttt{EoT}\rangle}position, which predictsA1A_{1}). We denote hidden states here by𝒛{{{\bm{z}}}}, distinct from the looped forward latents𝒉(t){{{\bm{h}}}^{({t})}}, to mark that they come from different sources. Applying the LM headfhead{f_{\mathrm{head}}}, standard next-token cross-entropy on the answer suffix gives:ℒans=1|A|​∑m=0|A|−1CE​(fhead​(𝒛m),Am+1).{\mathcal{L}_{\mathrm{ans}}}\;=\;\frac{1}{|{{A}}|}\sum_{m=0}^{|{{A}}|-1}{\mathrm{CE}}\!\left({f_{\mathrm{head}}}({{{\bm{z}}}}_{m}),\,A_{m+1}\right).(5)
+Given a step supervision weightλstep{\lambda_{\mathrm{step}}}, the full objective isℒ=ℒans+λstep​ℒstep.{\mathcal{L}}\;=\;{\mathcal{L}_{\mathrm{ans}}}+{\lambda_{\mathrm{step}}}\,{\mathcal{L}_{\mathrm{step}}}.(6)
+
+Key properties of the objective.
+
+The supervision inEquation˜6has three properties:(i)it isdirect: the per-block targetTi{T_{{i}}}is scored through the same LM head used to produce the answer;(ii)it isparallel: allK{K}blocks are supervised simultaneously; and(iii)it ispost-loop: the readout reads𝒉(R){{\bm{h}}}^{({R})}after the final iteration, rather than at every iteration.We ablate the design choice inSection˜4.3, and compare against prior latent reasoning methods inAppendix˜C.
+
+Inference.
+
+At inference, LOTUS runs the looped forward and then decodes the answer. We compute the KV cache of the questionQ{{Q}}once, iterate the loopR{R}times to obtain the post-loop latents𝒉(R){{{\bm{h}}}^{({R})}}, and then decode the answerA{{A}}autoregressively through the base LM head while conditioning on those latents (same asFigure˜2only without computing the losses). The reasoning is carried entirely by the parallel latent blocks, so the only sequential decoding is over the short answer suffix, which is the source of the latency gains reported inSection˜4.2.
+
+No latent decoding for answer generation.
+
+Note that the latent reasoning steps are never read out during answer generation. They are projected to the token space through the LM head only to align them with CoT reasoning during training withℒstep{\mathcal{L}_{\mathrm{step}}}.
+The answer is always generated from the latent hidden states, both in the final-forwardℒans{\mathcal{L}_{\mathrm{ans}}}pass (Equation˜4) and at inference.
+
+3.3.2Roles ofℒstep{\mathcal{L}_{\mathrm{step}}}andℒans{\mathcal{L}_{\mathrm{ans}}}
+
+A natural worry about the LOTUS objective (Equation˜6) is that it supervises each latent positionindependently:Equation˜3scores every gold CoT token in parallel, with no autoregressive factorization of the chain.
+Why should independent per-position targets train a model that produces a globally coherent answer?
+We give a lens that resolves this, distinguishing the role of the two losses and explaining why both are needed.
+
+Parallel chain likelihood.
+
+The step lossℒstep{\mathcal{L}_{\mathrm{step}}}supervises aparallel chain likelihood(PCL) over the readout positions.
+Maximizing the per-position probabilityp𝜽​(Ti,j∣Q)p_{{{{\bm{\theta}}}}}({T_{{i},j}}\mid{Q})of each gold token at its latent position induces the chain likelihoodp𝜽PCL​(T∣Q)=∏i=1K∏j=1cp𝜽​(Ti,j∣Q),p_{{{{\bm{\theta}}}}}^{\mathrm{PCL}}({T}\mid{Q})=\prod_{{i}=1}^{{K}}\prod_{j=1}^{{c}}p_{{{{\bm{\theta}}}}}({T_{{i},j}}\mid{Q}),(7)
+rather than the autoregressive conditionalsp𝜽​(Ti,j∣Q,T<i,Ti,<j)p_{{{{\bm{\theta}}}}}({T_{{i},j}}\mid{Q},{T}_{<{i}},{T_{{i},<j}}).
+The factorization treats the readout as conditionally independent across positions, but the latent states themselves are not independent: the looped Transformer computes themjointlyover the padded workspace, so the dependence the factorization drops is carried by the shared latent computation rather than by the loss.
+
+Complementary roles.
+
+This view makes the division of labor between the two losses precise. First, the support inclusionsupp​(q​(T∣Q))⊆∏i=1K∏j=1csupp​(q​(Ti,j∣Q))\mathrm{supp}\!\left({q}({T}\mid{Q})\right)\;\subseteq\;\prod_{{i}=1}^{{K}}\prod_{j=1}^{{c}}\mathrm{supp}\!\left({q}({T_{{i},j}}\mid{Q})\right)(8)
+shows that every gold chain lies inside the Cartesian product of per-position gold token supports.222Minimizingℒstep{\mathcal{L}_{\mathrm{step}}}, the cross-entropy to these marginals, pulls the model’s PCL toward that product, i.e. minimizesKL(∏i,jq(Ti,j∣Q)∥p𝜽PCL(T∣Q))\mathrm{KL}\big(\prod_{{i},j}{q}({T_{{i},j}}\mid{Q})\,\big\|\,p_{{{{\bm{\theta}}}}}^{\mathrm{PCL}}({T}\mid{Q})\big).Soℒstep{\mathcal{L}_{\mathrm{step}}}plays asupport-coveragerole: it makes each position place mass on the right gold tokens, without needing to reproduce the joint distribution—which LOTUS never samples, since the answer is decoded directly from the jointly computed latent states.
+Second,ℒans{\mathcal{L}_{\mathrm{ans}}}supplies the globalselectionpressure that PCL alone lacks: because the answer is trained while conditioning on the entire latent configuration, gradients favor jointly computed hidden states that can actually support the correct answer.
+The two losses are thus complementary by construction—coverage fromℒstep{\mathcal{L}_{\mathrm{step}}}, joint selection fromℒans{\mathcal{L}_{\mathrm{ans}}}—which is exactly the behavior we verify empirically inSection˜5.3, where dropping either loss degrades the gold chain likelihood.
+
+To further probe how LOTUS compares to modeling the autoregressive chain likelihood, we introduce an autoregressive decoder variant inSection˜3.4and compare the results inSection˜4.2.
+
+3.4LOTUS-aux: An Auxiliary Decoder Variant
+
+An alternative route for CoT supervision explored in existing work is autoregressive chain likelihood: an auxiliary autoregressive decoder conditioned on the latent blocks scores the CoT tokens
+under teacher forcing. This creates a trade-off: in exchange for modeling the chain autoregressively, CoT supervision no longer flows directly through the answer-generating base LM head, and teacher forcing introduces an extra train/inference mismatch.
+
+We instantiate this routing on our looped padded backbone as LOTUS-aux. LOTUS-aux reuses the same looped forward and final forward as LOTUS (Figure˜2). The only difference is the supervision in the looped forward, which is routed through an auxiliary decoder rather than read directly through the base LM head. The auxiliary decoder mirrors SIM-CoT(Weiet al.,2025), but instead of generating latents autoregressively and supervising a single latent per CoT step, LOTUS-aux produces allK{K}latent blocks in parallel through the looped backbone and supervises a fullc{c}-token block per step. We describe this routing below.Figure 3:LOTUS-aux supervision at loop iterationttfor blocktt. The auxiliary decodergϕ{g_{\phi}}only replaces the base LM head supervision inFigure˜2(a).
+
+Latent supervision via the auxiliary decoder.
+
+As shown in Figure3, the auxiliary decodergϕ{g_{\phi}}is an extra decoder model that, at each loop iterationtt, reads latent block𝒉(t)t{{{\bm{h}}}^{(t)}}_{t}(we select blocki=ti=tat iterationtt, thec{c}post-loop latents of thett-th block) as ac{c}-token prefix and predicts the gold CoT stepTt=(Tt,1,…,Tt,|Tt|){T_{t}}=(T_{t,1},\dots,T_{t,\lvert{T_{t}}\rvert})under teacher forcing, where|Tt|\lvert{T_{t}}\rvertis the step’s token length. Let𝒛~(t)=(𝒛~0(t),…,𝒛~|Tt|−1(t)){\widetilde{{{\bm{z}}}}^{(t)}}=({\widetilde{{{\bm{z}}}}^{(t)}_{0}},\dots,{\widetilde{{{\bm{z}}}}^{(t)}_{\lvert{T_{t}}\rvert-1}})denote the output hidden states at each input CoT positionm∈{0,1,…,|Tt|−1}m\in\{0,1,\dots,\lvert{T_{t}}\rvert-1\}(m=0m{=}0being the last latent position𝒉t,c(t){{{\bm{h}}}^{(t)}_{t,{c}}}, which predictsTt,1T_{t,1}, andm>0m{>}0the gold tokenTt,mT_{t,m}). Mirroring the final-forward pass ofEquation˜4, we generate𝒛~(t){\widetilde{{{\bm{z}}}}^{(t)}}with𝒛~(t)=gϕ([𝒉t,c(t),Tt,1,…,Tt,|Tt|−1]|𝒉t,1(t),…,𝒉t,c−1(t)),{\widetilde{{{\bm{z}}}}^{(t)}}\;=\;{g_{\phi}}\!\left([\,{{{\bm{h}}}^{(t)}_{t,{c}}},\;T_{t,1},\dots,T_{t,\lvert{T_{t}}\rvert-1}\,]\;\middle|\;{{{\bm{h}}}^{(t)}_{t,1}},\dots,{{{\bm{h}}}^{(t)}_{t,{c}-1}}\right),(9)
+where the firstc−1{c}-1latent positions𝒉t,1(t),…,𝒉t,c−1(t){{{\bm{h}}}^{(t)}_{t,1}},\dots,{{{\bm{h}}}^{(t)}_{t,{c}-1}}are the conditioning prefix. The teacher-forced next-token cross-entropy on the gold CoT gives:ℒstepaux=1Nstep​∑t=1K∑m=0|Tt|−1CE​(ghead​(𝒛~m(t)),Tt,m+1),{\mathcal{L}_{\mathrm{step}}^{\mathrm{aux}}}\;=\;\frac{1}{N_{\text{step}}}\sum_{t=1}^{{K}}\sum_{m=0}^{\lvert{T_{t}}\rvert-1}{\mathrm{CE}}\!\left({g_{\mathrm{head}}}({\widetilde{{{\bm{z}}}}^{(t)}_{m}}),\;T_{t,m+1}\right),(10)
+whereNstep=∑t=1K|Tt|N_{\text{step}}=\sum_{t=1}^{{K}}\lvert{T_{t}}\rvertis the total number of supervised CoT tokens. The supervision itself remains parallel: under teacher forcing the gold prefix is fed at every position, so all CoT positions are scored in a single forward pass with no sequential generation.
+In other words, the autoregressive factorization affects only the loss, not the computation.
+
+Per-iteration supervision and the full objective.
+
+Equation10reads blocki=ti=tat iterationtt(per-iteration, rather than at the final iterationRR). We validate this choice inSection˜4.3.1, where per-iteration readouts outperform reading all blocks at the final iterationR{R}for the auxiliary decoder routing. The answer lossℒans{\mathcal{L}_{\mathrm{ans}}}fromSection˜3.3is unchanged, so the full LOTUS-aux objective isℒaux=ℒans+λstep​ℒstepaux{\mathcal{L}^{\mathrm{aux}}}={\mathcal{L}_{\mathrm{ans}}}+{\lambda_{\mathrm{step}}}\,{\mathcal{L}_{\mathrm{step}}^{\mathrm{aux}}}. In our experimentsgϕ{g_{\phi}}is initialized with a copy of the base LM and trained together with the base LM. Training and architectural details are inAppendix˜D.
+
+Inference.
+
+The auxiliary decodergϕ{g_{\phi}}is used only at training time. At inference, LOTUS-aux generates the final answer autoregressively from the post-loop latents exactly as LOTUS does (Figure˜2(b)), so the inference efficiency gain of LOTUS also applies to LOTUS-aux.
+
+4Experiments
+
+Our experiments investigate four questions: how accurate LOTUS is, how efficient it is at inference, how much each design choice contributes, and whether its latent space is interpretable and CoT-aligned.Section˜4.1introduces the experimental setup,Section˜4.2presents accuracy and latency results against explicit CoT and prior latent baselines,Section˜4.3ablates the supervision design, latent block widthc{c}, loop depthR{R}, and inference-time robustness to changingc{c}andR{R}without retraining, andSection˜5analyzes the learned latent representations.
+Full training and evaluation details are inAppendix˜D.
+
+4.1Setup
+
+Datasets and backbones.
+
+Following SIM-CoT(Weiet al.,2025), we train on GSM8k-Aug(Denget al.,2023)with 385k training samples and report in-domain accuracy on the GSM8K test set(Cobbeet al.,2021), together with three out-of-domain benchmarks: GSM-Hard, MultiArith, and SVAMP. We additionally train on a natural-language version of GSM8K-Aug(Wuet al.,2025)as an efficiency stress test, where each reasoning step is a full-sentence rationale rather than a compact math expression. We use three backbones in increasing size:GPT-2(124M)(Radfordet al.,),Llama-3.2-1B-Instruct, andLlama-3.2-3B-Instruct(Grattafioriet al.,2024).
+
+Methods.
+
+We reportLOTUS(K=6{K}{=}6blocks ofc=25{c}{=}25tokens on theLlamabackbones,c=13{c}{=}13onGPT-2, andR=6{R}{=}6looped iterations)333K{K}is chosen to cover the target maximum CoT step count: GSM8K solutions have at most six steps for99%99\%of examples, soK=6{K}{=}6assigns one block per step and falls back to autoregressive completion otherwise.andLOTUS + CODI, which adds CODI’s single-position distillation loss. The auxiliary decoder variants LOTUS-aux and LOTUS-aux + CODI (Section˜3.4) share the same configuration. We compare withExplicit CoTandNo-CoTas reference, and withCODI(Shenet al.,2025)andCODI + SIM-CoT(Weiet al.,2025)for each backbone, which share the sequential latent reasoning budget (R=6{R}{=}6) with LOTUS and differ only in the number of latent tokens per step. Latent methods that use a different sequential compute budget: Coconut(Haoet al.,2025), Coconut + SIM-CoT (with 10 sequentially generated latent thought in total), and the parallel-latent methods PCCoT(Wuet al.,2025)and KaVa(Kuzinaet al.,2026)(with 3 sequential steps and 24 latent tokens in total) are compared separately inTable˜13andTable˜14(Appendix˜C).
+
+4.2Main Results
+
+LOTUS matches explicit CoT at scale, where prior latent methods fall behind.
+
+LOTUS scales well fromGPT-2toLlama-3.2-3B-Instruct(Table˜1). Prior latent methods match explicit CoT at small scale but fall behind as the backbone grows: CODI + SIM-CoT is level with explicit CoT atGPT-2(42.642.6vs.42.742.7) yet trails it by9.29.2points at 3B, and KaVa(Kuzinaet al.,2026)widens similarly (1.91.9to5.85.8points,Table˜13). LOTUS instead stays within∼1.5{\sim}1.5points of explicit CoT in-domain at each scale, and its gap does not widen. While the smaller-scale results are rather clustered, the decisive comparison is atLlama-3.2-3B-Instruct: LOTUS surpasses explicit CoT on the out-of-domain average and brings the in-domain GSM8K gap to within1.51.5points. LOTUS + CODI further tightens it to within11point.
+
+The two routings match at 3B, but only direct LOTUS stays robust at smaller scales.
+
+At 3B, LOTUS-aux performs comparably to LOTUS and well above the CODI + SIM-CoT baseline, which uses an auxiliary decoder of the same size as the base LM. The gains therefore come from the looped padded backbone with parallel CoT supervision, regardless of the routing. This parity holds only at 3B: at smaller scales LOTUS-aux degrades, whereas direct LM-head supervision (LOTUS) stays robust across scale.Table 1:Main results across three backbones (GPT-2,Llama-3.2-1B-Instruct,Llama-3.2-3B-Instruct).
+Accuracy (%) on in-domain (GSM8K) and out-of-domain
+(GSM-Hard, MultiArith, SVAMP) benchmarks. All methods are trained on
+GSM8k-Aug(Denget al.,2023).
+“Average” is the mean
+over the three out-of-domain datasets. Results are reported as
+mean±\pmstd across33seeds. The 3B block is the main scaling comparison: LOTUS nearly closes the in-domain gap to the explicit CoT reference while leading the out-of-domain average.In-domainOut-of-domainBackboneMethodGSM8K↑\uparrowGSM-Hard↑\uparrowMultiArith↑\uparrowSVAMP↑\uparrowAverage↑\uparrowGPT-2Explicit CoT42.742.79.09.085.085.041.641.645.245.2No-CoT19.119.14.34.341.141.116.416.420.620.6CODI42.042.09.49.493.0\mathbf{93.0}41.741.748.0¯\underline{48.0}CODI + SIM-CoT42.642.69.49.492.8¯\underline{92.8}42.6\mathbf{42.6}48.3\mathbf{48.3}LOTUS44.1±0.7\mathbf{44.1{\scriptstyle\,\pm\,0.7}}9.5±0.2¯\underline{9.5{\scriptstyle\,\pm\,0.2}}92.4±1.492.4{\scriptstyle\,\pm\,1.4}41.8±0.9¯\underline{41.8{\scriptstyle\,\pm\,0.9}}47.947.9LOTUS + CODI43.1±1.2¯\underline{43.1{\scriptstyle\,\pm\,1.2}}9.8±0.5\mathbf{9.8{\scriptstyle\,\pm\,0.5}}90.0±4.390.0{\scriptstyle\,\pm\,4.3}41.6±0.441.6{\scriptstyle\,\pm\,0.4}47.147.1LOTUS-aux35.5±4.535.5{\scriptstyle\,\pm\,4.5}8.2±1.28.2{\scriptstyle\,\pm\,1.2}82.0±2.882.0{\scriptstyle\,\pm\,2.8}35.5±1.535.5{\scriptstyle\,\pm\,1.5}41.941.9LOTUS-aux + CODI38.1±3.738.1{\scriptstyle\,\pm\,3.7}8.6±0.58.6{\scriptstyle\,\pm\,0.5}85.7±4.185.7{\scriptstyle\,\pm\,4.1}36.1±2.636.1{\scriptstyle\,\pm\,2.6}43.543.5Llama3.2-1BExplicit CoT58.458.413.913.996.796.765.765.758.858.8No-CoT28.828.86.36.350.350.326.726.727.827.8CODI52.752.711.911.995.095.060.660.655.855.8CODI + SIM-CoT56.156.112.7\mathbf{12.7}96.296.261.5\mathbf{61.5}56.856.8LOTUS57.3±0.2¯\underline{57.3{\scriptstyle\,\pm\,0.2}}12.7±0.5\mathbf{12.7{\scriptstyle\,\pm\,0.5}}98.3±2.0¯\underline{98.3{\scriptstyle\,\pm\,2.0}}60.9±0.660.9{\scriptstyle\,\pm\,0.6}57.3¯\underline{57.3}LOTUS + CODI58.3±0.8\mathbf{58.3{\scriptstyle\,\pm\,0.8}}12.7±0.2\mathbf{12.7{\scriptstyle\,\pm\,0.2}}98.9±0.6\mathbf{98.9{\scriptstyle\,\pm\,0.6}}61.1±0.9¯\underline{61.1{\scriptstyle\,\pm\,0.9}}57.6\mathbf{57.6}LOTUS-aux55.4±0.255.4{\scriptstyle\,\pm\,0.2}12.6±0.212.6{\scriptstyle\,\pm\,0.2}97.8±0.097.8{\scriptstyle\,\pm\,0.0}58.0±0.658.0{\scriptstyle\,\pm\,0.6}56.156.1LOTUS-aux + CODI50.6±4.750.6{\scriptstyle\,\pm\,4.7}11.4±0.811.4{\scriptstyle\,\pm\,0.8}95.7±1.295.7{\scriptstyle\,\pm\,1.2}55.0±3.655.0{\scriptstyle\,\pm\,3.6}54.054.0Llama3.2-3BExplicit CoT71.571.517.017.098.398.371.071.062.162.1No-CoT38.338.39.59.588.788.752.952.950.450.4CODI60.860.814.314.398.798.773.373.362.162.1CODI + SIM-CoT62.362.314.614.698.898.874.9¯\underline{74.9}62.862.8LOTUS70.0±0.970.0{\scriptstyle\,\pm\,0.9}16.0±0.516.0{\scriptstyle\,\pm\,0.5}99.9±0.3\mathbf{99.9{\scriptstyle\,\pm\,0.3}}75.7±0.8\mathbf{75.7{\scriptstyle\,\pm\,0.8}}63.9±0.3\mathbf{63.9{\scriptstyle\,\pm\,0.3}}LOTUS + CODI70.6±0.2\mathbf{70.6{\scriptstyle\,\pm\,0.2}}16.3±0.316.3{\scriptstyle\,\pm\,0.3}99.6±0.399.6{\scriptstyle\,\pm\,0.3}74.4±1.474.4{\scriptstyle\,\pm\,1.4}63.4±0.363.4{\scriptstyle\,\pm\,0.3}LOTUS-aux69.9±0.969.9{\scriptstyle\,\pm\,0.9}16.6±0.5\mathbf{16.6{\scriptstyle\,\pm\,0.5}}99.8±0.3¯\underline{99.8{\scriptstyle\,\pm\,0.3}}74.6±2.274.6{\scriptstyle\,\pm\,2.2}63.7±0.8¯\underline{63.7{\scriptstyle\,\pm\,0.8}}LOTUS-aux + CODI70.5±0.7¯\underline{70.5{\scriptstyle\,\pm\,0.7}}16.5±0.4¯\underline{16.5{\scriptstyle\,\pm\,0.4}}99.4±0.699.4{\scriptstyle\,\pm\,0.6}73.9±0.173.9{\scriptstyle\,\pm\,0.1}63.3±0.463.3{\scriptstyle\,\pm\,0.4}
+
+LOTUS reasons2.5×2.5\timesfaster than explicit CoT.
+
+The thought phase dominates the difference between methods (Table˜2): CoT decodes its chain autoregressively, while LOTUS compresses the same “thinking” intoR{R}parallel latent iterations, making its thought2.5×\mathbf{2.5\times}faster than CoT and1.2×\mathbf{1.2\times}faster than SIM-CoT444We measure latency on a single NVIDIA H100 NVL at batch size11with greedy decoding, split into query-prefill, thought, and answer phases. SIM-CoT and CODI both replace each explicit CoT step with a single latent token decoded sequentially. SIM-CoT additionally adds LoRA adapters (rank128128) on top of CODI, which inflates every phase.(2.1×\mathbf{2.1\times}faster than CoT in total555LOTUS’s prefill and answer phases are just the standard LM operations (Figure2), so they match explicit CoT inTable2(16.716.7vs.15.915.9ms and31.531.5vs.29.529.5ms); the looped latent thought is the only phase that differs.).
+CODI is faster than LOTUS in the thought phase because it decodes only a single latent per step, rather than LOTUS’sK​c=150{K}{c}\!=\!150parallel positions, but comes at the cost of accuracy. LOTUS is nonetheless only modestly slower (133133vs.8888ms) because it consumes all positions in parallel. The inference-time width sweep inTable˜8further separates sequential depth from parallel width: withR{R}fixed, increasing the latent prefix from66to300300positions changes thought latency by only3030ms.Table 2:Per-phase inference latency (average ms/example) on the GSM8K test set withLlama-3.2-3B-Instructbackbone.PhaseLOTUSExplicit CoTSIM-CoTCODIQuery prefill16.716.715.915.929.529.516.516.5Thought133.0133.0338.8338.8162.7162.788.288.2Answer31.531.529.529.559.259.230.430.4Sum181.2181.2384.2384.2251.4251.4135.1135.1
+
+Speedup grows to6.9×6.9\timeson natural-language CoT traces.
+
+The main GSM8K-Aug setting uses compact math-expression steps, while natural-language CoT requires explicit models to decode much longer reasoning in natural language. In the 3B natural-language CoT stress test (Table˜3), LOTUS is on par with explicit CoT in accuracy (68.1368.13vs.68.4168.41) while cutting thought-phase latency from963.6963.6ms to140.8140.8ms with a6.9×6.9\timesspeedup. On this natural-language setting, LOTUS (68.13%68.13\%GSM8K) far exceeds the latent baselines PCCoT (47.6%47.6\%), CODI (55.9%55.9\%), and KaVa (60.0%60.0\%) reported byKuzinaet al.(2026)(Table˜14), staying within variance of explicit CoT (Table˜3).Table 3:Natural-language CoT stress test on GSM8K with theLlama-3.2-3B-Instruct. LOTUS is statistically on par with explicit CoT accuracy while reducing thought-phase latency by6.9×6.9\times.MethodGSM8K acc. (%)↑\uparrowThought ms/example↓\downarrowExplicit CoT68.41±0.5968.41\pm 0.59963.6963.6(1.0×1.0\times)LOTUS68.13±0.7768.13\pm 0.77140.8\mathbf{140.8}(6.9×\mathbf{6.9\times})
+
+4.3Ablation Studies
+
+We ablate each component of LOTUS to isolate its contribution. Unless noted,
+all ablations useLlama-3.2-3B-Instruct, evaluate on
+GSM8K test set(Cobbeet al.,2021).
+
+4.3.1Latent Supervision Design
+
+LOTUS supervises the latent blocks via a direct readout (ℒstep{\mathcal{L}_{\mathrm{step}}}) of thepost-looplatents𝒉(R){{{\bm{h}}}^{({R})}}through the main LM headfhead{f_{\mathrm{head}}}. We compare it against five alternatives, holding the rest fixed (K=R=6{K}{=}{R}{=}6,c=25{c}{=}25, also keepingℒans{\mathcal{L}_{\mathrm{ans}}}):(i)no latent supervision (onlyℒans{\mathcal{L}_{\mathrm{ans}}});(ii)CODI(Shenet al.,2025), distilling a single pre-answer latent onto the teacher CoT model’s hidden state;(iii)LOTUS (per-iter), reading𝒉(t){{{\bm{h}}}^{(t)}}throughfhead{f_{\mathrm{head}}}at each iterationttrather than the post-loop𝒉(R){{{\bm{h}}}^{({R})}};(iv)LOTUS-aux, reading𝒉(t){{{\bm{h}}}^{(t)}}through a separate auxiliary decodergϕ{g_{\phi}}per iteration (default,Section˜3.4); and(v)LOTUS-aux (post-loop), reading𝒉(R){{{\bm{h}}}^{({R})}}throughgϕ{g_{\phi}}instead.
+
+Both the looped backbone and latent supervision are beneficial.
+
+Without any latent supervision, the looped backbone alone (63.3%63.3\%) already exceeds CODI + SIM-CoT (62.3%62.3\%,Table˜1), which uses a single latent per step; the looped padded backbone is thus already beneficial on its own.
+Every supervised variant exceeds both no latent supervision and CODI-only, confirming that the gold CoT supervision contributes to the gain.
+LOTUS (post-loop direct,70.0%70.0\%) matches the best LOTUS-aux schedule (per-iter,69.9%69.9\%).
+The direct (LOTUS) and auxiliary decoder (LOTUS-aux) routings thus perform comparably at their best schedule.
+
+The best supervision schedule differs between LOTUS and LOTUS-aux.
+
+LOTUS performs best with post-loop readout (70.0%70.0\%vs.68.2%68.2\%per-iter), which lets the early latent blocks refine fully until the end of the loop.
+LOTUS-aux instead works best with per-iteration readout (69.9%69.9\%vs.68.4%68.4\%post-loop), which shortens the gradient path—possibly helpful because its extra decoder already lengthens it.Table 4:Latent supervision design comparison.Latent supervisionRouted viaTest acc. (%)↑\uparrowNone (onlyℒans{\mathcal{L}_{\mathrm{ans}}})—63.363.3CODI only—64.464.4LOTUS(per-iter supervision of𝒉(t){{{\bm{h}}}^{(t)}})main LM head68.268.2LOTUS(post-loop supervision of𝒉(R){{{\bm{h}}}^{({R})}}, default)main LM head70.0\mathbf{70.0}LOTUS-aux(per-iter supervision of𝒉(t){{{\bm{h}}}^{(t)}}, default)auxiliary decoder69.969.9LOTUS-aux(post-loop supervision of𝒉(R){{{\bm{h}}}^{({R})}})auxiliary decoder68.468.4
+
+4.3.2Looped Architecture DesignTable 5:Training-time looped iterationsR{R}(separate models, latent prefix fixed atK​c=150Kc{=}150).
+
+R{R}GSM8K acc. (%)↑\uparrow2214.614.63323.223.24452.652.65568.168.16670.070.0Table 6:Inference-time looped iterationsR{R}(reusing the model trained atR=6{R}{=}6).
+
+R{R}GSM8K acc. (%)↑\uparrow1122.722.72240.040.03355.055.04463.563.55568.768.76670.070.07769.369.3
+
+Latent token budget per blockcc.
+
+We train separate models atc∈{1,5,10,25,30}c\in\{1,5,10,25,30\}to measure how the per-block budget affects accuracy, holdingK=6K{=}6fixed (Table˜7).
+Accuracy rises sharply fromc=1c{=}1(49.7%49.7\%) toc=5c{=}5(67.5%67.5\%), then climbs only marginally before plateauing withc=25c{=}25andc=30c{=}30tied at70.0%70.0\%.
+A single token per CoT step is too narrow for the direct-readout supervision, but moderate widths suffice.
+
+Inference-timecc.
+
+We sweep the inference-time budgetc∈{1,5,10,25,30,50}c\in\{1,5,10,25,30,50\}on a single checkpoint trained atc=25c{=}25(Table˜8). Reducingccbelow the trained value
+hurts accuracy (−19-19points atc=1c{=}1,−11-11points atc=5c{=}5,−6-6points atc=10c{=}10),
+while exceeding it slightly helps before plateauing (70.5%70.5\%at bothc=30c{=}30andc=50c{=}50).
+Thought-phase latency increases only∼30{\sim}30ms
+(111111to141141ms) asccvaries by50×50\times, since the latents are processed in parallel within the fixedR=6{R}{=}6sequential steps.
+This contrasts with autoregressive CoT, whose latency grows linearly in the number of thought tokens.Table 7:Trained variants of LOTUS with different latent token budgets per blockcc.cc(tokens / block)Total latent positions (K​cKc)Test acc. (%)116649.749.755303067.567.51010606068.468.4252515015070.070.0303018018070.070.0Table 8:Inference-time latent budget adaptationccon LOTUS trained withc=25c{=}25.Inference-timeccK​cKcGSM8K acc. (%)↑\uparrowAvg. thought (ms / example)↓\downarrow116651.451.4110.9110.955303059.459.4120.3120.31010606064.264.2127.0127.0252515015070.070.0133.0133.0303018018070.570.5136.0136.0505030030070.570.5141.2141.2
+
+Looped iterationsR{R}.
+
+We train separate models forR∈{2,…,6}{R}\in\{2,\dots,6\}, fixingK=6K{=}6andc=25c{=}25so that the latent prefix hasK​c=150Kc=150positions and only the depth of sequential refinement changes (Table˜6).
+LargerR{R}gives the model more refinement iterations before the readout.
+As a result, accuracy rises steeply withR{R}(from14.6%14.6\%atR=2{R}{=}2to70.0%70.0\%atR=6{R}{=}6), with gains continuing throughR=5{R}{=}5(68.1%68.1\%) before nearly saturating atR=6{R}{=}6.
+
+Inference-timeR{R}.
+
+Reusing the model trained atR=6{R}{=}6, we varyR∈{1,…,7}{R}\in\{1,\dots,7\}at inference with the latent prefix fixed at150150positions (Table˜6).
+Accuracy climbs withR{R}(22.7%22.7\%atR=1{R}{=}1to70.0%70.0\%atR=6{R}{=}6), peaks at the trainedR=6{R}{=}6, and dips slightly atR=7{R}{=}7(69.3%69.3\%).
+Running fewer iterations leaves the model less opportunity to refine, while running more than at training time brings no further gain.
+
+5Latent Representation Analysis
+
+We analyze the learned latent representations along three axes. Together, these analyses show that LOTUS’s accuracy gains are accompanied by structured latent computation: the post-loop latents carry readable CoT token signal, assign nontrivial mass to unseen valid alternatives, and rely on both gold CoT supervision and answer supervision to form coherent reasoning states.Section˜5.1measures the likelihood assigned to the gold CoT under different readouts,Section˜5.2tests whether the latents place mass on unseen but valid reasoning chains, andSection˜5.3ablates the roles of gold CoT and answer supervision in shaping the representation. Extended block-to-step decode examples are deferred toSection˜F.1.
+
+5.1Likelihood of the Gold Chain under Different Readout Options
+
+Recall that𝒉(R){{{\bm{h}}}^{({R})}}denotes the post-loop latents and𝒛~(t){\widetilde{{{\bm{z}}}}^{(t)}}the aux decoder’s output latents fort∈{1,…,R}t\in\{1,\dots,{R}\}. We evaluate four readouts inTable˜9:(i)LOTUS, reading𝒉(R){{{\bm{h}}}^{({R})}}through the base LM head;(ii)LOTUS-aux, reading𝒉(R){{{\bm{h}}}^{({R})}}throughghead{g_{\mathrm{head}}};(iii)LOTUS-aux, reading𝒛~(t){\widetilde{{{\bm{z}}}}^{(t)}}throughghead{g_{\mathrm{head}}}underteacher forcing(TF) that matches training (each block’sc{c}latents paired with that block’s gold step tokens); and(iv)LOTUS-aux, reading𝒛~(t){\widetilde{{{\bm{z}}}}^{(t)}}throughghead{g_{\mathrm{head}}}but underfree-running(FR),666LOTUS-aux (FR) gives a fairer reference to LOTUS than LOTUS-aux (TF): at inference the gold CoT is unavailable, so LOTUS-aux must feed its decoder its own generated tokens, exactly the FR setting. The TF row instead feeds the gold prefix the model would not have at test time.feeding the aux decoder’s own generated token in place of the gold tokens.777Here we report greedy decoding results. Replacing them with temperature-TTsampling (T∈{0.5,0.7,1.0,1.5}T\in\{0.5,0.7,1.0,1.5\}) moves FR NLL by≤0.05\leq 0.05and top-11by≤1\leq 1pp.
+
+Metrics.
+
+We report the negative log-likelihood (NLL) of the gold CoT token sequenceT{T}at the latent positions.888Note that the𝒉(R){{{\bm{h}}}^{({R})}}readout scores the gold CoT under the PCL (Section3.3.2) factorization and𝒛~(t){\widetilde{{{\bm{z}}}}^{(t)}}under an autoregressive one, so NLL is only directly comparable under the same factorization and only for reference across factorizations. Mathematically, PCL NLL has a higher lower bound than the autoregressive NLL (details inAppendixE).We also report averageP​(gold∈top-1){P(\text{gold}\in\text{top-1})}andP​(gold∈top-5){P(\text{gold}\in\text{top-5})}against the full128​K128\text{K}-vocabulary softmax. All metrics are averaged over the1,3191{,}319GSM8K test questions.
+
+LOTUS’s post-loop latent𝒉(R){{{\bm{h}}}^{({R})}}contains the gold CoT via a direct readout.
+
+Reading LOTUS’s post-loop latent𝒉(R){{{\bm{h}}}^{({R})}}throughfhead{f_{\mathrm{head}}}assigns the gold CoT a low3.073.07NLL and70.9%70.9\%top-11accuracy (Table˜9), edging out LOTUS-aux (FR) at64.5%64.5\%.
+The teacher-forced LOTUS-aux reader does better still (1.561.56NLL,84.3%84.3\%top-11), but with the caveat that it uses the gold prefix as input, so we read it as an upper bound rather than a direct comparison. Still, the results confirm that the latents carry enough information to reconstruct the gold CoT chain.
+
+LOTUS-aux has CoT signal in both𝒉(R){{{\bm{h}}}^{({R})}}and𝒛~(t){\widetilde{{{\bm{z}}}}^{(t)}}.
+
+Surprisingly, even though𝒉(R){{{\bm{h}}}^{({R})}}is never directly supervised to predict the gold CoT throughghead{g_{\mathrm{head}}}in LOTUS-aux, we can still read𝒉(R){{{\bm{h}}}^{({R})}}throughghead{g_{\mathrm{head}}}with a25.8%25.8\%top-55probability.
+Greedy decoding also surfaces some meaningful gold tokens, indicating that the CoT content is carried by the latents themselves. In fact, despite being supervised through different heads, LOTUS and LOTUS-aux have asimilareffect of making the post-loop latents𝒉(R){{{\bm{h}}}^{({R})}}put mass on the CoT steps, with the caveat that LOTUS-aux readouts are less formatted (which is expected since it is not supervised directly). We provide side-by-side𝒉(R){{{\bm{h}}}^{({R})}}readout examples for both models inAppendix˜F.Table 9:Likelihood of the gold CoT from different readout configurations.ReaderNLLP​(gold∈top-1)P(\text{gold}\in\text{top-1})P​(gold∈top-5)P(\text{gold}\in\text{top-5})Without gold prefix:LOTUS:𝒉(R){{{\bm{h}}}^{({R})}}throughfhead{f_{\mathrm{head}}}3.073.0770.9%70.9\%85.8%85.8\%LOTUS-aux:𝒉(R){{{\bm{h}}}^{({R})}}throughghead{g_{\mathrm{head}}}9.029.0212.4%12.4\%25.8%25.8\%LOTUS-aux:𝒛~(t){\widetilde{{{\bm{z}}}}^{(t)}}throughghead{g_{\mathrm{head}}}(FR)6.396.3964.5%64.5\%76.7%76.7\%With gold prefix:LOTUS-aux:𝒛~(t){\widetilde{{{\bm{z}}}}^{(t)}}throughghead{g_{\mathrm{head}}}(TF)1.561.5684.3%84.3\%93.9%93.9\%
+
+5.2Mass on Unseen Valid Chains
+
+Beyond the gold chain in the test set, we test whether LOTUS and LOTUS-aux place mass on unseen valid reasoning chains rather than only memorizing the seen trace in the training set. We use the same four readout configurations as inSection˜5.1.
+
+Setup.
+
+Given each question, we compare its ground-truth reasoning chain against an unseen-but-valid alternative. LetGGandUUdenote the sets of intermediate numbers appearing uniquely in the ground-truth and the unseen reasoning chain, respectively.
+A random control set serves as a baseline. We report each set’s average per-token negative log-likelihood (NLL) at the position where it surfaces most strongly (lower means more confident). We also reportP​(U∈top-​k)P(U\in\text{top-}k), the fraction ofUUnumbers that surface within the top-kkreadout at any latent position. SeeSection˜F.2for the full construction and metric details.
+
+Findings.
+
+Across all four readouts the orderingG≪U≪G\!\ll\!U\!\ll\!Random holds (Table˜10, lower NLL==surfaces more): each reader assigns much lower NLL to a ground-truth-only number than to an unseen-but-valid one, which in turn sits far below the random control. Crucially, theUUsignal is concentrated rather than diffuse:P​(U∈top-​k)P(U\in\text{top-}k)columns confirm the unseen-valid intermediates genuinely surface in the top-kk(e.g., for LOTUS through the base LM head,15.3%15.3\%are top-11and64.0%64.0\%fall within top-55, despite never being trained on).Section˜F.3andFigure˜4give a path-level example and visual grid: two valid chains reach the same answer (108108) through disjoint intermediates, and the unseen-path numbers (2424,1818) surface in the post-loop readout despite never appearing in the trained chain, question, or answer.
+
+5.3Disentangling the Two Losses in LOTUS
+
+We now ask what each of LOTUS’s two supervision losses contributes to the latent representation observed above. The theory inSection˜3.3.2ascribes complementary roles toℒstep{\mathcal{L}_{\mathrm{step}}}andℒans{\mathcal{L}_{\mathrm{ans}}}. We compare three models that differ in supervision: LOTUS (both losses),ℒstep{\mathcal{L}_{\mathrm{step}}}only, andℒans{\mathcal{L}_{\mathrm{ans}}}only.
+
+Gold-chain NLL.
+
+Reading the𝒉(R){{{\bm{h}}}^{({R})}}through the base LM headfhead{f_{\mathrm{head}}},Table˜11reports NLL,P​(gold∈top-1)P(\text{gold}\in\text{top-1}), andP​(gold∈top-5)P(\text{gold}\in\text{top-5})on the GSM8K test set, using the same protocol asTable˜9.Table 10:Evaluation on both seen and unseen valid CoT chains.ReaderGGNLLUUNLLRandom NLLP​(U∈top-1)P(U\in\text{top-1})P​(U∈top-5)P(U\in\text{top-5})Without gold prefix:LOTUS:𝒉(R){{{\bm{h}}}^{({R})}}throughfhead{f_{\mathrm{head}}}0.070.074.284.288.168.1615.3%15.3\%64.0%64.0\%LOTUS-aux:𝒉(R){{{\bm{h}}}^{({R})}}throughghead{g_{\mathrm{head}}}3.303.306.046.049.429.4214.5%14.5\%49.3%49.3\%LOTUS-aux:𝒛~(t){\widetilde{{{\bm{z}}}}^{(t)}}throughghead{g_{\mathrm{head}}}(FR)0.800.8012.6212.6220.3920.395.6%5.6\%39.2%39.2\%With gold prefix:LOTUS-aux:𝒛~(t){\widetilde{{{\bm{z}}}}^{(t)}}throughghead{g_{\mathrm{head}}}(TF)0.180.1813.1713.1720.8320.831.9%1.9\%37.4%37.4\%Table 11:Disentangling on the two loss components; NLL and per-position gold CoT accuracy on the GSM8K test.VariantNLL↓\downarrowP​(gold∈top-1)P(\text{gold}\in\text{top-1})↑\uparrowP​(gold∈top-5)P(\text{gold}\in\text{top-5})↑\uparrowLOTUS3.073.0770.9%70.9\%85.8%85.8\%ℒstep{\mathcal{L}_{\mathrm{step}}}only9.299.299.1%9.1\%17.1%17.1\%ℒans{\mathcal{L}_{\mathrm{ans}}}only5.975.979.4%9.4\%26.5%26.5\%
+
+ℒstep{\mathcal{L}_{\mathrm{step}}}andℒans{\mathcal{L}_{\mathrm{ans}}}play complementary roles.
+
+LOTUS beats both ablations (Table˜11).ℒstep{\mathcal{L}_{\mathrm{step}}}-only, lacking the cross-block coupling and the answer grounding thatℒans{\mathcal{L}_{\mathrm{ans}}}supplies, is worst on every column.ℒans{\mathcal{L}_{\mathrm{ans}}}-only, without directly tying𝒉(R){{{\bm{h}}}^{({R})}}to the gold CoT, lands nearer the gold tokens (NLL5.975.97, top-5526.5%26.5\%) yet has a top-11rate similar toℒstep{\mathcal{L}_{\mathrm{step}}}-only and stays far short of LOTUS (NLL3.073.07, top-5585.8%85.8\%). The answer loss alone settles𝒉(R){{{\bm{h}}}^{({R})}}into an answer-consistent neighborhood without aligning to the gold chain, matching the complementary roles posited inSection˜3.3.2.
+
+6Conclusion
+
+We introduce LOTUS, showing that latent reasoning can approach the performance of explicit CoT by supervising a looped padded Transformer in parallel against the gold CoT tokens under the simple cross-entropy objective. OnLlama-3.2-3B-Instruct, LOTUS bridges the in-domain gap to explicit CoT on GSM8K, surpasses CoT on the out-of-domain average, and cuts thought-phase latency by2.5×2.5\times. Ablations show the looped backbone, parallel gold CoT supervision, and sufficient block width and loop depth are each necessary. The latent representation analysis further shows the latents are transparent: the gold CoT is recoverable from them by a direct readout, they place graded probability on unseen but valid reasoning chains rather than a single memorized trace, and the step and answer losses contribute complementary structure.
+
+Limitations.
+
+We follow prior latent reasoning work(Haoet al.,2025; Shenet al.,2025; Weiet al.,2025)and evaluate on math benchmarks. Whether the recipe transfers to other domains remains an open direction for future work.
+The block budgetK{K}, per-block widthc{c}, and loop depthR{R}are fixed hyperparameters that must be set to cover the expected step count, so chains longer thanK{K}steps fall back to autoregressive completion of the tail.
+MakingK{K},c{c}, andR{R}adaptive is a natural and promising direction for future work.
+
+Acknowledgments
+
+Anej Svete is supported by the ETH Zürich AI Center doctoral fellowship.
+
+References
+A. Altabaa, S. Chen, J. Lafferty, and Z. Yang (2025)Unlocking out-of-distribution generalization in transformers via recursive latent space reasoning.arXiv preprint arXiv:2510.14095.External Links:2510.14095,LinkCited by:§3.
+I. Amos, A. Caciularu, M. Geva, A. Globerson, J. Herzig, L. Shani, and I. Szpektor (2026)Latent reasoning with supervised thinking states.arXiv preprint arXiv:2602.08332.External Links:2602.08332,LinkCited by:Appendix A.
+S. Bae, A. Fisch, H. Harutyunyan, Z. Ji, S. Kim, and T. Schuster (2025a)Relaxed recursive transformers: effective parameter sharing with layer-wise loRA.InThe Thirteenth International Conference on Learning Representations,External Links:LinkCited by:Appendix A.
+S. Bae, Y. Kim, R. Bayat, S. Kim, J. Ha, T. Schuster, A. Fisch, H. Harutyunyan, Z. Ji, A. Courville, and S. Yun (2025b)Mixture-of-recursions: learning dynamic recursive depths for adaptive token-level computation.InThe Thirty-ninth Annual Conference on Neural Information Processing Systems,External Links:LinkCited by:Appendix A.
+J. Baek, M. Jo, M. Kim, M. Ren, Y. Bengio, and S. Ahn (2026)Generative recursive reasoning.arXiv preprint arXiv:2605.19376.Cited by:Appendix A.
+T. Cai, Y. Li, Z. Geng, H. Peng, J. D. Lee, D. Chen, and T. Dao (2024)Medusa: simple llm inference acceleration framework with multiple decoding heads.InInternational Conference on Machine Learning,pp. 5209–5235.Cited by:Appendix A.
+C. Chen, S. Borgeaud, G. Irving, J. Lespiau, L. Sifre, and J. Jumper (2023)Accelerating large language model decoding with speculative sampling.arXiv preprint arXiv:2302.01318.Cited by:Appendix A.
+H. Chen (2026)Thinking deeper, not longer: depth-recurrent transformers for compositional generalization.arXiv preprint arXiv:2603.21676.External Links:2603.21676,LinkCited by:Appendix A.
+X. Chen, A. Zhao, H. Xia, X. Lu, H. Wang, Y. Chen, W. Zhang, J. Wang, W. Li, and X. Shen (2025a)Reasoning beyond language: a comprehensive survey on latent chain-of-thought reasoning.arXiv preprint arXiv:2505.16782.External Links:2505.16782,LinkCited by:Appendix A.
+Y. Chen, J. Shang, Z. Zhang, Y. Xie, J. Sheng, T. Liu, S. Wang, Y. Sun, H. Wu, and H. Wang (2025b)Inner thinking transformer: leveraging dynamic depth scaling to foster adaptive internal thinking.InProceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers),W. Che, J. Nabende, E. Shutova, and M. T. Pilehvar (Eds.),Vienna, Austria,pp. 28241–28259.External Links:Document,ISBN 979-8-89176-251-0,LinkCited by:Appendix A.
+Z. Chen, S. Cui, D. Ye, Y. Zhang, Y. Bian, and T. Zhu (2025c)Think consistently, reason efficiently: energy-based calibration for implicit chain-of-thought.arXiv preprint arXiv:2511.07124.External Links:2511.07124,LinkCited by:Appendix A.
+J. Cheng and B. V. Durme (2024)Compressed chain of thought: efficient reasoning through dense representations.arXiv preprint arXiv:2412.13171.External Links:2412.13171,LinkCited by:Appendix A.
+Y. Chu, M. Shao, Y. Liu, B. Hao, Y. Lin, J. Wang, and R. Wang (2026)SPOT: span-level pause-of-thought for efficient and interpretable latent reasoning in large language models.arXiv preprint arXiv:2603.06222.External Links:2603.06222,LinkCited by:Appendix A.
+K. Cobbe, V. Kosaraju, M. Bavarian, M. Chen, H. Jun, L. Kaiser, M. Plappert, J. Tworek, J. Hilton, R. Nakano, C. Hesse, and J. Schulman (2021)Training verifiers to solve math word problems.arXiv preprint arXiv:2110.14168.External Links:2110.14168,LinkCited by:§F.2,§4.1,§4.3.
+R. Csordás, K. Irie, J. Schmidhuber, C. Potts, and C. D. Manning (2024)MoEUT: mixture-of-experts universal transformers.InThe Thirty-eighth Annual Conference on Neural Information Processing Systems,External Links:LinkCited by:Appendix A.
+R. Csordás, C. D. Manning, and C. Potts (2025)Do language models use their depth efficiently?.InThe Thirty-ninth Annual Conference on Neural Information Processing Systems,External Links:LinkCited by:Appendix A.
+Y. Cui, Z. Dai, B. He, Z. Shi, H. Liu, R. Sun, Z. Liu, Y. Xing, J. Tang, and B. Dumoulin (2026)How do latent reasoning methods perform under weak and strong supervision?.arXiv preprint arXiv:2602.22441.External Links:2602.22441,LinkCited by:Appendix A.
+DeepSeek-AI (2025)DeepSeek-R1 incentivizes reasoning in LLMs through reinforcement learning.Nature645(8081),pp. 633–638.External Links:Document,ISSN 1476-4687,LinkCited by:§1.
+M. Dehghani, S. Gouws, O. Vinyals, J. Uszkoreit, and Ł. Kaiser (2019)Universal transformers.arXiv preprint arXiv:1807.03819.External Links:1807.03819,LinkCited by:Appendix A,§2,§3.2.
+J. Deng, L. Pang, Z. Wei, S. Xu, Z. Duan, K. Xu, Y. Song, H. Shen, and X. Cheng (2026)LLM latent reasoning as chain of superposition.arXiv preprint arXiv:2510.15522.External Links:2510.15522,LinkCited by:Appendix A.
+Y. Deng, K. Prasad, R. Fernandez, P. Smolensky, V. Chaudhary, and S. Shieber (2023)Implicit chain of thought reasoning via knowledge distillation.arXiv preprint arXiv:2311.01460.Cited by:§F.2,§4.1,Table 1.
+Y. Fan, Y. Du, K. Ramchandran, and K. Lee (2025)Looped transformers for length generalization.InThe Thirteenth International Conference on Learning Representations,External Links:LinkCited by:Appendix A,§3.2.
+S. Feng, G. Fang, X. Ma, and X. Wang (2025)Efficient reasoning models: a survey.arXiv preprint arXiv:2504.10903.External Links:2504.10903,LinkCited by:Appendix A.
+R. Fu and G. Luo (2026)SeLaR: selective latent reasoning in large language models.arXiv preprint arXiv:2604.08299.External Links:2604.08299,LinkCited by:Appendix A.
+T. Fu, Y. You, Z. Chen, G. Dai, H. Yang, and Y. Wang (2025)Think-at-hard: selective latent iterations to improve reasoning language models.arXiv preprint arXiv:2511.08577.External Links:2511.08577,LinkCited by:Appendix A.
+Y. Fu, P. Bailis, I. Stoica, and H. Zhang (2024)Break the sequential dependency of llm inference using lookahead decoding.InInternational Conference on Machine Learning,pp. 14060–14079.Cited by:Appendix A.
+J. Geiping, S. McLeish, N. Jain, J. Kirchenbauer, S. Singh, B. R. Bartoldson, B. Kailkhura, A. Bhatele, and T. Goldstein (2025a)Scaling up test-time compute with latent reasoning: a recurrent depth approach.arXiv preprint arXiv:2502.05171.External Links:2502.05171,LinkCited by:Appendix A,§1.
+J. Geiping, X. Yang, and G. Su (2025b)Efficient parallel samplers for recurrent-depth models and their connections to diffusion language models.InNeurIPS 2025 Workshop on Efficient Reasoning,External Links:LinkCited by:Appendix A.
+A. Giannou, S. Rajput, J. Sohn, K. Lee, J. D. Lee, and D. Papailiopoulos (2023)Looped transformers as programmable computers.InProceedings of the 40th International Conference on Machine Learning,A. Krause, E. Brunskill, K. Cho, B. Engelhardt, S. Sabato, and J. Scarlett (Eds.),Proceedings of Machine Learning Research, Vol.202,pp. 11398–11442.External Links:LinkCited by:Appendix A.
+S. Goyal, Z. Ji, A. S. Rawat, A. K. Menon, S. Kumar, and V. Nagarajan (2024)Think before you speak: training language models with pause tokens.InThe Twelfth International Conference on Learning Representations,External Links:LinkCited by:Appendix A,§2,§3.1.
+H. A. Gozeten, M. E. Ildiz, X. Zhang, H. Harutyunyan, A. S. Rawat, and S. Oymak (2026)Continuous chain of thought enables parallel exploration and reasoning.InThe Fourteenth International Conference on Learning Representations,External Links:LinkCited by:Appendix A.
+A. Grattafiori, A. Dubey, A. Jauhri, A. Pandey, A. Kadian, A. Al-Dahle, A. Letman, A. Mathur, A. Schelten, A. Vaughan,et al.(2024)The llama 3 herd of models.arXiv preprint arXiv:2407.21783.Cited by:§F.2,§4.1.
+S. Hao, S. Sukhbaatar, D. Su, X. Li, Z. Hu, J. E. Weston, and Y. Tian (2025)Training large language models to reason in a continuous latent space.InSecond Conference on Language Modeling,External Links:LinkCited by:item(i),Appendix C,Appendix C,Table 13,Appendix D,§1,§1,§2,§4.1,§6.
+Y. He, W. Zheng, Y. Zhu, Z. Zheng, L. Su, S. Vasudevan, Q. Guo, L. Hong, and J. Li (2025)SemCoT: accelerating chain-of-thought reasoning through semantically-aligned implicit tokens.InThe Thirty-ninth Annual Conference on Neural Information Processing Systems,External Links:LinkCited by:Appendix A.
+A. Jeddi, M. Ciccone, and B. Taati (2026)LoopFormer: elastic-depth looped transformers for latent reasoning via shortcut modulation.InThe Fourteenth International Conference on Learning Representations,External Links:LinkCited by:Appendix A.
+S. Jerad, A. Svete, S. Hao, R. Cotterell, and W. Merrill (2026)Context-free recognition with transformers.arXiv preprint arXiv:2601.01754.External Links:2601.01754,LinkCited by:Appendix A.
+H. Kang, Y. Zhang, N. L. Kuang, N. Majamaki, N. Jaitly, Y. Ma, and L. Qin (2026)LaDiR: latent diffusion enhances LLMs for text reasoning.InThe Fourteenth International Conference on Learning Representations,External Links:LinkCited by:Appendix A,Appendix A.
+J. Knupp, J. H. Metzen, J. Bohn, G. Groh, and K. Kersting (2026)Depth-recurrent attention mixtures: giving latent reasoning the attention it deserves.arXiv preprint arXiv:2601.21582.External Links:2601.21582,LinkCited by:Appendix A.
+H. Kohli, S. Parthasarathy, H. Sun, and Y. Yao (2026)Loop, think, & generalize: implicit reasoning in recurrent-depth transformers.arXiv preprint arXiv:2604.07822.External Links:2604.07822,LinkCited by:Appendix A.
+Y. Koishekenov, A. Lipani, and N. Cancedda (2025)Encode, think, decode: scaling test-time reasoning with recursive latent thoughts.arXiv preprint arXiv:2510.07358.External Links:2510.07358,LinkCited by:Appendix A.
+A. Kuzina, M. Pióro, and B. E. Bejnordi (2026)KaVa: latent reasoning via compressed KV-cache distillation.InThe Fourteenth International Conference on Learning Representations,External Links:LinkCited by:Appendix C,Appendix C,Table 13,§1,§2,§4.1,§4.2,§4.2.
+Y. Leviathan, M. Kalman, and Y. Matias (2023)Fast inference from transformers via speculative decoding.InInternational Conference on Machine Learning,pp. 19274–19286.Cited by:Appendix A.
+H. Li, C. Li, T. Wu, X. Zhu, Y. Wang, Z. Yu, E. H. Jiang, S. Zhu, Z. Jia, Y. N. Wu, and Z. Zheng (2026a)Seek in the dark: reasoning via test-time instance-level policy gradient in latent space.arXiv preprint arXiv:2505.13308.External Links:2505.13308,LinkCited by:Appendix A.
+J. Li, Y. Fu, L. Fan, J. Liu, Y. Shu, C. Qin, M. Yang, I. King, and R. Ying (2025)Implicit reasoning in large language models: a comprehensive survey.arXiv preprint arXiv:2509.02350.External Links:2509.02350,LinkCited by:Appendix A.
+J. Li, R. Li, Y. Zhou, B. Ma, and J. Z. Pan (2026b)Chain of thought compression: a theoritical analysis.arXiv preprint arXiv:2601.21576.External Links:2601.21576,LinkCited by:§1.
+Y. Li, F. Wei, C. Zhang, and H. Zhang (2024a)EAGLE: speculative sampling requires rethinking feature uncertainty.InInternational Conference on Machine Learning,pp. 28935–28948.Cited by:Appendix A.
+Z. Li, H. Liu, D. Zhou, and T. Ma (2024b)Chain of thought empowers transformers to solve inherently serial problems.InThe Twelfth International Conference on Learning Representations,External Links:LinkCited by:Appendix A.
+L. Lian, S. Wang, F. Juefei-Xu, T. Fu, X. Li, A. Yala, T. Darrell, A. Suhr, Y. Tian, and X. V. Lin (2025)ThreadWeaver: adaptive threading for efficient parallel reasoning in language models.arXiv preprint arXiv:2512.07843.External Links:2512.07843,LinkCited by:Appendix A.
+H. Liu, S. Murty, C. D. Manning, and R. Csordás (2026)Thoughtbubbles: an unsupervised method for parallel thinking in latent space.arXiv preprint arXiv:2510.00219.External Links:2510.00219,LinkCited by:Appendix A.
+J. Liu, X. Dong, Z. Ye, R. Mehta, Y. Fu, V. Singh, J. Kautz, C. Zhang, and P. Molchanov (2025a)Tidar: think in diffusion, talk in autoregression.arXiv preprint arXiv:2511.08923.Cited by:Appendix A.
+L. Liu, J. Pfeiffer, J. Wu, J. Xie, and A. Szlam (2025b)Deliberation in latent space via differentiable cache augmentation.InForty-second International Conference on Machine Learning,External Links:LinkCited by:Appendix A.
+K. Maile and J. Sacramento (April 27, 2026)Dynamic parameter reuse augments reasoning via latent chain of thought.InICLR Blogposts 2026,Note:https://iclr-blogposts.github.io/2026/blog/2026/recur-refine-reason/External Links:LinkCited by:Appendix A.
+S. McLeish, A. Li, J. Kirchenbauer, D. S. Kalra, B. R. Bartoldson, B. Kailkhura, A. Schwarzschild, J. Geiping, T. Goldstein, and M. Goldblum (2025)Teaching pretrained language models to think deeper with retrofitted recurrence.arXiv preprint arXiv:2511.07384.External Links:2511.07384,LinkCited by:Appendix A.
+W. Merrill and A. Sabharwal (2024)The expressive power of transformers with chain of thought.InThe Twelfth International Conference on Learning Representations,External Links:LinkCited by:Appendix A.
+W. Merrill and A. Sabharwal (2025a)A little depth goes a long way: the expressive power of log-depth transformers.InThe Thirty-ninth Annual Conference on Neural Information Processing Systems,External Links:LinkCited by:Appendix A,§1.
+W. Merrill and A. Sabharwal (2025b)Exact expressive power of transformers with padding.InThe Thirty-ninth Annual Conference on Neural Information Processing Systems,External Links:LinkCited by:Appendix A.
+I. M. Moosa, S. Lohit, Y. Wang, M. Chatterjee, and W. Yin (2026)Understanding dynamic compute allocation in recurrent transformers.arXiv preprint arXiv:2602.08864.External Links:2602.08864,LinkCited by:Appendix A.
+K. Ng and Q. Wang (2024)Loop neural networks for parameter sharing.arXiv preprint arXiv:2409.14199.External Links:2409.14199,LinkCited by:Appendix A.
+A. Ning, Y. Kuo, and G. Gomes (2025)Learning when to stop: adaptive latent reasoning via reinforcement learning.External Links:2511.21581,LinkCited by:Appendix A.
+F. Nowak, A. Svete, A. Butoi, and R. Cotterell (2024)On the representational capacity of neural language models with chain-of-thought reasoning.InProceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers),L. Ku, A. Martins, and V. Srikumar (Eds.),Bangkok, Thailand,pp. 12510–12548.External Links:Document,LinkCited by:Appendix A.
+OpenAI (2026)OpenAI o1 system card.arXiv preprint arXiv:2412.16720.External Links:2412.16720,LinkCited by:§1.
+J. Pfau, W. Merrill, and S. R. Bowman (2024)Let’s think dot by dot: hidden computation in transformer language models.InCOLM,External Links:LinkCited by:Appendix A,§2,§3.1.
+[63]A. Radford, J. Wu, R. Child, D. Luan, D. Amodei, I. Sutskever,et al.Language models are unsupervised multitask learners.Cited by:§1,§4.1.
+D. Raposo, S. Ritter, B. Richards, T. Lillicrap, P. C. Humphreys, and A. Santoro (2024)Mixture-of-depths: dynamically allocating compute in transformer-based language models.arXiv preprint arXiv:2404.02258.External Links:2404.02258,LinkCited by:Appendix A.
+M. Rizvi-Martel and M. Mosbach (2026)The illusion of superposition in latent cot via soft thinking.InWorkshop on Latent & Implicit Thinking – Going Beyond CoT Reasoning,External Links:LinkCited by:Appendix A.
+N. Saunshi, N. Dikkala, Z. Li, S. Kumar, and S. J. Reddi (2025)Reasoning with latent thoughts: on the power of looped transformers.InThe Thirteenth International Conference on Learning Representations,External Links:LinkCited by:Appendix A,§1.
+A. Shah, K. Gupta, K. Ramji, and P. Chaudhari (2025)Language modeling with learned meta-tokens.InICML 2025 Workshop on Long-Context Foundation Models,External Links:LinkCited by:Appendix A.
+Z. Shen, H. Yan, L. Zhang, Z. Hu, Y. Du, and Y. He (2025)CODI: compressing chain-of-thought into continuous space via self-distillation.InProceedings of the 2025 Conference on Empirical Methods in Natural Language Processing,C. Christodoulopoulos, T. Chakraborty, C. Rose, and V. Peng (Eds.),Suzhou, China,pp. 677–693.External Links:Document,ISBN 979-8-89176-332-6,LinkCited by:item(ii),Appendix C,§1,§1,§2,§4.1,§4.3.1,§6.
+S. Song, H. Li, Z. Wang, B. Zeng, F. Song, Y. Wang, Z. J. Xu, Z. He, and Z. Lin (2026)AdaPonderLM: gated pondering language models with token-wise adaptive depth.arXiv preprint arXiv:2603.01914.External Links:2603.01914,LinkCited by:Appendix A.
+D. Su, H. Zhu, Y. Xu, J. Jiao, Y. Tian, and Q. Zheng (2025)Token assorted: mixing latent and text tokens for improved language model reasoning.InForty-second International Conference on Machine Learning,External Links:LinkCited by:Appendix A.
+A. Suleymanzade, A. Bergmeister, and S. Jegelka (2026a)Limits of continuous chain-of-thought in multi-step and multi-chain reasoning.InLogical and Symbolic Reasoning in Language Models @ AAAI 2026,External Links:LinkCited by:Appendix A.
+A. Suleymanzade, H. A. Gozeten, I. I. Ceylan, and J. Kim (2026b)MUX: continuous reasoning via multiplexed tokens.InICLR 2026 Workshop on Logical Reasoning of Large Language Models,External Links:LinkCited by:Appendix A,Appendix C.
+A. Svete and A. Sabharwal (2026)On the reasoning abilities of masked diffusion language models.InThe Fourteenth International Conference on Learning Representations,External Links:LinkCited by:Appendix A,Appendix A.
+W. Tan, J. Li, J. Ju, Z. Luo, R. Song, and J. Luan (2025)Think silently, think fast: dynamic latent compression of LLM reasoning chains.InThe Thirty-ninth Annual Conference on Neural Information Processing Systems,External Links:LinkCited by:Appendix A.
+G. Tang, S. Jiang, H. Chang, N. Chen, Y. Li, H. Fan, J. Li, M. Liu, and B. Qin (2026)LoopRPT: reinforcement pre-training for looped language models.arXiv preprint arXiv:2603.19714.External Links:2603.19714,LinkCited by:Appendix A.
+J. Wang, H. Peng, and C. Liu (2026)Latent chain-of-thought as planning: decoupling reasoning from verbalization.arXiv preprint arXiv:2601.21358.External Links:2601.21358,LinkCited by:Appendix A.
+X. Wang, L. Caccia, O. Ostapenko, X. Yuan, W. Y. Wang, and A. Sordoni (2024)Guiding language model reasoning with planning tokens.InFirst Conference on Language Modeling,External Links:LinkCited by:Appendix A.
+J. Wei, X. Wang, D. Schuurmans, M. Bosma, B. Ichter, F. Xia, E. H. Chi, Q. V. Le, and D. Zhou (2022)Chain-of-thought prompting elicits reasoning in large language models.InProceedings of the 36th International Conference on Neural Information Processing Systems,NIPS ’22,Red Hook, NY, USA.External Links:ISBN 9781713871088Cited by:§1.
+X. Wei, X. Liu, Y. Zang, X. Dong, Y. Cao, J. Wang, X. Qiu, and D. Lin (2025)SIM-CoT: Supervised implicit chain-of-thought.arXiv preprint arXiv:2509.20317.External Links:2509.20317,LinkCited by:Appendix C,Appendix C,Table 13,Appendix D,§1,§1,§2,§3.4,§4.1,§4.1,§6.
+H. Wu, Z. Teng, and K. Tu (2025)Parallel continuous chain-of-thought with Jacobi iteration.InProceedings of the 2025 Conference on Empirical Methods in Natural Language Processing,C. Christodoulopoulos, T. Chakraborty, C. Rose, and V. Peng (Eds.),Suzhou, China,pp. 914–926.External Links:Document,ISBN 979-8-89176-332-6,LinkCited by:Appendix C,Appendix C,Table 13,Table 14,Appendix D,§1,§2,§4.1,§4.1.
+K. Xu and I. Sato (2025a)A formal comparison between chain-of-thought and latent thought.ArXivabs/2509.25239.External Links:LinkCited by:Appendix A.
+K. Xu and I. Sato (2025b)To CoT or to loop? A formal comparison between chain-of-thought and looped transformers.arXiv preprint arXiv:2505.19245.External Links:2505.19245,LinkCited by:Appendix A.
+Y. Xu, X. Guo, Z. Zeng, and C. Miao (2025)SoftCoT++: test-time scaling with soft chain-of-thought reasoning.arXiv preprint arXiv:2505.11484.External Links:2505.11484,LinkCited by:Appendix A.
+W. Ye, Y. Liang, and L. Shan (2026)Thinking on the fly: test-time reasoning enhancement via latent thought policy optimization.InThe Fourteenth International Conference on Learning Representations,External Links:LinkCited by:Appendix A.
+R. You, Y. Li, M. Liu, W. Wang, L. Nie, and W. Li (2026)Parallel test-time scaling for latent reasoning models.arXiv preprint arXiv:2510.07745.External Links:2510.07745,LinkCited by:Appendix A.
+X. Yu, Z. Chen, Y. He, T. Fu, C. Yang, C. Xu, Y. Ma, X. Hu, Z. Cao, J. Xu, G. Zhang, J. Tao, J. Zhang, S. Ma, K. Feng, H. Huang, Y. Li, R. Chen, H. Wang, C. Wu, Z. Su, X. Xu, K. Yao, K. Wang, C. Gao, Y. Liao, R. Huang, T. Jin, C. Tan, J. Zhang, W. Ren, Y. Fu, Y. Liu, Y. Wang, X. Yue, Y. Jiang, and S. Yan (2026)The latent space: foundation, evolution, mechanism, ability, and outlook.arXiv preprint arXiv:2604.02029.External Links:2604.02029,LinkCited by:Appendix A.
+B. Zeng, H. Li, S. Song, Y. Wang, Z. Wang, Z. He, X. Wang, and Z. Lin (2026a)PonderLM-2: pretraining llm with latent thoughts in continuous space.arXiv preprint arXiv:2509.23184.External Links:2509.23184,LinkCited by:Appendix A.
+B. Zeng, S. Song, S. Huang, Y. Wang, H. Li, Z. He, X. Wang, Z. li, and Z. Lin (2026b)PonderLM: pretraining language models to ponder in continuous space.InThe Fourteenth International Conference on Learning Representations,External Links:LinkCited by:Appendix A,§1.
+Y. Zhang, B. Tang, T. Ju, S. Duan, and G. Liu (2025)Do latent tokens think? a causal and adversarial analysis of chain-of-continuous-thought.arXiv preprint arXiv:2512.21711.External Links:2512.21711,LinkCited by:Appendix A.
+H. Zhu, S. Hao, Z. Hu, J. Jiao, S. Russell, and Y. Tian (2025a)Reasoning by superposition: a theoretical perspective on chain of continuous thought.InICML 2025 Workshop on Methods and Opportunities at Small Scale,External Links:LinkCited by:§2.
+R. Zhu, T. Peng, T. Cheng, X. Qu, J. Huang, D. Zhu, H. Wang, K. Xue, X. Zhang, Y. Shan, T. Cai, T. Kergan, A. Kembay, A. Smith, C. Lin, B. Nguyen, Y. Pan, Y. Chou, Z. Cai, Z. Wu, Y. Zhao, T. Liu, J. Yang, W. Zhou, C. Zheng, C. Li, Y. Zhou, Z. Li, Z. Zhang, J. Liu, G. Zhang, W. Huang, and J. Eshraghian (2025b)A survey on latent reasoning.arXiv preprint arXiv:2507.06203.External Links:2507.06203,LinkCited by:Appendix A.
+R. Zhu, Z. Wang, K. Hua, T. Zhang, Z. Li, H. Que, B. Wei, Z. Wen, F. Yin, H. Xing, L. Li, J. Shi, K. Ma, S. Li, T. Kergan, A. Smith, X. Qu, M. Hui, B. Wu, Q. Min, H. Huang, X. Zhou, W. Ye, J. Liu, J. Yang, Y. Shi, C. Lin, E. Zhao, T. Cai, G. Zhang, W. Huang, Y. Bengio, and J. Eshraghian (2025c)Scaling latent reasoning via looped language models.arXiv preprint arXiv:2510.25741.External Links:2510.25741,LinkCited by:Appendix A,§1.
+J. Zou, Y. Xiong, and Y. Liu (2026)Capabilities and fundamental limits of latent chain-of-thought.arXiv preprint arXiv:2602.01148.External Links:2602.01148,LinkCited by:§1.
+
+Appendix
+
+Appendix˜Adiscusses related works including looped transformers, latent reasoning, and speculative decoding methods.Appendix˜Bsummarizes the notation used in the paper.Appendix˜Ccompares LOTUS and LOTUS-aux with the closest latent reasoning baselines.Appendix˜Dincludes the experimental and implementation details.Appendix˜Eexplains the relation between PCL and autoregressive NLL lower bounds. Finally,Appendix˜Fprovides the latent representation analysis details, including greedy readout examples and the multi-path setup and examples.
+
+Appendix ARelated Work
+
+We refer the reader toChenet al.[2025a], Yuet al.[2026], Zhuet al.[2025b], Liet al.[2025], Fenget al.[2025], andMaile and Sacramento [April 27, 2026]for broad surveys of the latent reasoning and looped transformers landscapes. Below, we discuss the work most directly adjacent to ours.
+
+Looped and recurrent-depth transformers.
+
+Building on Universal Transformers[Dehghaniet al.,2019], a line of work has established the theoretical foundations of looped architectures:Giannouet al.[2023]show Turing completeness via program simulation, placing looped transformers alongside CoT in expressivity[Merrill and Sabharwal,2024, Liet al.,2024b, Nowaket al.,2024].Saunshiet al.[2025], Merrill and Sabharwal [2025a,b], Jeradet al.[2026]study the efficient reasoning abilities of looping, establishing their ability to solve problems with fewer model evaluations than CoT.Saunshiet al.[2025]show that a shallow Transformer looped multiple times nearly matches a non-looped Transformer with the equivalent total depth on arithmetic and reasoning tasks, with looping implicitly simulating hidden reasoning steps.Xu and Sato [2025b,a]compare looped Transformers to CoT, andSvete and Sabharwal [2026]draw connections to masked diffusion models.
+The latter connection also inspires approaches to improve looped transformers with time modulation[Jeddiet al.,2026, Chen,2026]and efficient sampling[Geipinget al.,2025b].
+An active line of work scales looped models to large-scale pretraining:Geipinget al.[2025a]train a 3.5B recurrent-depth Transformer whose loop depth can be increased at test time,Zhuet al.[2025c]pretrain LoopLM with token-level recurrence and learned depth allocation, andZenget al.[2026b,a]pretrain models that loop by superpositioning symbols in continuous space based on the logits produced after each iteration.
+LoopLM shows that looped computation can scale in pretraining, but its per-token loop at inference time does not by itself create the parallel padded latent workspace that LOTUS uses.
+Complementary work addresses different ways of implementingadaptive computewith looped architectures: Depth can be modulated per-symbol via gating[Ng and Wang,2024, Songet al.,2026, Moosaet al.,2026], mixture-of-depths routing[Raposoet al.,2024], or RL-trained stopping criteria[Ninget al.,2025].
+Depth-recurrent attention mixtures augment recurrence with attention mechanisms that can attend to latent representations of past iterations[Fuet al.,2025, Knuppet al.,2026].
+Parameter efficiency and flexibility are addressed by per-iteration LoRA adapters[Baeet al.,2025a], symbol-level recursion routing[Baeet al.,2025b], inner thinking mechanisms[Chenet al.,2025b], and Mixture-of-Experts compatibility[Csordáset al.,2024].
+Further work explores retrofitting recurrence into pretrained models[McLeishet al.,2025, Koishekenovet al.,2025], compositional and length generalization[Fanet al.,2025, Kohliet al.,2026], reinforcement pretraining[Tanget al.,2026], and whether pretrained models use their depth efficiently[Csordáset al.,2025].
+
+Diffusion language models.
+
+Diffusion language models are another route to parallel, non-autoregressive reasoning. Discrete-token variants face aparallel-decoding trap, where tokens denoised in parallel are conditionally independent, so recovering quality forces a partial return to sequential decoding[Liuet al.,2025a]. Notably,Svete and Sabharwal [2026]show masked diffusion models are equivalent to padded looped Transformers, motivating supervising such a backbone directly, as we do. Continuous diffusion variants such as LaDiR[Kanget al.,2026]instead refine latent thoughts with a VAE and a separate diffusion model over many denoising steps for diversity and adaptive compute, while showing limited efficiency gain when reaching CoT-level performance.
+
+Pause and padding symbols.
+
+A parallel strand of work studies the affordances of discrete padding symbols.Goyalet al.[2024]andPfauet al.[2024]show that they improve performance on natural language and formal tasks;Wanget al.[2024]use discrete symbols in the continuous representation space as planning signals; andChuet al.[2026]introduce span-level pause symbols for efficient and interpretable latent reasoning.
+These discrete-symbol approaches motivate our use of continuous latent vectors as a richer computation medium, while our looped architecture lets each iteration refine the same latent rather than extending the sequence.
+
+Compressing and replacing discrete CoT.
+
+Latent CoT methods replace or compress explicit reasoning symbols with continuous representations.Cheng and Durme [2024]supervise hidden-state representations of salient reasoning steps,Tanet al.[2025]dynamically compress CoT chains into latent thoughts,Wanget al.[2026]autoregressively encode CoT steps into hidden states decoded back to ground-truth symbols (analogously to our approach), andAmoset al.[2026]interleave supervised latent states with generated text.
+MUX[Suleymanzadeet al.,2026b]studies continuous reasoning with multiplexed vocabulary-space targets. It uses KL regression to multiplexed targets. Each target is a position-weighted superposition over aligned reasoning subwords, so several subwords are mixed into one sequential latent. In contrast, LOTUS keeps step and token positions explicit in a parallel padded workspace and applies per-position cross-entropy on gold CoT traces.
+Latent CoT also enables parallel exploration of reasoning paths[Gozetenet al.,2026, Liuet al.,2026], and test-time compute can be scaled in latent space via policy optimization[Yeet al.,2026], instance-level policy gradient[Liet al.,2026a], sampling conditioned on perturbed prompts[Xuet al.,2025], or parallel search[Lianet al.,2025, Youet al.,2026].
+Latent reasoning can be integrated with generation by mixing latent and text symbols[Fu and Luo,2026, Denget al.,2026], updating the KV cache with an additional model[Liuet al.,2025b], learning meta-symbols that guide generation[Shahet al.,2025], and semantically aligning padding symbols to spans of CoT symbols[Heet al.,2025].
+Further work studies latent reasoning with variational autoencoder features[Suet al.,2025, Kanget al.,2026]and energy-based guidance[Chenet al.,2025c]. GRAM[Baeket al.,2026]guides thinking with recursive latent-variable modeling through shared transitions. It uses stochastic high-level updates and learns a target-conditioned posterior and prior through amortized variational inference. GRAM samples distinct stochastic trajectories, whereas LOTUS represents them within a jointly refined continuous workspace. Interpretability studies probe whether latents actually contribute to reasoning[Zhanget al.,2025, Rizvi-Martel and Mosbach,2026], and empirical comparisons examine the effects of different supervision regimes[Cuiet al.,2026, Suleymanzadeet al.,2026a].
+
+Speculative decoding.
+
+Speculative decoding uses draft models to propose token continuations[Leviathanet al.,2023, Chenet al.,2023]. Related approaches include Lookahead[Fuet al.,2024]with Jacobi-style updates, Medusa[Caiet al.,2024]with auxiliary prediction heads, and EAGLE[Liet al.,2024a]with future hidden features. These methods parallelize proposals within an explicit token trace, whereas LOTUS parallelizes latent reasoning and decodes only the answer suffix.
+
+Appendix BNotation
+
+Table˜12summarizes the notation used throughout the paper.Table 12:Notation used in this paper.SymbolMeaningFirst usedInputs and targetsQ{{Q}}Question§2A{{A}}Answer suffix (ends with⟨EoS⟩\langle\text{EoS}\rangle)§3.1Ti{T_{{i}}}Tokenized gold CoT stepi{i}(Ti,jT_{{i},j}itsjj-th token)§2T{T}Full gold CoT token sequence(T1,…,TK)({T_{1}},\dots,{T_{{K}}})§3.3Counts and budgets (fixed vs. example-dependent)S{S}Number of CoT steps in an example (example-dependent)§2N{N}Total number of CoT tokens in an example§2K{K}Latent block budget (fixed; chosen soK≥S{K}\geq{S})§3.1c{c}Latent tokens per block (block width)§3.1R{R}Number of loop iterations (depth)§3.2d{d}Hidden / embedding dimension of the base LM§3.2Indicesi{i}Latent block index,i∈{1,…,K}{i}\in\{1,\dots,{K}\}§3.1t{t}Loop pass index,t∈{1,…,R}{t}\in\{1,\dots,{R}\}§3.2jjToken index within a CoT step / latent block§2Model and special tokensf𝜽{f_{{{{\bm{\theta}}}}}}Base causal LM (parameters𝜽{{{{\bm{\theta}}}}})§3.2fhead{f_{\mathrm{head}}}Base LM head (logits from a hidden state)§3.3gϕg_{\phi}Auxiliary decoder (LOTUS-aux, training only); headghead{g_{\mathrm{head}}}§3.4ghead{g_{\mathrm{head}}}Auxiliary decoder LM head§3.4⟨lat⟩{\langle\texttt{lat}\rangle}Learnable latent token (shared across positions)§3.1⟨BoT⟩,⟨EoT⟩{\langle\texttt{BoT}\rangle},\,{\langle\texttt{EoT}\rangle}Begin-/end-of-thought delimiters§3.1𝒞pre{\mathcal{C}}_{\text{pre}}Prefix KV cache (computed once, reused)§3.2𝑬{{{{\bm{E}}}}}Learnable latent embeddings fed to the loop§3.2Hidden states (distinct symbols by source)𝒉(t){{{\bm{h}}}^{({t})}}Post-loop latent states after passt{t}(entries𝒉i,j(t){{{\bm{h}}}^{({t})}_{{i},j}})§3.2𝒛{{{\bm{z}}}}Final-forward hidden states for the answer loss§3.3𝒛~(t){\widetilde{{{\bm{z}}}}^{({t})}}Auxiliary-decoder hidden states at iterationt{t}§3.4Losses and objectiveℒstep{\mathcal{L}_{\mathrm{step}}}Parallel step supervision loss (Equation˜3)§3.3ℒans{\mathcal{L}_{\mathrm{ans}}}Answer-suffix next-token loss§3.3ℒ{\mathcal{L}}Full objective,ℒans+λstep​ℒstep{\mathcal{L}_{\mathrm{ans}}}+{\lambda_{\mathrm{step}}}\,{\mathcal{L}_{\mathrm{step}}}§3.3λstep{\lambda_{\mathrm{step}}}Weight on the step loss§3.3Nstep{N_{\mathrm{step}}}Number of supervised (non-padding) CoT tokens§3.3CE​(⋅,⋅){\mathrm{CE}}(\cdot,\cdot)Cross-entropy§3.3ℒstepaux{\mathcal{L}_{\mathrm{step}}^{\mathrm{aux}}}Auxiliary-decoder step loss (Equation˜10)§3.4ℒaux{\mathcal{L}^{\mathrm{aux}}}LOTUS-aux objective,ℒans+λstep​ℒstepaux{\mathcal{L}_{\mathrm{ans}}}+{\lambda_{\mathrm{step}}}\,{\mathcal{L}_{\mathrm{step}}^{\mathrm{aux}}}§3.4Analysis (Section˜3.3.2)Q{Q}Question random variable§3.3.2q{q}True data distribution over chains§3.3.2p𝜽PCLp_{{{{\bm{\theta}}}}}^{\mathrm{PCL}}Parallel chain likelihood induced byℒstep{\mathcal{L}_{\mathrm{step}}}§3.3.2
+
+Appendix CClosely Related Latent Reasoning Methods
+
+We position LOTUS and its auxiliary-decoder variant LOTUS-aux against the most closely related latent reasoning methods.
+
+Coconut[Haoet al.,2025]
+
+introduced a curriculum-based approach that progressively replaces explicit CoT steps with latent tokens conditioned autoregressively on the previous latent. Both LOTUS and LOTUS-aux depart from Coconut in two ways:(i)they use apaddedlatent prefix processed by aloopedTransformer, so allK{K}steps are decoded in parallel, not autoregressively, giving the𝒪​(R){{{{\mathcal{O}}}({R})}}-iteration thought-phase cost, and(ii)they add step-aligned supervision on the latent blocks, where Coconut supervises only the answer.Our ablation without latent supervision (Table˜4) is the Coconut-style regime within our looped architecture, and it underperforms both variants.
+
+CODI[Shenet al.,2025]and SIM-CoT[Weiet al.,2025]
+
+retain Coconut’s autoregressive latent decoding but add an auxiliary supervision target: CODI aligns the hidden state of a single designated token with the corresponding teacher hidden state from a CoT model, and SIM-CoT trains an auxiliary autoregressive decoder that aligns each latent token with the corresponding CoT token. Our LOTUS removes the auxiliary path entirely, supervising the model’s own post-loop hidden states through the answer LM head at block granularity. LOTUS-aux keeps an auxiliary autoregressive decoder, but produces all blocks in parallel through the looped backbone and supervises a full block per step rather than one latent per step.
+
+Parallel Continuous CoT (PCCoT)[Wuet al.,2025]and KaVa[Kuzinaet al.,2026]
+
+form a single Jacobi-iteration family: PCCoT introduces the backbone and KaVa builds on it. They both refine a fixed budget of2424latent tokens over33Jacobi iterations and differ only in supervision. Like LOTUS, they process latent symbols in parallel and refine them over passes, but differ from our methods in three ways:(i)Architecture: PCCoT and KaVa use right-shifted Jacobi iterations to simulate sequential continuous CoT in parallel[Haoet al.,2025], so their latents are continuous thought vectors with no fixed alignment to individual gold CoT steps. LOTUS instead pins blocki{i}to fixed positions across all loops, so it always maps to gold CoT stepi{i}and is naturally supervised against that step’s tokens;(ii)Supervision: PCCoT uses CODI[Shenet al.,2025], and KaVa supervises indirectly by distilling a compressed teacher KV-cache, whereas both our variants supervise each latent block against its exact gold CoT step; and(iii)Depth: PCCoT reports accuracy peaking at about33Jacobi iterations and degrading beyond that, which is why KaVa inherits the33-iteration setting, whereas LOTUS improves monotonically with loop depth up to 6 (Table˜6).Table 13:Comparison with latent reasoning methods in other step regimes on GSM8K (trained on GSM8k-Aug).MethodGPT-2Llama-3.2-1BLlama-3.2-3BExplicit CoT42.742.758.458.471.571.5Coconut[Haoet al.,2025]36.636.633.233.2−-Coconut + SIM-CoT[Weiet al.,2025]44.844.842.242.2−-PCCoT[Wuet al.,2025]49.5\mathbf{49.5}54.254.254.754.7KaVa[Kuzinaet al.,2026]−-56.556.565.765.7LOTUS44.144.157.3\mathbf{57.3}70.0\mathbf{70.0}
+
+Comparison with latent methods at other compute budgets.
+
+The main results (Table˜1,Section˜4.2) compare LOTUS against latent methods at thesamesequential step budget (CODI and CODI + SIM-CoT, bothR=6{R}{=}6). Here we provide a more comprehensive accuracy comparison inTable˜13against latent methods whose sequential compute budget instead differs from LOTUS’sR=6{R}{=}6sequential steps. Coconut and Coconut + SIM-CoT decode latents autoregressively under the curriculum ofHaoet al.[2025](1010autoregressive latent tokens), while PCCoT and KaVa decode in parallel over a shared Jacobi-iteration backbone (2424latent tokens in total, refined over33iterations).
+We take accuracies fromWeiet al.[2025],Kuzinaet al.[2026], andWuet al.[2025]for each method. LOTUS attains higher in-domain GSM8K accuracy than KaVa at both shared scales (57.357.3vs.56.556.5at11B,70.070.0vs.65.765.7at33B), staying within1.51.5points of explicit CoT while PCCoT and KaVa fall further behind as the backbone grows. The missing entries follow what each source reports:Weiet al.[2025]evaluate Coconut only up toLlama-3.2-1B, attributing Coconut’s failure at larger scale to a latent-instability issue in which the latent representations become homogeneous and lose semantic diversity, causing training to collapse as the latent budget grows.Kuzinaet al.[2026]do not run KaVa onGPT-2.Table 14:Comparison with latent reasoning methods on GSM8K, trained on
+GSM8k-Aug (the natural language version inWuet al.[2025]).MethodGSM8K acc. (%)↑\uparrowGSM-Hard acc. (%)↑\uparrowSVAMP acc. (%)↑\uparrowExplicit CoT68.41±0.5968.41\pm 0.5918.27±0.8518.27\pm 0.8571.93±1.6271.93\pm 1.62PCCoT47.647.611.011.065.265.2CODI55.955.913.613.670.170.1KaVa60.060.014.814.866.166.1LOTUS68.13±0.77\mathbf{68.13\pm 0.77}16.27±0.19\mathbf{16.27\pm 0.19}73.40±0.35\mathbf{73.40\pm 0.35}
+
+Natural-language CoT stress-test.
+
+For the natural-language CoT stress test inSection˜4.2, we use theLlama-3.2-3B-Instructbackbone. The explicit CoT run reaches68.41%68.41\%GSM8K accuracy with963.6963.6ms thought latency. The looped run reaches68.13%68.13\%accuracy with140.8140.8ms thought latency. The latent baselines trail well behind on GSM8K (PCCoT47.647.6, CODI55.955.9, KaVa60.060.0). Out of domain, LOTUS leads all methods on SVAMP (73.4073.40, above explicit CoT’s71.9371.93) and stays close to explicit CoT on GSM-Hard (16.2716.27vs.18.2718.27), ahead of every latent baseline (Table˜14).  We exclude SIM-CoT from this comparison becauseSuleymanzadeet al.[2026b]report weak SIM-CoT accuracy on the natural-language subset.
+
+Appendix DExperimental Details
+
+This appendix includes the training and evaluation details inSection˜4.1.
+
+Latent prefix budget.
+
+Each of theK{K}blocks holdsc{c}latent positions, so the prefix spansK​c{K}{c}positions:c=25{c}{=}25(150150positions) for theLlamabackbones andc=13{c}{=}13(7878positions) forGPT-2. We useK=6{K}{=}6, which covers the reference CoT step count for99%99\%of GSM8k-Aug examples. Longer problems fall back to autoregressive completion of the unsupervised tail.
+
+Training curriculum.
+
+We follow the staged curriculum ofHaoet al.[2025], converting one additional CoT step into a latent block everyEstageE_{\text{stage}}epochs. At epochee, we useKe=min⁡(⌊e/Estage⌋,K),{K}_{e}\;=\;\min\!\left(\lfloor e/E_{\text{stage}}\rfloor,\;{K}\right),
+latent blocks: up to the firstKe{K}_{e}CoT steps become latent blocks, and the rest remain visible tokens. Thuse=0e{=}0is standard CoT fine-tuning and the curriculum saturates atKe=K{K}_{e}{=}{K}. We set the loop count at epocheetoRe=r​Ke{R}_{e}=r\,{K}_{e}, whererris the loops-per-block ratio. Since each pass refines all blocks in parallel,Ke{K}_{e}controls the latent workspace width andRe{R}_{e}controls the depth. Unless stated otherwise,Estage=1E_{\text{stage}}{=}1andr=1r{=}1, so the saturated model usesR=K=6{R}{=}{K}{=}6. The loop-depth ablation (Section˜4.3.2) fixesK=6{K}{=}6and variesrrto decouple depth from width.
+
+Optimization details.
+
+We initialize from each backbone’s standard explicit CoT checkpoint, and fine-tune all parameters with AdamW and gradient-norm clipping at1.01.0, inbf16for the Llama backbones andfp32forGPT-2. The learning rate is constant:1×10−41\!\times\!10^{-4}forGPT-2andLlama-3.2-1B-Instruct, and5×10−55\!\times\!10^{-5}forLlama-3.2-3B-Instruct. The training objective (Equation˜6) weights the step loss atλstep=0.05{\lambda_{\mathrm{step}}}{=}0.05(for both LOTUS and LOTUS-aux). Adding CODI weights its loss at1.01.0. We train for3030epochs with an overall batch size of128128, and select the best checkpoint by GSM8k validation accuracy, though the final epoch checkpoints perform similarly.
+
+Natural-language training setup.
+
+For the natural-language stress-test on LOTUS, we keep the same 3B looped backbone but switch to the natural-language GSM8k-Aug training set[Wuet al.,2025], increase latent width toc=50c{=}50and setλstep{\lambda_{\mathrm{step}}}to0.0330.033. We initialize from the CoT checkpoint trained on the natural-language GSM8k-Aug. Other settings are identical to those used for the original GSM8k-Aug training.
+
+LOTUS-aux auxiliary decoder.
+
+For LOTUS-aux, the auxiliary decoder is a full-size deep copy of the base model, initialized from its weights but trained together with the main model. This full-size choice matches SIM-CoT[Weiet al.,2025], whose auxiliary decoder is architecturally identical to the base model. We also tried lightweight auxiliary decoders but found them unstable in training.
+
+Evaluation.
+
+Inference uses greedy decoding with batch size11. This isolates per-example latency from batching effects and calculates the average latency per sample accurately. Latency is measured on a single NVIDIA H100 and decomposed into query, thought, and answer phases (Table˜2).
+
+Batched KV-cache sharing.
+
+For training, we left-pad shorter examples so the⟨lat⟩{\langle\texttt{lat}\rangle}positions align across the batch. This lets us compute each example’s question-prefix KV cache once and reuse it across allR{R}looped iterations.
+
+Appendix EPCL Versus Autoregressive NLL Lower Bounds
+
+Here we provide the explanation mentioned inSection˜5.1. PCL (Section˜3.3.2) scores each gold token in parallel,−∑i,jlog⁡p𝜽​(Ti,j∣𝒉(R))-\sum_{i,j}\log{{p_{{{{\bm{\theta}}}}}}}({T_{{i},j}}\mid{{{\bm{h}}}^{({R})}}), whereas the autoregressive factorization also conditions on the preceding gold tokens,−∑i,jlog⁡p𝜽​(Ti,j∣𝒉(R),T<(i,j))-\sum_{i,j}\log{{p_{{{{\bm{\theta}}}}}}}({T_{{i},j}}\mid{{{\bm{h}}}^{({R})}},{T}_{<({i},j)}), whereT<(i,j){T}_{<({i},j)}denotes all gold tokens before position(i,j)({i},j)in reading order. The lowest expected NLL each can reach is the corresponding conditional entropy, and since conditioning never increases entropy,H​(Ti,j∣𝒉(R))≥H​(Ti,j∣𝒉(R),T<(i,j)),H\!\big({T_{{i},j}}\mid{{{\bm{h}}}^{({R})}}\big)\;\geq\;H\!\big({T_{{i},j}}\mid{{{\bm{h}}}^{({R})}},{T}_{<({i},j)}\big),(11)
+with equality only when the gold tokens are conditionally independent given the latents. So PCL has a strictly higher NLL floor whenever cross-token dependence exists.
+
+Appendix FDetails for Latent Representation Analysis (Section˜5)
+
+F.1Greedy Readout Examples
+
+Here we give examples of two correctly answered and two incorrectly answered GSM8K test problems. We show three readouts of the post-loop latents:(A)the per-block top-11token sequence reading𝒉(R){{{\bm{h}}}^{({R})}}through LOTUS’s base LM headfhead{f_{\mathrm{head}}};(B)the same readout applied to LOTUS-aux’s post-loop latents𝒉(R){{{\bm{h}}}^{({R})}}through its auxiliary headghead{g_{\mathrm{head}}}; and(C)the autoregressive CoT produced by LOTUS-aux’s trained auxiliary decoder from𝒛~(t){\widetilde{{{\bm{z}}}}^{(t)}}, conditioned on the same latents and decoded greedily from the start-of-CoT token. (A) and (B) show the top-11token stream per block verbatim (newlines rendered as\n), truncated at6060characters per block with...marking the cut. (C) shows the raw aux-decoder output. We additionally report the final answer the model generates autoregressively from𝒉(R){{{\bm{h}}}^{({R})}}after allR=6{R}{=}6loops. In each(A)/(B)readout we list theK=6{K}{=}6latent blocks top to bottom, labeledB0–B5.
+
+For readability,bluemarks the readable gold content: well-formed<<…>>CoT steps and exact gold chain numbers (step operands and intermediate results), including a number stuttered back-to-back such as540540for540540. Wrong digit runs (e.g.120120or3636) are left unmarked, and within each readout line we highlight only the first surfacing of each gold value.
+
+Example 1 — Janet’s ducks.
+
+Question: Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers’ market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers’ market?Reference:<<16-3-4=9>>,<<9*2=18>>.Gold answer1818.
+
+(A) LOTUS LM head(𝒉(R){{{\bm{h}}}^{({R})}}throughfhead{f_{\mathrm{head}}}).
+B0:<<3+4=7>>\n00>>\n7>>\n>>\n>>\n1616--9999999<<B1:<<16-7=9>>\n00>>\n>>\n>>\n>>\n>>\n*2==1818>>\n>>\n>>\n1818<<B2:<<9*2=18>>\n00>>\n>>\n>>\n18>>\n>>\n>>\n= 1818>>\n18>>\n>>\n...B3:<<18*2=18>>\n>>\n>>\n>>\n>>\n>>\n>>\n>>\n>>\n=99>>\n>>\n18>>...B4: ###134*7=>>\n18>>\n>>\n>>\n>>\n>>\n>>\n>>\n2=2 .>>\n181818>>...B5: >>\n18=21818>>\n>>\n>>\n===.###2== ,>>\n1818222
+(B) LOTUS-aux LM head(𝒉(R){{{\bm{h}}}^{({R})}}throughghead{g_{\mathrm{head}}}).
+B0: <<’+)7))<<1616--7= 1313\n\n###22*22B1: =2189)#########2222=1818#########22*9=B2:1818 per#########2922 =1818 fresh######99* no16= 18B3:18fresh<|eot_id|>#########9* no no nothing=1818 Clean<|eot_...B4:18ly<|eot_id|>###### no nothing no nothing 1818<|eot_id|>###...B5: ############ nothing nothing nothing=181818############### n...
+(C) LOTUS-aux auxiliary decoder(𝒛~(t){\widetilde{{{\bm{z}}}}^{(t)}}throughghead{g_{\mathrm{head}}}, FR).
+<<3+4=7>>\n<<16-7=9>>\n<<9*2=18>>\n<<18=18>>\n<<9*2=18>>\n<<18+18=18>>\n<<18*2=18>>\n<<18=18>>
+Final answer (autoregressive, after66loops).LOTUS:### 18. LOTUS-aux:### 18. Gold:1818. Both correct.
+Reading the chains.(A): the gold intermediates𝟗\mathbf{9}and𝟏𝟖\mathbf{18}surface from B1 onward and stabilize by B5. (B): the same numerics (9,18,16,79,18,16,7) are present but interleaved with<|eot_id|>runs and filler. (C): the aux decoder produces the gold first two steps<<3+4=7>>,<<16-7=9>>,<<9*2=18>>and then loops on1818.
+
+Example 2 — James’s sprints.
+
+Question: James decides to run 3 sprints 3 times a week. He runs 60 meters each sprint. How many total meters does he run a week? Reference:<<3*3=9>>,<<9*60=540>>.Gold answer540540.
+
+(A) LOTUS LM head(𝒉(R){{{\bm{h}}}^{({R})}}throughfhead{f_{\mathrm{head}}}).
+B0:<<3*60=180>>\n00>>\n180180>>\n>>\n3==540540>>\n>>\n>>\n>>\n>...B1:<<180*3=540>>\n00>>\n>>\n>>\n540>>\n###   540>>\n>>\n   >>\n...B2:<<540*540=540>>\n00>>\n>>\n>>\n>>\n>>\n>>\n###  540>>\n>>\n ...B3:<<540=180=540>>\n540>>\n>>\n>>\n>>\n>>\n>>\n###  540>>\n>>\n...B4: ###540= =>>\n###>>\n>>\n>>\n 2 ######  540540>>\n>>\n   ###B5: ### == >>\n#########    >>\n###    >>\n>>\n   >>\n
+(B) LOTUS-aux LM head(𝒉(R){{{\bm{h}}}^{({R})}}throughghead{g_{\mathrm{head}}}).
+B0:33*3=180180180*###9993==540540)######9B1:9*60=540540))#########9*3nothing = 540540)############B2: /* nothing=540540)#########540+### nothing  540############...B3:  nothing is540540###############540,### also 540540540#####...B4:  is540540540############540,### also 540540#################...B5:540540###############540### definitely 540540540############...
+(C) LOTUS-aux auxiliary decoder(𝒛~(t){\widetilde{{{\bm{z}}}}^{(t)}}throughghead{g_{\mathrm{head}}}, FR).
+<<3*60=180>>\n<<180*3=540>>\n<<540=540>>\n<<540/60=9>>\n<<540=540>>\n<<540/10=540>>\n<<540>>
+Final answer (autoregressive, after66loops).LOTUS:### 540. LOTUS-aux:### 540. Gold:540540. Both correct.
+Reading the chains.(A): the gold step<<3*60=180>>appears in B0 already (a valid alternative decomposition: meters per day first), and𝟓𝟒𝟎\mathbf{540}stabilizes from B1. (B):180,540,9,3180,540,9,3are all present but with heavy###runs around them. (C): the aux decoder reproduces𝟏𝟖𝟎→𝟓𝟒𝟎\mathbf{180}\to\mathbf{540}cleanly, then loops.
+
+Example 3 — Carla’s download (failure).
+
+Question: Carla is downloading a 200 GB file. Normally she can download 2 GB/minute, but 40% of the way through the download, Windows forces a restart to install updates, which takes 20 minutes. Then Carla has to restart the download from the beginning. How long does it take to download the file? Reference:<<200*40*.01=80>>,<<80/2=40>>,<<200/2=100>>,<<40+100+20=160>>.Gold answer160160.
+
+(A) LOTUS LM head(𝒉(R){{{\bm{h}}}^{({R})}}throughfhead{f_{\mathrm{head}}}).
+B0:<<200/2=6=120>>\n6>>\n>>\n>>\n>>\n>>\n2>>\n505050>>\n605050<...B1:<<40*.2=40>>\n120>>\n666>>\n>>\n>>\n>>\n>>\n60>>\n8080>>\n>>...B2:<<60+40=120>>\n8>>\n>>\n>>\n>>\n>>\n>>\n>>\n6050>>\n>>\n>>\n...B3:<<140+20=120>>\n8>>\n33>>\n>>\n>>\n>>\n>>\n2020=120>>\n>>\n>...B4:<<140+20=120>>\n120>>\n33>>\n>>\n>>\n>>\n###+60+/1>>\n>>\n>>...B5:160160+20=120>>\n180>>\n>>\n>>\n>>\n180>>\n###+600+100120>>\...
+(B) LOTUS-aux LM head(𝒉(R){{{\bm{h}}}^{({R})}}throughghead{g_{\mathrm{head}}}).
+B0: 100200/)100100))<<100100**40percentage,404040,<<100-+B1:2020=80+ and###100100+20++ 120120)###100100+220+B2:  120120 plus###100100*10020 140 plus###12080+2100= 120240)\n...B3: ###120120+2020+120140140######120+202020 140140)\n######120+B4: +2=  140140)\n)\n######120120+202020  140100)\n Ris######B5: ###120+2020=100100 Ris#########120+20= 100100 Ris##########...
+(C) LOTUS-aux auxiliary decoder(𝒛~(t){\widetilde{{{\bm{z}}}}^{(t)}}throughghead{g_{\mathrm{head}}}, FR).
+<<100+20=120>>\n<<120+20=140>>\n<<100+20=120>>\n### 140
+Final answer (autoregressive, after66loops).LOTUS:### 180. LOTUS-aux:### 120. Gold:160160.
+Reading the chains.The latents recover most of the right intermediates (𝟖𝟎,𝟏𝟎𝟎,𝟒𝟎,𝟐𝟎\mathbf{80,100,40,20}) but fail to combine them: (A) flickers between120,140,160,180120,140,160,180in the late blocks; (B) commits to120+20120+20chains; (C) outputs<<100+20=120>>, <<120+20=140>>, ...and emits140140. Both methods land on plausible-but-wrong totals.
+
+Example 4 — Melanie’s vacuums (failure).
+
+Question: Melanie is a door-to-door saleswoman. She sold a third of her vacuum cleaners at the green house, 2 more to the red house, and half of what was left at the orange house. If Melanie has 5 vacuum cleaners left, how many did she start with? Reference:<<5*2=10>>,<<10+2=12>>.Gold answer1818. One extra step is omitted from the reference; the true chain is5→10→12→185\!\to\!10\!\to\!12\!\to\!18(12×3/2=1812\times 3/2=18).
+
+(A) LOTUS LM head(𝒉(R){{{\bm{h}}}^{({R})}}throughfhead{f_{\mathrm{head}}}).
+B0:<<5*2=10>>\n33>>\n12>>\n12>>\n22=1312>>\n1212121313<<B1:<<10+2=17>>\n5>>\n5>>\n17>>\n>>\n1//1181818.55<<B2:<<9/(1/2/5=20.5>>\n20>>\n15.18>>\n>>\n>>\n>>\n5>>\n<<B3:<<15*1=30>>\n15>>\n5>>\n5>>\n20>>\n5=151818>>\n>>\n55<<B4:<<3=15>>\n30>>\n15>>\n5>>\n5>>\n>>\n>>\n55515>>\n15>>\n5>>\n...B5:<<15+5=15>>\n15>>\n5>>\n>>\n>>\n17>>\n55515>>\n18>>\n18>>\n>...
+(B) LOTUS-aux LM head(𝒉(R){{{\bm{h}}}^{({R})}}throughghead{g_{\mathrm{head}}}).
+B0: 105* half1010)+101010+2)=1212)<<1212*3B1: 3)1512..<<121212*3 third = 3636.###121212*3)B2:   3636)######12+33= 3636)######36+125=B3: 3636/#########36+12++  4836 Egg#########36+12+=B4: 483636#########+5== 4836############36+5  3636###B5: ############15+3  3636###############15###1 = 363615###
+(C) LOTUS-aux auxiliary decoder(𝒛~(t){\widetilde{{{\bm{z}}}}^{(t)}}throughghead{g_{\mathrm{head}}}, FR).
+<<10+2=12>>\n<<10+2=12>>\n<<10+2=12>>\n<<12+2=14>>\n...
+Final answer (autoregressive, after66loops).LOTUS:### 30. LOTUS-aux:### 36. Gold:1818.
+Reading the chains.(A): LOTUS’s latents flicker between15,18,3015,18,30across blocks. The valid sub-chain𝟓→𝟏𝟎→𝟏𝟐→𝟏𝟖\mathbf{5\!\to\!10\!\to\!12\!\to\!18}surfaces in B5, but the final readout commits to3030. (B): LOTUS-aux locks onto a wrong×3\times 3branch (presumably “a third” read as multiply-by-three), with3636saturating B4 to B5. (C): the aux decoder loops on<<10+2=12>>.
+
+What these readouts are (and are not).The readouts (A), (B), (C) are just diagnostic projections of the post-loop continuous latents back into the discrete token space. They are not part of the inference pipeline. At inference, the final answer is generated autoregressively from the continuous post-loop latents (the “Final answer” line in each example), conditioning on the latent representation itself rather than on any discretized chain. The intermediate streams are intended to give intuition aboutwhat numbers the latents place mass on, not as a quality measure of the model’s reasoning: a noisy or repetitive (A)/(B) stream is compatible with a correct final answer, and a clean (C) chain is not required for the model to be correct.
+
+F.2Details for Multi-Path Analysis (Section˜5.2)
+
+Datasets.
+
+Note that GSM8K-Aug[Denget al.,2023]augments the original GSM8K[Cobbeet al.,2021]training split (about7.57.5K problems) into the385,620385{,}620training examples we use.
+GSM8K is thus a subset of GSM8K-Aug, and the multi-path bank below is built from theoriginalGSM8K problems, which are also in the training set.Figure 4:Multi-path readout probability for the example inSection˜F.3. The only-UUintermediates do not appear in the trained path, question, or answer, but they surface in the post-loop latent readout.
+
+Path bank.
+
+For each question we identify its trained path (its gold chain in the training data) and an unseen-but-valid alternative drawn from a bank of up to ten correct paths obtained by rejection-samplingLlama-3.1-8B[Grattafioriet al.,2024]on the original GSM8K training questions (7,4447{,}444questions with58,15558{,}155verified paths in total), with each alternative verified absent from training.
+
+Candidate sets and filtering.
+
+We partition intermediate numbers into three disjoint sets:GG(trained-path only),UU(unseen-path only), and a random control from other questions matched toUUin both cardinality and single/multi-token composition. Numbers shared by both paths or appearing in the question or answer are excluded, since they cannot indicate which chain a readout recovered. The random control is fixed and shared across all four readouts and verified disjoint from the trained path, unseen path, question, and answer numbers. Intersecting the bank with our training set and keeping questions with≥2\geq 2disjoint intermediates per side yields653653candidate questions. We then apply a token-clean filter, requiring every only-UUnumber to share no sub-token with any trained-path, question, or answer number, leaving the final341341questions, spanning871871GG,974974UU, and974974Random numbers. Random stays matched toUUin cardinality and composition under every criterion.
+
+Metrics.
+
+We score a target number by its best-position, per-token NLL. A number spans one or more consecutive sub-tokens, and at every latent position the readout gives a softmax distribution over the vocabulary. We slide the number’s sub-tokens across the latent positions. At each placement we average the sub-tokens’ NLLs at their aligned positions, and keep the lowest such per-token average over all placements (for a single-token number, simply the negative log of its highest readout probability across positions). Per-token normalization puts single and multi-token numbers on the same scale, and scoring only the most probable span avoids double counting overlaps. We average this over the numbers in setsGG,UU, and Random within each question, then over the341341questions. TheP​(U∈top-​k)P(U\in\text{top-}k)columns instead report a hit rate: the fraction ofUUnumbers recovered within the top-kkcandidates (top-kkmembership at any position for single-token numbers, and a consecutive top-kkmatch for multi-token ones), counting each number once however many positions it surfaces at, averaged within each question and then over the341341questions.
+
+F.3Multi-Path Readout Example
+
+This example (referenced fromSection˜5.2) shows a question that admits two valid reasoning chains with the same answer108108, read out by LOTUS (𝒉(R){{{\bm{h}}}^{({R})}}through the base LM headfhead{f_{\mathrm{head}}}, i.e. the first row ofTable˜10).
+Q:The bus driver drives an average of 2 hours each day, 5 days a week. From Monday to Wednesday he drove at an average speed of 12 kilometers per hour, and from Thursday to Friday at an average speed of 9 kilometers per hour. How many kilometers did the driver travel during these 5 days?
+Trained pathGG:3*2=6 -> 6*12=72 -> 2*2=4 -> 4*9=36 -> 72+36=108.
+Unseen pathUU:2*12=24 -> 24+24+24=72 -> 2*9=18 -> 18+18=36 -> 72+36=108.
+onlyG={3,4,6}\text{only}_{G}=\{3,4,6\},onlyU={24,18}\text{only}_{U}=\{24,18\}(question and final answer excluded).
+Figure˜4visualizes the same example, aligning the trained path, the unseen valid path, and the latent readout positions where the only-UUintermediates surface. The only-UUintermediates2424and1818are the per-day distances in the alternative decomposition, which forms daily distances before summing rather than aggregating hours first. Although neither appears in the trained reference path, both surface in the post-loop latent readout through the base LM head:P​(24)=0.77P(\texttt{24}){=}0.77(top-11, position142142) andP​(18)=0.14P(\texttt{18}){=}0.14(top-22, position116116). Every number here is a single token, so no only-UUnumber shares a sub-token with any trained-path, question, or answer number, confirming the surfacing is genuine unseen-chain content rather than a digit-overlap artifact.

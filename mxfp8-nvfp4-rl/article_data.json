@@ -1,0 +1,168 @@
+{
+  "title": "Blackwell 原生的 8 位和 4 位 RL：Miles 中端到端 MXFP8 与 NVFP4 的工程实践",
+  "summary": [
+    {
+      "key": "核心贡献",
+      "body": "LMSYS 在 Miles 中实现了两套 Blackwell 原生 RL 方案：端到端 MXFP8 和 per-token NVFP4，覆盖 checkpoint 转换、Megatron 训练、SGLang rollout 和实时权重更新"
+    },
+    {
+      "key": "NVFP4 路线的创新",
+      "body": "每 token 在线计算 FP32 激活缩放，避免 batch 变动引入的量化不一致；只量化 MoE 专家（97.8% 参数），其他层保持 BF16"
+    },
+    {
+      "key": "实验结果",
+      "body": "Qwen3-30B-A3B 在 8×B200 上，所有低精度配置的奖励曲线与 BF16 高度重叠，同时 MXFP8/NVFP4 减少了 rollout 时间"
+    }
+  ],
+  "lead": [
+    "在低精度 RL 中，rollout、训练、checkpoint 转换和实时权重更新必须统一于一个精度契约，否则采样器与训练器的策略将发生漂移。LMSYS 在 Miles 中实现了两套 Blackwell 原生低精度方案：**端到端 MXFP8**（覆盖 rollout、前向、权重梯度和数据梯度 GEMM）和 **per-token NVFP4**（MoE 专家路径使用每 token 在线激活缩放），两种格式都支持高精度或反量化反向模式。在 8×B200 上的 Qwen3-30B-A3B 消融实验中，BF16 与所有五种低精度配置的原始奖励曲线高度重叠。**这是 Blackwell 原生低精度 RL 在公共框架中的首次端到端实现。**"
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "为什么需要 Blackwell 原生方案",
+      "paras": [
+        "先前的低精度方法并非围绕 MXFP8 或 NVFP4 设计。Miles 现有路径遵循 DeepSeek-V3 风格的块缩放 FP8 方案：权重使用 128×128 块缩放，激活使用 1×128 tile 缩放，缩放在线计算。这是一个优秀的 Hopper 代方案，但在 Blackwell 上它的 FP32 缩放仍然在软件中围绕 Tensor Core 路径应用，而非通过原生的微缩放硬件。",
+        "INT4 QAT 解决了另一个问题。训练使用伪量化适应 INT4 权重，rollout 使用 W4A16。虽然内存高效，但计算路径实际上仍在使用 BF16 激活加反量化 INT4 权重。NVFP4 则能在 B200 上达到 9 PFLOPS（FP4 张量核心），Rollout、训练、Checkpoint、权重更新四者必须保持精度一致。",
+        "| GPU | BF16 张量核心 | FP8 张量核心 | FP4 张量核心 |\n| --- | --- | --- | --- |\n| B200 | 2.25 PFLOPS | 4.5 PFLOPS | 9 PFLOPS |\n| B300 | 2.25 PFLOPS | 4.5 PFLOPS | 13.5 PFLOPS |\n| Rubin GPU | 4 PFLOPS | 17.5 PFLOPS | 35 PFLOPS |"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "格式背景",
+      "paras": [
+        "**MXFP8** 是一种微缩放 FP8 格式。每 32 个连续的 E4M3 值共享一个本地 E8M0 缩放因子，块是一维的。由于 E8M0 缩放表示 2 的幂，解码缩放通常向上取整，使块内最大值不被截断。",
+        "**NVFP4** 是 Blackwell 的原生 FP4 格式。存储 FP4 E2M1 值，每 16 值块有一个 FP8 E4M3 缩放因子。E4M3 比 E8M0 分辨率更细，缩放通常四舍五入到最近的可表示值。标准 NVFP4 方案还添加一个 FP32 全局缩放，形成两级层次结构：FP32 张量缩放 × FP8 块缩放 × FP4 值。FP32 缩放的 scope 选择是一个方案决策而非格式属性，在 RL 中尤为重要。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig01.png",
+            "caption": "NVFP4 两级缩放的层次结构：FP32 张量缩放 + FP8 E4M3 块缩放 + FP4 E2M1 值"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "方案 1：端到端 MXFP8 RL",
+      "paras": [
+        "MXFP8 方案是先前 FP8 工作的最直接 Blackwell 原生扩展。Rollout、前向、权重梯度 GEMM 和数据梯度 GEMM 全部使用 MXFP8，选定的张量通过精度控制规则保留 BF16。训练侧由 TransformerEngine 和 Megatron 实现，包括 GB200 DeepSeek-V3 优化路径。",
+        "与 DeepSeek-V3 FP8 方案的一个关键区别是反向激活的表示方式。DeepSeek-V3 以前向激活以 1×128 FP8 tiles 存储，在反向 GEMM 前转置。TransformerEngine 则物化行方向（1×32）和列方向（32×1）两份量化副本。虽然使用更多内存，但避免了额外的重量化步骤和量化误差——这是 RL 中典型的系统权衡。",
+        "Rollout 侧，SGLang 使用来自 FlashInfer 和 Triton 的 Blackwell MXFP8 核函数，几乎所有的 GEMM 都能量化到 MXFP8。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig02.png",
+            "caption": "端到端 MXFP8 RL 方案：rollout、前向、权重梯度 GEMM 和数据梯度 GEMM 全部使用 MXFP8"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "方案 2：Per-Token NVFP4 RL",
+      "paras": [
+        "NVFP4 比 MXFP8 更激进，因此选择性应用。量化 MoE 专家——因为它们主导模型大小和 rollout 内存。以 DeepSeek-V3 为例，671B 参数中 MoE 专家占 656.5B（97.8%）。**针对性量化专家就捕捉了绝大部分内存收益，而无需将所有层强制进入最激进的精度格式。**"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "为什么不是直接使用 NVFP4 预训练方案",
+      "paras": [
+        "原始 NVFP4 预训练方案为大规模预训练设计，目标是在使用 FP4 GEMM 的同时保持粗略优化方向。它结合 FP4 线性层 GEMM 与多项稳定器：选定层保持高精度、权重缩放前后一致、使用随机舍入和随机 Hadamard 变换。但 RL 有不同的故障面：预训练梯度信号稳定、权重更新幅度大；RL 梯度嘈杂、奖励高方差、有用更新微小而精细。**必须将量化噪声保持在真实更新信号以下，否则它会覆写脆弱的能力并导致性能崩溃。**",
+        "NVFP4 RL 方案包含四项关键设计：**MoE 专家权重量化**、**每 token 激活缩放**、**一致的精度控制**、**使用可选原值或反量化操作数的 BF16 反向 GEMM**。",
+        "**每 token 激活缩放：** 两级 NVFP4 层次结构功能强大，但 FP32 激活缩放的范围必须精心选择。Per-tensor NVFP4 缩放会使训练随 batch 变化，跨 token 缩放共享会泄漏未来 token 信息。方案因此为每个 token 在线计算一个 FP32 激活缩放——将异常值局限到单个 token，去除静态校准伪影，并使 SGLang rollout 和 Megatron 训练使用相同的激活缩放范围。这一计算已融合到 FlashInfer 的激活量化核函数中。",
+        "Train-inference 一致性还需要匹配并行度。如果 FP32 缩放是在 expert-tensor-parallel 分区内按 token 计算的，SGLang 和 Megatron 应使用相同的 ETP 大小。SwiGLU MoE 的 gate 和 up 投影通常融合为一次 GEMM，二者必须共享同一 FP32 缩放——Miles 通过在导出路径中联合量化 gate/up 对来强制执行。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig03.png",
+            "caption": "原始 NVFP4 预训练方案：FP4 GEMM + 稳定器（随机 Hadamard 变换、随机舍入等）"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "高精度与反量化反向模式",
+      "paras": [
+        "**高精度反向 NVFP4 变体：** 前向和 rollout 使用 NVFP4，反向 GEMM 使用原始的 BF16 操作数。**反量化反向：** 反向 GEMM 仍运行在 BF16，但消费前向阶段产生的低精度操作数的 BF16 反量化版本。两种模式都避免低精度反向 GEMM，因此不使用原始 NVFP4 预训练方案中的 RHT 或随机舍入——用反向吞吐换取更高精度计算，但 RL 通常以 rollout 为瓶颈。",
+        "**内存收益显著：** 高精度和反量化反向不需要生成和保留 TransformerEngine 默认低精度反向路径中使用的第二份列方向量化副本。在 NVFP4 线性层上，高精度反向模式相比默认减少 **72.60% 反向分配内存**和 **70.39% 端到端分配内存**。",
+        "相同的反向模式选择也适用于 MXFP8。LMSYS 将 `NVTE_BACKWARD_OVERRIDE` 实现并上游为一个可复用的 TransformerEngine 接口。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig04.png",
+            "caption": "NVFP4 高精度反向模式：前向 NVFP4，反向使用原始 BF16 操作数"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "细节：比特精确量化契约与精细化精度控制",
+      "paras": [
+        "RL 中，量化不匹配会跨权重更新累积。LMSYS 将 FlashInfer 和 TransformerEngine 的量化器对齐到相同的 MXFP8/NVFP4 位级契约，FlashInfer 单元测试在随机、边界、全零和最大值数据上检查精确字节级一致。为此设置 `FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH=1` 禁用快速数学。",
+        "实践中单一的全局精度开关对低精度 RL 是不够的。LMSYS 在 Miles 中实现了基于计数和名称的 BF16 例外机制（首层和末层保持 BF16），跨 checkpoint 转换、Megatron 训练、SGLang rollout 和实时导出一致执行。保留最后 15% 层在 BF16 能有效减少训练-推理不匹配。共享专家保持高精度也可减少不匹配，因为它们总是活跃，精度误差影响每个经过的 token。",
+        "对于 MLA 模型，`kv_b_proj` 是一个重要的特殊情况。不同的 MLA 模式使用不同的收缩轴，而 MXFP8 使用一维微缩放块——更改收缩轴会改变哪些元素共享缩放。LMSYS 将这些投影张量保留在 BF16 中。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "实验结果：Qwen3-30B-A3B 在 8×B200 上的消融",
+      "paras": [
+        "所有实验使用同步 GRPO 风格训练在 dapo-math-17k 上，8 个 rollout 样本/prompt，最大 8192 响应 token。硬件分配：4 GPU rollout + 4 GPU 训练。比较 6 种配置：BF16、MXFP8（端到端、高精度反向、反量化反向）、NVFP4（高精度反向、反量化反向）。",
+        "**训练-推理不匹配：** 两种低精度格式都比 BF16 更高，但数值在合理范围内。NVFP4 的参考 KL 起点更高——这是相对于 BF16 参考模型的诊断指标，包含低精度策略与 BF16 参考之间的差异。",
+        "**奖励曲线：** 五种低精度配置全部紧密追踪 BF16 奖励曲线。**这是消融实验的关键结果。**",
+        "**性能：** MXFP8 和 NVFP4 都减少了 rollout 时间。训练侧，MXFP8 变体快于 BF16，而 NVFP4 反向覆写变体在本实现中较慢——原因在于 per-token FP32 缩放作为独立 PyTorch 操作而非融合核函数运行，融合 cuDNN 前端核函数已上游但 TransformerEngine 集成待定。由于 RL 以 rollout 为瓶颈，rollout 加速即使在前向路径未完全优化时也很有价值。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig10.png",
+            "caption": "原始奖励曲线对比：所有五种低精度配置紧密追踪 BF16——这是消融的核心结果"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig11.png",
+            "caption": "Rollout 时间对比：MXFP8 和 NVFP4 均减少 rollout 时间"
+          }
+        ],
+        "1+1": [
+          {
+            "src": "fig08.png",
+            "caption": "训练-rollout logprob 差异：低精度格式高于 BF16，但在合理范围内"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "未来工作与局限",
+      "paras": [
+        "**去除额外 BF16 权重副本：** Megatron 仍保存一份额外的 BF16 权重。`--fp4-param-gather` 尚不支持此方案使用的 1D 1×16 权重布局。",
+        "**偶发梯度尖峰：** 高精度反向 NVFP4 变体仍会出现偶发梯度尖峰，反量化反向减少最大尖峰但不消除。",
+        "**权重更新接口重构：** FlashInfer 后端需要填充、混洗和特定布局，与训练侧的规范张量布局不兼容。Miles 和 SGLang 致力于在保持高性能服务布局的同时使每个转换可验证。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig16.png",
+            "caption": "NVFP4 高精度反向变体的偶发梯度尖峰"
+          }
+        ]
+      }
+    }
+  ],
+  "conclusion": [
+    "这篇博客是 LMSYS 在低精度 RL 工程上的又一次重要推进。从 2025 年 11 月的 FP8 RL，到 2026 年 1 月的 INT4 QAT，再到现在的 MXFP8/NVFP4 Blackwell 原生方案——**核心逻辑一以贯之：RL 中精度契约必须在整个栈（rollout→训练→checkpoint→权重更新）一致执行，否则策略漂移使任何精度优势归于零。**",
+    "**这篇工作中最有趣的设计决策是『选择性 NVFP4』——只量化占 97.8% 参数的 MoE 专家，其余保持 BF16。这是一种务实的工程判断：不是所有层都需要最高压缩，关键张量（MLA 投影、共享专家）的精度错误会影响每个 token。** 这与之前 INT4 QAT 中全量化的思路形成有趣对比——全量化对非专家层来说可能得不偿失。",
+    "**独立观点：** NVFP4 方案中训练的「慢」（独立 PyTorch 缩放 vs 融合核函数）和推理的「快」（原生 FP4 Tensor Core + 在线缩放融合）之间的差距，揭示了低精度 RL 工程的当前瓶颈不在硬件而在软件栈。TransformerEngine 的融合核函数一旦就位，训练侧的 FP4 速度也会跟上。而 FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH 这个 flag 的存在本身就说明了 RL 与 serving 在量化精度要求上的本质差异。"
+  ],
+  "reference_url": "https://www.lmsys.org/blog/2026-07-29-mxfp8-nvfp4-rl"
+}

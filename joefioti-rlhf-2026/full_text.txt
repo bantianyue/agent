@@ -1,0 +1,117 @@
+The "One Weird Trick" of Optimization
+
+A modern accelerator can perform an absurd number of operations every second. The problem is that most of those operations depend on data that needs to be moved.
+
+A multiply might take only a few cycles, but fetching its inputs from memory can take hundreds, and moving a tensor between chips can take thousands. If the processor waited for each movement to finish before starting the next piece of work, nearly all of its compute would sit idle.
+
+This gap between compute speed and communication speed is one of the central problems in computer architecture. It cannot be solved simply by making arithmetic units faster. In fact, faster arithmetic often makes the problem worse: the quicker a processor consumes data, the more difficult it becomes to deliver that data on time.
+
+The solution is latency hiding.
+
+Latency vs Throughput
+
+Latency is the amount of time required for one operation to finish. Throughput is the number of operations a system can finish over time. These sound closely related, but they are not the same thing.
+
+Imagine a memory request takes 300 cycles. If the processor issues one request and waits 300 cycles before issuing another, it completes almost no useful work. But if it can keep hundreds of independent requests in flight, a result may return on nearly every cycle once the pipeline is full.
+
+The latency of each request is still 300 cycles, and though nothing became faster, the delay stopped limiting throughput.
+
+ 
+
+This is the key idea behind latency hiding: whenever one operation is waiting, the processor finds some other operation that is ready to run.
+
+A well-utilized processor may have an enormous number of unfinished operations at any moment. Some are waiting for memory, some are traveling across the chip, some are executing in arithmetic pipelines, and some are ready to begin. Performance comes from arranging this work so that every hardware unit always has something useful to do.
+
+Finding Independent Work
+
+Latency can only be hidden when independent work exists.
+
+Consider a chain of operations where every instruction consumes the result of the previous instruction. The processor cannot overlap them because the next operation genuinely does not have the information it needs. This is the critical path of the program, and its latency is fundamentally visible.
+
+However most real workloads contain more parallelism. For instance, different tensor elements can be calculated independently, multiple memory addresses can be fetched at once, one tile can be computed while another is transferred, or communication for one layer can overlap computation from another.
+
+Computer architectures expose this parallelism in several ways.
+
+Instruction Level Parallelism: A CPU searches through nearby instructions and executes independent ones out of order. It may continue doing arithmetic while an older instruction waits for a cache miss. This requires sophisticated hardware to track dependencies, rename registers, schedule instructions, and eventually retire them in the correct order.
+
+Thread Level Parallelism: Another approach is to keep multiple threads resident. When one thread encounters a dependency, the processor selects another thread whose inputs are available. Rather than extracting more parallelism from one instruction stream, it switches between many instruction streams.
+
+Software Pipelining: Finally, software can create overlap explicitly. It can request data long before that data is needed, divide work into stages, and operate several stages simultaneously.
+
+ 
+
+These techniques all solve the same underlying problem: create enough distance between starting a slow operation and consuming its result.
+
+How GPUs Hide Latency
+
+GPUs are designed around having much more work available than they can execute at once.
+
+A GPU kernel may launch tens of thousands of threads. Those threads are collected into groups called warps, with many warps resident on each streaming multiprocessor. On every cycle, the warp scheduler looks for warps whose next instruction is ready.
+
+Suppose one warp issues a load from global memory. The result may not return for hundreds of cycles. The GPU does not save the warp to memory or perform an operating-system context switch. It leaves the warp’s registers on the chip and begins issuing instructions from other warps.
+
+By the time the scheduler returns to the original warp, its data may be ready.
+
+This is why GPU performance is often associated with occupancy: the number of active warps that can reside on a processor. More resident warps give the scheduler more opportunities to find useful work while other warps are stalled.
+
+But occupancy is only a means to an end, and maximum occupancy does not guarantee maximum performance.
+
+Every warp consumes registers and thread blocks consume shared memory. Increasing the number of resident warps leaves fewer resources available to each one, so a kernel with lower occupancy may still run faster if it performs more work per instruction, reuses more data, or exposes enough independent instructions within each warp.
+
+The important quantity is not the number of warps. It is whether the processor has a ready instruction whenever an execution unit becomes available.
+
+Pipelines Inside GPU Kernels
+
+Warp scheduling is only one layer of latency hiding. High-performance GPU kernels also build explicit pipelines for moving data.
+
+Consider a tiled matrix multiplication. A basic implementation loads a tile into shared memory, waits for the load, performs the matrix multiply, and then begins loading the next tile. Every transition introduces a period where either the memory system or the matrix hardware is idle.
+
+A pipelined implementation behaves differently. While the matrix units operate on the current tile, the memory system loads a future tile into another buffer. When the computation finishes, the next tile is already available and the buffers exchange roles.
+
+More advanced kernels may keep several future tiles in flight.
+
+ 
+
+Increasing the number of pipeline stages gives memory more time to respond, but it also consumes more shared memory and registers. At some point the deeper pipeline reduces occupancy, increases synchronization overhead, or moves more data than the kernel can use.
+
+The correct pipeline depth depends on the operation, tensor shape, memory layout, and processor. There is no universally optimal configuration.
+
+Latency Hiding on TPUs
+
+TPUs face the same problem from a different architectural direction. Their matrix units can consume huge tiles of data at extremely high rates. Once a matrix operation begins, the hardware performs an enormous amount of arithmetic efficiently. The difficult part is arranging for the inputs to arrive before the matrix unit needs them and moving the outputs away before they block future work.
+
+TPUs rely heavily on explicit, compiler-planned execution. The compiler knows which tensors future operations require, where those tensors live, and which transfers can overlap with computation already in progress.
+
+A program might transfer one tile into local memory, execute a matrix operation on another tile, run vector operations on an earlier result, and begin sending completed outputs elsewhere, all at the same time.
+
+Instead of depending primarily on a large pool of dynamically scheduled warps, the TPU compiler constructs a schedule across the different engines in the chip.
+
+This can be extremely efficient because it removes much of the machinery required to discover parallelism at runtime. The downside is that software must discover the overlap ahead of time. If the schedule contains a gap, the hardware cannot always find unrelated work on its own.
+
+GPUs and TPUs therefore approach latency hiding from opposite sides. GPUs traditionally use more dynamic hardware scheduling. TPUs traditionally expose more of the schedule to software. Modern systems increasingly combine both ideas: programmable accelerators expose asynchronous operations, while compilers become responsible for coordinating increasingly specialized hardware units.
+
+When Latency Cannot Be Hidden
+
+Latency hiding has limits.
+
+The first limit is insufficient parallelism. If every operation depends on the previous result, no scheduler can manufacture independent work.
+
+The second limit is storage. Operations that are in flight need registers, queues, buffers, and bookkeeping. Eventually the processor runs out of space to start more work.
+
+The third limit is bandwidth. Latency hiding can cover the time required for data to arrive, but it cannot make a memory interface transport more bytes per second. Once the available bandwidth is saturated, issuing more requests creates congestion instead of additional overlap.
+
+Finally, synchronization can destroy otherwise available parallelism. A barrier forces different pieces of work to wait for one another. Sometimes this is required for correctness, but overly broad synchronization turns small dependencies into global stalls.
+
+This is why optimizing for latency hiding requires reasoning about the entire machine. Starting more work is only valuable when that work uses available resources without creating a new bottleneck elsewhere.
+
+Scheduling Is the Real Problem
+
+The difference between a slow kernel and a fast kernel is often not the arithmetic being performed. Both kernels may execute the same multiplies and move the same tensors. The fast kernel simply arranges those operations so that waiting happens in the background.
+
+Doing this manually is difficult. Pipeline depth interacts with tile size, tile size affects register pressure, register pressure affects occupancy, and so on. Occupancy changes how effectively the hardware can cover unpredictable stalls, so a schedule that works beautifully for one shape may fall apart on another.
+
+This is exactly the kind of interconnected optimization problem that Luminal is designed to search.
+
+Luminal can explore different decompositions, instruction orderings, buffer assignments, and degrees of overlap. It can measure when a transfer should begin, how much computation should sit between a producer and consumer, and whether a deeper pipeline is worth the resources it occupies. In doing so, it often discovers pipelines that we as kernel engineers either wouldn't think up or would be too complex for us to implement ourselves. It's always cool to see some alien-looking pipeline discovered to be optimal for a given operation!
+
+Remember, the goal is not to eliminate waiting; every real machine waits. The goal is to ensure that while one part of the machine is waiting, every other part is moving forward.

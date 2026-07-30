@@ -1,0 +1,139 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">系统优化</strong>：在Ascend CloudMatrix384 SuperPOD（910C NPU）上全参数训练1.6T DeepSeek-V4-Pro，通过多层次优化实现34.22% MFU，相比基线提升2.93倍<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">AuraKernel</strong>：运筹学（OR）驱动的AscendC内核优化agent，通过OR求解器自动优化tile选择和长时间跨度的内核搜索<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">领域适配</strong>：面向运筹学（OR）的CPT→SFT后训练工作流，在B4O基准上平均精度71.81%，超越GPT-5.4-Mini 3.98个百分点，超越基础DeepSeek-V4-Flash 11.27个百分点</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">万亿参数级MoE模型的后训练一直紧密绑定在CUDA或TPU基础设施上。<strong>在SIMD架构的AI芯片（如Ascend NPU）上做全参数后训练，是否可行？</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SLAI T-Rex给出了肯定的答案。这篇系统性的报告展示了在Ascend CloudMatrix384 SuperPOD（910C NPU）上对DeepSeek-V4系列进行全参数后训练的完整工程实践。<strong>Pro版本验证了基础设施可扩展性，Flash版本验证了领域适配能力。</strong></p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">万亿参数级训练的瓶颈分析</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">DeepSeek-V4-Pro拥有1.6万亿参数，集成了大规模MoE层和混合稀疏注意力。在256卡Ascend 910C上的profiling显示，训练inefficiency有两张互补的面孔：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>通信瓶颈</strong>：通信占设备内核时间的52.2%（40.76秒/步）。其中Tensor/Data Parallelism（AllReduce/AllGather）占48.4%，Pipeline Parallelism（Send/Recv）占36.7%，Expert Parallelism（AllToAllV）占14.5%。问题是通信不是带宽受限的，而是调度受限的：同步等待和流调度的开销远大于实际数据传输。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>计算瓶颈</strong>：在设备端，少量大算子（Cube内核）和大量小算子（Vector内核的「长尾」）共同占据设备时间。Vector内核的碎片化启动和内存移动开销是性能瓶颈的关键。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_ch2.1-fig_overview_v0.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">万亿参数LLM在Ascend SuperPOD NPU上的训练延迟分解：(a) 端到端训练流水线中的延迟分布，(b) 平均延迟分解（计算、通信、NPU空闲气泡）。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_ch2.2.1-bottleneck_anatomy_v3.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">瓶颈分析：(a) 步时间分解为计算、暴露通信和流水线气泡，(b) 大Cube内核与小Vector内核的启动次数与设备时间占比对比，(c) Vector内核的流水线占用分析。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">多层次并行与通信优化</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">论文提出了端到端的SuperPOD感知训练优化框架，覆盖三个层面：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>并行策略优化</strong>：针对万亿参数MoE模型，设计了多维并行（TP+PP+DP+EP）的联合优化方案。通过分析MoE路由的异构性（Attention、路由、Dispatch、Expert FFN、Combine各有不同的计算和通信强度），提出动态重叠调度策略。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>通信编排</strong>：关键创新是将通信与计算深度重叠。由于MoE的token路由在步间有负载变化，重叠窗口既不均匀也不稳定。论文通过细粒度的流调度和计算-通信依赖分析，将暴露通信时间大幅压缩。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>内存管理</strong>：针对Ascend软件管理内存层次的特点，设计了显式的数据移动编排，减少MTE（Memory Transfer Engine）的等待时间。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_ch2.2-train_framework.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Ascend SuperPOD上的训练框架架构：多维并行、通信编排和内存管理的协同设计。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_ch2.2-cover_dispatch_sync.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">dispatch与同步的通信重叠优化策略，掩盖通信时间。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_ch2.2-etp.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Expert Tensor Parallelism的通信优化方案。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">AuraKernel：OR驱动的AscendC内核优化Agent</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">AuraKernel是论文中的核心创新：<strong>基于运筹学（OR）的AscendC内核优化agent</strong>。与主要依赖harness构建和循环级工程的现有内核agent不同，AuraKernel将OR求解器引入内核优化工作流。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">核心思路是将Ascend的Cube单元tile优化问题建模为OR问题：给定算子形状、内存层次约束（L0/L1/UB/L2/HBM）、数据依赖关系，OR求解器自动搜索最优的tile划分方案。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">AuraKernel包含三个关键组件：<strong>OR求解器</strong>负责tiling优化，<strong>AscendC Harness</strong>提供编译和profiling环境，<strong>迭代优化循环</strong>根据实际运行时间反馈调整搜索方向。与手动优化和启发式优化相比，OR求解器能更系统地探索Ascend的内核搜索空间。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">论文进一步引入了<strong>算子融合与重写（Operator Fusion and Rewrite）</strong>策略。通过分析Ascend NPU的算子链执行模式，将多个连续的Vector内核融合为单个更高效的复合内核，减少内核启动开销和内存移动。同时，针对Attention机制中的RoPE、Softmax等关键算子，设计了NPU感知的重写优化，将计算从低效的Vector单元迁移到高效的Cube单元。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_aurakernel.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">AuraKernel架构：OR求解器驱动的AscendC内核优化agent，包含OR求解器、AscendC Harness和迭代优化循环。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_ai_workflow.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">AuraKernel的优化工作流：从算子profiling到OR建模再到自动tiling搜索的完整流程。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_fig_fusion_time_breakdown.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">算子融合的时间分解：AuraKernel优化前后的性能对比。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_fig_fusion_trace_schematic.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">算子融合的trace示意图：优化前后的计算与通信重叠情况。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_ch2.3.3-operator_chain_fusion_atlas.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Ascend NPU上的算子链融合策略：将多个Vector算子融合为高效复合内核。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_ch2.3.3-rope_mechanisms.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">RoPE算子的NPU感知重写优化：将计算从Vector迁移到Cube单元。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_ch2.3.3-mhc_mechanisms.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">MHC（Multi-Head Cache）机制的NPU优化实现。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">最终性能：34.22% MFU与2.93倍提升</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">通过AuraKernel在内核级的优化与系统级的多层次优化协同，DeepSeek-V4-Pro在Ascend SuperPOD上实现了<strong>34.22% 的MFU（Model FLOPs Utilization）</strong>，相比默认基线提升了<strong>2.93倍</strong>。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">MFU是衡量训练系统效率的核心指标，34.22% 在SIMD架构的NPU上是相当可观的数字。作为对比，同等规模的GPU集群通常在40-50% 范围。考虑到Ascend 910C的SIMD架构与GPU的SIMT架构在灵活性上的本质差异，这个结果展示了Ascend SuperPOD在万亿参数级训练上的潜力。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Ablation实验显示，各优化模块的贡献如下：通信-计算重叠优化贡献了最大的MFU提升（约1.5倍），AuraKernel内核优化贡献了约1.3倍，并行策略优化和内存管理优化贡献了约1.1倍。这些优化是累乘的，最终实现了2.93倍的总提升。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_overview_infra_and_acc.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Ascend SuperPOD上的基础设施优化与加速效果概览：MFU从基线提升2.93倍至34.22%。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_ablation.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Ablation实验：各优化模块对MFU提升的贡献分解。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">运筹学（OR）领域适配：CPT→SFT工作流</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">除了Pro版本的基础设施验证，论文还在DeepSeek-V4-Flash上验证了<strong>OR领域适配的后训练工作流</strong>，覆盖solver-grounded数据构建、SFT数据清洗、CPT-to-SFT迁移和基准评估。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>两阶段适配策略</strong>：论文采用Continued Pre-Training（CPT）→ Supervised Fine-Tuning（SFT）的渐进式工作流。CPT阶段让模型学习OR领域的数学建模先验知识：包括约束矩阵结构、目标函数形式、变量类型定义等。SFT阶段则对齐具体的solver交互格式和输出标准化。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>CPT数据构建</strong>：从公开的OR资源（NL4OPT、OptiBench、B4O等基准）中收集领域数据，同时使用solver验证过的合成优化文档进行数据增强。数据涵盖四种任务类别（线性规划、整数规划、混合整数规划、约束规划）和三种问题表示（自然语言描述、数学公式、代码模板）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>SFT数据管线</strong>：通过自蒸馏（Self-Distillation）生成高质量的OR建模SFT数据。核心组件包括：solver-grounded数据构建（利用solver的执行结果验证数据的正确性）、contract-aware清洗（基于合同语义的一致性检查）、CoT增强（将建模过程拆解为逐步的Chain-of-Thought）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>关键发现</strong>：SFT提供了监督任务对齐，将B4O-Feasible从60.47% 提升到65.93%，B4O-ORGEval从34.26% 提升到48.73%。而CPT初始化后的SFT进一步将两者提升到<strong>71.22% 和59.39%</strong>，说明CPT贡献了OR领域建模的先验知识，提高了solver面向的可行性和结构等价性。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在多个OR评估指标上聚合，模型平均精度达到<strong>71.81%</strong>，超越GPT-5.4-Mini 3.98个百分点，超越基础DeepSeek-V4-Flash 11.27个百分点。进一步分析表明，CPT建立的先验知识对SFT的增益是互补的：CPT主要提升结构等价性（solver输出的语法正确性），SFT则主要提升可行性（solver输出的语义正确性）。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_data_engine.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">OR领域的数据引擎：solver-grounded数据构建、自蒸馏SFT数据生成、contract-aware清洗的完整流水线。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_flywheel.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">OR领域适配的飞轮效应：从数据构建到训练到评估的闭环迭代。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_50k_sft_stability_paper.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">50K SFT训练稳定性分析：loss曲线、梯度范数和学习率调度的变化。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_base_error_family_bars.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">基础模型在不同OR设置下的错误类型分布。</figcaption></figure>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+SLAI T-Rex是<strong>首个公开的、在Ascend SuperPOD上全参数后训练万亿参数MoE模型的完整工程研究</strong>。核心成果包括：<br  /><br  /><strong>系统层面</strong>：通过多层次优化实现了34.22% MFU（2.93倍提升），证明SIMD架构的NPU（Ascend 910C）可以胜任万亿参数级LLM的后训练任务。<br  /><br  /><strong>算法层面</strong>：AuraKernel将OR求解器引入AscendC内核优化，为AI芯片上的自动内核优化提供了新范式。算子融合与重写策略进一步释放了NPU的计算潜力。<br  /><br  /><strong>应用层面</strong>：OR领域适配的CPT→SFT工作流超越了GPT-5.4-Mini，展示了在长尾工业决策领域（如调度、运输、供应链管理）的应用前景。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDAKernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/pCRjhls1WFaiRglb2MtjBw" target="_blank" data-linktype="2">蚂蚁CausalMix: 将数据混合从超参搜索转换成因果推断</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里SparseAttention on CXL替代RDMA做KVCache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/L6krDtAzuCiX4y2KNYYvfQ" target="_blank" data-linktype="2">万亿参数RL实战：如何用28个H200节点训GLM-5</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：ContextTuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://arxiv.org/abs/2607.20145</span></p>
+</section>

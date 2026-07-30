@@ -1,0 +1,226 @@
+
+From Proprietary to Open-Source: Bridging the Distribution Gap via Multi-Agent Protocol Distillation in Agentic Search
+Junlin LiuJiangwang ChenZixin SongShuaiyu ZhouChunji LvBeijing Institute of TechnologyHank WuEast China Normal UniversityKailin JiangUniversity of Science and Technology of ChinaJinyang WuTsinghua UniversityBohan YuUniversity of Chinese Academy of SciencesChenxi ZhouUniversity of Chinese Academy of Sciences
+Abstract
+Agentic search enables large language models to solve knowledge-intensive tasks by interleaving multi-step reasoning with retrieval, yet optimizing this with outcome-based reinforcement learning (RL) provides only sparse supervision. Knowledge distillation can supply denser guidance, and advanced proprietary models with their strong reasoning capabilities are promising teachers.
+While distilling from proprietary models can densify this supervisory signal, conventional logit-matching is precluded by hidden logits and mismatched tokenizers, whereas raw natural language trajectory imitation transfers superficial stylistic artifacts rather than core reasoning competence.
+To address the heterogeneous distillation problem and bridge the distribution gap, we proposeMulti-AgentProtocolDistillation (MAPD), a joint distillation and RL framework uses a structured, style-normalized protocol as an intermediate representation. An offline multi-agent system (MAS) decomposes each query, retrieves supporting evidence, repairs failed searches, and converts the resulting exploration trace into a JSON protocol containing the task type, reasoning plan, and extractive grounding facts.
+During training, the protocol is provided only to a privileged branch of the student policy, whose token distributions furnish a dense distillation signal alongside the sparse RL objective.
+Extensive evaluations across seven QA benchmarks demonstrate that MAPD consistently outperforms competitive distillation and RL, achieving average success rates of39.4%39.4\%on Qwen3-1.7B and44.4%44.4\%on Qwen3-4B. Crucially, the framework generalizes robustly across diverse proprietary teachers while effectively mitigating the student policy from style drift and verbosity degeneration. The code is open sourced inhttps://github.com/AaronLiu0702/MAPD
+
+1Introduction
+
+Driven by the rapid advancement of large language models (LLMs), research has shifted from single-turn reasoning to multi-turn agentic tasks, with agentic search emerging as a crucial paradigm for tackling knowledge-intensive challenges(jin2025search;zhang2025web;zheng2025deepresearcher;luo2025globalrag;liang2026search). However, existing agentic search systems are often optimized with outcome-based reinforcement learning from verifiable rewards (RLVR), where final-answer correctness provides only sparse supervision for long interaction trajectories. Recent studies supplement RLVR with online policy distillation (OPD), using token-level distribution alignment to provide denser guidance for intermediate decisions(dong2025agentic;wang2026openclaw;lu2026self).
+
+Although combining RL with OPD provides a more reliable training signal, the overall efficacy of OPD strictly hinges on a high-quality teacher policy.
+To unlock the potential of open-source models in complex agentic search, leveraging state-of-the-art proprietary models as expert teachers is highly desirable, given their exceptional capabilities in dynamic task decomposition, multi-hop reasoning, and information synthesis.
+However, distilling knowledge from these proprietary teachers to open-source students presents two major bottlenecks.
+First, traditional OPD fundamentally relies on token-level KL divergence alignment. Yet, the discrepancy of heterogeneous tokenizers and the absence of accessible teacher logits render this mathematical alignment undefined(agarwal2024policy;li2026rethinking).
+Second, as a common fallback, natural language trajectory distillation frequently fails in agentic scenarios. By forcing open-source student models to mimic the verbose and idiosyncratic reasoning styles of proprietary experts, this approach exacerbates the distribution gap. It induces severe style drift and hallucinations, failing to transfer the underlying cognitive strategies while degrading performance in agentic tasks(gudibande2023false;zhao2026self).
+Existing approaches therefore lack an intermediate representation that can convert black-box expert behavior into dense supervision without exposing the student to teacher-specific surface forms.Figure 1:Distilling from proprietary teacher to open-source student faces two bottlenecks: (1) heterogeneous tokenizers and inaccessible logits preclude direct alignment; (2) free-form natural-language trajectory imitation induces style drift and hallucination.
+
+To address these bottlenecks, we proposeMulti-AgentProtocolDistillation (MAPD), a joint distillation and RL framework built around a structured, style-normalized intermediate representation between proprietary experts and open-source students.
+MAPD separates offline protocol synthesis from online policy alignment. In the offline stage, a proprietary-model-powered MAS decomposes each query, retrieves supporting evidence, repairs failed searches, and converts the exploration trace into a JSON protocol. In the training stage, this protocol is reformatted as privileged information into a conditioned branch of the student policy. Since this privileged branch and the student branch share a same model, their distributions are aligned via a dense self-distillation objective that complements the sparse outcome-based RL objective. By distilling through structured protocols rather than free-form natural-language trajectories, MAPD reduces the student’s exposure to teacher-specific verbosity and formatting artifacts. Crucially, the proprietary model and MAS are used only for offline protocol synthesis, adding zero overhead to inference.
+Our main contributions are summarized as follows:
+•
+
+We propose MAPD, a joint on-policy self-distillation and outcome-based RL framework designed to bridge the distribution gap between proprietary and open-source. By aligning a protocol-conditioned branch with a student branch of the same policy, it provides dense guidance without requiring access to proprietary logits or cross-tokenizer alignment.
+•
+
+We introduce a structured, style-normalized JSON protocol as the intermediate representation to decouple core strategies from the linguistic shell. To reliably synthesize protocols, we construct a robust MAS with specialized roles and rigorous automated checks.
+•
+
+Experiments with three top-tier proprietary models (Claude-Opus-4.6, GPT-5.5, and Gemini-3.1-Pro) as expert teachers demonstrate that MAPD yields reliable gains and these improvements can transfer across different proprietary models without retuning the pipeline.
+
+2Problem Formulation & Preliminaries
+
+2.1Agentic Search
+
+We formulate agentic search as a multi-turn interaction paradigm. Given a questionxx, a language model policyπθ\pi_{\theta}interacts with a retrieval-augmented environment for up toKKturns. At each turn, the agent generates reasoning steps and optionally issues a retrieval query, to which the environment responds with relevant passages as the next observation. For notational simplicity, we flatten the entire generated trajectory across all turns into a single token sequencey=(y1,…,yT)∼πθ(⋅∣x).y=(y_{1},\ldots,y_{T})\sim\pi_{\theta}(\cdot\mid x).(1)
+The interaction terminates either when the agent emits a designated final answer string or reaches the maximum turn limitKK. Each completed episode receives a sparse, trajectory-level binary rewardR​(x,y)∈{0,1}R(x,y)\in\{0,1\}, which is determined by parsing the final predicted answer fromyyand evaluating it via strict exact-match (EM) against the ground-truth.
+
+2.2Group Relative Policy Optimization (GRPO)
+
+For a given promptxx, GRPO(shao2024deepseekmath)samples a group ofGGrollouts{y(i)}i=1G\{y^{(i)}\}_{i=1}^{G}and computes advantagesA^(i)\hat{A}^{(i)}derived from the terminal rewards. The policy is updated by optimizing a clipped surrogate objectiveJt(i)J_{t}^{(i)}alongside a per-token KL penalty against a reference modelπref\pi_{\text{ref}}:Jt(i)\displaystyle J_{t}^{(i)}=min⁡(ρt(i)​A^(i),clip​(ρt(i),1−ϵ,1+ϵ)​A^(i)),\displaystyle=\min\Bigl(\rho_{t}^{(i)}\hat{A}^{(i)},\;\text{clip}\bigl(\rho_{t}^{(i)},1-\epsilon,1+\epsilon\bigr)\hat{A}^{(i)}\Bigr),(2)ℒGRPO\displaystyle\mathcal{L}_{\text{GRPO}}=−1G​∑i=1G1|y(i)|​∑t=1|y(i)|[Jt(i)−β​𝔻KL​(πθ∥πref)].\displaystyle=-\frac{1}{G}\sum_{i=1}^{G}\frac{1}{|y^{(i)}|}\sum_{t=1}^{|y^{(i)}|}\Big[J_{t}^{(i)}-\beta\mathbb{D}_{\text{KL}}\bigl(\pi_{\theta}\parallel\pi_{\text{ref}}\bigr)\Big].
+Whereρt(i)\rho_{t}^{(i)}denotes the per-token importance weight. While GRPO effectively drives exploration, it strictly evaluates outcome success and lacks the granular supervision required to optimize complex intermediate reasoning steps.
+
+2.3Online Policy Self-Distillation (OPSD)
+
+To supply denser token-level supervision and follow the context-conditioned self-distillation formulation of OPSD(zhao2026self), we obtain two next-token distributions from the same current policy parameters. At optimization stepkk, the student branch conditions onst=(x,y<t)s_{t}=(x,y_{<t}), whereas the teacher branch additionally conditions onst+=(x,p,y<t)s_{t}^{+}=(x,p,y_{<t}), whereppdenotes the privileged information (PI) available exclusively during training.
+By restricting gradient flow solely to the student path during backpropagation, OPSD minimizes the per-token reverse KL divergence:ℒOPSD(t)=𝔻KL(πθk(⋅∣st)∥πθk(⋅∣st+)).\mathcal{L}_{\text{OPSD}}^{(t)}=\mathbb{D}_{\text{KL}}\bigl(\pi_{\theta_{k}}(\cdot\mid s_{t})\parallel\pi_{\theta_{k}}(\cdot\mid s_{t}^{+})\bigr).(3)
+This homologous formulation inherently circumvents the vocabulary mismatch issues encountered in proprietary model distillation. However, standard OPSD typically derives the PIppfrom the student’s own correct rollouts, which fundamentally bounds the supervision quality by the student’s existing reasoning limits.
+
+3Methodology
+
+In this section, we first introduce the Structured JSON Protocol (Section3.1) that normalizes privileged information and decouples cognitive strategies from proprietary model-specific linguistic patterns.
+We then detail the Multi-Agent System Generation Pipeline (Section3.2), which automates the distillation of raw teacher trajectories into our compact protocol through a three-stage collaborative process with rigorous quality control.
+Finally, we present the Joint Training Objective (Section3.3) that combines a token-level OPSD distillation signal with a sparse GRPO reinforcement learning signal to effectively align the student model.Figure 2:Overview of the MAPD framework. (1) A proprietary-model-powered multi-agent system generates high-quality structured protocols. (2) The structured JSON protocol serves as a bridge between proprietary teacher and open-source student. (3) The student model internalizes the teacher’s capability through joint training with protocols as privileged information.
+
+3.1Structured JSON Protocol
+
+Directly utilizing free-form natural language trajectories as privileged information for OPSD can introduce a substantial representation mismatch or induce severe style drift and hallucinations, because they contain model-specific verbosity, formatting conventions, and linguistic patterns.
+To address this, we introduce a style-normalized Structured JSON Protocol as the fundamental unit of distillation, and this design reduces the student’s direct exposure to teacher-specific language and provides traceable evidence for the privileged teacher branch.
+Specifically, rather than extracting raw text, this protocol establishes a purified, traceable format (e.g., Example3.1). Formally, the protocolzzencapsulates five essential dimensions of task:
+•
+
+Task Type:Determined by the proprietary expert, this field categorizes the query intosingle_hop,multi_hop,comparison,others, thereby dictating the overarching cognitive strategy.
+•
+
+Reasoning Plan:An ordered array of actionable sub-goals that strictly decomposes the complex agentic task into tractable search and inference steps.
+•
+
+Grounding Facts:A curated set of evidence extracted from the environment, which enforces faithful reasoning and actively mitigates parametric hallucinations.
+•
+
+Partial Findings:An optional field recording intermediate discoveries when multiple search rounds fail to yield the correct answer.
+•
+
+Answer Verification:The final extracted answer paired with a boolean flag (answer_grounded), ensuring the conclusion is rigorously supported by the retrieved facts.
+
+By formatting the protocol via a descriptive templatef​(⋅)f(\cdot)such that the PI is defined asp=f​(z)p=f(z), we effectively decouple the core cognitive strategies from the proprietary model’s surface linguistic patterns. This mechanism not only facilitates the transfer of high-quality reasoning capabilities into OPSD, but also effectively preserves the student’s native token distribution.Example 1:Representative Example of Structured Protocol — Evidence ProtocolQuestion:What is the name of the culture cultivated in the area of Duncan Farm and Golden Eagle?Ground-Truth Answer:Hopewell tradition(Search did not converge to this answer)"task_type":"multi_hop""reasoning_plan":[1. “Search for the Duncan Farm archaeological site to determine its geographic location and cultural period.”2. “Search for the Golden Eagle archaeological site to determine the culture it belongs to.”3. “Cross-reference two sites to find the name of the jointly present in the Duncan Farm and Golden Eagle area.”]"grounding_facts":[1. “The site was part of the Hopewell exchange system in Illinois and is the closest neighboring village site to the Golden Eagle regional transaction center, a major trade and social hub in the system.”2. “The Golden Eagle-Toppmeyer Site is a pre-Columbian archaeological site located near the confluence of the Illinois and Mississippi Rivers in Calhoun County, Illinois. The site is associated with the Havana Hopewell culture.”]"partial_findings":“Confirmed that Duncan Farm belongs to the Woodland period and is part of the Hopewell exchange system, and that the Golden Eagle-Toppmeyer Site is explicitly associated with the Havana Hopewell culture; the culture jointly linked to both sites is the Havana Hopewell culture, but the search did not resolve whether the precise sense of ‘cultivated’ points to a different answer.”"answer":null"answer_grounded":false
+
+3.2Multi-Agent System Generation Pipeline
+
+While the structured JSON protocol mitigates style drift, reliably extracting such knowledge from a proprietary teacher remains challenging. We automate this via a three-stage MAS pipeline that distills the teacher’s raw problem-solving into our compact protocol. Crucially, to prevent data leakage, ground-truth answers are strictly confined to offline synthesis and the privileged teacher context, remaining completely invisible to the student.
+
+Stage A: Multi-Agent Collaborative Search.
+
+Given a questionxx, theOrchestrator agentdecomposesxxinto sub-tasks with explicit dependency annotations.
+Subsequently, these sub-tasks are dispatched in parallel to independentSearcher agents.
+In response, each Searcher issues up toKKqueries to a local Wikipedia corpus and compresses the retrieved passages into a concise finding.
+Once all findings within a topological level are collected, the Orchestrator synthesizes them; if the accumulated evidence remains insufficient, it formulates an additional round of sub-tasks (up toMMrounds).
+After the initial exploration pass, an exact match (EM) check evaluates whether the candidate answer matches the ground truth answer.
+If the check fails, aRepair agentleverages the ground-truth answer as diagnostic guidance to trace back the reasoning chain (The GT answer is never propagated into the exploration log and retrieval queries).
+It diagnoses the failure as either anexpressionissue (correct evidence retrieved but answer poorly formatted) or asearch issue. It then triggers targeted re-decomposition and additional search operations accordingly, for up toRRrepair iterations. Ultimately, the output of Stage A comprises an original question, a candidate answer, a binary success label, and a comprehensive exploration log documenting every sub-task, query, retrieved passage, and finding.
+
+Stage B: Protocol Generation.
+
+To transform the exhaustive yet unstructured exploration log from Stage A into our structured JSON protocol target, aProtocolizer agentis deployed.
+Conditioned on the success label, the protocolizer compiles this raw information into one of two structured JSON variants. For succeeded trajectories, it generates aSucceeded Protocolthat includes the fully verified answer. Conversely, if the search failed to converge, it generates anEvidence Protocol; here, a definitive answer is omitted and replaced with a neutral summary of partial findings (e.g., “ConfirmedX​…X..., but reliable evidence forY​…Y...is missing”).
+To guarantee generation quality, two integrity constraints are strictly enforced: (i)No Hindsight: the reasoning_plan must be formulated step-by-step, strictly prohibiting any mention of the final outcome or subsequent search results to prevent data leakage; and (ii)Extractive Grounding: the grounding_facts must be strictly extractive, appearing as verbatim substrings within the retrieved passages.
+
+Stage C: Quality Gate.
+
+Before a generated protocol is admitted into the final training phase, it must pass a rigorous quality gate comprising four automated checks: (i)Schema Validation, ensuring a well-formed and valid JSON structure; (ii)EM Consistency(for succeeded protocol), confirming the extracted answer strictly matches the ground truth; (iii)Grounding Verification, enforcing extractive substring matching for all provided facts; and (iv)Leak Detection, guaranteeing no oracle knowledge is injected into the reasoning steps. Protocols failing any of these criteria are discarded, and the corresponding training falls back to a self-rollout baseline.
+Finally, manual review confirms the robustness of this pipeline, demonstrating a99.33%99.33\%accuracy in yielding high-quality, strictly compliant structured JSON protocols (total3,0003,000instances across three representative models).
+
+3.3Joint Training Objective
+
+The overall training objective integrates a sparse, outcome-driven reinforcement learning signal with a dense distillation signal to achieve high-quality alignment:ℒ​(θ)=λO​P​S​D⋅ℒOPSD​(θ)+ℒGRPO​(θ),\mathcal{L}(\theta)=\lambda_{OPSD}\cdot\mathcal{L}_{\text{OPSD}}(\theta)+\mathcal{L}_{\text{GRPO}}(\theta),(4)
+whereℒOPSD\mathcal{L}_{\text{OPSD}}provides a token-level distillation signal derived from the structured protocol, which facilitates efficient step-by-step credit assignment. Conversely,ℒGRPO\mathcal{L}_{\text{GRPO}}provides a sparse RL signal via clipped policy gradients, optimizing the model toward the final environment reward. The hyperparameterλO​P​S​D\lambda_{OPSD}dictates the relative strength of this distillation guidance (extensively ablated in Section4.2).
+
+4Experiments and Analysis
+
+4.1Experimental Setup
+
+Data Splits and Benchmarks.
+
+Following Search-R1(jin2025search), our training uses only the NQ and HotpotQA train splits.
+Evaluation spans seven knowledge-intensive QA benchmarks, encompassing single-hop (NQ, TriviaQA, and PopQA) and multi-hop (HotpotQA, 2WikiMultihopQA, MuSiQue, and Bamboogle) reasoning tasks(kwiatkowski2019natural;min2019discrete;mallen2023not;yang2018hotpotqa;ho2020constructing;trivedi2022musique;press2023measuring).
+Five of the seven evaluation sets remain entirely absent from training, serving as out-of-distribution tests; for the two shared benchmarks, we ensure no question-level overlap between train and test splits. Performance is reported as success rate (%) via exact match against ground-truth answers.
+ModelMethodSingle-hop QAMulti-hop QANQTriviaQAPopQAHotpotQA2WikiMuSiQueBamboogleAvg.Qwen3-1.7BVanilla29.9±\pm0.346.4±\pm0.239.1±\pm0.123.9±\pm0.218.8±\pm0.14.9±\pm0.316.8±\pm1.125.7±\pm0.1OPSD4.2±\pm0.18.3±\pm0.14.6±\pm0.16.6±\pm0.115.3±\pm0.10.7±\pm0.11.6±\pm0.55.9±\pm0.1GRPO36.9±\pm0.454.6±\pm0.343.1±\pm0.129.8±\pm0.327.5±\pm0.26.8±\pm0.422.4±\pm1.631.6±\pm0.2GRPO+OPSD37.0±\pm0.354.6±\pm0.241.4±\pm0.129.9±\pm0.323.3±\pm0.26.5±\pm0.320.8±\pm1.630.5±\pm0.2SDAR43.4±\pm0.458.1±\pm0.347.6±\pm0.237.0±\pm0.334.3±\pm0.310.6±\pm0.532.0±\pm1.637.6±\pm0.3MAPD(Ours)45.1±\pm0.258.6±\pm0.248.6±\pm0.139.0±\pm0.236.2±\pm0.211.2±\pm0.336.8±\pm1.139.4±\pm0.1Improvement (%)3.9%↑\uparrow0.9%↑\uparrow2.1%↑\uparrow5.4%↑\uparrow5.5%↑\uparrow5.7%↑\uparrow15.0%↑\uparrow4.8%↑\uparrowQwen3-4BVanilla29.3±\pm0.348.0±\pm0.234.9±\pm0.126.5±\pm0.230.9±\pm0.26.1±\pm0.325.6±\pm1.628.8±\pm0.2OPSD16.2±\pm0.236.7±\pm0.123.1±\pm0.120.5±\pm0.224.6±\pm0.15.7±\pm0.219.2±\pm1.120.9±\pm0.1GRPO40.4±\pm0.361.0±\pm0.243.5±\pm0.136.7±\pm0.337.3±\pm0.210.3±\pm0.432.8±\pm1.637.4±\pm0.2GRPO+OPSD36.3±\pm0.357.9±\pm0.243.1±\pm0.137.7±\pm0.336.7±\pm0.212.7±\pm0.344.0±\pm1.638.3±\pm0.2SDAR46.1±\pm0.462.4±\pm0.248.5±\pm0.243.3±\pm0.343.1±\pm0.313.1±\pm0.544.8±\pm1.643.0±\pm0.3MAPD(Ours)47.7±\pm0.262.5±\pm0.249.4±\pm0.144.3±\pm0.245.7±\pm0.214.0±\pm0.347.2±\pm1.144.4±\pm0.1Improvement (%)3.5%↑\uparrow0.2%↑\uparrow1.9%↑\uparrow2.3%↑\uparrow6.0%↑\uparrow6.9%↑\uparrow5.4%↑\uparrow3.3%↑\uparrowTable 1:Results are reported as success rate (%) (mean±\pmstd across five independent evaluation seeds from a single training run).Avg.denotes the macro-averaged success rate. Improvement (%) is the relative gain of MAPD over the SDAR baseline.Bold: best performance;underline: second best.
+
+Baselines.
+
+To rigorously assess the effectiveness of our approach, we compare against a spectrum of baselines, ranging from pure alignment strategies to advanced hybrid methods:
+(1)Vanilla: The pretrained base model evaluated zero-shot without any further alignment;
+(2)OPSD(zhao2026self): Pure online policy self-distillation, which utilizes the student’s own successful rollouts as privileged information;
+(3)GRPO(shao2024deepseekmath): Pure outcome-based reinforcement learning, relying solely on sparse environment rewards without any dense distillation guidance;
+(4)GRPO+OPSD: A naive hybrid approach combining RL with online policy self-distillation, using successful rollouts as privileged information;
+(5)SDAR(lu2026self): An advanced hybrid baseline combining RL with token-level gated distillation, utilizing skill-generated content as privileged information;
+(6)MAPD (Ours): Our proposed Multi-Agent Protocol Distillation framework, integrating RL with dense, token-level distillation guided by the structured MAS protocol without gating mechanisms.
+
+Implementation Details.
+
+For the student policy, we train two open-source models, Qwen3-1.7B and Qwen3-4B(yang2025qwen3), both initialized from their respective pretrained base checkpoints. During joint training, we utilize a group size ofn=8n\!=\!8rollouts per prompt, a batch size of128128, a maximum prompt length of40964096, and a maximum response length of512512tokens. The learning rate is set to1×10−61\!\times\!10^{-6}with a10%10\%linear warmup. Training runs for200200steps across 8 GPUs. The agentic environment allows up to44interaction turns, utilizing a local Wikipedia corpus (wiki-18) as the retrieval backend, returning the top-3 passages per query.
+
+MAS Pipeline Configuration.
+
+For protocol synthesis, the MAS agents (Orchestrator, Searcher, Repair, and Protocolizer) utilize Claude-Opus-4.6 as the default backbone LLM. We also explore GPT-5.5 and Gemini-3.1-Pro as alternative teacher sources (ablated in Section4.2). The MAS parameters are constrained as follows: the Orchestrator decomposes each query into a maximum of44sub-questions over at most22rounds; each Searcher issues up to33retrieval queries; and the Repair agent is permitted up to22diagnostic rounds. To ensure training efficiency, all protocols are pre-synthesized offline and cached, entirely decoupling the teacher’s generation latency from the student’s RL loop.
+
+4.2Results and Analysis
+
+Main Result.
+
+As shown in Table1, our proposed MAPD framework consistently outperforms all baseline methods across the seven benchmarks, achieving average success rates of39.4%39.4\%on Qwen3-1.7B and44.4%44.4\%on Qwen3-4B. Compared to the strongest baseline SDAR, MAPD yields relative average improvements of4.8%4.8\%and3.3%3.3\%, respectively.
+Crucially, these performance gains are more pronounced on complex multi-hop QA tasks. For Qwen3-1.7B, the average relative gain on multi-hop benchmarks reaches 7.9%, substantially exceeding the 2.3% on single-hop benchmarks. A similar pattern holds for Qwen3-4B (5.1% vs. 1.8%).
+These larger relative gains on multi-hop benchmarks are consistent with the intended role of multi-agent decomposition and evidence aggregation, as the MAS pipeline in MAPD systematically breaks down complex queries, synthesizes evidence across multiple retrieval steps, and distills these strategies into the student policy via our structured protocol, thereby raising its upper bound for complex reasoning.
+Furthermore, we observe a catastrophic performance collapse when applying pure OPSD to the models under our agentic training configuration (dropping to 5.9% on Qwen3-1.7B and 20.9% on Qwen3-4B).
+This indicates that dense self-distillation is insufficient for agentic search and motivates the use of external PI.
+Lacking external information gain, self-rollouts merely drive the model toward pathologically long outputs——as evidenced by the length clip ratio surging from5%5\%to approximately74%74\%during training, a collapse that underscores the necessity of our MAS protocol.MethodPMSPMASAvg.Qwen3-1.7BQwen3-4BGRPO+OPSD✗✗✗30.538.3SDAR✗✗✗37.643.0Raw trajectory (single PM)✓✗✗30.137.3Raw trajectory (MAS)✓✗✓29.236.1Protocol (single PM)✓✓✗37.142.9MAPD (Ours)✓✓✓39.444.4Table 2:Component ablation study of MAPD. PM = Proprietary Model; SP = Structured Protocol; MAS = Multi-Agent System.
+
+Ablation Study.
+
+We systematically ablate the Proprietary Model (PM), Structured Protocol (SP), and Multi-Agent System (MAS) to assess the contribution of each component, results are reported in Table2.
+
+(1) Structured protocol is essential for cross-model distillation.The most striking finding is that directly distilling from a proprietary model’s raw natural-language trajectories (w/o SP&MAS) performs worse than baselines using no proprietary model at all (GRPO+OPSD).
+By comparingw/o SP&MASwithw/o MAS, we isolate the impact of the representation format under a single-teacher setting: replacing raw text with our structured protocol drives an observed gain of 7.0 and 5.6 points, respectively.
+This is consistent with the style drift and distribution gap bottlenecks discussed in Section 1: without structured decoupling, the student imitates the teacher’s surface patterns (e.g., verbose reasoning chains, idiosyncratic phrasing), which conflicts with its own learned distribution and actively degrades performance.
+
+(2) MAS cannot replace structured protocol.Adding the MAS pipeline without the structured protocol (w/o SP: 29.2%/36.1%) does not improve performance and is slightly worse, because the MAS produces richer but also noisier natural-language trajectories that exacerbate the style-transfer problem.
+Conversely, applying the structured protocol generated by single proprietary agent (w/o MAS: 37.1%/42.9%) recovers a relative gain, showing that the JSON protocol alone already alleviates style contamination. However, this single-agent protocol still underperforms SDAR, indicating that a single proprietary model call cannot match the retrieval depth and error recovery of the full MAS pipeline.
+
+(3) MAS pipeline improves the quality of protocol generation.The full MAPD configuration performs best, suggesting that the structured representation and the MAS pipeline provide complementary benefits in the evaluated setting. Specifically, SP ensures that the distilled signal largely mitigates style drift and remains learnable, while MAS ensures that the signal is factually accurate, reasoning-complete and traceable.
+Compared with the single-agent protocol without MAS, this full protocol delivers a significantly higher-quality training signal that bridges the gap between proprietary and open-source models.
+Moreover, our results demonstrate that the primary bottleneck in distillation lies in PI quality rather than training mechanisms: with sufficiently clean, style-decoupled protocols, a simple token-level KL objective achieves performance comparable to gated approaches (SDAR).
+Proprietary TeacherModel𝝀\bm{\lambda}Single-hop QAMulti-hop QANQTriviaQAPopQAHotpotQA2WikiMuSiQueBamboogleAvg.Claude-Opus-4.6Qwen3-1.7B0.0144.158.047.537.833.510.928.037.10.0545.158.648.639.036.211.236.839.40.1043.758.249.138.236.610.236.038.9Qwen3-4B0.0146.363.048.342.537.013.943.242.00.0547.762.549.444.345.714.047.244.40.1047.463.750.142.338.411.142.442.2GPT-5.5Qwen3-1.7B0.0143.558.649.138.435.511.236.038.90.0543.559.748.638.738.09.335.239.00.1043.358.448.636.431.99.232.837.2Qwen3-4B0.0147.462.248.743.546.014.346.444.10.0548.362.950.644.244.614.647.244.60.1047.463.750.343.443.112.644.043.5Gemini-3.1-ProQwen3-1.7B0.0142.858.248.937.432.49.933.637.60.0543.258.947.537.736.39.132.837.90.1042.558.347.937.732.610.535.237.8Qwen3-4B0.0148.863.747.944.845.213.043.243.80.0548.962.850.843.839.114.048.844.00.1047.462.549.343.042.312.843.242.9Table 3:Effect of three proprietary models as privileged information source and OPSD loss weightλ\lambda. Results are reported as Success Rate (%).Bold: best performance.
+
+Effect of the OPSD Loss Weight.
+
+Table3and Figure4summarizes the sensitivity of our framework to the OPSD loss weightλ∈{0.01,0.05,0.1}\lambda\!\in\!\{0.01,0.05,0.1\}in the joint objective. Across both model scales,λ=0.05\lambda\!=\!0.05consistently achieves the best among the tested values (39.4% on 1.7B and 44.4% on 4B), revealing a sweet-spot associated with two observed patterns at the extremes. Below we analyze these in detail.
+
+(1) Weak distillation signal(λ=0.01\lambda\!=\!0.01). A small OPSD weight provides only a weak distillation signal relative to the dominant GRPO policy-gradient objective. Training logs on Claude-Opus-4.6 reveal that the teacher-student gap collapses prematurely by step 100, indicating that the student quickly exhausts the available supervision. However, the KL divergence from the reference policy remains low (0.24 on 1.7B), suggesting that the model does not simply revert to the reference behavior. Despite the early disappearance of the distillation signal, this configuration still achieves a clear improvement over GRPO alone (37.1% vs. 31.6% on 1.7B), implying that even a short-lived OPSD term can provide beneficial guidance during the initial phase of training.
+
+(2) Excessive distillation pressure(λ=0.1\lambda\!=\!0.1). A large OPSD weight pushes the student aggressively toward the teacher’s distribution, which inflates the KL divergence from the reference policy (1.06 on 4B, nearly4×4\timesthat ofλ=0.01\lambda\!=\!0.01). More importantly, we observe a behavioral degeneration specific to agentic search: on 4B the mean response length collapses from 135 tokens to roughly 42 tokens while the number of tool calls saturates at the maximum of 3.0 per episode. This pattern suggests that excessive distillation pressure drives the model toward a “retrieve-without-reasoning” shortcut–issuing retrieval calls with minimal intermediate reasoning.
+As a result, single-hop accuracy slightly improves (e.g., PopQA rises from 49.4% to 50.1%, TriviaQA from 62.5% to 63.7% on 4B), but performance on multi-hop tasks drops sharply because coherent chain-of-thought across hops is essential (2WikiMultihopQA falls from 45.7% to 38.4%, MuSiQue from 14.0% to 11.1%). This trade-off reveals that over-regularization erodes the model’s capacity for multi-step reasoning, ultimately harming the very capability that agentic search relies on.
+
+Taken together, these results highlight a fundamental tension in agentic distillation: too little distillation provides insufficient guidance, while too much forces the student into shallow, retrieval-heavy behaviors.λ=0.05\lambda\!=\!0.05strikes a practical balance, maintaining a sustained distillation signal throughout training without destabilizing the policy, thereby fostering a robust balance between efficient retrieval and rigorous reasoning.
+
+Figure 3:The relationship between the OPSD loss weightλ\lambdaand Avg success rate (%).λ=0.05\lambda\!=\!0.05balances distillation strength and policy stability, achieving the best Avg on both model scales.
+Figure 4:Performance with three top-tier proprietary teacher backbones. All configurations use the same MAPD architecture and training settings without retuning the MAS pipeline.
+
+Transfer Across Proprietary Teacher Backbones.
+
+A key advantage of MAPD is transferability across different proprietary models. Because the structured JSON protocol successfully decouples the teacher’s core reasoning strategies from its surface stylistic artifacts, any sufficiently capable model can serve as the teacher backbone. To validate this flexibility, we evaluate whether the framework can seamlessly utilize protocols generated by three top-tier commercial models without requiring any architectural modifications or teacher-specific hyperparameter tuning—Claude-Opus-4.6, GPT-5.5, and Gemini-3.1-Pro.
+Results are shown in Table3and Figure4.
+All three configurations produce positive observed gains over SDAR on both student scales: Claude-Opus-4.6 (39.4%/44.4%), GPT-5.5 (39.0%/44.6%), and Gemini-3.1-Pro (37.9%/44.0%). This narrow variance across teachers (within 2 points) confirms that our protocol successfully abstracts away teacher-specific idiosyncrasies, isolating semantic reasoning from the source model. Consequently, practitioners can seamlessly swap APIs to optimize cost-latency tradeoffs without retuning the pipeline.
+
+Cost Analysis.
+
+To quantify the overhead of protocol synthesis, we report the generation cost using Gemini-3.1-Pro as an illustrative example. The MAS pipeline processes 25,600 training instances, producing 25,584 valid protocols that pass the quality gate (99.94% yield). On average, the pipeline invokes the teacher LLM∼6.3{\sim}6.3times per instance, consuming approximately 12.5K tokens per instance. The amortized cost is $0.057 per instance, yielding a total one-time generation cost of approximately $1,454 for the entire training set. Since all protocols are pre-synthesized and cached, this cost is incurred only once.
+
+5Related Work
+
+LLM Reasoning and Agentic Search.
+
+The paradigm of LLM reasoning has recently shifted from static, single-turn tasks toward dynamic, multi-turn agentic tasks that require sustained interaction with external environments(liu2026amo;liu2026general365;dong2025agentic2;mai2025agent;lv2026physagent;jiang2026beyond;jiang2025kore;jiang2026mined).
+As a critical extension of this reasoning paradigm, agentic search interleaves multi-step logical deduction with environment-augmented retrieval to tackle knowledge-intensive tasks.
+Recent frameworks have formalized this as an RL optimization problem. For instance, WebRL(qi2025webrl)employs self-evolving RL with process-level rewards, Search-R1(jin2025search)leverages classic RL algorithms for multi-turn retrieval, and RAGEN(wang2025ragen)optimizes retrieval-augmented reasoning chains via trajectory-based rewards. However, these policies remain predominantly driven by sparse, outcome-only signals (e.g., terminal answer accuracy), which fundamentally struggle to provide granular credit assignment for intermediate planning, searching, and diagnostic steps.
+To resolve this optimization bottleneck, our MAPD framework introduces a joint training paradigm that integrates outcome-driven RL signal with a dense distillation signal.
+
+Knowledge Distillation from Proprietary Models.
+
+Transferring capabilities from proprietary LLMs to smaller open-source models has become a dominant paradigm. Classical knowledge distillation(hinton2015distilling)relies on matching output probability distributions, a mechanism fundamentally precluded by the opaque nature of black-box APIs and the mismatch between heterogeneous tokenizers. Consequently, contemporary approaches resort to text-level imitation, distilling the natural language reasoning traces or Chain-of-Thought (CoT) generated by proprietary teachers(hsieh2023distilling;mukherjee2023orca;xu2025magpie). However, as highlighted by recent studies(gudibande2023false), directly mimicking unconstrained teacher trajectories forces the student to overfit to the teacher’s verbose linguistic patterns and authoritative tone. This capacity mismatch induces severe style drift and exacerbates hallucinations.
+Our MAPD framework extracts the teacher’s semantic strategies into a style-normalized structured JSON protocol to decouple the core reasoning logic from the proprietary linguistic shell, enabling safe online self-distillation.
+
+Multi-Agent System for Complex Reasoning.
+
+LLM-based MAS have achieved remarkable success in complex reasoning and open-ended problem-solving(wu2023autogen;hong2024metagpt;lei2024macm). In retrieval-augmented scenarios, multi-agent collaboration can significantly enhance recall on multi-step questions through parallel sub-query orchestration and iterative debate(du2023improving;talebirad2023multi;wang2026mad). However, deploying these collaborative swarms at inference time incurs prohibitive computational overhead, severe latency, and massive API costs, rendering them highly impractical for real-time applications. Instead of relying on MAS during test-time interactions, MAPD utilizes the agent swarm exclusively as an offline training-time knowledge synthesizer, distilling the swarm’s collaborative problem-solving strategies into a single student model via our structured protocol.
+
+6Conclusion
+
+In this paper, we introduce Multi-Agent Protocol Distillation (MAPD), a novel joint distillation and RL framework designed to bridge the heterogeneous distribution gap between proprietary teachers and open-source students in agentic search.
+To overcome the severe style drift and verbosity collapse inherent in raw trajectory imitation, MAPD elegantly decouples core cognitive strategies from idiosyncratic linguistic shells via a style-normalized, structured JSON protocol. Synthesized exclusively offline by a robust multi-agent system, this protocol serves as privileged information to provide dense guidance that seamlessly complements sparse outcome-driven RL without incurring any inference overhead.
+Extensive evaluations across seven knowledge-intensive QA benchmarks demonstrate that MAPD not only consistently outperforms all evaluated baselines, but also generalizes seamlessly across different proprietary teachers without retuning.
+By isolating semantic reasoning from idiosyncratic stylistic artifacts, MAPD unlocks a safer and more efficient pathway for heterogenes models alignment.
+We expect that the structural decoupling pioneered by MAPD will serve as a catalyst for future research, inspiring the community to push beyond the reliance on proprietary models and toward the development of fully autonomous, self-improving agentic frameworks.
+
+References
+
+Appendix AStructured Protocol Example
+
+ExampleA, ExampleAand ExampleAshow three complete structured protocols produced by our MAS pipeline with different teacher backbones (Claude-Opus-4.6, GPT-5.5 and Gemini-3.1-Pro, respectively).Example 2:Structured Protocol Example of Claude-Opus-4.6Question:Which English actor and director who was involved with the 1997 filmThe Winter Guestalso appeared in “Die Hard”?Ground-Truth Answer:Alan Rickman"task_type":"multi_hop""reasoning_plan":[1. “Search forThe Winter Guest1997 film to identify its director and cast.”2. “Search forDie Hard1988 film to identify its cast.”3. “Cross-reference the two casts to find the English actor and director common to both.”]"grounding_facts":[1. “The Winter Guest is a 1997 film directed by Alan Rickman in his debut as a director.”2. “Alan Sidney Patrick Rickman (21 February 1946 – 14 January 2016) was an English actor and director.”3. “Rickman’s first film role was as the German terrorist leader Hans Gruber in ‘Die Hard’ (1988).”]"answer":"Alan Rickman""answer_grounded":trueExample 3:Structured Protocol Example of GPT-5.5Question:What year was the barber surgeon who served the last French monarch of the House of Valois born?Ground-Truth Answer:1510"task_type":"multi_hop""reasoning_plan":[1. “Search for the last French monarch of the House of Valois to identify the king’s name.”2. “Search for that king’s name + ‘barber surgeon’ to find the person who served him.”3. “Look up the barber surgeon’s Wikipedia entry to verify the birth year.”]"grounding_facts":[1. “In 1589, at the death of Henry III of France, the House of Valois became extinct in the male line.”2. “Ambroise Paré (c. 1510 – 20 December 1590) was a French barber surgeon who served in that role for kings Henry II, Francis II, Charles IX and Henry III.”3. “Paré was born in 1510 in Bourg-Hersent in northwestern France.”]"answer":"1510""answer_grounded":trueExample 4:Structured Protocol Example of Gemini-3.1-ProQuestion:The band famous for the single Waterfalls, had a singer with the nickname Left Eye, who was born on what day?Ground-Truth Answer:May 27, 1971"task_type":"multi_hop""reasoning_plan":[1. “Search for the band famous for the single Waterfalls to identify the musical group”2. “Search for the members of the identified band to find the singer who goes by the nickname Left Eye”3. “Search for the biographical details of the identified singer to find their exact date of birth”]"grounding_facts":[1. “ ‘Waterfalls’ is a song by American recording group TLC.”2. “ ‘Lisa Nicole Lopes (May 27, 1971 – April 25, 2002), better known by her stage name Left Eye, was an American hip hop singer, rapper, songwriter, and producer.’3. “ ‘Lopes was best known as one-third of the R&B girl group TLC’]"answer":"May 27, 1971""answer_grounded":true
+
+Appendix BTraining Dynamics
+
+To provide a comprehensive overview of the optimization process, Figures5and6illustrate the detailed training dynamics of MAPD. These visualizations track the learning trajectories across different model scales, while systematically highlighting how varying the distillation weight,λO​P​S​D\lambda_{OPSD}, influences the overall convergence and performance evolution(jiang2026large;jia2026benchmarking;jiang2025mmke;qi2025context;Fu2026CanML;Fu2026MMKUBenchAM).λ=0.01\lambda=0.01λ=0.05\lambda=0.05λ=0.1\lambda=0.1ClaudeGPTGeminiFigure 5:Training success rateofQwen3-1.7Bunder varying distillation weightλOPSD\lambda_{\text{OPSD}}with different proprietary teacher models.λ=0.01\lambda=0.01λ=0.05\lambda=0.05λ=0.1\lambda=0.1ClaudeGPTGeminiFigure 6:Training success rateofQwen3-4Bunder varying distillation weightλOPSD\lambda_{\text{OPSD}}with different proprietary teacher models.

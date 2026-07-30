@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""
+article_data_build.py — Scaling Latent Reasoning via Looped Language Models
+arXiv 2510.25741 — 精简编译，论文类 60% 阈值。遵守图文原则、简洁原则、结论首句原则。
+"""
+import json, os, sys
+
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+
+DATA = {
+    "title": "Looped LLM：让模型在潜空间自由推理，令牌级自适应计算，推理时扩展的新范式",
+
+    "summary": [
+        {"key": "核心思路", "body": "将 Transformer 的层堆叠循环复用 T_max 次，每个 token 在每个循环步可自适应退出，实现令牌级推理计算分配"},
+        {"key": "训练方法", "body": "两阶段训练：阶段 I 学习熵正则化目标，阶段 II 聚焦自适应门控训练，让模型学会对不同难度 token 分配不同计算量"},
+        {"key": "实验结果", "body": "在推理、知识、安全等基准上全面超越标准 Transformer，随循环步数增加性能持续提升，且存在可预测的 Scaling Law"},
+    ],
+
+    "lead": [
+        "标准 Transformer 对所有 token 使用相同的计算量——无论这是一个简单的停用词还是一个复杂的数学推理步骤。这显然不是最优的：推理密集型 token 需要更多计算，而简单 token 可以快速通过。",
+        "Looped LLM 提出了一种简洁而强大的方案：将同一组 Transformer 层循环复用 T_max 次，每个 token 在每个循环步可以通过一个学习到的门控机制自适应退出。模型在训练时学会对简单 token 早期退出，对复杂推理 token 投入更多循环计算。在推理、知识理解、多跳问答、安全性等多维度评估中，Looped LLM 在同等 FLOPs 下全面超越标准 Transformer。",
+    ],
+
+    "sections": [
+        {
+            "type": "h2",
+            "title": "Looped LLM 架构",
+            "paras": [
+                "Looped LLM 的核心架构非常简洁：一个由 N 层组成的 Transformer 模块 H^L 被重复使用 T_max 次。在每个循环步 ℓ，模型通过一个门控机制预测退出概率 pℓ，同时语言建模头 Lℓ 计算当前步的损失。",
+                "训练时，模型对所有 T_max 步都计算损失和门控信号。推理时，模型可以根据累积退出概率自适应退出——简单 token 可能只需 1-2 步，复杂 token 可以使用全部 T_max 步。下图展示了训练和推理时的架构对比：",
+            ],
+            "figs": [
+                {"src": "main_figure1_cropped.png", "caption": "Looped LLM 架构概览。左：训练时所有循环步都计算损失和门控信号；右：推理时可根据门控概率自适应退出。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "自适应计算：门控机制",
+            "paras": [
+                "门控机制是 Looped LLM 的核心组件。每个循环步 ℓ 有一个退出门，预测当前步的退出概率 pℓ。门控信号基于当前隐状态，通过一个轻量级 MLP 计算。",
+                "训练时，门控通过两个阶段的优化来学习：阶段 I 学习一个熵正则化目标，让模型探索不同循环步的使用；阶段 II 聚焦于自适应门控训练，让模型学会动态分配计算资源。这种两阶段设计避免了门控过早收敛到次优策略。",
+                "下图展示了训练过程中循环步的使用模式变化：",
+            ],
+            "figs": [
+                {"src": "training_process.png", "caption": "训练过程中循环步使用模式的变化。阶段 I 探索不同步数，阶段 II 收敛到自适应分配策略。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "与标准 Transformer 的对比",
+            "paras": [
+                "Looped LLM 与标准 Transformer 的关键区别在于计算分配方式。标准模型所有 token 经过相同层数，而 Looped LLM 可以按 token 难度分配计算量。",
+                "下图的对比分析展示了两种架构的差异。标准模型（左）的推理路径是固定的，而 Looped LLM（右）的推理路径是动态的——简单 token 快速退出，复杂 token 进入更深循环。",
+            ],
+            "figs": [
+                {"src": "side_by_side.png", "caption": "标准 Transformer（左）vs Looped LLM（右）的推理路径对比。Looped LLM 的推理路径随 token 难度动态变化。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "实验结果：推理基准",
+            "paras": [
+                "在多个推理基准上的实验结果显示，Looped LLM 在同等 FLOPs 下全面超越标准 Transformer。下图左展示了在不同模型规模下的性能对比，Looped LLM 的曲线始终在标准模型之上。下图右展示了雷达图，在推理、知识、多跳问答、安全性等多个维度上的综合评估。",
+            ],
+            "figs": [
+                {"src": "reasoning_benchmark.png", "caption": "推理基准性能对比。Looped LLM 在同等 FLOPs 下超越标准 Transformer。"},
+                {"src": "radar.png", "caption": "多维度能力雷达图。Looped LLM 在推理、知识、安全等维度全面领先。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "循环深度与扩展性",
+            "paras": [
+                "Looped LLM 的一个关键特性是推理时计算可以灵活扩展。增加循环步数 T_max 可以持续提升性能，且存在可预测的 Scaling Law。",
+                "下图展示了不同循环步数对性能的影响。随着循环步数增加，模型在推理任务上的准确率持续提升，而标准 Transformer 受限于固定层数，无法利用额外的推理计算。",
+            ],
+            "figs": [
+                {"src": "recurrent_depth_strategy.png", "caption": "不同循环深度策略的性能对比。增加循环步数持续提升性能。"},
+                {"src": "knowledge_scaling.png", "caption": "知识理解能力随模型规模扩展。Looped LLM 的扩展曲线更陡峭。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "几何路由与均匀路由的对比",
+            "paras": [
+                "Looped LLM 的门控策略本质上是一种几何路由——每个循环步独立决定是否退出。这与均匀路由（所有 token 使用相同步数）形成对比。",
+                "下图展示了两种路由策略的对比。几何路由在保持性能的同时大幅节省计算量，因为大部分 token 在早期步就足够确定，只有少数复杂 token 需要深层循环。",
+            ],
+            "figs": [
+                {"src": "geo_vs_uni.png", "caption": "几何路由 vs 均匀路由的对比。几何路由在同等性能下计算量更少。"},
+            ],
+        },
+    ],
+
+    "conclusion": [
+        "核心贡献是：提出了一种让 Transformer 在潜空间进行循环推理的架构，通过令牌级自适应计算分配，实现了推理时计算的有效扩展。",
+        "Looped LLM 的简洁性在于它不改变 Transformer 的基本结构——只是将同一组层循环复用，并通过学习到的门控机制控制退出时机。这种设计使得现有的大规模训练基础设施可以直接复用，无需从头设计新架构。",
+        "实验结果表明，Looped LLM 在推理、知识、安全性等多个维度上全面超越标准 Transformer，且存在可预测的 Scaling Law。对于需要推理时计算扩展的场景，Looped LLM 提供了一个比思维链（CoT）更通用、更高效的替代方案。",
+    ],
+    "reference_url": "https://arxiv.org/abs/2510.25741",
+}
+
+# ========== 写入逻辑 ==========
+os.makedirs(_article_dir, exist_ok=True)
+out = os.path.join(_article_dir, "article_data.json")
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 {out} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA['sections'])} sections)")

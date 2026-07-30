@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""
+article_data_build.py — ReferTrack: Referring Then Tracking for Embodied Visual Tracking
+精简编译模式，基于 arXiv 2607.20061。
+"""
+import json, os, sys
+
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+
+DATA = {
+    "title": "ReferTrack：先指认再跟踪——具身视觉跟踪的 Referring-Then-Tracking 范式",
+
+    "summary": [
+        {"key": "核心范式", "body": "将目标识别从抽象空间推理转为图像空间的索引框选择，通过单 token 的 Refer-CoT 完成指认"},
+        {"key": "三大组件", "body": "Refer-CoT Token 选择目标框，TVBI Token 注入运动线索，Refer-QA 协同训练增强指认能力"},
+        {"key": "SOTA 性能", "body": "在 EVT-Bench 上单摄像头设置下 SR 达 89.4%/73.3%/74.1%，追平甚至超越多摄像头基线"},
+    ],
+
+    "lead": [
+        "具身视觉跟踪（EVT）要求机器人仅靠机载摄像头持续跟踪自然语言描述的目标。现有 VLA 模型将目标识别和轨迹规划统一为单一策略，但其 CoT 推理往往在抽象的空间潜空间中运作，难以与显式的图像空间检测对齐。",
+        "**ReferTrack 提出了一种互补范式：先指认（referring），再跟踪（tracking）。** 目标识别被转化为一个约束性的多项选择题——从当前视角检测到的边界框集合中选出正确的那个。这使得识别过程可监督、与 VLM 的视觉定位能力天然对齐。",
+    ],
+
+    "sections": [
+        {
+            "type": "h2",
+            "title": "ReferTrack 方法：Referring-Then-Tracking",
+            "paras": [
+                "ReferTrack 建立在双分支架构之上。对于导航分支，前向观测历史经过 SigLIP 和 DINOv2 双编码器提取视觉特征，再通过 TVBI（Temporal-Viewpoint-Bbox Indicator）Token 注入时空结构。同时，当前帧的 YOLO 行人检测结果被组织为一个索引化的候选框目录，每个框由 MLP 投影器编码。",
+                "**核心流程分两阶段**：第一阶段，模型输出一个 Refer-CoT Token 从索引框目录中选择与指令匹配的目标框（或输出 ⟨NO_EXIST⟩ 表示目标不在视野内）。第二阶段，选中的目标框通过滑动窗口队列传播，TVBI Token 将历史框的几何特征注入视觉流，最终解码出跟踪航点。",
+                                "这种设计的关键优势在于：将目标识别从抽象的极坐标空间推理（如 TrackVLA++ 的做法）转移到图像空间的显式框选择，直接对齐 VLM 的视觉定位机制，同时保留了端到端学习的简洁性。",
+                                "与现有方法相比，ReferTrack 的找拍框目录接口还有一个额外优势：它解锁了超出稀缺专家跟踪轨迹之外的监督来源。网络上存在大量的指代和定位数据，以及丰富的带 2D 行人标注的第三人称视频，这些都可以用来填充候选框目录，从而以可扩展的方式提升 EVT 驱动的 VLA 的指认能力。",
+            ],
+            "figs": [
+                {"src": "fig01.png", "caption": "Figure 1: ReferTrack 将 EVT 形式化为先指认再跟踪的两阶段任务。"},
+                {"src": "fig02.png", "caption": "Figure 2: ReferTrack 整体架构。先通过 Refer-CoT Token 选择目标框，再通过 TVBI Token 注入历史运动线索，最终解码跟踪航点。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "三大技术组件",
+            "paras": [
+                            "ReferTrack 的三个核心技术组件，分别解决指认、跟踪和数据三个关键瓶颈。其中 Refer-CoT 负责指出目标是谁，TVBI 负责跟踪目标怎么动，Refer-QA 负责让模型学会指认：",
+                        ],
+                    },
+                    {
+                        "type": "h3",
+                        "title": "Refer-CoT Token：单 Token 指认",
+                        "paras": [
+                            "模型输出一个特殊的 Refer-CoT Token，取值空间为 {⟨ped₁⟩, ..., ⟨ped_K⟩, ⟨NO_EXIST⟩}。这个 Token 直接从索引化的候选框目录中选择目标，将目标识别转化为一个约束性多项选择题。相比于在抽象空间坐标中推理，这种方式更易监督、与 VLM 的 grounding 能力天然对齐。⟨NO_EXIST⟩ 显式表示目标不在当前视野中，避免了模型在无目标时强行生成跟踪轨迹。",
+                        ],
+                    },
+                    {
+                        "type": "h3",
+                        "title": "TVBI Token：历史运动线索注入",
+                        "paras": [
+                            "受 NavFoM 的 TVI（Temporal-Viewpoint Indicator）Token 启发，ReferTrack 提出了 TVBI Token。一旦目标被 Refer-CoT Token 选中，其历史边界框被放入一个滑动窗口队列，TVBI Token 将这些框的几何特征注入到当前视觉编码流中。这使得模型能够感知目标的运动模式——走向、转向、速度变化——即使目标暂时被遮挡也能保持跟踪。Ablation 显示 TVBI 贡献了 +6.5 SR 的提升。",
+                        ],
+                    },
+                    {
+                        "type": "h3",
+                        "title": "Refer-QA 协同训练：扩大指认数据来源",
+                        "paras": [
+                            "在线跟踪的指认数据稀缺且昂贵。为此，ReferTrack 从行人 ReID 数据集构建了一个 Refer-QA 数据集，使用相同的索引框目录接口：给定一张行人图像和一段描述，模型选择对应的索引框。这种离线指认训练与在线跟踪协同进行，使模型在不依赖大量闭环导航数据的情况下学会鲁棒的指认能力。Ablation 显示 Refer-QA 贡献了 +5.0 SR 的提升。",
+                        ],
+            "figs": [
+                {"src": "fig05.jpg", "caption": "Figure 5: Refer-QA 数据示例。从行人 ReID 数据构造的指认数据集，使用与在线跟踪相同的索引框选择接口。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "实验结果：SOTA 单摄像头性能",
+            "paras": [
+                "在 EVT-Bench 的 single forward-view 设置下，ReferTrack 使用 Qwen3-4B 作为 LLM 骨干、1.3M 导航样本（仅 SFT，无 RL），在三个核心任务上均取得最优：",
+                "**Single-Target Tracking（STT）：** SR 89.4%，TR 92.5%，CR 1.6%——证明指认接口不损害标准跟踪稳定性。",
+                "**Distracted Tracking（DT）：** SR 73.3%，TR 81.8%——相比最强单视图基线 TrackVLA++ 提升 +6.8 SR 和 +13.0 TR。",
+                "**Ambiguity Tracking（AT）：** SR 74.1%，TR 85.7%——相比 TrackVLA++ 提升 +22.9 SR 和 +22.3 TR，甚至超越多个多摄像头基线。",
+                "**结论三——指认>多视角**：ReferTrack 的单摄像头结果甚至在识别密集型任务上超越多个多摄像头基线，说明当目标判别是主要瓶颈时，显式的图像空间指认可以比增加摄像头覆盖更有效。同时，这些收益并非以牺牲标准跟踪稳定性为代价——ReferTrack 在 STT 上同样取得了最优结果。",
+                "Ablation 进一步验证了三个组件的贡献：完整 ReferTrack 相比无 Refer-CoT 的变体提升 +13.7 SR，移除 TVBI 退步 -6.5 SR，移除 Refer-QA 退步 -5.0 SR。这三个组件协同工作，共同构成了核心性能提升的来源。",
+            ],
+            "figs": [
+                {"src": "fig03.png", "caption": "Figure 3: 真实世界定性结果。在四足机器人和人形机器人上验证了 sim-to-real 迁移能力。"},
+                {"src": "fig04.jpg", "caption": "Figure 4: 专家跟踪数据示例。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "真实世界部署",
+            "paras": [
+                "ReferTrack 在四足机器人和人形机器人上进行了真实世界部署验证。实验表明，模型能够将从仿真中学习的指认-跟踪能力直接迁移到现实场景，在拥挤环境中稳定跟踪指定行人。这表明显式的图像空间指认策略不仅提升了仿真环境中的性能，也有助于缩小 sim-to-real 差距。",
+            ],
+            "figs": [
+                {"src": "fig06.png", "caption": "Figure 6: 机器人平台。ReferTrack 在四足和人形机器人上验证了真实的 sim-to-real 迁移能力。"},
+            ],
+        },
+    ],
+
+    "conclusion": [
+        "ReferTrack 的核心贡献是证明了一个简单的洞察：**在具身视觉跟踪中，将目标识别从抽象空间推理退回到显式的图像空间框选择，可以取得更好的效果。**",
+        "通过 Refer-CoT Token、TVBI Token 和 Refer-QA 协同训练三个组件，ReferTrack 在 EVT-Bench 上以单摄像头、紧凑模型（4B）、仅 SFT 的设置追平甚至超越了多摄像头和 RL 增强的基线。这表明，当目标识别是主要瓶颈时，显式的图像空间指认比增加摄像头覆盖范围更有效。",
+    ],
+    "reference_url": "https://arxiv.org/abs/2607.20061",
+}
+
+# ========== 写入逻辑 ==========
+os.makedirs(_article_dir, exist_ok=True)
+out = os.path.join(_article_dir, "article_data.json")
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 {out} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA['sections'])} sections)")

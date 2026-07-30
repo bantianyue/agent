@@ -1,0 +1,100 @@
+\section{\system Serving System}
+\label{sect:system}
+
+To this end, we have presented the \algo quantization algorithm, which aims to minimize accuracy loss incurred by \textbf{\texttt{W4A8KV4}} quantization. However, realizing the theoretical throughput benefits in Figure \ref{fig:motivation:roofline} remains challenging. Thus, in this section, we will delve into the \system system design, which follows two important directions: \textbf{I.} Reducing main loop overhead in GEMM kernels; \textbf{II.} Accerating KV4 attention. %
+
+\subsection{\system System Runtime}
+\label{sect:system:runtime}
+\input{text/figure/4-algorithm/llm-block}
+
+We start by introducing the \system runtime in Figure \ref{fig:system:overview}. All GEMM layers in \system operate on \textbf{\texttt{W4A8}} inputs, perform computation on \texttt{INT8} tensor cores, and generate \texttt{FP16} outputs. 
+All attention layers perform computation in \texttt{FP16} on CUDA cores. Consequently, each LLM block in \system has \texttt{FP16} inputs and \texttt{FP16} outputs. 
+
+\textbf{Activation Quantization.} To ensure that each GEMM takes in \texttt{INT8} activation, we fuse activation quantization into the preceding layernorm for the QKV projection and the first FFN layer, or into the preceding activation kernel for the second FFN layer. Furthermore, a separate quantization node is inserted before output projection in the attention block.
+
+\textbf{KV Cache Management.} To avoid memory fragmentation, we follow vLLM~\cite{kwon2023efficient} and TensorRT-LLM~\cite{trtllm} to adopt paged KV caches. In contrast to these two frameworks, which perform \textit{per-tensor}, \textit{static} quantization (\ie, scaling factors computed offline) on KV caches, \system requires \textit{per-head}, \textit{dynamic} KV quantization to maintain competitive accuracy due to the lower bit precision (4 \vs 8). We therefore store \texttt{FP16} scaling factors and zero points for each head immediately following the quantized KV features in each KV cache page, allowing these values to be updated on-the-fly. \system also supports in-flight batching, similar to vLLM and TensorRT-LLM. %
+
+\subsection{\textbf{\texttt{W4A8}} GEMM in \system}
+
+As discussed in Section \ref{sect:motivation}, the main loop overhead poses a significant obstacle in allowing quantized GEMMs to attain the theoretical performance gains projected by the roofline model (Figure \ref{fig:motivation:roofline}). Therefore, the focus of \system \textbf{\texttt{W4A8}} GEMM is to \textbf{reduce main loop overhead}. Specifically, we address the costs of pointer arithmetic operations through \textbf{compute-aware weight reorder}, and reduce dequantization overhead through a \textbf{subtraction after multiplication} computation order and \textbf{register-level parallelism}.
+
+\subsubsection{Compute-Aware Weight Reorder}
+\input{text/figure/5-system/reorder}
+
+Prior to dequantization and tensor core computation, the operands must be loaded from global memory into the L1 shared memory during each main loop iteration. This loading process is non-trivial since the tensor core GEMM intrisics require a strided layout for each thread in computation, as demonstrated in Figure \ref{fig:sys:weight_reorder}a. For instance, instead of loading consecutive eight \texttt{INT8} weights, thread 0 first loads input channels 0-3, then skips ahead to input channels 16-19. That said, a naive weight loading implementation would require one address calculation per four channels, leading to two efficiency issues. First, pointer arithmetic operations are performed on CUDA cores, which have \textbf{32\x} lower throughput than the \texttt{INT8} tensor core on the A100. Consequently, the address calculation overhead becomes non-negligible. Second, strided memory access prevents achieving the highest HBM bandwidth through packed 128-bit loading, further slowing down the memory pipeline. This issue is addressed by the \texttt{ldmatrix} instruction when the storage and compute data types are \textbf{the same}. As illustrated in Figure \ref{fig:sys:weight_reorder}a, thread $i$ loads a consecutive 128 bits in output channel $i \% 8$, and the \texttt{ldmatrix} instruction automatically distributes the data in a strided manner, ensuring that each thread eventually obtains the required data for \texttt{INT8} tensor core computation. 
+
+Unfortunately, the \texttt{ldmatrix} instruction will \textbf{not} work when the data types used for storage and computation differ (like in \textbf{\texttt{W4A8}}). Specifically, in Figure \ref{fig:sys:weight_reorder}b, \texttt{ldmatrix} ensures that each thread obtains the same number of \textbf{bytes}, not the same number of \textbf{elements}, after data permutation in the register file. Consequently, thread 0 obtains the tiles needed by both itself and thread 1, while thread 1 obtains the tiles needed by thread 2 and thread 3 in the subsequent \texttt{INT8} tensor core computation. This creates a mismatch between the data obtained by each thread and used in computation. That said, \texttt{ldmatrix} cannot be used for \textbf{\texttt{W4A8}} GEMM and the aforementioned pointer arithmetic overhead persists. Worse still, memory bandwidth utilization deteriorates further as we consecutively load only 16 bits for 4-bit weights.
+
+We address this challenge through \textbf{compute-aware weight reordering} (Figure \ref{fig:sys:weight_reorder}c). The key insight is to store the weights in the order they are used during computation. We divide the entire GEMM problem into multiple 32$\times$32 tiles. Within each tile, thread 0 utilizes input channels 0-3 and 16-19 for output channels 0, 8, 16, and 24 (output channels 16-31 are omitted in Figure \ref{fig:sys:weight_reorder}c). Consequently, we concatenate these 32 channels into a single 128-bit word. The 32 channels used by thread 1 are stored immediately following thread 0's 32 channels. Since weights are static, such reordering does not introduce any runtime overhead. Additionally, it not only reduces the pointer arithmetic overhead to the same level as \texttt{ldmatrix} but also guarantees high-bandwidth 128-bit/thread memory transactions. We apply this reordering to zero points and scales as well to mitigate dequantization overhead. 
+
+\subsubsection{Fast Dequantization in Per-Channel \textbf{\texttt{W4A8}} GEMM}
+\label{sect:system:gemm:per_channel}
+\input{text/figure/5-system/dequant_u4tou8}
+
+As illustrated in Figure \ref{fig:motivation:gemm}d, dequantizing weights within the main loop becomes necessary when the bit precisions for weights and activations differ. In the case of per-channel \textbf{\texttt{W4A8}} quantization, second-level scaling factors are omitted, and first-level \texttt{FP16} scaling is efficiently fused into the GEMM epilogue. We therefore focus our discussion on the efficient conversion from \texttt{ZINT4} (i.e., unsigned 4-bit integers with zero points) to \texttt{SINT8} within the main loop. We further decompose this conversion into two steps: \texttt{UINT4} to \texttt{UINT8} (weight unpacking) and \texttt{UINT8} to \texttt{SINT8} (zero point subtraction). As depicted in Figure \ref{fig:sys:dequant_u4tou8}, we reorder every 32 \texttt{UINT4} weights $w_0, w_1, ..., w_{31}$ into $w_0, w_{16}, w_1, w_{17}, ...$ This allows us to exploit \textbf{register-level parallelism} and efficiently unpack them into \texttt{UINT8} numbers with only three logical operations.
+
+For the conversion from \texttt{UINT8} to \texttt{SINT8}, the most intuitive approach is to introduce integer subtraction instructions within the main loop, which we refer to as subtraction before multiplication. Although straightforward, this approach inevitably introduces additional cost to the main loop, which is undesirable. Instead, we adopt a \textbf{subtraction after multiplication} approach to minimize the main loop overhead.
+
+Specifically, a GEMM layer with per-channel quantized operands can be expressed as:
+
+\vspace{-17pt}
+\begin{equation}
+\small \mathbf{O} = \hat{\mathbf{X}}\hat{\mathbf{W}} = (\mathbf{Q}_\mathbf{X}\odot\mathbf{S}_\mathbf{X})((\mathbf{Q}_\mathbf{W} - \mathbf{Z}_\mathbf{W})\odot\mathbf{S}_\mathbf{W}),  
+\label{eqn:sys:per_channel_qmm}
+\end{equation}
+
+\vspace{-10pt}
+where $\mathbf{Q}_\mathbf{W}$ ($\mathbf{Q}_\mathbf{X}$) is the quantized weight (activation), $\mathbf{Z}_\mathbf{W}$ expands the zero point vector $\mathbf{z}_\mathbf{W}$ of size $n$ (output channels) to $k\times n$ ($k$ is input channels) and $\mathbf{S}_\mathbf{W}$, $\mathbf{S}_\mathbf{X}$ are similarly obtained from scaling vectors $\mathbf{s}_\mathbf{W},\mathbf{s}_\mathbf{X}$. We denote $\mathbf{Z}_\mathbf{W}\odot\mathbf{S}_\mathbf{W}$ as $\mathbf{ZS}_\mathbf{W}$, then we rewrite Equation \ref{eqn:sys:per_channel_qmm} as:
+
+\vspace{-20pt}
+\begin{equation}
+\begin{aligned}
+\small \mathbf{O} &= (\mathbf{Q}_\mathbf{X}\odot\mathbf{S}_\mathbf{X})(\mathbf{Q}_\mathbf{W}\odot\mathbf{S}_\mathbf{W}-\mathbf{ZS}_\mathbf{W}) \\
+\small &= (\mathbf{Q}_\mathbf{X}\mathbf{Q}_\mathbf{W})\odot(\mathbf{s}_\mathbf{W}\times\mathbf{s}_\mathbf{X}) - (\mathbf{Q}_\mathbf{X}\odot\mathbf{S}_\mathbf{X})\mathbf{ZS}_\mathbf{W}.  
+\label{eqn:sys:per_channel_qmm_step2}
+\end{aligned}
+\end{equation}
+
+The first term, $(\mathbf{Q}_\mathbf{X}\mathbf{Q}_\mathbf{W})\odot(\mathbf{s}_\mathbf{W}\times\mathbf{s}_\mathbf{X})$, is analogous to the \textbf{\texttt{W8A8}} GEMM in TensorRT-LLM, where the $\mathbf{s}_\mathbf{W}\times\mathbf{s}_\mathbf{X}$ outer product scaling is performed in the epilogue. For the second term, we first replace $\mathbf{Q}_\mathbf{X}\mathbf{S}_\mathbf{X}$  ($\hat{\mathbf{X}}$) with the unquantized $\mathbf{X}$. We then notice that:
+
+
+\vspace{-14pt}
+\begin{equation}
+\mathbf{X}(\mathbf{ZS}_\mathbf{W}) = \mathbf{t}_\mathbf{X}\times(\mathbf{z}_\mathbf{W}\odot\mathbf{s}_\mathbf{W}),
+\label{eqn:sys:per_channel_qmm_step3}
+\end{equation}
+\vspace{-18pt}
+
+where $\mathbf{t}_\mathbf{X} = \mathbf{X}\mathbf{1}_k$, i.e., summing all input channels for each token. We observe that Equation \ref{eqn:sys:per_channel_qmm_step3} has a form similar to the outer product of scaling factors. Therefore, it can also be fused into the epilogue of the \textbf{\texttt{W4A8}} GEMM, analogous to the first term in Equation \ref{eqn:sys:per_channel_qmm_step2}. To this end, we move the zero-point subtraction from the main loop to the epilogue, thereby largely eliminating its overhead in the GEMM kernel. This formulation of \textbf{subtraction after multiplication} necessitates precomputing $\mathbf{t}_\mathbf{X}$. Fortunately, each \textbf{\texttt{W4A8}} kernel is always preceded by a memory-bound kernel, allowing us to fuse the precomputation kernel into it with negligible latency overhead.
+
+\subsubsection{Fast Dequantization in Per-Group \textbf{\texttt{W4A8}} GEMM} 
+\input{text/figure/5-system/dequant_group}
+
+The primary distinction between the per-group \textbf{\texttt{W4A8}} GEMM and its per-channel counterpart lies in the second-level dequantization process in Figure \ref{fig:motivation:gemm}d. Firstly, since zero points are now defined on a per-group basis, it is no longer possible to merge zero point subtraction into the epilogue, as was done in the previous section. Secondly, due to the presence of level 2 scales, an additional \texttt{INT8} multiplication is required for each weight. Akin to the previous section, we must determine whether to apply multiplication (scales) or subtraction (zeros) first during level 2 dequantization.
+
+In this context, we contend that performing \textbf{subtraction after multiplication} remains the advantageous approach because it enables \textbf{register-level parallelism} (RLP). As shown in Figure \ref{fig:sys:dequant_group}, NVIDIA GPUs provide the \texttt{vadd4} instruction that performs four \texttt{INT8} additions with a single \texttt{INT32} ALU operation. However, there is no instruction that realizes similar effect for 4-way \texttt{INT8} multiplication. Consequently, in order to achieve RLP, one has to simulate this by padding 24 zeros to the most significant bits (MSBs) of the 8-bit scaling factor. However, this simulation is valid only when the result of each \texttt{INT8} multiplication remains within the \texttt{INT8} range. This condition is not met for the subtraction-before-multiplication computation order. As illustrated in Figure \ref{fig:sys:dequant_group}a, the result of the scale multiplication overflows, leading to an incorrect output. In the subtraction-before-multiplication approach, we can only perform multiplication one by one, which is extremely inefficient. On the other hand, with the subtraction-after-multiplication computation order, our progressive group quantization algorithm ensures that the result of the initial multiplication step never exceeds the \texttt{INT8} range. This allows for fully leveraging the performance benefits of RLP in both multiplication and subtraction.
+
+
+\vspace{-8pt}
+\subsubsection{General Optimizations}
+
+In our \textbf{\texttt{W4A8}} kernel, we also employ general techniques for GEMM optimization. On the memory side, we apply multi-stage software pipelining and asynchronous memory copy to better overlap memory access with computation. Additionally, we swizzle the layout of the L1 shared memory to eliminate bank conflicts. To improve L2 cache utilization, we permute the computation partition across different thread blocks, allowing adjacent blocks to reuse the same weight. On the compute side, when the number of input tokens ($m$) is small, we found it beneficial to partition the reduction dimension $k$ into multiple slices and reduce the partial sums across different warps in the L1 shared memory. %
+
+\vspace{-8pt}
+\subsection{\textbf{\texttt{KV4}} Attention in \system}
+\label{sect:system:attention}
+\input{text/table/5-system/attention-breakdown}
+
+
+Attention accounts for 30-50\% of the total LLM runtime, as depicted in Figure \ref{fig:motivation:precision_choice}a. Although the roofline model in Figure \ref{fig:motivation:gemm} suggests that quantizing the KV cache to \texttt{INT4} should automatically yield a 2\x speedup over the 8-bit KV baseline, this is not the case in real-world implementation. 
+
+We start with the \textbf{\texttt{KV8}}-attention \decodingstage kernel from TensorRT-LLM as our baseline and replace all static, per-tensor quantized 8-bit KV cache accesses and conversions with their dynamic, per-head quantized 4-bit counterparts. This direct replacement immediately leads to 1.7$\times$ speedup on L40S, but results in \textbf{1.2\x slowdown} on A100 (Table \ref{tab:sys:naive_attn_slower}), compared to the \textbf{\texttt{KV8}} baseline. 
+
+Once again, our analysis reveals that the devil is in the slow CUDA cores, which are responsible for executing the attention kernels during the \decodingstage. While each individual batched GEMV has a computation intensity of 1 MAC / element, the computation intensity escalates significantly for a fused attention kernel that combines all the arithmetics and KV cache updates. As an illustration, naively dequantizing a single \texttt{INT4} number from the KV cache necessitates 5 ALU Ops. This includes \texttt{mask} and \texttt{shift} operations to isolate the operand, type conversion from integer to floating-point representation, and floating point \texttt{mul} and \texttt{sub} to obtain the final results. It is crucial to note that the roofline turning point for A100 FP32 CUDA cores is merely \textbf{9.8 Ops/Byte}. That said, the dequantization of KV  operands alone already saturates this bound, leading to the surprising observation that the fused \textbf{\texttt{KV4}} attention kernel can become \textbf{compute-bound} on datacenter GPUs like A100. In fact, similar observations hold in other systems like QuaRot~\cite{ashkboos2024quarot} and Atom~\cite{zhao2023atom}. Specifically, QuaRot introduces compute-intensive Hadamard transformation~\cite{quip} in the attention operator, making it hard to achieve real speedup over TRT-LLM-\texttt{KV8} with 4-bit quantized KV caches.
+
+To mitigate the compute-bound bottleneck, it is important to shift the \decodingstage \textbf{\texttt{KV4}} attention kernels away from the compute-bound region. We accomplish this objective through a bidirectional approach: Firstly, delaying the onset of the roofline turning point, and secondly, concurrently reducing the computation intensity within the fused kernel. For the first part, we replace all FP32 operations in the original TensorRT-LLM kernel with their FP16 counterpart, effectively doubling the computation roof.  For the second part, we observe that the arithmetic intensity of dequantization can be significantly reduced to 2 operations per element by applying bit tricks proposed in~\cite{kim2022says}. Furthermore, we note that simplifying the control logic and prefetching the scaling factors and zero values, thereby simplifying address calculations, contribute to performance improvements. After incorporating these enhancements, we observe a \textbf{1.5\x} speedup over TensorRT-LLM's \textbf{\texttt{KV8}} kernel on A100. 
+
+
+
+
+

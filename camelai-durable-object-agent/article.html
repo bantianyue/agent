@@ -1,0 +1,78 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">架构迁移</strong>：camelAI将agent从虚拟机搬到Cloudflare Durable Object：文件系统在SQLite+R2，代码用JavaScript而非Python<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">成本革命</strong>：Durable Object休眠时零计算成本。1万个agent各1% 活跃时间 → 只需 ~100个并发实例，而非1万台始终在线VM<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">执行阶梯</strong>：文件系统(SQLite)→沙箱JS(isolate)→npm→无头浏览器→完整沙箱。每级可加，最低0级即可工作</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">camelAI最近将其agent从虚拟机迁移到了Cloudflare Durable Object。<strong>Agent现在运行在一个Durable Object内，文件系统活在SQLite和R2中，用JavaScript而非Python编写代码。</strong> 这不是概念验证：这是他们在生产环境运行了数周的真实架构。支撑这一迁移的是Cloudflare新发布的Project Think（Agents SDK + @cloudflare/codemode + Pi集成）：Durable Objects提供每个agent独立持久化存储和零成本休眠，Codemode让LLM编写完整的JavaScript程序而非顺序调用工具，Pi提供最小化agent框架。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么从虚拟机迁移</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">传统应用是一个实例服务多个用户。餐厅有一份菜单和一个优化为大批量出餐的厨房。<strong>一个agent更像一个私人厨师：不同的食材、不同的技法、不同的工具，每次都不一样。</strong> 如果一亿知识工作者每人使用一个agentic助手，即使只是在中等并发下，你也需要数千万个同时活跃的会话：按当前每容器成本计算不可持续。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">camelAI将agent迁移到Durable Object：实战架构转型</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">VMs/容器在空闲时仍然消耗全额计算成本，每个实例始终在线。Durable Object将开销从「始终在线」变为「按需唤醒」。一个休眠的DO不消耗计算资源。当请求、WebSocket、定时器或邮件到达时，平台唤醒agent，加载状态，处理事件，然后继续休眠。<strong>1万个agent各活跃1% 的时间 → 任何时候只有 ~100个实例在线，而非1万个。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">附带的内置特性：每个agent有自带SQLite数据库（无需外部存储）、平台自动处理恢复（状态不丢失）、内置身份与路由。这在VM/容器上需要自己构建进程管理器、健康检查、负载均衡和粘性会话。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Durable Execution：崩溃中存活</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">LLM调用需要30秒，多轮agent循环运行更久。在这段时间内执行环境随时可能消失：部署、重启、资源限制。上游到模型提供商的连接被永久切断，内存中的状态丢失。<strong>runFiber() 解决了这个问题。</strong> 一个fiber是持久函数调用：执行开始前注册在SQLite中，可在任意点通过stash() 做检查点，在重启时通过onFiberRecovered恢复。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如果agent在循环到第5步时崩溃，恢复后从第5步继续：stash的数据（findings、step、topic）完好无损。SDK在fiber执行期间自动保持agent活跃。对于以分钟计的工作，keepAlive() 防止驱逐；对于更长的操作（CI流水线、设计评审），agent启动工作、持久化job ID、休眠、在回调时唤醒。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">从工具调用到代码执行</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">传统的工具调用有一个尴尬的形状。模型调用一个工具，把结果拉回上下文窗口，再调用另一个工具，拉回结果：如此反复。100个文件意味着100次通过模型的往返。<strong>模型更擅长编写代码来使用系统，而非玩工具调用的游戏。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">@cloudflare/codemode实现了这一洞察：LLM编写一个完整的程序来处理整个任务。例如查找所有包含TODO的TypeScript文件：执行一次JS程序，而不是100次LLM往返。<strong>Cloudflare API MCP服务器只暴露两个工具（search和execute），消耗 ~1,000 tokens，而等价的逐工具端点方式消耗约117万tokens：减少了99.9%。</strong> 这对token节省是革命性的。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">安全沙箱与执行阶梯</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Dynamic Worker提供了安全的代码执行环境：毫秒级启动的V8 isolate，几MB内存。比容器快约100倍、内存高效约100倍。<strong>关键设计是能力模型：</strong> 从几乎没有默认权限（无网络访问）开始，显式授予每种资源。这引出了一个自然的五级计算环境：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>0级</strong>：Workspace：基于SQLite+R2的持久虚拟文件系统。<strong>1级</strong>：Dynamic Worker：沙箱JS isolate，无网络。<strong>2级</strong>：添加npm：esbuild打包后加载。<strong>3级</strong>：无头浏览器（Browser Run）。<strong>4级</strong>：完整Sandbox。<strong>核心原则：agent在0级单独就可用，每级累加。</strong> 用户根据需要添加能力，而不是一开始就被迫处理所有复杂性。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Pi Agents SDK还提供了会话API（父子ID树形存储对话，支持分叉和压缩）和Facet子agent（每个有独立SQLite + 执行上下文，通过RPC协作，类型安全）。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">对开发者意味着什么</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Agent的规模经济与Web应用完全不同。</strong> Web应用是一个后端服务成千上万的用户。Agent是每个用户/每个任务/每个线程一个agent：这是1:1的模型。Durable Objects的按需唤醒使这种模型在经济上可行。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">从工具调用到代码执行的范式转变同样重要。Codemode不仅减少了token消耗，还改变了agent与系统的交互方式：不是通过API端点的胶水代码，而是通过真实的编程。<strong>如果你正在为agent设计后端，问自己这个关键问题：是让你的agent在你的系统上运行，还是让你的agent成为你的系统？</strong> Durable Objects的actor模型让前者自然过渡到后者。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+这篇X长文和配套的Cloudflare Project Think博客共同描绘了一个清晰的趋势：<strong>Agent基础设施正在从『进程内工具调用』转向『持久化代码执行』。</strong> 这不是增量改进，是对agent架构模型的重塑：从stateless API calls到stateful actor model，从顺序工具调用到批处理代码生成，从始终在线VM到按需唤醒DO。<br  /><br  /><strong>最有价值的洞察是『执行阶梯』：agent在Tier 0就应该有用。</strong> 这意味着基础设施不应该为了高级功能强迫你在第一时间就处理所有复杂性。Workspace (SQLite+R2文件系统) + Codemode (JS执行) 这两层就能覆盖大量agent用例，npm和无头浏览器是累加加成。<br  /><br  /><strong>独立观点：</strong> Codemode的99.9% token减少不是噱头：它从根本上改变了工具设计的ROI。当每个工具的成本从「一个LLM往返」降到「函数调用」，你可以暴露更大、更复杂的工具。这可能导致agent工具设计的分叉：一方继续做细粒度MCP工具的标准化，另一方转向粗粒度『语言级API』的代码生成。Cloudflare+Codemode站在后者一边。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/L6krDtAzuCiX4y2KNYYvfQ" target="_blank" data-linktype="2">万亿参数RL实战：如何用28个H200节点训GLM-5</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/pCRjhls1WFaiRglb2MtjBw" target="_blank" data-linktype="2">蚂蚁CausalMix: 将数据混合从超参搜索转换成因果推断</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://x.com/Vercantez/status/2082138839888589200</span></p>
+</section>

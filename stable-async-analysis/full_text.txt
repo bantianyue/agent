@@ -1,0 +1,1904 @@
+CONTENTS
+
+RESEARCH  ·  TENCENT HY LLM FRONTIER  ·  JULY 2026
+
+研究  ·  腾讯 HY 大模型  ·  2026 年 7 月
+
+Stale but Stable: Staleness-Adaptive Trust Regions for Stabilizing Asynchronous Reinforcement Learning
+
+陈旧度下的稳定训练：用于稳定异步强化学习的陈旧度自适应信任域
+
+Staleness analysis in asynchronous reinforcement learning: principled origins, diagnostics, and mitigations.
+
+异步强化学习中的陈旧度问题：来源剖析、诊断与缓解方案。
+
+Decoupling rollout from training buys throughput, but the policy that generated a token can then differ from the policy that trains on it. This blog is a field guide to that mismatch: where it comes from, why it's risky under LLM's reinforcement learning setting , and what current stabilizers and our proposed method do about it. The theory in one line: the policy-improvement approximation degrades as the divergence between inference policy 
+𝜇
+ and training policy 
+𝜋
+ grows. At state 
+𝑠
+, the divergence can be defined as 
+𝐷
+TV
+(
+𝜇
+,
+𝜋
+)
+[
+𝑠
+]
+=
+1
+2
+𝐸
+𝑎
+∼
+𝜇
+(
+⋅
+∣
+𝑠
+)
+|
+𝑟
+(
+𝑎
+)
+−
+1
+|
+ — so a hard ratio bound on every action would bound the divergence — but PPO clipping is only a sampled-objective guardrail, not that hard constraint.
+
+One feasible solution is lets this clipping mechanism adaptive to the action: Staleness-Adaptive Trust Region (SAT) gives tokens with high observed staleness a tighter directional clip radius, suppressing future distribution drift via Staleness-based kernel function scaling and Effective contraction factors. In the reported best-checkpoint grid, SAT-GSPO w/ R3 reaches 35.83 at lag = 1 and 34.79 at lag = 8. Under high-staleness training, SAT can achieve higher training performance and lower staleness during training, while several fixed-clip baselines still collapse later in training.
+
+将采样与训练解耦可以换来吞吐，但代价是生成 token 的策略可能已不同于消费它的训练策略。本文是关于这种失配的一份“实战指南”：它从哪里来、在 LLM 强化学习设定下为何具有风险，以及现有稳定方法与我们提出的方法如何应对。从理论层面一句话概括：inference policy μ 与 training policy π 之间的 divergence 越大，策略改进近似越不可靠。对状态 s，这一 divergence 可以定义为 DTV(μ,π)[s]=12Ea∼μ(⋅∣s)|r(a)−1|， 因此若能对每个动作施加硬比率界，就能约束这一 divergence。与此同时， PPO 裁剪只是采样目标上的一道截断，并不是针对 divergence 本身的硬约束。
+              一个可行的方案是让这道截断倾听动作：陈旧度自适应信任域（Staleness-Adaptive Trust Region, SAT）给观测陈旧度较高的 token 更紧的方向性裁剪半径，并通过基于陈旧度的核函数缩放与有效收缩因子来抑制未来的分布漂移。在最新报告的最佳检查点汇总中，SAT-GSPO w/ R3 在 lag = 1 达到 35.83，在 lag = 8 达到 34.79。在高异步的训练场景下，SAT 可以实现更高的训练性能与训练期间的较低陈旧度，而若干基线在训练中仍会在后期崩溃。
+
+Junyao Yang1,2,* · Yucheng Shi1,† · Zongxia Li1,3 · Zhongzhi Li1,4 · Ruhan Wang1,5 · Xiangxin Zhou6 · Kishan Panaganti1 · Haitao Mi1 · Leowei Liang1
+
+1Tencent Hy LLM Frontier  ·  2National University of Singapore  ·  3University of Maryland, College Park  ·  4University of Georgia  ·  5Indiana University  ·  6Tencent Hy LLM
+
+†Project Lead  ·  *Corresponding Author: junyaoyang@u.nus.edu  ·  First published July, 2026
+
+IN ONE MINUTE
+
+Asynchronous RL for LLMs decouples rollout, which is executed by SGLang[2], from training, which is executed by Megatron[3], so the two can be parallel; the price is a token-level importance ratio 
+𝑟
+𝑏
+,
+𝑡
+. This ratio is the sampled probability ratio between the current training policy and the rollout or behavior policy at token 
+𝑡
+ of sample 
+𝑏
+, and it defintely departs from 
+1
+.
+
+面向大模型的异步 RL 把 rollout 与训练解耦，其中 rollout 由 SGLang[2] 执行，训练由 Megatron[3] 执行，因此二者得以并行；代价是会出现 token 级重要性比 rb,t。这个比值表示在样本 b 的第 t 个 token 上，当前训练策略相对 rollout 或 behavior 策略的采样概率比，因此它不可避免地偏离 1。
+
+The performance-bound error is bounded by full-distribution of inference-training policy divergence, with 
+𝐷
+TV
+(
+𝜇
+,
+𝜋
+)
+=
+1
+2
+𝐸
+𝑎
+∼
+𝜇
+(
+⋅
+∣
+𝑠
+)
+|
+𝑟
+𝑏
+,
+𝑡
+−
+1
+|
+. Here 
+𝑟
+𝑏
+,
+𝑡
+ denotes the sampled token-level ratio; 
+𝑏
+ indexes sampled responses in one batch, and 
+𝑡
+ indexes token positions within response. Here sampled 
+|
+𝑟
+𝑏
+,
+𝑡
+−
+1
+|
+ can be viewed as a single-sample Monte Carlo estimator of the divergence quantity, with smaller divergence making the approximation tighter.
+
+性能下界中的误差项由 inference-training policy divergence 的完整分布控制，其中 DTV(μ,π)=12Ea∼μ(⋅∣s)|rb,t−1|。这里 rb,t 表示采样到的 token 级比率；b 表示 mini-batch 中的样本编号，t 表示该样本中的 token 位置。这里采样到的 |rb,t−1| 可以看作这一 divergence 量的单样本 Monte Carlo 估计，而更小的 divergence 会让近似更紧。
+
+PPO does not enforce that all-action condition. Its fixed clip radius changes the sampled loss: it stops only outward gradients that cross the boundary and keeps the converging pull-back gradient channel.
+
+PPO 并不会执行上述全动作条件。固定裁剪半径只改变采样损失：它停止越过边界的向外梯度，同时保留收敛方向的回拉梯度通道。
+
+We propose SAT, which treats 
+|
+log
+⁡
+𝑟
+𝑏
+,
+𝑡
+|
+ as an observable staleness proxy and contracts the sign-selected radius for the high-staleness tail. This makes outward clipping activate earlier; it is intended to suppress future 
+𝐷
+TV
+(
+𝜇
+,
+𝜋
+)
+ growth.
+
+我们提出 SAT：把 |log⁡rb,t| 作为可观测陈旧度代理，并对高陈旧度长尾收缩由符号选中的半径。这会让向外裁剪更早生效；其目标是抑制未来 DTV(μ,π) 增长。
+
+Empirically, in single-seed runs on Qwen3-30B-A3B-Base, SAT-GSPO w/ R3 reports the best AIME24 best-checkpoint avg@8 at both configured lags, reaching 35.83 at lag 1 and 34.79 at lag 8, while several fixed-clip baselines collapse at lag 8. Adaptive clipping and MoE routing replay appear complementary.
+
+经验结果来自 Qwen3-30B-A3B-Base 上的单种子实验。SAT-GSPO w/ R3 在两种配置 lag 下都报告了最高的 AIME24 最佳检查点 avg@8，其中 lag = 1 为 35.83，lag = 8 为 34.79；而多个固定裁剪基线在 lag = 8 时崩溃。自适应裁剪与 MoE 路由重放呈现互补效应。
+
+PART 01
+
+第 01 部分
+
+Preliminaries: the asynchronous RL pipeline
+
+预备知识：异步 RL 流水线
+
+Let 
+𝑏
+ index a response, 
+𝑡
+ a token, and 
+𝑗
+ the global trainer update at which that response is evaluated. The rollout engine samples token 
+(
+𝑏
+,
+𝑡
+)
+ from its actual behavior distribution 
+𝜇
+𝑏
+,
+𝑡
+, while Megatron evaluates the current train policy 
+𝜋
+(
+𝑗
+)
+ with index 
+𝑗
+. In fixed-cadence pipelines all tokens in a batch share one rollout checkpoint, so we write 
+𝜇
+𝑏
+,
+𝑡
+=
+𝜇
+𝑅
+, the engine behavior produced at weights 
+𝜃
+(
+ℓ
+)
+; only in an idealized policy-only model is this identified with 
+𝜋
+𝜃
+(
+ℓ
+)
+. In a fully asynchronous pipeline 
+𝜇
+𝑏
+,
+𝑡
+ may vary across tokens. The three regimes below differ in how the rollout-to-train version lag is distributed.
+
+记 b 为响应下标、t 为 token 下标、j 为该响应被计算时的全局训练更新下标。采样引擎从 token (b,t) 的实际行为分布 μb,t 采样，Megatron 则在当前版本 j 训练策略 π(j) 下计算目标。固定节拍流水线中，同一批 token 共用一个 rollout 检查点，因此可简写为 μb,t=μR，表示引擎在权重 θ(ℓ) 下产生的行为；只有在理想化、仅考虑策略的模型中，才把它等同于 πθ(ℓ)。完全异步时，μb,t 可以随 token 改变。下面三种范式的区别，在于 rollout 到训练的版本滞后如何分布。
+
+Synchronous RL   staleness = 0
+
+同步 RL   陈旧度 = 0
+
+Formally, let 
+ℓ
+ be the rollout checkpoint index, let 
+𝜃
+roll
+ and 
+𝜃
+train
+ be the rollout and trainer weights, and let 
+𝑁
+𝑏
+,
+𝑡
+ be the realized lag of token 
+(
+𝑏
+,
+𝑡
+)
+.
+
+形式化地，记 ℓ 为 rollout 检查点下标，记 θroll 与 θtrain 分别为 rollout 和训练器的权重，记 Nb,t 为 token (b,t) 的实际版本滞后。
+
+At this pre-update behavior point, 
+𝑟
+𝑏
+,
+𝑡
+≡
+1
+, so the ratio contributes no off-policy correction; under the usual on-policy estimator assumptions, the surrogate gradient at the behavior policy matches the corresponding policy-gradient estimator. The notation 
+a.s.
+ in the display means that this equality holds with probability one under the idealized same-distribution abstraction. Here we abstract away perturbations induced by hardware and the train/inference engines. The price is throughput: the two engines never overlap, and one optimizer step costs (rollout) + (trainer) + (broadcast) in serial.
+
+在更新前的行为策略点，rb,t≡1，因此比率项不再需要离策略校正；在通常的 on-policy 估计器假设下，行为策略处的替代梯度与相应策略梯度估计器一致。公式里的 a.s. 表示在该理想化同分布抽象下，这个等式以概率 1 成立。此处我们不考虑硬件和训练推理引擎带来的扰动。代价是吞吐：两个引擎从不重叠，一个优化步的耗时是（rollout）+（训练）+（广播）的串行总和。
+
+Asynchronous RL, batch-wise   realized lag ≥ 1
+
+批式异步 RL   实际 lag ≥ 1
+
+Let 
+ℓ
+ be the rollout checkpoint index, 
+𝑛
+ the lag at batch handoff, 
+ℎ
+ the within-consumption update offset, and 
+𝐻
+ its maximum. Let 
+𝑁
+𝑏
+,
+𝑡
+ be the realized lag of token 
+(
+𝑏
+,
+𝑡
+)
+, and let 
+𝑦
+𝑏
+,
+𝑡
+,
+𝑠
+𝑏
+,
+𝑡
+ be the sampled token and its decoding context.
+
+记 ℓ 为 rollout 检查点下标，记 n 为批次交接时的 lag，记 h 为消费该批时的局部更新偏移，记 H 为其最大值。记 Nb,t 为 token (b,t) 的实际版本滞后，记 yb,t,sb,t 为采样到的 token 及其解码上下文。
+
+All tokens share the behavior checkpoint, while their realized lag at evaluation is 
+𝑁
+𝑏
+,
+𝑡
+=
+𝑛
++
+ℎ
+. Write 
+𝑑
+𝑏
+,
+𝑡
+=
+log
+⁡
+𝑟
+𝑏
+,
+𝑡
+, 
+Δ
+𝑏
+,
+𝑡
+𝜋
+=
+log
+⁡
+𝜋
+(
+𝑗
+)
+−
+log
+⁡
+𝜋
+(
+ℓ
+)
+, and 
+Δ
+𝑏
+,
+𝑡
+impl
+=
+log
+⁡
+𝜋
+(
+ℓ
+)
+−
+log
+⁡
+𝜇
+𝑅
+. Then the observed staleness splits into a policy-lag term and an implementation-mismatch term:
+
+所有 token 共用行为检查点，而计算时的实际 lag 为 Nb,t=n+h。记 db,t=log⁡rb,t、Δb,tπ=log⁡π(j)−log⁡π(ℓ)、Δb,timpl=log⁡π(ℓ)−log⁡μR。于是观测陈旧度可拆成策略版本差项与实现失配项：
+
+Here 
+log
+⁡
+𝜋
+(
+ℓ
+)
+ is Megatron's trainer-side reference at the rollout weights; the Notation panel and §4.f write the same quantity as 
+𝜇
+~
+𝑅
+. This two-term equality is exact when all log-probs are evaluated at 
+(
+𝑦
+𝑏
+,
+𝑡
+,
+𝑠
+𝑏
+,
+𝑡
+)
+. Engine kernels, MoE routing, and hardware are useful diagnostic sources for 
+Δ
+𝑏
+,
+𝑡
+impl
+, but without additional intermediate distributions they are not a unique additive decomposition.
+
+其中 log⁡π(ℓ) 是 Megatron 在 rollout 权重下的 trainer-side reference；在记号面板与 §4.f 中，同一个量也写作 μ~R。当所有对数概率都在 (yb,t,sb,t) 上计算时，上述二项分解是精确的。引擎算子、MoE 路由与硬件可以作为 Δb,timpl 的诊断来源，但若不额外定义中间分布，就不能把它们声称为唯一的精确加法分解。
+
+Fully asynchronous RL   staleness is a random variable
+
+完全异步 RL   陈旧度是随机变量
+
+The dropdown below summarizes the steady-state mean-staleness model and the staleness formulation used for fully asynchronous RL.
+
+下方下拉栏总结了完全异步强化学习中使用的稳态平均陈旧度模型与陈旧度形式化定义。
+
+Scope of this article
+
+本文的研究范围
+
+The three regimes above establish the object of study. Concretely, this blog
+
+上述三种范式确定了研究对象。具体而言，本文
+
+separates version lag (a deterministic configured 
+𝑛
+ or a token-level 
+𝑁
+𝑏
+,
+𝑡
+ with mean 
+𝑛
+¯
+) from the observed per-token log-ratio staleness, and uses policy / engine / router effects as diagnostic hypotheses rather than a unique decomposition (Part 02);
+
+区分版本差（确定的配置值 n，或 token 级随机 lag Nb,t 及其均值 n¯）与观测逐 token 对数比陈旧度，并把策略 / 引擎 / 路由效应作为诊断假说，而非唯一分解（第 02 部分）；
+
+proposes a primary solution — the Staleness-Adaptive Trust Region (SAT) of Part 03 — that couples a directional clip radius to the observed log-ratio staleness. It tightens PPO's sampled-ratio surrogate on tokens with high observed staleness; true 
+𝐷
+TV
+ and improvement interpretations remain explicitly conditional;
+
+提出核心解法 —— 第 03 部分的陈旧度自适应信任域（SAT）：让方向性裁剪半径与观测对数比陈旧度耦合。它在观测陈旧度较高的 token 上收紧 PPO 的采样比率替代机制；真实 DTV 与策略改进解释仍明确是条件性的；
+
+surveys the existing async-RL stability approaches as different choices of behavior policy, target-policy definition, ratio truncation, mask, clip radius, threshold on the same 
+log
+⁡
+𝑟
+𝑏
+,
+𝑡
+ (Part 04).
+
+综述现有的异步 RL 稳定方法 —— 它们分别是在同一个 log⁡rb,t 上对行为策略、目标策略定义、比率截断、掩码、裁剪半径、阈值的不同选择（第 04 部分）。
+
+PART 02
+
+第 02 部分
+
+Staleness Analysis in Asynchronous RL
+
+异步 RL 中的陈旧度分析
+
+Part 01 identified the three pipeline regimes; this part quantifies the reinforcement-learning cost of that decoupling. Synchronous RL accepts fully serialized throughput in exchange for strictly on-policy data (in the idealized same-distribution analysis, 
+𝜇
+𝑏
+,
+𝑡
+=
+𝜋
+(
+𝑗
+)
+ and 
+𝑟
+𝑏
+,
+𝑡
+≡
+1
+, while engine-level numerical mismatch is taken to be negligible at this scale). Asynchronous RL instead runs SGLang and Megatron in parallel on separate GPU pools, so the trainer continues updating while rollout data are still in flight, which substantially improves training efficiency: the model state is synchronized between the training and inference engines once every configured handoff interval, denoted 
+𝑛
+, while a token's realized lag is 
+𝑁
+𝑏
+,
+𝑡
+=
+𝑗
+−
+ℓ
+𝑏
+,
+𝑡
+. The cost is a systematic parameter mismatch:
+
+第 01 部分确定了三种流水线范式；本部分量化这种解耦对于强化学习的代价。同步 RL 用完全串行的吞吐，换来严格 on-policy 的数据（在理想化同分布分析中 μb,t=π(j) 且 rb,t≡1；引擎数值失配量级可以忽略不计）。异步 RL 则让 SGLang 与 Megatron 在各自的 GPU 池上并行运行，训练器在 rollout 数据尚在途中时继续更新，这无疑大幅度提高了训练效率：每过 lag 步将训练以及推理引擎之间的模型配置同步一次，配置的交接 lag 可记为 n，而 token 的实际 lag 为 Nb,t=j−ℓb,t。代价是系统性的参数失配：
+
+For the loss, the key consequence is that training is no longer strictly on-policy: behavior data are generated under stale rollout parameters and are then optimized under the current trainer parameters. In other words, the update becomes off-policy at training time, though not offline RL in the fixed-dataset sense. This necessarily changes the token-level ratio. Staleness can be formulized as the observed token-level log-ratio.:
+
+对于损失函数的影响在于它将原本在线的强化学习强制变成离线强化学习，这毋庸置疑地改变了更新时 token-ratio，因而陈旧度可以被表示为观测到的token-level对数比：
+
+WHY 
+𝐷
+TV
+ MOTIVATES RATIO CONTROL — AND WHERE SAMPLED CLIPPING FALLS SHORT
+
+Equation (2.2) immediately gives the ideal ratio-to-
+𝐷
+TV
+ bridge. If, at a fixed state, a hard bound on every action satisfies 
+|
+𝑟
+𝑏
+,
+𝑡
+(
+𝑎
+)
+−
+1
+|
+≤
+𝜀
+ for all 
+𝑎
+, then it follows that 
+𝐷
+TV
+(
+𝜇
+𝑏
+,
+𝑡
+,
+𝜋
+(
+𝑗
+)
+)
+[
+𝑠
+𝑏
+,
+𝑡
+]
+≤
+𝜀
+2
+. With asymmetric hard bounds 
+𝑟
+(
+𝑎
+)
+∈
+[
+1
+−
+𝜀
+low
+,
+1
++
+𝜀
+high
+]
+, the same argument gives 
+𝐷
+TV
+≤
+1
+2
+max
+{
+𝜀
+low
+,
+𝜀
+high
+}
+. This is an all-action statement, not a statement about one sampled token.
+
+式 (2.2) 直接给出理想的token-ratio 和 DTV之间的推导关系。若在固定状态上，对每个动作都有硬约束 |rb,t(a)−1|≤ε，则可得 DTV(μb,t,π(j))[sb,t]≤ε2。对于非对称裁剪 r(a)∈[1−εlow,1+εhigh]，同理可得 DTV≤12max{εlow,εhigh}。这是全动作结论，不是关于单个采样 token 的结论。
+
+For the performance bound below, specialize to a fixed trajectory behavior 
+𝜇
+𝑏
+,
+𝑡
+≡
+𝜇
+𝑅
+; token-varying fully asynchronous behavior requires conditioning on the realized rollout schedule (or augmenting the state with scheduler/version information).
+
+对下面的性能界，先专门考虑固定轨迹行为 μb,t≡μR；token 行为随时间变化的完全异步情形还需对已实现的 rollout 调度取条件（或把调度器 / 版本信息加入增广状态）。
+
+A smaller 
+𝐷
+TV
+ term makes this lower bound less pessimistic, so the surrogate is a more trustworthy approximation; it does not by itself imply a better policy because 
+𝐿
+𝜇
+𝑅
+′
+ and optimization error also matter. Equation (2.2) assumes 
+𝜋
+(
+𝑗
+)
+≪
+𝜇
+𝑏
+,
+𝑡
+; otherwise target mass outside behavior support must be handled separately. Equation (2.3) is the finite-horizon DPPO lower bound[5] under its bounded-reward and compatible trajectory/support assumptions. PPO clipping observes sampled actions and changes their loss; it does not enforce the all-action hard bound above.
+
+更小的 DTV 项会让这个下界不那么悲观，因此替代目标近似更可信；但它并不单独意味着策略更好，因为 LμR′ 与优化误差同样重要。式 (2.2) 假设 π(j)≪μb,t；否则必须另行处理行为支撑之外的目标概率质量。式 (2.3) 是 DPPO[5] 在奖励有界、轨迹与支撑相容等假设下给出的有限视界下界。PPO 裁剪只观测采样动作并改变其损失，并不会执行上面的全动作硬约束。
+
+Empirically the same picture is reflected by IS-deviation-token fraction, the training–inference log-prob absolute difference, and its KL counterpart: a naive GRPO[8] baseline at configured lag 
+=
+8
+ produces roughly an order-of-magnitude larger IS deviation than at configured lag 
+=
+1
+; in those runs this larger mismatch is associated with training instability after only a few good checkpoints, before the first epoch closes.
+
+实证上，IS 偏移 token 占比、训练–推理对数概率绝对差与其 KL 对应量 三个指标呈现出相似图景：Vanilla GRPO[8] 基线在配置 lag =8 时的 IS 偏移比配置 lag =1 时大约高一个数量级；在这些运行中，更大的失配与训练在首个 epoch 结束前、仅取得几个较好检查点后失稳相关。
+
+SECTION 2.1
+Training instability associated with staleness
+
+The theoretical bound above is only the beginning of the story: its inequality remains valid under its assumptions, but its numerical lower bound becomes looser as the divergence penalty grows. In our runs, sufficiently large lag is also associated with loss of training stability. The main diagnostics are:
+
+上面的理论界只是故事的开头：在其假设成立时，不等式本身仍然有效，但散度惩罚增大时，数值下界会变松。在我们的实验中，足够大的版本差还与训练稳定性丧失相关。主要诊断指标如下：
+
+These symptoms are much weaker in the reported low-lag runs and reappear in the high-lag comparisons. They motivate the rest of the article: Part 03 introduces SAT, whose per-token nominal clip radii respond to the observed staleness distribution, and Part 04 catalogues the existing async-RL stabilizers under the same trust-region lens. The experiments test whether these mechanisms improve stability; the conditional theory in §3.2 should not be read as a causal explanation of every run.
+
+在已报告的低版本差运行中，这些症状明显更弱，并在高版本差比较中重新出现。它们引出本文的其余部分：第 03 部分引入 SAT —— 其逐 token 名义裁剪半径随观测陈旧度分布变化；第 04 部分则在同一信任域视角下梳理现有异步 RL 稳定方法。实验用于检验这些机制是否改善稳定性；§3.2 的条件性理论不应被解读为对每次运行的因果解释。
+
+PART 03
+
+第 03 部分
+
+SAT — Staleness-Adaptive Trust Region
+
+SAT — 陈旧度自适应信任域
+
+SAT (Staleness-Adaptive Trust Region) is a trust-region-motivated sampled-ratio clipping plug-in for PPO-like objectives. It turns static radii 
+(
+𝜀
+low
+,
+𝜀
+high
+)
+ into per-token directional radii using the observed staleness proxy 
+|
+𝑑
+𝑏
+,
+𝑡
+|
+=
+|
+log
+⁡
+𝑟
+𝑏
+,
+𝑡
+|
+. The construction is batch-relative, direction-aware, and only contracts tokens beyond an adaptive quantile gate. Its name describes the motivation; the implementation is not a hard policy-level trust-region projection.
+
+SAT（陈旧度自适应信任域）是面向 PPO 类目标、由信任域思想驱动的采样比率裁剪插件。它使用观测陈旧度代理 |db,t|=|log⁡rb,t|，把静态半径 (εlow,εhigh) 改成逐 token 的方向性半径。该构造以当前微批为相对参考、具有方向性，并且只收缩超过自适应分位数门控的 token。名称表达的是设计动机；实现本身并不是策略级硬信任域投影。
+
+3.1   From observed staleness to an adaptive clip
+
+3.1   从观测陈旧度到自适应裁剪
+
+Equations (2.2)–(2.3) motivate keeping the train policy close to the behavior policy: an ideal support-wide ratio bound controls training-inference divergence 
+𝐷
+TV
+, and smaller divergence tightens the performance approximation. PPO replaces that intractable hard constraint with a fixed-radius sampled clipped objective. It is a soft guardrail: seeing one action per visited state cannot certify the full vocabulary distribution, and clipping does not project the learned policy into a ratio-feasible set.
+
+式 (2.2)–(2.3) 给出了让训练策略靠近行为策略的动机：理想的全支撑比率界能够控制训练-推理散度 DTV，而更小的散度会收紧性能近似。PPO 用固定半径的采样裁剪目标替代了这个难以直接执行的硬约束。它只是一道软护栏：每个已访问状态只看到一个采样动作，无法验证完整词表分布；裁剪也不会把学习后的策略投影到比率可行集。
+
+Comparing with vanilla PPO clipping, SAT provides a token-level clipping mechanism behind suppressing future staleness growth.
+
+Token-level staleness signal. Larger 
+|
+𝑑
+𝑏
+,
+𝑡
+|
+ indicates higher training staleness and correlates with instability. SAT therefore narrows the sign-selected nominal endpoint on the high-staleness tail of the current training batch. What it uses here is an observable relative-staleness signal: actions with larger token-level ratios are often the ones that trigger training collapse.
+
+Staleness-based effective contraction factors By imposing a tighter trust region with Staleness-based effective contraction factors 
+𝑐
+±
+,
+𝑏
+,
+𝑡
+, SAT suppresses divergent gradient updates and uses 
+|
+𝑑
+𝑏
+,
+𝑡
+|
+ as a practical proxy for staleness. On the additionally truncated portion, SAT further ensures that the next-step sampling-ratio deviation stays no larger than under PPO clipping, providing the most direct local mechanism for curbing future growth of training staleness.
+
+与 vanilla PPO clipping 相比，SAT 提供了一种 token-level 的裁剪机制，其背后对应着抑制未来训练陈旧度增长的局部机制。
+
+Token-level 陈旧度信号。较大的 |db,t| 往往意味着更高的训练陈旧度，并且与训练不稳定性相关。因此，SAT 会在当前训练批次中陈旧度较高的长尾 token 上收窄由符号选中的名义端点。这里使用的是一种可观测的相对陈旧度信号：那些具有较大 token-level ratio 的动作，往往更容易诱发训练崩溃。
+
+基于陈旧度的有效收缩因子。SAT 通过引入基于陈旧度的收缩因子 c±,b,t 来施加更紧的 trust region，抑制发散的梯度更新，并将 |db,t| 作为一种实用的陈旧度代理。对于新增截断的那部分 token，SAT 进一步保证下一步的采样比率偏离不超过 PPO 裁剪，从而给出抑制未来训练陈旧度增长的最直接局部机制。
+
+3.2   SAT pipeline
+
+3.2   SAT 工作流程
+
+PPO-LIKE CLIPPING VS. W/ SAT — ONE-LINE COMPARISON
+
+PPO-like clipping uses a fixed nominal clip interval:
+
+PPO-like 裁剪使用固定名义裁剪区间：
+
+SAT replaces it with a per-token, staleness-adaptive nominal interval:
+
+SAT 把它换成逐 token、陈旧度自适应的名义区间：
+
+Green: PPO's fixed nominal interval. Blue: SAT's contracted nominal interval, driven by the current microbatch's sampled staleness distribution (definitions below).
+
+绿色：PPO 的固定名义区间。蓝色：由当前微批采样陈旧度分布驱动的 SAT 收缩名义区间（定义见下）。
+
+Token-level staleness signal
+
+Token-level 陈旧度信号
+
+We begin with the observable mismatch carried by each sampled token in the current batch. Measure staleness on the sampled action and detach it before constructing the gate and clip limits:
+
+我们先从当前批次每个采样 token 所携带的可观测失配出发。在构造门控与裁剪边界前，先在采样动作上测量陈旧度并停止其梯度：
+
+Here 
+sg
+ denotes stop-gradient; 
+𝑑
+𝑏
+,
+𝑡
+sg
+ has the same numerical value as 
+𝑑
+𝑏
+,
+𝑡
+ but no derivative. Otherwise derivatives through the staleness, quantile, and moving clip limits would change the PPO-like gradient analysed below.
+
+sg 表示停止梯度；db,tsg 与 db,t 数值相同，但不携带导数。否则梯度会穿过陈旧度、分位数与移动裁剪边界，实际梯度就不再是下文分析的 PPO 类梯度。
+
+Directional hill kernel
+
+方向希尔核函数
+
+Next we convert that detached mismatch into a smooth directional scaling rule for clipping. For a positive reference scale 
+𝑞
+, map a non-negative staleness 
+𝑢
+ to a factor in 
+(
+0
+,
+1
+]
+:
+
+接着我们把这一停止梯度后的失配转成平滑的方向性裁剪缩放规则。对正参考尺度 q，把非负陈旧度 u 映射到 (0,1] 中：
+
+For fixed 
+𝑞
+, 
+𝜓
+(
+0
+;
+𝑞
+)
+=
+1
+, 
+𝜓
+(
+𝑞
+;
+𝑞
+)
+=
+1
+2
+, and 
+𝜕
+𝜓
+/
+𝜕
+𝑢
+≤
+0
+.
+
+固定 q 时，ψ(0;q)=1、ψ(q;q)=12，且 ∂ψ/∂u≤0。
+
+Staleness-based kernel function scaling
+
+基于陈旧性的核函数缩放
+
+We then anchor this scaling to the batch tail through a detached empirical quantile.
+
+然后我们通过停止梯度的经验分位数，把这一缩放锚定到当前批次的长尾。
+
+Thus 
+𝑞
+ is the detached empirical 
+0.90
+ quantile over active, non-padding tokens. The strict gate 
+|
+𝑑
+𝑏
+,
+𝑡
+|
+>
+𝑞
+ targets upper tail; ties at 
+𝑞
+ can make the realized gate rate smaller than 
+10
+%
+.
+
+因此，q 是活跃、非 padding token 上停止梯度的经验 0.90 分位数。严格门控 |db,t|>q 针对上侧长尾；若在 q 处存在并列值，实际门控率可能低于 10%。
+
+Staleness-based effective contraction factors
+
+基于陈旧度的有效收缩因子
+
+This gate applies contraction only where mismatch is unusually large for the current batch.
+
+这一步只在失配对当前批次而言异常偏大的位置施加收缩。
+
+The explicit 
+𝑞
+>
+0
+ branch prevents division by zero when most staleness values are zero. Thus 
+𝑐
+±
+,
+𝑏
+,
+𝑡
+∈
+(
+0
+,
+1
+]
+, and the raw kernel is never evaluated with a zero reference. If 
+𝑇
+act
+ is empty, the optimizer step is skipped (equivalently, no SAT factor is evaluated).
+
+显式的 q>0 分支可避免“大多数陈旧度为零”时的除零问题。因此 c±,b,t∈(0,1]，原始核不会在零参考尺度上求值。若 Tact 为空，则跳过该优化步（等价地，不计算 SAT 因子）。
+
+SAT sampled objective
+
+SAT 采样目标
+
+Finally we insert these adaptive radii back into the standard sampled PPO surrogate.
+
+最后我们把这些自适应半径重新代回标准的采样 PPO surrogate。
+
+Tokens for which the gate is off use the original radii exactly. A gated token has a strictly smaller nominal interval on the direction selected by the sign of 
+𝑑
+𝑏
+,
+𝑡
+; the opposite endpoint remains unchanged.
+
+门控未触发的 token 完全使用原半径。对触发门控的 token，db,t 的符号所选方向上的名义区间端点严格收缩，另一侧端点保持不变。
+
+WHAT SMALLER RADIUS ACTUALLY CHANGES
+
+For one sampled token, write PPO's nominal interval and SAT's detached interval as
+𝐼
+PPO
+=
+[
+1
+−
+𝜀
+low
+,
+1
++
+𝜀
+high
+]
+,
+𝐼
+𝑏
+,
+𝑡
+SAT
+=
+[
+1
+−
+𝜀
+~
+low
+,
+𝑏
+,
+𝑡
+,
+1
++
+𝜀
+~
+high
+,
+𝑏
+,
+𝑡
+]
+⊆
+𝐼
+PPO
+.
+Holding the detached radii fixed,
+𝑆
+𝑏
+,
+𝑡
+PPO
+=
+min
+(
+𝑟
+𝑏
+,
+𝑡
+𝐴
+^
+𝑏
+,
+𝑡
+,
+clip
+(
+𝑟
+𝑏
+,
+𝑡
+,
+1
+−
+𝜀
+low
+,
+1
++
+𝜀
+high
+)
+𝐴
+^
+𝑏
+,
+𝑡
+)
+,
+𝑆
+𝑏
+,
+𝑡
+SAT
+=
+min
+(
+𝑟
+𝑏
+,
+𝑡
+𝐴
+^
+𝑏
+,
+𝑡
+,
+clip
+(
+𝑟
+𝑏
+,
+𝑡
+,
+1
+−
+𝜀
+~
+low
+,
+𝑏
+,
+𝑡
+,
+1
++
+𝜀
+~
+high
+,
+𝑏
+,
+𝑡
+)
+𝐴
+^
+𝑏
+,
+𝑡
+)
+≤
+𝑆
+𝑏
+,
+𝑡
+PPO
+.
+
+对一个采样 token，记 PPO 类方法的名义裁剪区间与 SAT 的停止梯度区间为
+          。IPPO=[1−εlow,1+εhigh],Ib,tSAT=[1−ε~low,b,t,1+ε~high,b,t]⊆IPPO。 固定停止梯度的半径后，
+          Sb,tPPO=min(rb,tA^b,t,clip(rb,t,1−εlow,1+εhigh)A^b,t),
+          。Sb,tSAT=min(rb,tA^b,t,clip(rb,t,1−ε~low,b,t,1+ε~high,b,t)A^b,t)≤Sb,tPPO。
+
+Away from clip kinks, the autograd derivative changes only on the newly clipped outward bands:
+𝐴
+^
+𝑏
+,
+𝑡
+>
+0
+,
+1
++
+𝜀
+~
+high
+,
+𝑏
+,
+𝑡
+<
+𝑟
+𝑏
+,
+𝑡
+<
+1
++
+𝜀
+high
+,
+𝐴
+^
+𝑏
+,
+𝑡
+<
+0
+,
+1
+−
+𝜀
+low
+<
+𝑟
+𝑏
+,
+𝑡
+<
+1
+−
+𝜀
+~
+low
+,
+𝑏
+,
+𝑡
+.
+In these bands SAT has already zeroed the diverging gradient while PPO has not. The converging branch 
+𝐴
+^
+𝑏
+,
+𝑡
+(
+𝑟
+𝑏
+,
+𝑡
+−
+1
+)
+<
+0
+ keeps its pull-back gradient even outside the nominal interval. If an outward ratio is already beyond PPO's original boundary, PPO already clips it, so further shrinkage has no additional gradient effect. Thus SAT matters exactly where it creates a new outward cutoff.
+
+避开裁剪折点时，两者的自动微分导数只在新增的向外裁剪带不同：
+          A^b,t>0,1+ε~high,b,t<rb,t<1+εhigh,
+          。A^b,t<0,1−εlow<rb,t<1−ε~low,b,t。 在这些区域，SAT 相较于 PPO 将已经把发散方向的梯度归零。收敛分支 A^b,t(rb,t−1)<0 即使位于名义区间外也保留回拉梯度。反过来，如果向外比率早已越过 PPO 原始边界，PPO 本来就会裁剪，此时继续缩小半径不会再改变梯度。SAT 真正改变的是“向外截断”出现的位置。
+
+3.3   Empirical evaluation: setup
+
+3.3   经验评估：实验设置
+
+We evaluate SAT in a realistic asynchronous pipeline on Qwen3-30B-A3B-Base: a grid of single-seed runs over the GRPO and GSPO bases, each optionally combined with R3, TIS, and SAT, plus a DPPO baseline. In the reported grid, this is the DPPO-
+𝐷
+TV
+ variant, where inline 
+𝐷
+TV
+ denotes the total variation divergence, at configured lag ∈ { 1, 8 }. Each cell reports two quantities: the best-checkpoint AIME24 avg@8 and the training-time sampled training–inference mismatch 
+𝑑
+¯
+𝜋
+. Neither metric is the exact full-policy 
+𝐷
+TV
+. Section 3.4 reports each run's best logged checkpoint; the per-method figures in Part 04 restrict to the early-training windows stated in their titles, so a few cells there can be lower than in the §3.4 table.
+
+我们在贴近真实的异步流水线中、于 Qwen3-30B-A3B-Base 上评估 SAT：以 GRPO 与 GSPO 为基础方法，分别可叠加 R3、TIS 与 SAT，另加一个 DPPO 基线。本文报告的实现使用的是 DPPO-DTV 变体，其中行内的 DTV 表示 total variation divergence，配置 lag ∈ { 1, 8 }，全部为单种子实验。每个格子报告两个量：AIME24 最佳检查点 avg@8，以及训练期采样训练–推理失配 d¯π；两者都不是精确的完整策略 DTV。§3.4 报告每次运行的最佳日志检查点；第 04 部分的各方法小图仅统计其标题所注明的训练早期窗口，因此个别数值会低于 §3.4 的表格。
+
+SECTION 3.4
+The results
+
+Three comparisons follow: the full best-checkpoint grid (Result 3.4.1), the matching last-epoch mismatch grid (Result 3.4.2), and the mismatch trajectories over training (Results 3.4.3a/b).
+
+下面给出三组对照：完整的最佳检查点网格（结果 3.4.1）、对应的末 epoch 失配网格（结果 3.4.2），以及训练全程的失配轨迹（结果 3.4.3a/b）。
+
+Best observed AIME24 avg@8 across the reported configurations
+
+已报告配置中的 AIME24 最佳 avg@8
+
+注
+
+Per-run last-epoch mean of the training–inference mismatch 
+𝑑
+¯
+𝜋
+
+各实验末个 epoch 的训练–推理失配 d¯π 均值
+
+Training–Inference Mismatch over training — lag = 1
+
+训练全程的训练–推理失配 — lag = 1
+
+Training–Inference Mismatch over training — lag = 8
+
+训练全程的训练–推理失配 — lag = 8
+
+GSPO (lag = 8) leaves the axis after step ≈ 330 and reaches 
+𝑑
+¯
+𝜋
+>
+6
+ by step 504
+
+empirical asymmetry经验性不对称
+
+The raw means eps_low_mean and eps_high_mean combine two effects: unequal base radii and the
+            sign distribution of gated mismatches. They should therefore be interpreted together with the normalized factors
+            E[c−], E[c+], the realized gate rate, and q. A crossing between the two raw means is a
+            useful diagnostic, but it neither proves a universal positive drift nor, by itself, determines that the quantile
+            hyperparameter should be changed.
+
+原始均值 eps_low_mean 与 eps_high_mean 同时混合了两种效应：不相等的基础半径，以及被门控失配的符号分布。因此应结合归一化因子 E[c−]、E[c+]、实际门控率与 q 一起解释。两个原始均值的交叉是有用的诊断信号，但它既不能证明普适的正向漂移，也不能单独决定必须修改分位数超参数。
+
+PART 04
+
+第 04 部分
+
+How does each stability approach work in async RL?
+
+各稳定方法在异步 RL 中如何生效？
+
+SAT turns one dial — the clip radius — using one observable signal. The rest of the async-RL stabilizer landscape can be read through the same lens: every method below picks a different mathematical object built from the same observed log-ratio 
+log
+⁡
+𝑟
+𝑏
+,
+𝑡
+ (the behavior denominator, the ratio's granularity, a mask, a threshold, a radius) and modifies it. Each method follows the same template: (i) which mismatch source it targets, (ii) which mathematical object it modifies, (iii) a mechanistic or conditional interpretation, and (iv) the reported experiment. The folded ANALYSIS panels give algebra where it is available and state the assumptions where a formal claim needs them; they are not all policy-improvement proofs.
+
+Click any tile below to expand its panel; click the same tile again to collapse it — only one panel is shown at a time.
+
+SAT 只用一个可观测信号去调一个旋钮——裁剪半径。其余的异步 RL 稳定方法也可以用同一视角来读：下面每种方法都在同一个观测对数比 log⁡rb,t 之上，选择并修改一个不同的数学对象（行为分母、比率的粒度、掩码、阈值、半径）。每种方法都按同一模板展开：(i) 针对哪个失配来源；(ii) 修改哪个数学对象；(iii) 机制性或条件性解释；(iv) 已报告实验。折叠的分析面板在可行处给出代数，并在形式化结论需要假设时明确写出；它们并不都是策略改进证明。可以点击不同的方块以展开不同下拉栏；再次点击当前已展开的方块可将其收起，页面上一次只显示一个下拉栏。
+
+Use Rollout-logprobs
+
+使用 rollout 对数概率
+
+Target source. The denominator mismatch between Megatron's token-level rollout-weight recomputation μ~b,t and the actual engine behavior μb,t; the switch does not reduce policy-version lag.
+
+针对来源。Megatron 在各 token rollout 权重下的重算分布 μ~b,t 与真实引擎行为 μb,t 之间的分母失配；该开关并不降低策略版本差。
+
+In vanilla async PPO/GRPO, the "old log-probs" term is Megatron's recomputation
+            log⁡μ~b,t. The switch replaces it with the token log-probs already emitted by SGLang, so the trainer uses
+            the sampled ratio against the actual token behavior conditional μb,t:
+
+在原味异步 PPO/GRPO 中，"旧对数概率"一项是 Megatron 的逐 token 重算值 log⁡μ~b,t。该开关将其替换为 SGLang 已经产出的逐 token 对数概率，于是训练器使用以真实 token 行为条件分布 μb,t 为分母的采样比率：
+
+This aligns the sampled denominator with the actual behavior log-prob. Under the usual support condition it is the
+            denominator required by the importance-sampling identity. It can nevertheless make the observed ratio more
+            variable because implementation mismatch is now visible rather than absorbed by the recomputation.
+
+这会让采样分母与真实行为对数概率对齐；在通常的支撑条件下，它是重要性采样恒等式所需的分母。但观测比率仍可能更易波动，因为实现失配不再被重算值吸收，而是显式出现。
+
+Split the log-ratio the switch actually optimizes:
+
+把该开关实际优化的对数比率拆开：
+
+The first term is exactly what PPO's ratio machinery was designed to correct, and it is not touched by the
+              switch. The switch merges the second term into the visible ratio, so PPO actually sees it — that is the "cleanness"
+              part. The variance of the sum depends on both component variances and their covariance, so it is not guaranteed to
+              increase in every system. It did increase in the measurements reported here:
+
+第一项正是 PPO 比率机制所处理的对象，而该开关并未触碰它。开关把第二项并入可见比率，让 PPO 真正“看到”它。两项之和的方差取决于各自方差与协方差，因此不能保证在每个系统中都增大；但在这里报告的测量中确实增大：
+
+Scope. Equation (2.3) is a deterministic population bound and contains no sample-complexity constant. Logging
+              the actual denominator changes the estimator used in optimization; the table above is empirical evidence about that
+              estimator, not a modification of the bound itself.
+
+范围。式 (2.3) 是总体层面的确定性下界，本身不含样本复杂度常数。记录真实分母会改变优化中使用的估计量；上表是关于该估计量的经验证据，而不是对下界本身的修改。
+
+Rollout Routing Replay (R3)
+
+路由重放 R3（Rollout Routing Replay）
+
+Target source. (S3) router staleness for MoE.
+
+针对来源。MoE 的 (S3) 路由陈旧量。
+
+The original R3[11] paper (arXiv:2510.11370v2) motivates R3 by a mismatch inside a single global step: SGLang and
+            Megatron produce different Top-K experts on identical weights — a framework-level artifact that can persist even when
+            mini-step =1. Lifting R3 into async-RL adds a second axis of drift: even a "framework-consistent" MoE could see
+            a different Top-K at each local offset h among trainer updates j=ℓ+n+h, i.e. inside [ℓ+n,ℓ+n+H].
+
+R3[11] 原论文（arXiv:2510.11370v2）的动机是单个全局步内部的失配：在完全相同的权重下，SGLang 与 Megatron 仍可能给出不同的 Top-K 专家，即使 mini-step =1 也可能存在。把 R3 用于异步 RL 场景则多出第二条变化轴：即使框架计算一致，在训练更新 j=ℓ+n+h 对应的窗口 [ℓ+n,ℓ+n+H] 内，不同局部偏移 h 上也可能得到不同 Top-K。
+
+The fix — for every trainer minor step j=ℓ+n+h, replace the training-side mask by the rollout-time mask,
+            while keeping the softmax denominator built from the current trainer logits so gradients still flow into the
+            router:
+
+修复方式 — 对每个训练小步 j=ℓ+n+h，把训练侧的专家掩码替换为 rollout 时的掩码，同时 softmax 分母仍由当前训练器 logits 构建，使梯度依旧流入路由器：
+
+Async R3 gate异步 R3 门控
+
+The rollout mask fixes expert membership, while current logits and expert weights preserve gradient flow through the trainer computation. This aligns one discrete routing choice; it does not make the entire forward pass identical to rollout.
+
+rollout 掩码固定专家集合，而当前 logits 与专家权重保留训练侧计算中的梯度流。它对齐的是一个离散路由选择，并不会让整个前向与 rollout 完全相同。
+
+Empirically (Qwen3-30B-A3B), the reported sampled k3 divergence estimate falls from 1.5×10−3 to
+            7.5×10−4 with R3, close to the 6.4×10−4 dense-model reference. This is a finite-sample diagnostic, not an exact KL identity or a claim that all MoE mismatch is removed.
+
+实证上（Qwen3-30B-A3B），报告的采样 k3 散度估计在使用 R3 后从 1.5×10−3 降到 7.5×10−4，接近稠密模型的参考值 6.4×10−4。这是有限样本诊断量，不是精确 KL 恒等式，也不表示所有 MoE 失配都被消除。
+
+Total variation does not have an exact additive decomposition into “policy + router + engine” terms. With explicitly defined intermediate distributions, the triangle inequality can separate diagnostic comparisons, but it cannot show that replay must reduce the final DTV. R3 makes one narrower statement by construction: the trainer uses the rollout-time Top-K membership.
+
+总变差距离不存在“策略 + 路由 + 引擎”的精确加法分解。若显式定义中间分布，可用三角不等式拆开诊断比较，但这不能证明重放后最终 DTV 必然减小。R3 在构造上只保证一个更窄的结论：训练器使用 rollout 时的 Top-K 专家集合。
+
+Current router logits, gate weights, hidden states, expert parameters, and downstream layers can still differ. Consequently the router-related contribution is not identically zero, the numerical surrogate is not untouched, and (2.3) is not guaranteed to tighten uniformly. The reported KL reduction is empirical evidence that mask replay helps on this stack.
+
+当前 router logits、门权重、hidden states、专家参数与后续层仍可能不同。因此不能声称路由相关贡献恒为零、数值替代目标完全不变，或 (2.3) 在整个异步窗口上一致收紧。已报告的 KL 降低是该软硬件栈上掩码重放有效的经验证据。
+
+Two useful operating regimes are:
+
+两个有用的运行情形是：
+
+n=0,h=0: mask replay isolates framework-level Top-K disagreement at fixed weights.
+
+n=0,h=0：掩码重放隔离固定权重下的框架级 Top-K 分歧。
+
+n+h≥1: replay also fixes expert membership across a rollout-to-train version gap, while all continuous computations remain trainer-current.
+
+n+h≥1：重放还会跨 rollout 到训练的版本差固定专家集合，但所有连续计算仍使用训练器当前值。
+
+R3 on AIME24 — reported best avg@8 on Qwen3-30B-A3B-Base
+
+R3 在 AIME24 上的表现 — Qwen3-30B-A3B-Base 的已报告最佳 avg@8
+
+Group Sequence Policy Optimization (GSPO) & SeqClip
+
+组序列策略优化（GSPO）与 SeqClip
+
+Target source. (S1) + (S3): move the unit of importance sampling from token to sequence.
+
+针对来源。(S1) + (S3)：把重要性采样的单位从 token 提升到序列。
+
+Instead of reweighting each token by 
+𝑟
+𝑏
+,
+𝑡
+, GSPO reweights each entire response by a length-normalized sequence ratio and clips at the response level. Within one prompt group, the following formulas locally index its 
+𝐺
+ candidate responses by 
+𝑏
+=
+1
+,
+…
+,
+𝐺
+. Here 
+𝐴
+^
+𝑏
+ is the detached, group-normalized sequence advantage for response 
+𝑏
+; when broadcast to token notation, 
+𝐴
+^
+𝑏
+,
+𝑡
+=
+𝐴
+^
+𝑏
+ for all 
+𝑡
+ in that response:
+
+GSPO 不再用 rb,t 给每个 token 加权，而是用长度归一的序列比率给整条响应加权，并在响应级别做裁剪。下式在单个提示词组内，把 G 条候选响应局部编号为 b=1,…,G。其中 A^b 是响应 b 经过组归一化且停止梯度的序列优势；广播到 token 记号时，该响应内所有 t 都满足 A^b,t=A^b：
+
+Length-normalization replaces the unnormalized sum of token log-ratios by their mean, avoiding automatic exponential scaling with response length. It does not make the range mathematically length-independent: token deviations can cancel or reinforce. Sequence-level weighting may smooth isolated token fluctuations, but neither cancellation nor convergence on MoE is guaranteed, and routing replay can still be useful empirically.
+
+长度归一化把 token 对数比的未归一化求和改成均值，从而避免比率随响应长度自动指数缩放。但它并不在数学上保证数值范围与长度无关：token 偏差既可能抵消，也可能同向叠加。序列级加权可能平滑孤立 token 波动，但不能保证抵消或 MoE 收敛；路由重放在经验上仍可能有用。
+
+Ignoring clipping for brevity,
+
+为简洁起见忽略裁剪，
+
+Compared with a token-ratio objective — whose effective per-token weights depend on 
+𝑟
+𝑏
+,
+𝑡
+ and the sign of 
+𝐴
+^
+𝑏
+ — GSPO weights all tokens in a response equally by the length-normalized factor 
+𝜌
+𝑏
+seq
+.
+
+与 GRPO 的逐 token 权重不同，GSPO 用长度归一因子 ρbseq 统一加权同一响应内的 token。该公式说明权重粒度的变化，但不单独给出方差或稳定性排序。
+
+SeqClip[18]. A response-level mean log-ratio can still move far from zero when deviations reinforce. SeqClip hard-masks any response whose 
+𝜌
+𝑏
+seq
+ falls outside a tight tolerance:
+
+SeqClip[18]。当 token 偏差同向叠加时，响应级平均对数比仍可能显著偏离零。SeqClip 会把 ρbseq 落在紧容差之外的整条响应硬掩掉：
+
+Reported production settings use a very tight 
+[
+𝛼
+seq
+,
+𝛽
+seq
+]
+=
+[
+0.995
+,
+1.005
+]
+ — orders of magnitude tighter than IcePop's per-token 
+[
+0.5
+,
+5.0
+]
+, because the length-normalized sequence ratio is already close to 
+1
+ under a healthy run.
+
+公开报道的生产配置使用非常紧的 [αseq,βseq]=[0.995,1.005] —— 比 IcePop 的逐 token [0.5,5.0] 紧几个数量级，因为健康实验中长度归一的序列比率本就非常接近 1。
+
+GSPO vs GRPO on AIME24 — reported best avg@8 on Qwen3-30B-A3B-Base
+
+GSPO 对比 GRPO（AIME24）— Qwen3-30B-A3B-Base 的已报告最佳 avg@8
+
+Token-level stabilisers — TIS / IcePop / KPop
+
+token 级稳定器 — TIS / IcePop / KPop
+
+Target source. All three are token-level stabilisers layered on a PPO / GRPO surrogate. TIS weights by the sampled policy ratio rb,t of §1; IcePop and KPop gate on the sampled token's trainer-side vs. rollout-side probabilities — the implementation-mismatch part of the §1 decomposition.
+
+针对来源。三者都是叠加在 PPO / GRPO 替代目标上的 token 级稳定器。TIS 使用 §1 定义的采样策略比率 rb,t 加权；IcePop 与 KPop 则以采样 token 在训练侧与 rollout 侧的概率为门控对象 —— 对应 §1 分解中的实现失配部分。
+
+TIS[12] caps the ratio's contribution at a constant C>1 from above (typical C∈[2,5]) so extreme
+            overshoot cannot dominate, while passing the exact importance weight through everywhere below the cap (a one-sided
+            continuous truncation).
+            IcePop[13][14] discards tokens whose train-engine / inference-engine probability ratio leaves a two-sided range [α,β], keeping the ratio itself as an IS-style weight in range.
+            KPop[15] replaces the ratio geometry with a Bernoulli-KL geometry that scales quadratically at small mismatch
+            and more strongly at large mismatch. This targets a limitation of ratio-only screening: a 10−4→10−2 jump on a long-tail
+            token yields rb,t=100 but a DTV/KL contribution of only ≈10−2.
+
+TIS[12] 从上方把比率贡献封顶在常数 C>1（典型取值 C∈[2,5]），防止极端超冲占据主导；低于上限时则原样保留精确重要性权重（单侧连续截断）。IcePop[13][14] 丢弃训练引擎 / 推理引擎概率比移出双侧区间 [α,β] 的 token，区间内则保留该比率本身作为 IS 式权重。KPop[15] 用 Bernoulli-KL 几何替代比率几何：小失配时二次缩放，大失配时惩罚更强。它针对了单看比率的一个局限：长尾 token 上 10−4→10−2 的跳变给出 rb,t=100，但其对 DTV/KL 的贡献只有约 10−2。
+
+TIS — continuous one-sided truncation. Here the effective weight is detached when applied to the log-policy term; C>1 is the truncation cap (e.g., 2 in verl's default, 5 in the Qwen formulation[12]).
+
+TIS — 连续单侧截断。有效权重乘到 log-policy 项上时停止梯度；C>1 为截断上限（例如 verl 默认取 2，Qwen 表述[12]取 5）。
+
+IcePop — two-sided range gate with an IS-style in-range weight. Its discriminant is the sampled token's train-engine / inference-engine probability ratio evaluated at the same rollout weights, kb,t=μ~b,t(yb,t∣sb,t)/μb,t(yb,t∣sb,t) — in our notation, the implementation-mismatch ratio. Both factors are fixed numbers at loss time, so the weight carries no gradient.
+
+IcePop — 双侧范围门控 + 区间内 IS 式权重。其判别量是采样 token 在同一 rollout 权重下的训练引擎 / 推理引擎概率比 kb,t=μ~b,t(yb,t∣sb,t)/μb,t(yb,t∣sb,t)——即本文记号中的实现失配比率。两个因子在计算损失时都是常数，因此该权重不携带梯度。
+
+The weight multiplies the raw PPO/GRPO clip term — in-range tokens keep the IS-style correction kb,t, out-of-range tokens are zeroed (some re-implementations reduce this to a pure 0/1 rejection mask):
+
+该权重乘进原始 PPO/GRPO 裁剪项——区间内的 token 保留 IS 式修正 kb,t，越界 token 归零（一些复现实现将其简化为纯 0/1 拒绝掩码）：
+
+KPop — Bernoulli-KL bidirectional adaptive mask. With pb,tπ the trainer-side and pb,tμ=μb,t(yb,t∣sb,t) the rollout-side probability of the sampled token, let ϕ>0 be the KPop divergence threshold and define
+
+KPop — Bernoulli-KL 双向自适应掩码。记 pb,tπ 为采样 token 的训练侧概率、pb,tμ=μb,t(yb,t∣sb,t) 为其 rollout 侧概率，令 ϕ>0 为 KPop 的散度阈值，并定义
+
+Mechanistic view. These methods suppress sampled gradient contributions associated with large ratios or divergences. That does not by itself prove that the resulting policy has smaller D¯TV in (2.3). A two-sided hard mask also removes any pull-back contribution on a masked sample, whereas direction-aware PPO-style clipping can retain it (see §4.d).
+
+机制视角。这些方法会抑制与大比率或大散度相关的采样梯度贡献；仅凭这一点不能证明更新后的策略在 (2.3) 中具有更小的 D¯TV。双侧硬掩码还会移除被掩样本上的回拉贡献，而方向感知的 PPO 类裁剪可能保留它（见 §4.d）。
+
+The essential mathematical difference between IcePop / KPop and PPO / DPPO is that the former's gate is a function of a
+            mismatch magnitude (kb,t or the bidirectional DKLBern) only, while the latter's is a function of sign(A^b,t(rb,t−1))
+            as well. Section 4.d derives this asymmetric structure and its async-RL consequences from the ground up.
+
+IcePop / KPop 与 PPO / DPPO 的本质数学区别在于：前者的门控只是失配幅度（kb,t 或双向 DKLBern）的函数，而后者的门控还依赖 sign(A^b,t(rb,t−1))。§4.d 会从头推导这种非对称结构及其在异步 RL 中的后果。
+
+Token-level stabilisers on AIME24 — reported best avg@8 for TIS variants
+
+token 级稳定器在 AIME24 上的表现 — TIS 系列的已报告最佳 avg@8
+
+Top-p configuration
+
+Top-p 配置
+
+Target source. Support mismatch caused by truncating the behavior sampler while evaluating an untruncated target policy.
+
+针对来源。行为采样器做截断、目标策略却不截断时产生的支撑失配。
+
+During rollout, top_p=p with p<1 assigns zero behavior probability outside the selected nucleus. Those
+            excluded actions are never sampled and therefore do not directly enter a sampled policy loss. The issue is instead
+            measure-theoretic: if the full-softmax target assigns positive mass outside the behavior support, then
+            π(j)≪̸μb,t and importance sampling from μb,t cannot recover expectations over that missing target
+            mass. A sampled ratio is defined on the nucleus, but a full-policy IS / DTV argument needs support coverage.
+
+rollout 使用 top_p=p（p<1）时，所选 nucleus 之外的行为概率为零。这些动作永远不会被采样，因此不会直接进入采样策略损失。真正的问题是测度支撑：若全 softmax 目标在行为支撑外仍分配正质量，则 π(j)≪̸μb,t，从 μb,t 出发的重要性采样无法恢复缺失的目标质量。采样比率在 nucleus 内有定义，但完整策略的 IS / DTV 推导需要支撑覆盖。
+
+MAI-Thinking-1[16] — rollout Top-p mask replay. Cache the Top-p truncation mask Tb,t⊆V used at rollout time. During training, before the softmax, set
+
+MAI-Thinking-1[16] — 重放 rollout 的 Top-p 掩码。缓存 rollout 时使用的 Top-p 截断掩码 Tb,t⊆V。训练时在 softmax 之前置
+
+The target then assigns zero mass outside the recorded behavior nucleus, so supp(π(j))⊆supp(μb,t) for that masked computation. This repairs the support condition; any KL reduction remains an empirical result.
+
+于是该掩码计算中的目标策略在记录的行为 nucleus 外分配零质量，即 supp(π(j))⊆supp(μb,t)。这修复了支撑条件；KL 是否降低仍是经验结果。
+
+Full-support sampling — disable truncation at rollout time (the configuration used in our experiments, §3.3, and in several reported multimodal training recipes).
+
+全支撑采样 — 在 rollout 阶段关闭截断（即本文实验采用的配置，见 §3.3，也见于一些公开的多模态训练报告）。
+
+Under these settings the rollout support is the full vocabulary and the training/rollout support disagreement disappears; in reported runs with this configuration, DKL(π(j)‖μR) hovers around and below ∼10−3 — the same ballpark as R3's post-fix regime.
+
+在这组设置下，rollout 的支撑集就是整个词表，训练/rollout 支撑集不再分歧；在采用该配置的已报告运行中，DKL(π(j)‖μR) 稳定在 ∼10−3 上下 —— 与 R3 修复后的量级相同。
+
+Equality of supports is stronger than necessary. The required direction for target expectations is absolute continuity, π(j)≪μb,t. Without it, sampled clipping cannot account for target probability mass on excluded actions.
+
+支撑完全相等比必要条件更强。对目标期望而言，需要的方向是绝对连续 π(j)≪μb,t。若不满足，采样裁剪无法处理目标策略在被排除动作上的概率质量。
+
+Asymmetric clipping mechanism
+
+非对称裁剪机制
+
+Target. Gates that depend on sign(A^t(rt−1)), distinguishing whether a sampled local update moves its ratio away from or back toward the behavior reference.
+
+目标。依赖 sign(A^t(rt−1)) 的门控，用于区分某个采样局部更新是在让比率远离行为参考，还是拉回参考。
+
+For the local derivations in §4.d only, we suppress the response index b and write rt, A^t, and μR for a fixed-batch behavior reference. Throughout this subsection A^t is detached, and the radii ε,δ are positive whenever used.
+
+仅在 §4.d 的局部推导中，我们省略响应下标 b，并在固定批行为参考下写作 rt、A^t 与 μR。本小节始终把 A^t 视为停止梯度量，并在使用时假设半径 ε,δ 为正。
+
+Asymmetric clipping is inherited by PPO, extended by DPPO to divergence space, and softened by SPO /
+            DRPO to preserve out-of-range pull-back. This subsection proves a narrower local property: a two-sided hard mask can
+            discard a pull-back integrand that an advantage-aware asymmetric gate preserves. It does not establish that asymmetry
+            is necessary for every stable async-RL algorithm.
+
+非对称裁剪由 PPO 继承、被 DPPO 推广到散度空间、又被 SPO / DRPO 软化以保留域外回拉。本小节证明一个更窄的局部性质：双侧硬掩码可能丢弃优势感知非对称门控会保留的回拉被积项；它并不证明所有稳定异步 RL 算法都必须使用非对称裁剪。
+
+4.d.i   The classical improvement bound  →  DTV motivates the discriminator
+
+4.d.i   经典改进界  →  DTV 为判别量提供动机
+
+Under γ=1, finite horizon T, sparse sequence-level reward, DPPO re-derives the LLM version of the TRPO lower bound:
+
+在 γ=1、有限视界 T、稀疏序列级奖励下，DPPO 重推了 TRPO 下界的 LLM 版本：
+
+Here DTVmax(μR,π(j))≜sups∈Reach(μR)DTV(μR,π(j))[s], where the supremum is over the behavior-reachable states covered by the bound.
+
+其中 DTVmax(μR,π(j))≜sups∈Reach(μR)DTV(μR,π(j))[s]，上确界取遍该下界覆盖的行为可达状态。
+
+These bounds motivate the ideal problem of maximising LμR′ subject to
+            DTVmax(μR,π(j))≤δ. PPO instead optimizes a sampled clipped objective with a nominal ratio cutoff; it is neither a hard all-action constraint nor a projection onto that feasible set. Raw sampled ratio is also poorly aligned with probability mass on LLM long tails: a μR=10−4→π=10−2 jump gives rt=100 (over-clipped)
+            while its sampled-vs-complement sampled DTV value is only about 10−2; a 0.99→0.80 shift gives rt≈0.808∈[1−ε,1+ε]
+            (escapes clipping) but has sampled DTV 0.19. This sampled DTV is a partition-based lower bound on full-vocabulary DTV, not a full-vocabulary DTV certificate.
+
+这些下界启发了理想问题：在 DTVmax(μR,π(j))≤δ 约束下最大化 LμR′。PPO 实际优化的是带名义比率截断的采样裁剪目标；它既不是全动作硬约束，也不会把策略投影到该可行集。原始采样比率在 LLM 长尾上也与概率质量变化对齐较差：μR=10−4→π=10−2 的跳变给出 rt=100（被过度裁剪），但其“采样动作 vs. 其余动作”的采样 DTV 只有约 10−2；而 0.99→0.80 的移动给出 rt≈0.808∈[1−ε,1+ε]（逃过裁剪），采样 DTV 却为 0.19。这个采样 DTV 是基于分区的完整词表 DTV 下界，不是完整词表 DTV 证书。
+
+The DPPO variant analysed here moves the implemented sampled-token discriminator from raw ratio space to sampled DTV: the PPO sampled discriminator is |rt−1| with cutoff ε, whereas the DPPO sampled discriminator is DTV,t=|π(j)(yt∣st)−μR(yt∣st)| with cutoff δ.
+
+这里分析的 DPPO 变体把实现中的采样 token 判别量从原始比率空间搬到采样 DTV 空间：PPO 的采样判别量是带阈值 ε 的 |rt−1|，而 DPPO 的采样判别量是带阈值 δ 的 DTV,t=|π(j)(yt∣st)−μR(yt∣st)|。
+
+This sampled DTV discriminator is motivated by the full-distribution bound above but is not identical to the vocabulary-level DTV in (2.2), and does not hard-enforce that policy-level constraint.
+
+这个采样 DTV 判别量受上方全分布下界启发，但不等同于 (2.2) 的词表级 DTV，也不会硬性执行该策略级约束。
+
+4.d.ii   The asymmetric structure of PPO's clip
+
+4.d.ii   PPO 裁剪的非对称结构
+
+Recall the PPO per-token surrogate rtA^t. Its partial derivative w.r.t.\ rt is
+
+回顾 PPO 的逐 token 替代项 rtA^t。它对 rt 的偏导为
+
+so the desired ascent direction of rt is sign(A^t). Taking rt=1 as the reference:
+
+因此 rt 的期望上升方向是 sign(A^t)。以 rt=1 为参照：
+
+Diverging — sign(A^t(rt−1))>0: this sampled ratio moves away from μR in the reward-improving direction and may cross its ratio/divergence boundary. This local sign alone does not certify a violation of full-policy DTV.
+
+偏离 — sign(A^t(rt−1))>0：该采样比率沿奖励提升方向远离 μR，并可能越过相应比率 / 散度边界；仅凭这个局部符号不能判定完整策略 DTV 已经违规。
+
+Converging — sign(A^t(rt−1))<0: π(j) sits on the wrong side of the reward objective, and further optimization pulls rt back toward 1 — this is the desired behavior.
+
+收敛 — sign(A^t(rt−1))<0：π(j) 落在奖励目标的错误一侧，继续优化会把 rt 拉回 1 —— 这正是想要的行为。
+
+Away from clip kinks, expanding the four cases of min(rtA^t,clip(rt,1−ε,1+ε)A^t) shows that PPO only zeroes the gradient on diverging updates that have crossed the boundary — never on converging updates, however large |rt−1| is. At equality, the derivative follows the implementation's subgradient/autograd convention:
+
+在裁剪折点之外，展开 min(rtA^t,clip(rt,1−ε,1+ε)A^t) 的四种情形可见：PPO 只在越界的偏离更新上归零梯度 —— 无论 |rt−1| 多大，收敛更新的梯度从不被归零。边界取等时，导数由具体实现的次梯度 / 自动微分约定决定：
+
+PPO's asymmetric mask (canonical form)PPO 的非对称掩码（标准形式）
+
+DPPO reproduces the same structure with the discriminator swapped from ratio space to divergence space:
+
+DPPO 复刻同样的结构，只是把判别量从比率空间换成散度空间：
+
+4.d.iii   DPPO DTV gate as a token-adaptive ratio threshold
+
+4.d.iii   DPPO DTV 门控对应的 token 自适应比率阈值
+
+Under sampled DTV, DTV,t=|π(j)(yt∣st)−μR(yt∣st)|=μR(yt∣st)|rt−1|, so DTV,t≤δ is equivalent to
+
+在采样 DTV 下，DTV,t=|π(j)(yt∣st)−μR(yt∣st)|=μR(yt∣st)|rt−1|，因此 DTV,t≤δ 等价于
+
+Thus the detached DPPO sampled DTV mask can be written with a token-adaptive ratio threshold:
+
+因此，停止梯度的 DPPO 采样 DTV 掩码可写成 token 自适应的比率阈值：
+
+The threshold δ/μR(yt∣st) is loose on long-tail tokens (small μR) and tight on high-probability tokens (μR→1). Away from threshold kinks, this mask has the same keep/drop gradient regions as a PPO clip with that token-dependent radius. The two objective values are not identical: a hard mask zeroes a rejected term, whereas a clipped surrogate saturates it at a boundary value. In the experiments of §3.4 the DPPO mask is multiplied by the baseline PPO clip, so the effective gate is the intersection of both mechanisms; the adaptive threshold alone does not describe the full experimental objective.
+
+阈值 δ/μR(yt∣st) 在长尾 token（μR 小）上宽松，在高概率 token（μR→1）上收紧。远离阈值折点时，该掩码与采用此逐 token 半径的 PPO 裁剪具有相同的梯度保留 / 丢弃区域；但二者的目标函数值并不相等：硬掩码把被拒项置零，裁剪替代目标则在边界值处饱和。§3.4 的实验把 DPPO 掩码乘在基础 PPO 裁剪项上，因此有效门控是两种机制的交集；仅凭自适应阈值不能描述完整实验目标。
+
+4.d.iv   Why direction-aware gates preserve a pull-back channel
+
+4.d.iv   方向感知门控为何保留回拉通道
+
+Consider a token with A^t>0 and rt≪1 in a stale-data setting.
+
+考虑陈旧数据场景中一个 A^t>0 且 rt≪1 的 token。
+
+Under an IcePop-style two-sided range gate (α=0.5) applied to this ratio: rt<α⇒M=0; the pull-back gradient is discarded.
+
+在作用于该比率、α=0.5 的 IcePop 式双侧范围门控下：rt<α⇒M=0，回拉梯度被丢弃。
+
+Under a KPop-style bidirectional Bernoulli-KL gate at this mismatch level: M=0; the pull-back gradient is discarded.
+
+在该失配水平下的 KPop 式双向 Bernoulli-KL 门控下：M=0，回拉梯度被丢弃。
+
+Under the DPPO / DRPO direction gate, sign(A^t(rt−1))=−1≤0⇒M=1; the sampled pull-back term A^t∇θrt is retained. Its local ratio direction points toward 1, although a shared-parameter optimizer need not move every token ratio monotonically.
+
+在 DPPO / DRPO 的方向门控下，sign(A^t(rt−1))=−1≤0⇒M=1，采样回拉项 A^t∇θrt 被保留。其局部比率方向指向 1，但共享参数优化器不保证每个 token 比率都单调移动。
+
+The following calculation uses a contextual-bandit reduction, behavior support coverage, and detached advantages and gates; it is exact within that local model away from gate boundaries. Let P be the chosen contextual-state distribution, let β(s) be the baseline, set A(s,a)=R(s,a)−β(s), and identify the detached estimate A^=A within this calculation. The importance-weighted reference integrand is
+
+下面的计算采用上下文老虎机化简、行为支撑覆盖，以及停止梯度的优势与门控；在远离门控边界的这一局部模型内，计算是精确的。令 P 为选定的上下文状态分布，记 β(s) 为基线、A(s,a)=R(s,a)−β(s)，并在该计算中令停止梯度的估计量 A^=A。重要性加权参照被积项为
+
+Two-sided advantage-agnostic hard mask. Let 0<rmin<1<rmax. A gate 𝟙M(a)=1[r(θ)∈[rmin,rmax]] depends on the ratio magnitude but not on the advantage direction. Writing 𝟙1M=1−M for the masked set, the exact bias relative to gon is supported on M:
+
+双侧、与优势方向无关的硬掩码。令 0<rmin<1<rmax。门控 𝟙M(a)=1[r(θ)∈[rmin,rmax]] 依赖比率幅度，但不依赖优势方向。记 𝟙1M=1−M 为被掩集合，则相对 gon 的精确偏差支撑在 M 上：
+
+Thus, whenever a converging sample lies in M (for example A>0 and r<rmin<1), the two-sided mask removes its entire reference integrand. This is a pointwise statement about that sample; it does not determine the sign or magnitude of the batch-averaged bias.
+
+因此，只要一个收敛样本落入 M（例如 A>0 且 r<rmin<1），双侧掩码就会移除该样本的完整参照被积项。这是关于该样本的逐点结论，并不能决定批平均偏差的符号或大小。
+
+Asymmetric gate. A gate of the PPO form sets M=1 whenever sign(A(r−1))≤0, so it never masks a converging token. Its bias is supported only on diverging out-of-window tokens:
+
+非对称门控。PPO 形式的门控在 sign(A(r−1))≤0 时置 M=1，故从不掩掉收敛 token。其偏差只支撑在偏离侧的越窗 token 上：
+
+This is the defensive truncation implemented by the PPO-style gate: it removes only sampled terms pushing away from μR in the reward-improving direction, and preserves the pull-back term on every converging token within this local model. It should not be confused with TRPO's hard policy-level constraint. (The unbounded-positive limit[20] removes even the diverging-side clip for A>0 via a stop-gradient anchor r~=πθ/sg(πθ), whose bias factor (1−r) vanishes pointwise as r→1.)
+
+这就是 PPO 类门控实现的防御性截断：它只移除沿奖励提升方向远离 μR 的采样项，并在该局部模型中保留每个收敛 token 的回拉项；不应把它与 TRPO 的策略级硬约束混为一谈。（无界正向极限[20]甚至通过停梯度锚 r~=πθ/sg(πθ) 对 A>0 移除偏离侧裁剪，其偏差因子 (1−r) 随 r→1 逐点消失。）
+
+Conclusion. Within the stated local model, a direction-aware gate preserves all samples satisfying sign(A(r−1))≤0, while a two-sided magnitude mask can remove some of them. This explains a useful design property; it does not prove that the discarded terms grow monotonically with staleness or that every stable async method must be asymmetric. ∎
+
+结论。在上述局部模型中，方向感知门控会保留所有满足 sign(A(r−1))≤0 的样本，而双侧幅度掩码可能移除其中一部分。这解释了一个有用的设计性质；它没有证明被丢项会随陈旧度单调增长，也没有证明所有稳定异步方法都必须非对称。 ∎
+
+4.d.v   Softened asymmetric clipping (SPO / DRPO)
+
+4.d.v   软化的非对称裁剪（SPO / DRPO）
+
+On the diverging side, DPPO's asymmetric mask is still a hard 0/1 gate: immediately after Dt crosses δ, that sampled gradient drops to zero. Converging out-of-range terms remain active through the asymmetric branch. For ε>0, SPO[17] instead softens PPO's diverging-side cutoff with a differentiable quadratic regularizer:
+
+在偏离侧，DPPO 的非对称掩码仍是硬 0/1 门控：Dt 刚越过 δ 后，该采样梯度便降为零；收敛侧的域外项仍由非对称分支保留。当 ε>0 时，SPO[17] 用可微二次正则软化 PPO 的偏离侧截断：
+
+For A^t≠0, the unconstrained scalar stationary point rt⋆ lands exactly on PPO's clip boundary; if A^t=0, this per-token term is identically zero and has no unique stationary point. Out-of-range regions with non-zero advantage produce a "pull-back force" toward the boundary. DRPO applies the same recipe on top of DPPO's sampled DTV space, replacing ε by the token-adaptive εt=δ/μR(yt∣st):
+
+当 A^t≠0 时，无约束标量驻点 rt⋆ 恰好落在 PPO 裁剪边界；若 A^t=0，该逐 token 项恒为零，不存在唯一驻点。优势非零时，域外区域产生指向边界的“回拉力”。DRPO 在 DPPO 的采样 DTV 空间上如法炮制，把 ε 换成 token 自适应的 εt=δ/μR(yt∣st)：
+
+For δ>0 and A^t≠0, ignoring the probability-simplex boundary and setting ∂SDRPO/∂rt=0 gives the unconstrained stationary point in probability space. When A^t=0, the per-token term is identically zero and no unique stationary point is selected:
+
+当 δ>0 且 A^t≠0 时，暂不考虑概率单纯形边界，令 ∂SDRPO/∂rt=0，得到概率空间中的无约束驻点。若 A^t=0，逐 token 项恒为零，不会选出唯一驻点：
+
+When this value lies in [0,1], it is the corresponding scalar DPPO sampled DTV boundary; otherwise the one-coordinate optimum is clipped by feasibility. Because action probabilities share a simplex constraint, this scalar stationary equation does not characterize the full-policy optimum. The gradient weight is nevertheless bounded and continuous:
+
+当该值落在 [0,1] 内时，它就是相应的标量 DPPO 采样 DTV 边界；否则，单坐标最优值会受可行概率边界截断。由于各动作概率共享单纯形约束，该标量驻点方程并不刻画完整策略最优解。不过梯度权重仍有界且连续：
+
+At a fixed state, substituting εt=δ/μR into the SPO regularizer changes the implicit penalty from a χ2-type term with inverse behavior probability to an ℓ22 term without that factor:
+
+在固定状态下，把 εt=δ/μR 代入 SPO 正则项，会把含行为概率倒数因子的 χ2 型惩罚改成不含该因子的 ℓ22 项：
+
+as opposed to SPO's ∑a|A^t(a)|(π−μR)2/μR (χ2). The algebra removes the inverse-behavior-probability factor from this regularizer; improved long-tail stability is the motivation and must still be checked empirically.
+
+而 SPO 对应的是 ∑a|A^t(a)|(π−μR)2/μR（χ2）。该代数会从此正则项中移除行为概率倒数因子；长尾稳定性改善是设计动机，仍需经验证据检验。
+
+DPPO on AIME24 — reported best avg@8
+
+DPPO 在 AIME24 上的表现 — 已报告最佳 avg@8
+
+PART 05
+
+第 05 部分
+
+Toward agentic asynchronous RL stability
+
+迈向智能体异步 RL 的稳定性
+
+Parts 03–04 use a single-turn presentation. Once the LLM becomes an agent — issuing tool calls, receiving structured responses, and continuing in later rounds — the state distribution also becomes turn- and environment-dependent. This adds diagnostic factors not explicitly conditioned on by the methods above; whether they dominate is an empirical question.
+
+第 03–04 部分采用单轮表述。当 LLM 成为智能体 —— 发起工具调用、接收结构化响应并继续后续轮次 —— 状态分布也会依赖轮次与环境。这增加了上述方法未显式条件化的诊断因素；它们是否占主导是经验问题。
+
+During tool-integrated reasoning the agent receives a tool response, typically structured text such as <python_output> ... </python_output> enclosing arbitrary program stdout. This structured envelope may be rare or out-of-distribution relative to the model's pre-training and SFT data. In the reported runs, later-round contexts are associated with higher mismatch; increased entropy is one hypothesis to test, not an automatic consequence:
+
+在工具融合推理中，智能体接收的工具响应通常是结构化文本，如 <python_output> ... </python_output> 包裹的程序输出；相对模型的预训练与 SFT 数据，这些上下文可能稀有或分布外。在已报告运行中，后续轮次上下文与更高失配相关；熵升高是需要检验的假说，而不是自动推论：
+
+where 
+𝐻
+𝑏
+,
+𝑡
+(
+𝑗
+)
+ is the current train policy's token entropy. The fraction of sampled tokens with 
+𝜋
+(
+𝑗
+)
+(
+𝑦
+𝑏
+,
+𝑡
+∣
+𝑠
+𝑏
+,
+𝑡
+)
+<
+10
+−
+3
+ is also reported to increase on non-first-round outputs. This is low train-policy probability, not by itself low behavior probability. Such tail probabilities can make relative changes sensitive to small absolute perturbations, but identifying a behavior-tail mechanism requires logging 
+𝜇
+𝑏
+,
+𝑡
+ as well; the observed association does not establish that tool responses cause the mismatch.
+
+其中 Hb,t(j) 是当前训练策略的 token 熵。报告还显示，非首轮输出中满足 π(j)(yb,t∣sb,t)<10−3 的采样 token 占比上升；这是较低的训练策略概率，不能单独解释为较低行为概率。此类长尾概率会让相对变化对小的绝对扰动更敏感，但若要识别行为长尾机制，还必须同时记录 μb,t；观测相关性并不能证明工具响应导致了失配。
+
+The token-level ratio in the agentic regime becomes
+
+智能体场景下的 token 级比率变为
+
+Here 
+𝑘
+(
+𝑏
+,
+𝑡
+)
+ is the tool-interaction turn associated with token 
+(
+𝑏
+,
+𝑡
+)
+, and 
+𝑃
+𝐸
+ is a schematic environment/tool-response context kernel. It summarizes how the environment helps determine the next autoregressive state; it is not an additional policy in the importance ratio.
+
+其中 k(b,t) 是 token (b,t) 所属的工具交互轮次，PE 是环境 / 工具响应诱导上下文的示意核。它概括环境如何参与决定后续自回归状态，并不是重要性比率中的另一条策略。
+
+Tool-turn OOD effects and tool-response distribution shift are two additional diagnostic hypotheses for why the observed 
+𝑑
+𝑏
+,
+𝑡
+=
+log
+⁡
+𝑟
+𝑏
+,
+𝑡
+ changes across turns. They are not a unique additive decomposition unless counterfactual intermediate policies are explicitly defined.
+
+工具轮次 OOD 效应与工具响应分布偏移，是解释观测量 db,t=log⁡rb,t 为何跨轮次变化的两个额外诊断假说。若没有显式定义反事实中间策略，就不能把它们写成唯一的精确加法分解。
+
+The mechanisms in Sections 3–4 do not condition explicitly on tool turn. Because SAT uses the batch-relative reference 
+𝑞
+, a nearly uniform rescaling of all mismatches also rescales the reference and can leave the contraction factors unchanged. A turn-conditioned reference is therefore a plausible extension, not yet a proved remedy.
+
+第 3–4 节的机制没有显式以工具轮次为条件。由于 SAT 使用批相对参考 q，若所有失配近似同比例变化，参考尺度也会同比例变化，收缩因子可能保持不变。因此按轮次条件化参考是一种合理扩展，但尚未被证明为必然有效的修复。
+
+Takeaways
+
+要点回顾
+
+The sampled log-ratio 
+𝑑
+𝑏
+,
+𝑡
+=
+log
+⁡
+𝑟
+𝑏
+,
+𝑡
+ is an observable train–behavior staleness proxy. It mixes policy change with implementation effects and is not itself a version count or a unique source decomposition.
+
+采样对数比 db,t=log⁡rb,t 是可观测的训练–行为陈旧度代理；它混合策略变化与实现效应，不等于版本计数，也不是唯一来源分解。
+
+𝐷
+TV
+ gives the trust-region motivation: 
+𝐷
+TV
+=
+1
+2
+𝐸
+𝜇
+|
+𝑟
+−
+1
+|
+, and sampled 
+|
+𝑟
+−
+1
+|
+ can be viewed as a single-sample Monte Carlo estimator of this 
+𝐷
+TV
+ quantity. This makes it natural to express the trust-region intuition in terms of 
+𝐷
+TV
+. A smaller 
+𝐷
+TV
+ term tightens the approximation; it does not by itself mean a better policy.
+
+DTV 给出信任域动机：DTV=12Eμ|r−1|，而采样到的 |r−1| 可以看作这一 DTV 量的单样本 Monte Carlo 估计，因此用 DTV 来表达信任域直觉是自然的。更小的 DTV 项会收紧近似，但本身不代表策略一定更好。
+
+PPO clipping and the stabilizers built on it modify sampled objectives or gradient regions. They do not hard-enforce the full-policy 
+𝐷
+TV
+ constraint.
+
+PPO 裁剪及其上的稳定方法修改的是采样目标或梯度区域，并不会硬性执行完整策略 DTV 约束。
+
+SAT strictly contracts the nominal sampled-ratio surrogate when its gate fires: tokens with high observed staleness reach the outward cutoff earlier, while pull-back gradients remain and ratios already past PPO's boundary see no extra change. Any resulting true-
+𝐷
+TV
+ improvement remains conditional or empirical; SAT-GSPO is an empirical sequence-level extension.
+
+SAT 在门控触发时严格收缩名义采样比率替代目标：观测陈旧度较高的 token 更早触及偏离侧截断，同时保留回拉梯度；已经越过 PPO 原边界的比率不会再发生额外变化。真实 DTV 是否因此改善仍是条件性的；SAT-GSPO 是经验性的序列级扩展。
+
+Agentic async-RL adds turn-dependent state distribution shift. Turn-conditioned diagnostics and references are open directions rather than established guarantees.
+
+智能体异步 RL 增加了轮次相关的状态分布偏移；按轮次条件化的诊断与参考尺度属于开放方向，而非既有保证。
+
+Future Directions
+
+未来方向
+
+The items above — especially the last one on agentic async-RL — are the directions we plan to pursue next in the study of asynchronous reinforcement learning for large language models. Multi-turn tool-use rollouts inject rare or out-of-distribution contexts whose interaction with policy lag and implementation mismatch is not yet separated. Testing a turn-conditioned SAT variant and deriving a sequence-level bound that includes environment-dependent state shift are two concrete open problems.
+
+以上要点 — 尤其是最后一条关于智能体异步 RL 的部分 — 是我们接下来针对大模型异步强化学习的探索方向。多轮工具调用 rollout 可能引入稀有或分布外上下文，而它们与策略版本差、实现失配之间的交互尚未被分离。检验按轮次条件化的 SAT 变体，以及推导包含环境相关状态偏移的序列级界，是两个具体开放问题。
+
+In asynchronous RL for LLMs, there is a measurable mismatch between the training policy that generates data and the training policy for rollout data. SAT uses that diagnostic to tighten the directional sampled-ratio guardrail on tokens with high observed staleness, aiming to suppress future drift without discarding pull-back gradients.
+
+大模型的异步强化学习中会在生成数据的training策略与rollout数据的训练策略之间产生可测失配。SAT 用该诊断收紧观测陈旧度较高 token 的方向性采样比率护栏，目标是在不丢弃回拉梯度的同时抑制未来漂移。
+
+REFERENCES
+
+参考文献
+
+References
+
+参考文献
+
+[1]
+Zhu, Z., Xie, C., Lv, X., & slime Contributors. (2025). slime: An LLM post-training framework for RL Scaling. GitHub repository. github.com/THUDM/slime
+
+[2]
+Zheng, L., Yin, L., Xie, Z., Sun, C., Huang, J., Yu, C. H., Cao, S., Kozyrakis, C., Stoica, I., Gonzalez, J. E., Barrett, C., & Sheng, Y. (2023). SGLang: Efficient Execution of Structured Language Model Programs. arXiv:2312.07104. arxiv.org/abs/2312.07104
+
+[3]
+Shoeybi, M., Patwary, M., Puri, R., LeGresley, P., Casper, J., & Catanzaro, B. (2019). Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism. arXiv:1909.08053. arxiv.org/abs/1909.08053
+
+[4]
+Schulman, J., Levine, S., Moritz, P., Jordan, M. I., & Abbeel, P. (2015). Trust Region Policy Optimization (TRPO). ICML 2015; arXiv:1502.05477. arxiv.org/abs/1502.05477
+
+[5]
+Qi, P., Zhou, X., Liu, Z., Pang, T., Du, C., Lin, M., & Lee, W. S. (2026). Rethinking the Trust Region in LLM Reinforcement Learning (DPPO). arXiv:2602.04879. arxiv.org/abs/2602.04879
+
+[6]
+Yao, J., Zhou, X., Qi, P., Lee, W. S., Bo, L., & Pang, T. (2026). Rethinking the Divergence Regularization in LLM RL (DRPO). arXiv:2606.09821. arxiv.org/abs/2606.09821
+
+[7]
+Schulman, J., Wolski, F., Dhariwal, P., Radford, A., & Klimov, O. (2017). Proximal Policy Optimization Algorithms (PPO). arXiv:1707.06347. arxiv.org/abs/1707.06347
+
+[8]
+Shao, Z., Wang, P., Zhu, Q., Xu, R., Song, J., Bi, X., Zhang, H., Zhang, M., Li, Y. K., Wu, Y., & Guo, D. (2024). DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models (introduces GRPO). arXiv:2402.03300. arxiv.org/abs/2402.03300
+
+[9]
+Yang, A., et al. (2025). Qwen3 Technical Report. arXiv:2505.09388. arxiv.org/abs/2505.09388
+
+[10]
+Zheng, C., Liu, S., Li, M., Chen, X.-H., Yu, B., Gao, C., Dang, K., Liu, Y., Men, R., Yang, A., Zhou, J., & Lin, J. (2025). Group Sequence Policy Optimization (GSPO). arXiv:2507.18071. arxiv.org/abs/2507.18071
+
+[11]
+Ma, W., Zhang, H., Zhao, L., Song, Y., Wang, Y., Sui, Z., & Luo, F. (2025). Stabilizing MoE Reinforcement Learning by Aligning Training and Inference Routers (Rollout Routing Replay, R3). arXiv:2510.11370. arxiv.org/abs/2510.11370
+
+[12]
+Zheng, C., Dang, K., Yu, B., Li, M., Jiang, H., Lin, J., Liu, Y., Lin, H., Wu, C., Hu, F., Yang, A., Zhou, J., & Lin, J. (2025). Stabilizing Reinforcement Learning with LLMs: Formulation and Practices (TIS & R3-consistent formulation). arXiv:2512.01374. arxiv.org/abs/2512.01374
+
+[13]
+Zhao, X., Liu, Y., Xu, K., Guo, J., Wang, Z., Sun, Y., Kong, X., Cao, Q., Jiang, L., Wen, Z., Zhang, Z., & Zhou, J. (2025). Small Leak Can Sink a Great Ship — Boost RL Training on MoE with IcePop. ringtech.notion.site/icepop
+
+[14]
+Hou, Z., Li, Y., Tang, J., & Dong, Y. (2026). Single-Rollout Asynchronous Optimization for Agentic Reinforcement Learning (SAO / DIS). arXiv:2607.07508. arxiv.org/abs/2607.07508
+
+[15]
+Guo, J., Sun, Y., Huang, Z., Wang, Z., Wen, Z., Zhang, Z., Zhou, J., & Kok, S. (2026). KPop: Taming Training–Inference Mismatch in Reinforcement Learning with Adaptive Masking Regions. ringtech.notion.site/kpop
+
+[16]
+Microsoft AI Team. (2026). MAI-Thinking-1: Building a Hill-Climbing Machine. microsoft.ai/pdf/mai-thinking-1.pdf
+
+[17]
+Xie, Z., Zhang, Q., Yang, F., Hutter, M., & Xu, R. (2024). Simple Policy Optimization (SPO). arXiv:2401.16025. arxiv.org/abs/2401.16025
+
+[18]
+Tencent Hy. Stabilizing RLVR via Token-level Gradient Diagnosis and Layerwise Clipping (SeqClip / GradLoc). hy.tencent.com/research/100015; code: github.com/Tencent-Hunyuan/GradLoc
+
+[19]
+Dong, C., Goel, A., & Yu, D. (2026). Predicting and Controlling Staleness in Fully Asynchronous RL Training. Applied Compute Research. appliedcompute.com/research/staleness-in-fully-async-rl
+
+[20]
+Fan, C., Liu, P., Huang, J., Liu, S., & Lin, Y. (2026). UP: Unbounded Positive Asymmetric Optimization for Breaking the Exploration–Stability Dilemma. arXiv:2607.06987. arxiv.org/abs/2607.06987

@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""
+article_data_build.py — Kimi K3 Post-Training & Infrastructure
+===========================================================
+只提取第 4 章（Post-Training）和第 5 章（Infrastructure），保留 80%+ 内容。
+"""
+import json, os, sys
+
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+
+DATA = {
+    "summary": [
+        {"key": "三阶段后训练", "body": "SFT 初始化 → 三域专家 RL（通用/Agent/Coding）× 三推理力度（低/高/最大）→ 多教师在线策略蒸馏合并为统一模型"},
+        {"key": "MoonEP3 完美负载均衡", "body": "用 E/R 冗余专家保证 MoE 每 rank 收 S×K 个 token，消除负载不均，消除逐层 host 同步，训练零中断"},
+        {"key": "AgentENV 沙箱", "body": "Firecracker microVM 隔离，133ms 增量 checkpoint/49ms 恢复，5120 万+ 沙箱在训练中创建，内存超卖 6.5×"},
+    ],
+
+    "lead": [
+        "Kimi K3 的 2.8T 参数 MoE 模型不仅架构创新，**后训练（Post-Training）和基础设施（Infrastructure）同样关键**。三阶段后训练把 SFT 冷启动、多域专家 RL 和 MOPD 蒸馏结合，在 1M-token 上下文上训练出通用 Agent 能力。基础设施则从 KDA 算法-系统协同设计、3T 类预训练、1M Agentic RL 到在线推理服务，覆盖了模型全生命周期。",
+    ],
+
+    "sections": [
+        # ========== 4 Post-Training ==========
+        {
+            "type": "h2",
+            "title": "三阶段后训练管线",
+            "paras": [
+                "Kimi K3 的后训练遵循一个三阶段范式：通过**监督微调（SFT）**初始化基线 Agent 能力，通过**强化学习（RL）**在不同推理力度上培养专业领域专家，最后通过**多教师在线策略蒸馏（MOPD）**将领域专用策略合并为单一模型。",
+                "**SFT 阶段**在 Kimi 前代模型管线基础上大幅扩展了复杂 Agent 任务的数据覆盖。它们使用 Kimi 系列领域专用模型合成数据轨迹，经过多轮验证和人工标注。所有数据用 XTML 聊天模板序列化，赋予 Kimi K3 自适应推理、精确工具调用和长程 Agent 场景的稳健执行能力。从 SFT 阶段开始就应用了量化感知训练（QAT），权重用 MXFP4、激活用 MXFP8。",
+                "**RL 阶段**是解锁高阶推理和执行能力的关键。Kimi K3 不针对单个任务训练专用 RL 模型，而是将 RL 扩展到三个广泛领域，每个领域覆盖大量子任务，在每个推理力度上训练一个专家：(i) 通用任务（经验/视觉/推理/忠诚度/搜索/知识工作）；(ii) 通用 Agent（长程助手/深度研究/段落级写作）；(iii) Coding Agent（软件工程/编码经验/内核任务/Web 开发）。三个领域专家 × 三个推理力度（低/高/最大）共产生 9 个专家模型。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "RL 算法：Partial Rollout + 推理力度控制",
+            "paras": [
+                "为缓解长程任务中的尾延迟，Kimi K3 扩展了同步 RL 框架中的 Partial Rollout 方案。每轮 rollout 对 N 个 prompt 各采样 K 个 completion，当 λ(0,1) 比例（λNK）的轨迹完成后，生成阶段即暂停，让策略优化无需等执行拖尾者。暂停的 rollouts 排入队列，优先在下轮迭代开始时恢复，由沙箱基础设施支持。",
+                "在 Partial Rollout 下，单个长程轨迹自然跨越多次迭代，引入数据陈旧性。策略优化算法通过**逐 token 正则化**来容忍这种极端 off-policy 场景，将策略更新约束在局部邻域内，稳健处理高陈旧度数据。",
+                "**推理力度控制**通过 per-problem 预算机制实现。每个问题 x 关联一个初始 token 预算 b₀(x)，轨迹总 token 超出阈值 τ·b₀(x) 时奖励置为 -1。训练按 τ 的阶段性课程进行：先训练大预算变体，再退火到较小的 τ 值获得高/低力度专家模型。所有专家模型的轨迹被联合收集用于 SFT 和 MOPD。",
+                "**Agentic 生成式奖励模型（GRM）**用于不可验证的通用任务，采用锦标赛式组奖励和二元比较。GRM 遵循强制协议：(1) 读取输出；(2) 生成评分标准；(3) 按标准评分；(4) 记录分数。为防止奖励黑客攻击，应用基于预算的冗长控制：输出超 σ·ℓ₀ 的候选自动输掉比较。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "MOPD：多教师在线策略蒸馏",
+            "paras": [
+                "MOPD 将 9 个领域专用、不同推理力度的专家模型合为统一模型。训练时，对于给定域 d 和推理力度 e，优化由对应教师模型 πᵈᵉ_teacher 指导。逐 token 的 OPD 奖励定义为教师与学生 log-prob 的 clipped 比值，作为密集奖励信号无缝融入 RL 框架，自然支持 Partial Rollout 等基础设施优化。更细粒度的 top-k 蒸馏目标在 Kimi K3 的设定下未带来明显收益。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "部署感知后训练：MXFP4 QAT + 推测解码",
+            "paras": [
+                "**MXFP4 量化感知训练**对 MoE 专家权重（占模型参数大部分）量化到 MXFP4，激活用 MXFP8，非专家模块保持高精度。QAT 覆盖整个后训练阶段（SFT 和 RL），rollout 和训练共享同一量化方案，消除训练-推理不匹配。",
+                "**Draft 模型微调**：Kimi K3 预训练了多 token 预测（MTP）层，结构与 EAGLE-3 的 draft 模型匹配。MTP 层被微调为 EAGLE-3 风格 draft 模型，冻结目标模型仅更新 draft 层和特征融合投影。draft 输入融合目标模型第 1/4/最终 AttnRes 块的输出。直接优化基于似然的 LK 损失（接受率的负对数），而非传统 KL 散度。",
+            ],
+        },
+
+        # ========== 4.2 RL Task Synthesis ==========
+        {
+            "type": "h2",
+            "title": "RL 任务合成与 Agent 环境",
+            "paras": [
+                "RL 框架的有效性高度依赖丰富、多样且可稳健验证的环境。Kimi K3 设计了一系列专用白盒环境和任务合成范式。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "统一白盒 RL 环境",
+            "paras": [
+                "使用单一固定 Agent harness 训练会导致模型过拟合特定的工具 schema、系统提示词或交互协议。Kimi K3 开发了统一白盒 RL 环境，将 Agent harness 表示为可配置、可组合的模块集合（工具接口/系统提示词/上下文管理/技能/记忆/子Agent 等）。通过配置组合这些模块，可实例化 Kimi Code、Claude Code、Codex、OpenClaw、Hermes 等主流 harness，以及全新的 harness。同一抽象也支持跨任务域的 RL。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "知识图谱引导的任务合成",
+            "paras": [
+                "后训练任务的质量和多样性由源材料决定。**细粒度概念驱动的检索**能挖掘专业和代表性不足的知识，而跨多样概念的采样能拓宽领域覆盖。Kimi K3 构建了一个自进化的、分层组织的知识图谱，Agent 通过 Web 规模探索在知识和编码领域持续扩展。",
+                "知识图谱以有向无环图形式构建，通过递归、Agent 驱动的扩展形成。从预定义的粗粒度种子节点开始，每个节点分配一个 Agent 实例执行多次 Web 搜索，发现等价或相关概念时复用已有节点，最小化重复。边始终从粗粒度概念指向细粒度概念。新节点被分配给 Agent 进一步探索，分支在当前概念足够原子时停止扩展。",
+                "材料检索时，系统在不同粒度层级采样节点，从采样节点派生的关键词结合知识图谱中祖先的上下文信息构建 Web 查询。检索到的真实材料由合成 Agent 生成各种类型的训练任务。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "Agent 环境中的可验证问题",
+            "paras": [
+                "Kimi K3 在 Agent 环境的可验证问题上训练，代表性问题包括多步复杂信息搜索、投资银行/数据分析/法律实践等专业工作流、以及 STEM 问题/视觉谜题/图表理解的多步可验证视觉推理。每个视觉推理轨迹在配备 Python 解释器的隔离沙箱中生成：模型迭代编写和执行代码以裁剪/缩放/变换输入图像，执行精确计算或验证中间结果。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "内核优化、个人助理与自主执行任务",
+            "paras": [
+                "**内核优化任务**：Kimi K3 构建了大规模内核任务套件，从单算子内核到融合巨型内核，覆盖 CUDA/Triton/CuTe DSL/Gluon/ThunderKittens/TileLang 等多种 GPU 编程方法，以及 BF16/FP8/FP4 等数值格式。奖励基于正确性和性能，并开发了黑客检测系统惩罚 CUDA graph replay/输入缓存/精度降低等奖励黑客策略。",
+                "**个人助理任务**：开发了真实应用的 mock 实现（Gmail/Notion/Slack/Canvas 等），保留核心语义的同时支持可重现的大规模交互。任务在持续演化的环境中运行，横跨多个模拟天，涉及数十个跨应用关联事件。单次 rollout 可能涉及数千次工具调用和数百万上下文 token。",
+                "**自主执行任务（AET）**：一种新的环境范式，通过验证循环优化训练长程 Agent 智能。每个任务指定初始状态、约束目标、基于工具的动作空间和执行预算，以及独立验证器。Agent 看不到参考轨迹或预定义流程，必须自主执行任务分解、工具选择、规划、错误恢复和终止。奖励基于验证器对最终环境状态的评估，而非 Agent 自报的完成状态。",
+                "**Web 开发任务**：专家策划的多样化 Web 开发任务套件，覆盖典型场景。输入从单行场景描述到多段落规格说明；产物涵盖网站、交互游戏、3D/WebGL 场景、数据可视化、SVG 和全栈应用。每项任务在容器化沙箱中运行，在多样化 Agent scaffold 下 rollout。奖励由确定性检查和模型评判两部分组成。",
+            ],
+        },
+
+        # ========== 5 Infrastructure ==========
+        {
+            "type": "h2",
+            "title": "KDA 算法-系统协同设计",
+            "paras": [
+                "Kimi K3 的系统架构面临三个很少同时出现的挑战：混合 KDA 注意力、3T 级稀疏多模态训练推理、以及百万 token 的 Agent 工作负载。基础设施与这些挑战在整个模型生命周期中协同设计。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "KDA 内核跨执行场景",
+            "paras": [
+                "KDA 状态更新的串行依赖与 GPU 对宽并行性的偏好相矛盾，在每种执行场景中表现为不同的瓶颈。Kimi K3 为每种场景设计了专用内核。",
+                "**Chunkwise 内核（训练/prefill）**：KDA 的 chunkwise 形式在 chunk 内并行但跨 chunk 串行。FlashKDA 是基于 CUTLASS 的 chunkwise 内核，将 intra-chunk 计算与跨 chunk 状态传播重叠。内核将工作分解为 token 并行阶段和 head 并行循环，各自独立调度和调优，性能大幅超越 Triton 参考实现。",
+                "**设备内上下文并行（长上下文 prefill）**：张量并行分割 head 但不缩短循环，纯 TP 部署下超长序列 prefill 使大部分 SM 空闲。Kimi K3 利用一个关键观察——每段的状态转换可独立于传入状态求值并精确组合——实现自动 SM 级上下文并行规划器，在单 rank 的 SM 间分割序列，并行求值段转换，再合并恢复每段的精确初始状态。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "KDA 上下文并行（KCP）",
+            "paras": [
+                "上下文并行在 softmax 和线性注意力间的通信开销有本质区别。Softmax 注意力需要 rank 间交换随序列长度增长的 KV 块。KDA 的 delta rule 在更新状态前对传入状态应用 token 依赖矩阵 Mt，使得局部段的效果取决于进入该段的状态，无法仅从 S=0 计算的状态确定。",
+                "KCP 将每段的效果分解为两个局部可计算的量：作用于传入状态的累积转移和从零生成的局部状态。每个 rank 先计算局部 MTi←1 和 eSTi，然后通过一次 all-gather 交换。rank i+1 通过按序处理同文档的前面片段重建 STi，从 S=0 开始依次应用 S ← MTj←1 S + eSTj。因此 KCP 只需固定大小的 all-gather 进行循环状态同步，实现线性计算扩展。",
+            ],
+        },
+
+        {
+            "type": "h2",
+            "title": "3T 级预训练基础设施",
+            "paras": [
+                "Kimi K3 预训练结合了流水线并行（PP）与虚拟阶段（VP）、专家并行（EP）、ZeRO-1 数据并行、Pipeline ZeRO-2 梯度分片和上下文并行（CP）。MoE 层在 EP rank 间复制共享专家，all-to-all 通信与计算重叠以隐藏延迟。3T 级原生多模态预训练面临三个关键问题：(i) EP rank 间 token 负载不均；(ii) 激活/梯度/优化器状态超内存预算；(iii) 视觉编码器的高变计算暴露在关键路径上。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "MoonEP3：完美负载均衡的专家并行",
+            "paras": [
+                "传统 EP 方案中，token 负载跨 rank 不均衡，导致吞吐下降和内存碎片。MoonEP3 通过**动态冗余专家**实现完美负载均衡。其核心保证是：**每个 rank 收到恰好 S×K 个 token**，所有 rank 执行相同计算量。",
+                "MoonEP 证明了一个关键结论：**一个平衡的规划始终存在，且每个 rank 最多需要 E/R 个冗余专家**，这个界是紧的。因此每个 rank 预留 E/R 冗余专家槽就保证规划总能找到可行解，训练永不中断。相比之下，ECHO 和 UltraEP 等前人工作预设冗余专家数或设置 per-rank token 上限，训练在无可行规划时被迫停止，上限需手动调优且仍有残留不均衡。",
+                "**在线规划**：MoonEP 在 GPU 上运行规划内核，接近最优、开销可忽略且始终遵守 E/R 上界。**零拷贝通信**：规划内核预计算每个 token 的目的地，token 直接发送到远程 rank 的专家分组位置，消除中间拷贝。在最坏不均衡下，DeepEP 需要 S×K×R 大小的通信缓冲，MoonEP 只需固定 S×K。**无同步执行**：完美平衡下每层计算形状静态已知，消除了逐层 MoE host 同步和 kernel launch 开销。",
+                "**Expert-GEMM 调度**：即使总负载完美平衡，rank 内每个专家的 token 数仍有倾斜。MoonEP 使用 workload-aware 调度器，在 launch 前根据当前 token 分布自适应参数，轻量级启发式通过硬件指标的解析成本模型选择参数，关键系数通过离线自动调优标定。共享专家的 GEMM 被分发到独立流上与其他内核重叠。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "内存高效训练",
+            "paras": [
+                "**统一激活管理器**：所有为反向传播保存的 tensor 关联可插拔存储后端。重计算、量化和卸载/远程卸载只是该抽象下的存储策略，可在 tensor 粒度自由组合，策略通过轻量级注解声明，与模型代码完全解耦。大部分激活使用块级 FP8 量化结合卸载/远程卸载，逐元素算子配置为重计算。",
+                "**内存高效 MoE**：通过数学变换将 permuted probs 的梯度计算写成只依赖中间激活 act_output 和上游梯度 doutput 的形式，消除对 output 的反向依赖。在 group GEMM 前向中只保存 dispatch 操作的输入，反向时通过重计算 dispatch 恢复。",
+                "**内存高效 Attention Residual**：Block AttnRes 的块表示在边界层生成一次，被所有后续层共享，直接驻留 GPU。AttnRes 计算完全包裹 checkpointing，每层保存的激活与标准残差架构相同。流水线并行采用基于缓存的流水线通信，仅增量传输新生成的块，微批完成后立即释放。",
+                "**跨 PP rank 激活均衡**：interleaved 1F1B 下激活分布不均。使用 Mooncake Transfer Engine 将激活远程卸载到其他 PP rank 的内存，实现跨 PP rank 的激活内存均衡。",
+                "**Pipeline ZeRO-2 + P2P Muon**：梯度通过 Pipeline ZeRO-2 在 DP rank 间分片并存储到 CPU 内存。分布式优化器将参数均匀分片到 DP rank，Muon 的 Newton-Schulz 正交化需要完整参数矩阵，改用 P2P 通信从对应 owner rank 仅取本地拥有的参数分片，消除全参数缓冲。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "多模态编码器优化",
+            "paras": [
+                "**动态 CP**：长上下文多模态训练中，大图像和长视频大幅增加视觉编码器计算时间并造成设备间负载不均。Kimi K3 将上下文并行扩展到这些大样本：单张大图沿 patch 维度在多个设备间分割，通过 gather-KV 计算注意力。每个 CP 组再分为多个子 CP 组，多个大图以负载均衡方式分布，防止通信比例随规模增长。",
+                "**PP 气泡中的编码器计算**：在 interleaved 1F1B 下，前几个 PP 微批的文本前向全部排在开头，最后几个微批的文本反向排到末尾。Kimi K3 将 ViT 前向分解，前几个 PP 微批的 ViT 前向同步执行，其余前向调度到 pipeline 气泡中，反向类似处理。大部分 ViT 计算被隐藏在 pipeline 气泡中，基本消除视觉编码器的有效开销。",
+            ],
+        },
+
+        {
+            "type": "h2",
+            "title": "1M Agentic RL 基础设施",
+            "paras": [
+                "在有限计算预算下将 Kimi K3 这样大的模型扩展到百万 token 上下文的 Agentic RL，使资源效率成为首要目标。这推动了两个互补方向：(1) 高效训练和 rollout，包括 KV 缓存管理、请求调度和训练状态放置；(2) 长程交互的高性能可恢复沙箱。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "长上下文 RL 基础设施",
+            "paras": [
+                "Kimi K3 采用**共置 RL 训练**将每个 1M 上下文实验保持在几百个 GPU 内，使用 Partial Rollout 减少超长轨迹的尾延迟。但 rollout KV 缓存（需跨迭代持久化）和训练内存之间存在竞争。",
+                "**外部 KV 缓存池**：1M 上下文多步 rollout 中，前缀 KV 缓存 miss 代价极高。Kimi K3 采用写回设计：活跃解码块留在 GPU KV 缓存，可重用的空闲前缀在被 GPU 逐出时写回 CPU DRAM 的外部 KV 缓存池，下次重用前预取回来。KDA 状态与对应 MLA KV 缓存块一起卸载和预取。训练状态（模型权重和优化器状态）在训练迭代完成后卸载到 NVMe。",
+                "**Rollout 自动限流调度器**：多步 rollout 中上下文随轨迹推进逐渐增长，固定并发度难以估计。Kimi K3 设计自动限流机制，使用活跃请求数、排队请求数和 KV 缓存利用率等运行时信号动态控制发往推理引擎的请求数。",
+                "**梯度缓冲复用**：RL 损失计算需要前向-only 的非策略模型（如 reference 模型），其权重太大无法常驻 GPU。Kimi K3 将这些权重放在 CPU 内存，用策略模型的 FP32 梯度缓冲存储作为 backing，只在需要时加载。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "AgentENV：沙箱基础设施",
+            "paras": [
+                "Kimi K3 使用多种沙箱运行时支持后训练和评估的不同需求，包括传统容器运行时、GPU 沙箱运行时，以及全新的 **microVM 沙箱运行时 AgentENV**。AgentENV 由 Kimi 与合作伙伴联合开发，围绕三个核心设计目标：",
+                "**高保真隔离**：Agent 越强越可能激进探索甚至尝试奖励黑客。传统容器运行时中观察到多次内核 panic 和死锁。AgentENV 使用 Firecracker 运行隔离 microVM，提供容器运行时无法比拟的隔离性和保真度——Agent 可以挂载磁盘、运行容器甚至启动虚拟机。",
+                "**灵活沙箱生命周期**：AgentENV 支持增量 checkpoint/恢复，仅保存自上次 checkpoint 以来脏化的内存页，checkpoint 延迟 133ms、恢复 49ms。提供三个高级操作：(a) Pause/Resume：暂停时零内存 CPU 消耗，Agent 等待模型推理结果时（占沙箱生存期 98%）可暂停；(b) Fork：从精确状态创建新沙箱，用于无副作用的奖励评判；(c) Snapshot：定期保存沙箱快照用于错误恢复。",
+                "**高效率高密度**：工作负载下需在数秒内创建数万个沙箱，每个有独特镜像集。AgentENV 采用 OverlayBD 镜像格式，配合自定义 ublk 驱动、存储层共享和 P2P 传输，实现大规模亚秒级启动延迟。通过 COW 内存和页缓存优化，实际工作负载中实现 6.5× 内存超卖比。Kimi K3 训练和评估中总计创建了 **51,219,741 个沙箱**，使用 1,505,678 个镜像。",
+            ],
+        },
+
+        {
+            "type": "h2",
+            "title": "在线推理与服务",
+            "paras": [
+                "Kimi K3 的推理服务面临同样挑战：混合 KDA-MLA 架构维护两种根本不同的缓存，需在百万 token 上下文中联合管理；新模块和高稀疏度专家需要专用内核；生产流量混合了每请求成本跨越三个数量级的请求。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "KDA 感知前缀缓存管理",
+            "paras": [
+                "混合架构使前缀缓存复杂化：KDA 循环状态和 MLA KV 缓存在大孝生命周期上根本不同，但只有在两者都能同时恢复时，缓存前缀才可重用。Kimi K3 设计 KDA 感知前缀缓存，统一管理两种缓存类型。",
+                "**统一缓存布局**：KDA 状态打包到与 MLA KV 相同的分页块池中，统一页面为相同字节大小，共享分配/引用计数/逐出实现。页面内所有 head 状态按 head 连续存储，每个 head 的字节流自包含，是跨节点传输的最小单元。",
+                "**KDA 前缀缓存优化**：传统基于 block-hash 的前缀缓存在 Kimi K3 上失效——block-hash 匹配要求所有层共享一个块大小，且 KDA 层维护的是单一大循环状态而非每 token 条目。Kimi K3 将两种粒度解耦：前缀哈希在 MLA 页面内以细粒度哈希块（512 token）运行，而物理块保持粗粒度分配单元。KDA checkpoint 仅在 MLA 哈希端点的（稀疏）子集上保存，支持在物理块中间（如 2560 token 处）命中前缀并恢复 prefill。",
+                "**并发调度一致性**：三个设计要点：(a) 所有缓存组在分配前从共享空闲列表 pin 住命中块；(b) 刚分配或注册的块在拷贝落地前排除在匹配之外；(c) 一个 KDA 组的 checkpoint 逐出会原子地使其兄弟组失效——checkpoint 要么在所有组中可命中，要么全部不可命中。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "高性能内核",
+            "paras": [
+                "**KDA 解码**：与 prefill 不同，KDA 解码的主要瓶颈从利用并行性转向高效管理循环状态（每步原地更新）。MTP 推测解码中，如果验证拒绝部分 draft token，状态已推进到最后一个接受 token 之后。Kimi K3 的方案：只缓存 draft token 的投影输入，接受 token 的状态在芯片上重建，验证和 bonus token 的状态写回。一个融合内核覆盖短卷积/输入归一化/门控/KDA 循环/输出归一化。",
+                "**Block AttnRes**：两阶段调度——批量的跨块 pass 每块读一次缓存块表示，每层通过 online-softmax merge 折叠块内部分和。Prefill 优化采用序列并行（SP），TP all-reduce 分解为 reduce-scatter + all-gather，块内 kernel 插入两个集合之间，消除额外内存消耗。解码优化将跨块内核启动在副流上，与主流的独立计算重叠；块内内核通过融合（AttnRes 输出与部分和更新合并 + 后续 RMSNorm）简化为前一个 TP all-reduce 的一部分。",
+                "**Stable LatentMoE**：三项优化——(1) 将 latent down-projection 与 MoE 路由器融合为单个 GEMM；(2) 在 rank 间分片 latent 权重矩阵，使用 multimem store 指令将输出 all-gather 融合到 GEMM epilogue；(3) 将通信与其他算子（如共享专家计算）重叠。小 batch 下 group GEMM 变为内存受限的权重矩阵流，解码内核基于 WarpDecode 的 token-centric 设计，每个 warp 负责一个输出神经元，直接流式加载权重。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "集群级调度",
+            "paras": [
+                "**缓存感知亲和调度**：1M 上下文下，典型编码输入携带 400K token 前缀但只需 4K token prefill 增量。前缀缓存命中比 miss 便宜数个数量级。每个请求路由到持有其前缀缓存的集群，一致性哈希将每个 session 固定到两个集群——主集群处理流量，预分配备用集群在主集群故障时接管。备用集群无 session 前缀缓存，故障时需重新 prefill，但一致性哈希将备用分配均匀分布到整个集群，限制单集群故障的影响。",
+                "**基于预算的准入控制**：生产流量混合了 2K token 以下短请求和 1M token 超长请求，每请求成本跨越三个数量级。Kimi K3 采用基于预算的准入控制，为不同请求类分配独立资源预算，使突发长上下文流量最多消耗其自身份额，不会恶化其他类的系统级 SLO。",
+            ],
+        },
+    ],
+
+    "conclusion": [
+        "Kimi K3 的后训练和基础设施展示了 2.8T 参数 MoE 模型从训练到服务的完整工程方案。**三阶段后训练**（SFT→多域 RL→MOPD 蒸馏）将 9 个专家模型的多样化能力合为统一模型，**Partial Rollout + 推理力度控制**使长程 Agent 任务的 RL 训练在有限预算下可行。**MoonEP3** 通过冗余专家保证完美负载均衡，消除了传统 EP 的训练中断和 host 同步瓶颈。**AgentENV** 用 Firecracker microVM 提供了 5100 万+ 沙箱的安全隔离，133ms 增量 checkpoint 使长程轨迹可恢复。**KDA 感知前缀缓存**将混合 KDA-MLA 架构的缓存统一管理，支持 512 token 粒度的前缀命中。",
+        "这些系统设计不只是为 Kimi K3 服务——它们定义了下一代大模型基础设施的工程标准：算法-系统协同设计、完美负载均衡、内存高效训练、高保真沙箱隔离，以及生产级的缓存感知调度。",
+        "**独立观点**：Kimi K3 的 Infrastructure 比 Architecture 更值得关注。MoonEP3 的完美均衡证明（E/R 冗余专家保证）和 KCP 的线性扩展通信是两个理论贡献，而 AgentENV 的 5100 万沙箱和 6.5× 内存超卖是工程基准。真正决定大模型竞争力的，正在从「设计什么架构」转向「如何高效运行这个架构」。",
+    ],
+
+    "reference_url": "https://github.com/MoonshotAI/Kimi-K3/blob/main/k3_tech_report.pdf",
+    "title": "Kimi K3 后训练与基础设施全景：三阶段 RL、MoonEP3 负载均衡、AgentENV 5100 万沙箱、KDA 感知缓存",
+}
+
+out_path = os.path.join(_article_dir, "article_data.json")
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 {out_path} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA.get('sections', []))} sections)")

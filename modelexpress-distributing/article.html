@@ -1,0 +1,111 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心思路</strong>：加载模型前先问「哪里已有兼容副本」，优先GPU到GPU的P2P RDMA直传，避免重复从对象存储拉取<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">冷启动加速</strong>：DeepSeek-V4 Pro（806 GiB）冷启动从8分钟降到1分44秒，含JIT内核缓存继承<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">RL场景</strong>：支持receiver-driven的RL权重分发，通过Publish→Discover→Plan→Pull四阶段完成refit</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每个字节的移动都有成本。当模型checkpoint膨胀到数百GB甚至TB级别，这个成本急剧放大。冷启动要从远程存储拉权重到GPU，自动扩缩容要填充每个新副本，RL后训练要持续把更新后的权重从训练器分发到rollout worker：<strong>看似不同的工作流，背后是同一个问题：花在搬权重上的时间。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">NVIDIA ModelExpress（MX）的核心思路很简单：<strong>加载模型前，先问哪里已有兼容副本。</strong> 不是把每个副本都当作独立冷启动，而是选择最快的可用来源和传输路径。当serving peer已持有兼容权重时，MX通过NIXL的P2P RDMA直接从GPU到GPU传输，绕过对象存储、本地磁盘和主机内存。当没有peer可用时，MX从最快的可用存储路径引导。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">从存储启动：首个Worker的引导</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第一个worker没有peer可用，必须从外部存储引导。MX提供三条路径，按优先级自动选择：</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">远程对象存储 → GPU</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">当checkpoint在云存储桶中时，MX使用Model Streamer多线程张量读取器并发拉取safetensors，经过可复用的CPU staging buffer直接进入GPU。<strong>checkpoint从不落地磁盘</strong>，消除了中间下载、重新加载和存储卷的开销。在tensor-parallel部署中，参与rank分担远程读取并通过NCCL共享结果，而不是每个rank独立下载完整checkpoint。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">集群入口去重：下载一次，不是N次</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">当集群维护共享磁盘缓存时（如K8s持久卷），MX的Model Cache Service将多个副本的并发下载<strong>折叠为一次协调下载</strong>：原子声明在Metadata Store中选择一个下载者，其余副本跟踪其进度并复用缓存副本。如果10个副本同时拉取806 GiB的DeepSeek-V4 Pro模型，原本需要约8 TiB的入口带宽，现在集群只付一次外部下载成本。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">本地存储 → GPU</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">支持GPUDirect Storage（GDS）时，MX通过NIXL的多线程GDS后端直接将checkpoint从本地存储读入GPU内存，<strong>绕过主机内存和staging副本</strong>。不支持GDS时自动检测并回退到ModelStreamer的管道化读取：多OS线程并发读取safetensors到可配置的CPU缓冲区，已完成张量移至GPU的同时后续读取继续并行，重叠磁盘I/O与GPU放置。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Peer到Peer：GPU直连分发</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一旦第一个worker开始服务，它的权重已驻留在GPU内存中，完成后处理并布局好供推理引擎使用。<strong>后续每个worker都应该从peer通过P2P RDMA直接加载。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">MX控制平面通过Redis或K8s CRD发现兼容peer，计算 `mx_source_id`（基于模型和运行时配置）确保只有布局一致的peer可互传。<strong>控制平面只处理元数据，从不触碰权重字节本身。</strong> 数据平面使用NIXL作为默认传输引擎，其可插拔后端支持InfiniBand、RoCE、NVLink、EFA等多种网络。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">新replica加载完成后加入源池，后续replica就有了更多加载源。每次成功传输都在扩大源池，将scale-out转化为GPU到GPU的扇出，而非重复冷加载。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 1: ModelExpress概览。选择最快的可用路径将权重加载到GPU内存。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 2: Peer-to-peer GPUDirect RDMA传输。通过NIXL在GPU之间直传权重。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">NIXL内存注册优化</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">NIXL做RDMA前需要注册GPU内存（ibv_reg_mr获取rkey）。大模型有数万个张量，逐个注册的开销不可忽视。MX提供两种优化策略，按侵入性递增：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Pool注册</strong>：每个底层cudaMalloc分配只注册一次而非每个张量。典型模型上注册次数减少80-99%，传输语义不变。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>VMM Arena注册（更激进）</strong>：安装一个CUDAPluggableAllocator，将所有加载时分配路由到单个16 TiB虚拟地址arena，加载完成后将整个已用范围注册为一个dmabuf支持的内存区域。<strong>注册从每个张量一次坍缩为总共一次</strong>，每个张量描述符只需携带偏移量。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 3: NIXL内存注册优化对比。VMM Arena将注册开销从每张量一次降到总共一次。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">运行时路径选择与安全回退</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">MX在启动时探测可用能力，自动跳过环境不支持的路径。优先级顺序：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">①<strong>P2P RDMA</strong> → ②<strong>ModelStreamer</strong> → ③<strong>GPUDirect Storage</strong> → ④<strong>默认加载器（主机staging POSIX I/O）</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如果某路径不可用或在修改模型状态前失败，自动fall through。如果失败发生在权重开始落地后，MX会重新初始化模型再继续，<strong>永远不会提供部分写入的权重。</strong> 这种能力驱动的设计让MX核心保持硬件和软件无关，平台特定的加速路径只在支持时启用。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">端到端效果：8分钟 → 1分44秒</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在8×B200 GPU + ConnectX-7 NIC节点上测试DeepSeek-V4-Pro（TP=8），MX的端到端冷启动时间从8分钟降到<strong>1分44秒</strong>，包含权重加载和内核缓存继承。其中权重加载本身在P2P模式下仅需不到10秒。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Ablation实验显示，P2P RDMA路径相比从对象存储加载带来最大的单次加速收益，而内核缓存继承则解决了权重加载加速后暴露的新瓶颈：编译时间。两者叠加，才实现了从8分钟到1分44秒的跨越。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 4: 端到端冷启动模型加载时间对比。MX显著缩短了从存储和peer加载的时间。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">不仅是加载：继承编译后的内核缓存</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">权重进入GPU内存后，模型还不能立即开始服务。首次前向传播时，引擎需要JIT编译和autotune内核（torch.compile、Triton、DeepGEMM、TileLang等）并捕获CUDA Graph。对于DeepSeek-V4 Pro，这需要几分钟，一旦MX将权重加载延迟降到10秒以下，<strong>编译时间反而成了主导成本。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">MX的Artifact Transfer API解决了这个问题：当模型、软件栈和GPU架构匹配时，一个replica支付编译成本，其余replica继承生成的缓存。API将这些文件缓存通过NIXL的CPU到CPU RDMA路径在replica间传递，验证后安装到目标引擎的缓存目录中。这消除了K8s中共享RWX卷的需求，同时 `mx_source_id` 的artifact特定校验防止了跨不兼容replica的复用。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 6: 总启动时间减少。包含JIT内核缓存继承后的冷启动时间从8分钟降到1分44秒。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">RL后训练：权重每个Step都在变</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">以上所有场景假设权重加载后固定不变。RL后训练打破了这个假设：训练器每个step更新策略，推理actor必须在下一轮生成前拿到新权重。MX通过四个阶段驱动refit：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Publish</strong>：每个训练器rank向MX发布它已拥有的张量或shard，附带形状、dtype、放置位置和参数映射的元数据。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Discover</strong>：rollout worker通过MX查找请求的权重版本及其可用来源。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Plan</strong>：接收方将发布的ownership信息映射到自己的目标布局，识别哪些源包含所需的张量或范围。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Pull, convert, and load</strong>：接收方对源发起单边RDMA读取，直接拉取所需权重。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">MX还正在测试delta weight diff refit用于跨集群权重传输，这是Fireworks/Cursor、Cognition等团队在最近RL运行中使用的技术。MX已原生集成vLLM、SGLang，并支持Dynamo和llm-d等推理框架。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png">
+<figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 7: ModelExpress加速RL refit流程。从训练器到推理worker的权重更新通过P2P RDMA直传。</figcaption></figure>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+ModelExpress的核心贡献是打破了「每个模型副本 = 独立冷启动」的惯性思维。<strong>通过将已加载的replica作为活体权重源，后续副本的启动从冷加载变成了GPU到GPU的热迁移。</strong><br  /><br  />这种思路不仅适用于推理冷启动，也适用于RL训练中的权重分发：当集群中已有权重时，与其重复从存储拉取，不如直接从最近的peer拿。当inference和training的权重移动问题被统一处理，整个模型生命周期的基础设施效率将显著提升。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/L6krDtAzuCiX4y2KNYYvfQ" target="_blank" data-linktype="2">万亿参数RL实战：如何用28个H200节点训GLM-5</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/pCRjhls1WFaiRglb2MtjBw" target="_blank" data-linktype="2">蚂蚁CausalMix: 将数据混合从超参搜索转换成因果推断</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://developer.nvidia.com/blog/modelexpress-distributing-model-artifacts-at-the-speed-of-light/</span></p>
+</section>

@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""
+article_data_build.py — Harness Handbook: Making Evolving Agent Harnesses Readable, Navigable, and Editable
+基于 arXiv 2607.13285 (Tencent HY LLM Frontier + Indiana University)。
+"""
+import json, os, sys
+
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+
+DATA = {
+    "title": "Harness Handbook：让不断演化的 Agent Harness 变得可读、可导航、可编辑",
+
+    "summary": [
+        {"key": "核心问题", "body": "Agent 的 harness（管理 prompt、状态、工具调用的基础设施）在不断演化，但修改请求描述的是「行为」，而代码按文件/函数组织——行为定位是瓶颈"},
+        {"key": "Harness Handbook", "body": "通过静态程序分析 + LLM 辅助行为结构化，自动从代码库合成行为中心化表示，将每个行为链接到对应源码位置"},
+        {"key": "BGPD 方法", "body": "Behavior-Guided Progressive Disclosure：从高层行为描述逐步引导到相关实现细节，并验证候选位置，显著提升行为定位和编辑计划质量"},
+    ],
+
+    "lead": [
+        "现代 AI agent 的能力不仅取决于基础模型，还取决于其 **harness**——构建 prompt、管理状态、调用工具、协调执行的框架。随着模型、API、环境和需求的变化，harness 必须持续修改以增加能力或适配现有行为。",
+        "但修改 harness 的第一步——**找到所有实现该目标的代码位置**——在大型生产级 harness 中极其困难。一个行为可能分散在数百个函数、多个文件、不同的执行阶段和状态转换中。腾讯 HY LLM Frontier 与印第安纳大学等机构提出了 **Harness Handbook**，一种自动合成的行为中心化表示，让修改规划变得系统化。",
+    ],
+
+    "sections": [
+        {
+            "type": "h2",
+            "title": "Harness 演化的核心瓶颈：行为定位",
+            "paras": [
+                "Paper 指出，修改请求描述的是「系统应该做什么」，而代码库按「文件、函数、模块」组织。**行为定位（Behavior Localization）**——即找到实现目标行为的所有代码位置——是 harness 演化的核心瓶颈。",
+                "一个大型 harness 可能跨越数百个函数、数十个文件，执行逻辑分布在多个阶段，通过共享状态连接。因此，单个行为可能依赖多个不相邻的实现位置。现有的代码搜索、仓库索引和长上下文处理方法虽然让代码更容易检查，但仍然让开发者或 coding agent 自己去恢复这种映射。",
+                "论文在引言中用一个具体例子说明了这个问题：修改一个工具调用行为可能需要在 prompt 构造、状态管理、工具注册和结果处理四个不同位置同时修改，而传统的代码搜索无法自动识别这种跨模块的分散实现。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "Harness Handbook：自动构建行为中心化表示",
+            "paras": [
+                "Harness Handbook 是一种**自动从代码库合成的行为中心化表示**，通过三个阶段构建：",
+                "**Phase I：静态事实提取（Static Fact Extraction）。** 语言适配器解析代码库，提取函数、外部边界、源码位置、签名和调用边。构建程序图 G，只保留能解析到内部函数的调用。此阶段是确定性的，不调用 LLM。",
+                "**Phase II：行为组织（Behavioral Organization）。** 将源码单元组织到执行阶段骨架中。function-as-leaf 模式下，用源码和调用图上下文提出函数→阶段分配，经迭代评审细化。file-as-leaf 模式下，将扫描文件摘要与程序图结合推断阶段骨架。",
+                "**Phase III：层次化合成与打包（Hierarchical Synthesis and Packaging）。** 将 Phase II 的阶段骨架和源码组织转换为 L1↔L3 文档树和跨阶段状态寄存器视图。每个 L3 条目链接到静态识别的源码位置并验证一致性。最终渲染结果并打包结构化数据供后续源码定位和再同步使用。",
+                "最终生成的 Handbook 包含两个粒度：**function-as-leaf**（细粒度，每个行为对应到具体函数）和 **file-as-leaf**（粗粒度，每个行为对应到文件级）。这使开发者或 coding agent 可以从高层行为描述逐步下钻到具体实现。",
+            ],
+            "figs": [
+                {"src": "fig_harness_handbook_overview_font_small.png", "caption": "Harness Handbook 概览：从代码库自动合成行为中心化表示，将行为链接到对应源码位置。"},
+                {"src": "fig_handbook_construction_pipeline_pptx_slide3.png", "caption": "Handbook 构建流水线：Phase I 静态事实提取 → Phase II 行为组织 → Phase III 层次化合成与打包。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "BGPD：行为引导的渐进式披露",
+            "paras": [
+                "有了 Handbook 之后，下一步是如何利用它来指导修改。论文提出了 **Behavior-Guided Progressive Disclosure（BGPD）**，一种引导 coding agent 从高层行为描述逐步深入到相关实现细节的方法。",
+                "BGPD 的工作流程是：修改请求先匹配到 Handbook 中的行为描述，找到相关的行为节点；然后从这些节点出发，沿链接下钻到具体的函数和代码位置；最后对这些候选位置进行验证，确认它们与当前源码的一致性。",
+                "这种渐进式披露避免了让 agent 一开始就面对整个代码库的复杂性，而是从行为层逐步深入到实现层，每一步都聚焦于与修改目标相关的部分。",
+                "BGPD 的一个关键设计是**验证机制**：候选位置在被确认前会与当前源码进行比对，确保 Handbook 中的映射关系在代码演化后仍然有效。这防止了因 Handbook 过时而导致的错误定位。",
+            ],
+            "figs": [
+                {"src": "fig_behavior_localization_results.png", "caption": "行为定位结果：BGPD 在多个场景下的行为定位准确率对比。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "实验验证：更少的 token，更好的规划",
+            "paras": [
+                "论文在来自两个开源 agent harness 的多样化修改请求上评估了 Harness Handbook。关键发现：",
+                "**更好的规划，更少的 token**：Handbook-Assisted 规划在提升行为定位和编辑计划质量的同时，**使用的 planner token 更少**。这意味着 Handbook 让 agent 能够更快、更准确地定位需要修改的代码。",
+                "**弱规划器匹配强模型**：使用 Handbook 后，较弱的 planner 模型（如 GPT-4o-mini）的规划质量可以匹配甚至超过不使用 Handbook 的更强模型（如 GPT-4o）。这表明 Handbook 有效地将知识从代码库结构转移到了规划过程中。",
+                "**最大收益在难点场景**：最大的提升出现在涉及分散实现位置、很少执行的代码路径和跨模块交互的修改请求上——这些正是生产级 harness 演化中最常见的挑战。",
+            ],
+            "figs": [
+                {"src": "fig_harness_modification_results.png", "caption": "Harness 修改结果：Handbook-Assisted 规划在不同模型上的编辑质量提升。"},
+                {"src": "fig_scenario_generalization_results.png", "caption": "场景泛化结果：在不同难度和类型的修改请求上，Handbook 带来的一致提升。"},
+            ],
+        },
+    ],
+
+    "conclusion": [
+        "Harness Handbook 的核心洞察是：**演化复杂 agent 系统的瓶颈不仅在于生成编辑，还在于确定在何处进行编辑。** 通过将行为与代码的映射关系显式化、结构化，Harness Handbook 让 coding agent 能在更少的 token 成本下做出更好的修改规划。",
+        "这项工作对 agent 工程实践有直接意义：对于任何正在构建和维护 agent harness 的团队，行为中心化的代码表示可以显著降低修改复杂度和认知负担。",
+    ],
+
+    "reference_url": "https://arxiv.org/abs/2607.13285",
+}
+
+# ── 写入 article_data.json ──
+out_path = os.path.join(_article_dir, "article_data.json")
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 {out_path} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA.get('sections', []))} sections)")

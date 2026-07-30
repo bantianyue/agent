@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""
+article_data_build.py — Stale but Stable: Staleness-Adaptive Trust Regions
+arXiv 2607.18722 — 精简编译，非论文类。遵守图文原则、简洁原则、结论首句原则。
+"""
+import json, os, sys
+
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+
+DATA = {
+    "title": "腾讯混元 SAT：用陈旧度自适应信任域稳定异步 RL，抑制高 lag 训练崩溃",
+
+    "summary": [
+        {"key": "核心问题", "body": "异步 RL 将 rollout 与训练解耦，生成 token 的策略可能已不同于消费它的训练策略——陈旧度越高，策略改进近似越不可靠"},
+        {"key": "核心方法", "body": "SAT（Staleness-Adaptive Trust Region）：将观测到的 |log rb,t| 作为陈旧度代理，对高陈旧度 token 自动收窄方向性裁剪半径，抑制未来分布漂移"},
+        {"key": "实验结果", "body": "Qwen3-30B-A3B-Base 上 SAT-GSPO w/ R3 在 lag=1 时 AIME24 avg8 达 35.83，lag=8 时达 34.79；固定裁剪基线在 lag=8 时全部崩溃"},
+    ],
+
+    "lead": [
+        "异步强化学习将 rollout（由 SGLang 执行）与训练（由 Megatron 执行）解耦，让两者并行运行，大幅提升训练效率。但代价是产生 token 级重要性比 rb,t——当前训练策略相对 rollout 策略的采样概率比，它不可避免地偏离 1。",
+        "腾讯混元 HY 大模型团队从理论根源剖析了异步 RL 中的陈旧度问题，并提出了 Staleness-Adaptive Trust Region（SAT）。在 Qwen3-30B-A3B-Base 上，SAT-GSPO w/ R3 在 lag=1 和 lag=8 两种配置下都达到了最高 AIME24 最佳检查点 avg8，而固定裁剪基线的 lag=8 配置在训练后期崩溃。",
+    ],
+
+    "sections": [
+        {
+            "type": "h2",
+            "title": "异步 RL 的三种范式",
+            "paras": [
+                "将 rollout 与训练解耦后，版本滞后分布可以形式化为三种范式。同步 RL 中 rollout 与训练完全串行，两个引擎从不重叠，一个优化步的耗时是 rollout + 训练 + 广播的串行总和。优势是严格 on-policy，rb,t≡1，不需要离策略校正，但吞吐受限。同步 RL 流水线架构如下图所示：",
+            ],
+            "figs": [
+                {"src": "sync_rl_pipeline.png", "caption": "同步 RL 流水线：rollout 与训练串行，陈旧度=0，但吞吐受限。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "批式异步与完全异步 RL",
+            "paras": [
+                "批式异步 RL 中所有 token 共用一个行为检查点，实际 lag 为 Nb,t=n+h——批次交接时的 lag 加上消费时的局部更新偏移。观测陈旧度可拆为策略版本差项与实现失配项。完全异步 RL 中 token 行为随时间变化，μb,t 可以随 token 改变，每个 token 的实际 lag 取决于到达调度器的时刻。完全异步流水线如下图所示：",
+            ],
+            "figs": [
+                {"src": "fully_async_rl.png", "caption": "完全异步 RL 流水线：rollout 与训练完全解耦，陈旧度为随机变量。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "陈旧度与策略改进的关系",
+            "paras": [
+                "核心理论线：inference policy μ 与 training policy π 之间的 divergence 越大，策略改进近似越不可靠。对状态 s，divergence 可以定义为 DTV(μ,π)[s]=½Ea∼μ(·|s)|r(a)−1|。若对每个动作都有硬约束 |r(a)−1|≤ε，则可得 DTV≤ε/2。但 PPO 裁剪只观测采样动作并改变其损失，不会执行全动作硬约束——它只是采样目标上的一道截断，不是针对 divergence 本身的硬约束。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "陈旧度加剧的实证证据",
+            "paras": [
+                "vanilla GRPO 基线在配置 lag=8 时的 IS 偏移比 lag=1 时大约高一个数量级。更大的失配与训练在首个 epoch 结束前、仅取得几个较好检查点后失稳相关。下图展示了不同 lag 下的训练-推理对数概率差异：",
+            ],
+            "figs": [
+                {"src": "section_2_1_logprob_mismatch.png", "caption": "不同 lag 下训练-推理对数概率差异。lag=8 时的失配比 lag=1 时大约高一个数量级。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "KL 散度与 AIME24 训练崩溃",
+                        "paras": [
+                            "高 lag 场景下 KL 散度显著增大，AIME24 pass@1 在训练早期冲到峰值后迅速崩溃。下图 1 展示了不同 lag 下的 KL 散度对比：",
+                            "下图 2 展示了 AIME24 pass@1 随训练进度的变化曲线——训练在早期取得几个较好检查点后快速失稳，而 SAT 有效抑制了这种趋势。",
+                        ],
+            "figs": [
+                {"src": "section_2_1_kl_magnitude.png", "caption": "不同 lag 下 KL 散度大小对比。高 lag 场景下散度显著增大。"},
+                {"src": "section_2_1_aime24_pass1.png", "caption": "AIME24 pass@1 随训练进度变化。高 lag 场景下训练在早期峰值后崩溃。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "SAT：陈旧度自适应信任域",
+            "paras": [
+                "SAT 是面向 PPO 类目标、由信任域思想驱动的采样比率裁剪插件。它把静态的固定裁剪半径 (εlow, εhigh) 改成逐 token 的方向性半径，使用观测陈旧度代理 |db,t| = |log rb,t|。",
+                "下图 1 展示了 PPO 的固定裁剪区间——对于所有 token 使用相同的裁剪半径。下图 2 展示了 SAT 的自适应裁剪区间——对高陈旧度 token 收窄方向性半径，另一侧保持不变。这种不对称设计让裁剪只在需要时收紧，保持普通 token 行为不变。",
+            ],
+            "figs": [
+                {"src": "asymmetric_clip_PPO.png", "caption": "PPO 的固定名义裁剪区间。对于所有 token 使用相同的裁剪半径。"},
+                {"src": "asymmetric_clip_SATR.png", "caption": "SAT 的自适应裁剪区间。对高陈旧度 token 收窄方向性半径，另一侧保持不变。"},
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "Token-level 陈旧度信号",
+            "paras": [
+                "较大的 |db,t| 往往意味着更高的训练陈旧度，并与训练不稳定性相关。SAT 在构造门控和裁剪边界前，先在采样动作上测量陈旧度并停止梯度（stop-gradient），避免梯度穿越陈旧度、分位数和移动裁剪边界。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "方向希尔核函数与核函数缩放",
+            "paras": [
+                "将停止梯度后的失配转成平滑的方向性裁剪缩放规则。通过停止梯度的经验 0.90 分位数将缩放锚定到当前批次的长尾——严格门控 |db,t|>q 针对上侧长尾，只在失配对当前批次而言异常偏大的位置施加收缩。固定 q 时，ψ(0;q)=1、ψ(q;q)=½，且 ∂ψ/∂u≤0。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "基于陈旧度的有效收缩因子",
+            "paras": [
+                "对触发门控的 token，db,t 的符号所选方向上的名义区间端点严格收缩，另一侧端点保持不变。在 PPO 尚未裁剪的新增裁剪向外带上，SAT 已把发散梯度置零，而收敛方向的梯度通道保持完整。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "实验验证",
+            "paras": [
+                "在 Qwen3-30B-A3B-Base 上的单种子实验中，lag=1 时 SAT-GSPO w/ R3 达到 AIME24 最佳检查点 avg8 为 35.83，SAT 维持了较低的训练失配水平。",
+                "lag=8 时 SAT-GSPO w/ R3 达到 34.79，而多个固定裁剪基线在训练后期全部崩溃。SAT 在高异步场景下保持了训练稳定性，训练失配信号远低于固定裁剪基线。自适应裁剪与 MoE 路由重放呈现互补效应，两者结合（SAT w/ R3）效果最好。",
+            ],
+            "figs": [
+                {"src": "result_3_4_3a_training_mismatch_lag1.png", "caption": "lag=1 时训练失配对比。SAT 维持较低的失配水平。"},
+                {"src": "result_3_4_3b_training_mismatch_lag8.png", "caption": "lag=8 时训练失配对比。固定裁剪基线失配爆炸，SAT 保持稳定。"},
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "异步 RL 稳定方法的统一视角",
+            "paras": [
+                "在同一信任域视角下梳理了现有异步 RL 稳定方法，将它们视为对同一个 log rb,t 的不同选择：",
+                "**行为策略选择**：使用更保守的行为策略来减少策略差异。",
+                "**目标策略定义**：如何定义训练阶段的目标策略，影响比率计算。",
+                "**比率截断与掩码**：通过截断或掩码操作限制极端比率的影响。",
+                "**裁剪半径与阈值**：固定 vs 自适应裁剪半径，以及如何设定阈值。",
+                "这些方法在 SAT 的框架下可以被统一理解为不同形式的信任域约束。DPPO 等方法的裁剪策略如下图所示，与 PPO 和 SAT 形成对比。",
+            ],
+            "figs": [
+                {"src": "asymmetric_clip_DPPO.png", "caption": "DPPO 的裁剪策略。与 PPO 和 SAT 形成对比，展示不同信任域约束的实现方式。"},
+            ],
+        },
+    ],
+
+    "conclusion": [
+        "核心贡献是：从理论根源出发，将异步 RL 中的陈旧度问题形式化，并提出了一个简洁有效的自适应解决方案。",
+        "SAT 不改变 PPO 类算法的基本结构，仅通过替换固定裁剪半径为陈旧度自适应半径，就能在高异步场景下显著提升训练稳定性和最终性能。它把 |log rb,t| 作为可观测陈旧度代理，对高陈旧度长尾收缩方向性半径，让向外裁剪更早生效，抑制未来 DTV 增长。",
+        "对于需要大规模异步 RL 训练的团队来说，SAT 提供了一个低侵入、高回报的改进方向——只需要在现有 PPO/GRPO 实现中替换裁剪逻辑即可。",
+    ],
+    "reference_url": "https://jyyang26.github.io/stable_async_analysis/",
+}
+
+# ========== 写入逻辑 ==========
+os.makedirs(_article_dir, exist_ok=True)
+out = os.path.join(_article_dir, "article_data.json")
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 {out} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA['sections'])} sections)")

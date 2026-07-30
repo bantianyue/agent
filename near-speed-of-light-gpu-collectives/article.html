@@ -1,0 +1,96 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">接近光速下限</strong>：GB200 4 GPU上小消息AllReduce从11.0μs降至2.37μs，距硬件SoL下限仅差7%<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">无屏障同步</strong>：LL协议、哨兵同步、双缓冲、LL128 Atomic四种技术消除全局内存屏障<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">端到端收益</strong>：Llama-3.1-70B推理ITL降低8.7%，cuSOLVERMp加速2.3×</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GPU集体通信通常以带宽为优化目标，但长上下文解码密集型LLM推理越来越受延迟限制。<strong>在4块GB200 GPU上，一次小消息AllReduce的延迟从NCCL ring的11.0μs降到了2.37μs，距硬件Speed-of-Light（SoL）下限仅差7%。</strong></p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么延迟比带宽更重要</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">LLM推理中，许多小型集体操作直接位于token生成的关键路径上。长上下文推理时，batch size减小，AllReduce以相对较小的消息大小频繁调用：<strong>延迟而非带宽成为主导瓶颈。</strong> vLLM、SGLang、TensorRT-LLM等推理框架已把通信延迟作为一级优化目标。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="x1.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 1: 长上下文、小batch TP LLM推理中，许多小型AllReduce操作位于关键路径上。本文的低延迟内核将小消息AllReduce延迟降至接近SoL下限，转化为Llama-3.1-70B推理更低的ITL和更高的成本节省。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">低延迟集体不仅对LLM推理重要，对传统科学计算同样关键。许多模拟器和求解器在紧密同步的阶段中频繁执行小型全局归约。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="x2.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 2: NCCL设备端通信与对称内存概览。同一节点或NVLink域内GPU支持LSA操作，NVLink SHARP支持硬件加速多播和归约。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">内存屏障的代价</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">检查现有最先进框架中的one-shot和two-shot AllReduce实现后，本文观察到这些设计通常依赖显式内存屏障来同步对等节点。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">使用NCCL的ncclLsaBarrierSession测量，<strong>每次屏障的延迟超过1μs。</strong> 在许多AllReduce内核中需要两个这样的屏障，占总延迟的40%。<strong>消除这些屏障可以带来显著的性能收益。</strong></p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="x3.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 3: GB200上屏障延迟随GPU数量的变化（unicast和multicast实现）。每次屏障超过1μs，两个屏障就占小消息AllReduce总延迟的40%。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">四种无屏障同步技术</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本文采用push模式，并引入四种技术来消除全局内存屏障，每种针对不同消息大小区间。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">LL协议：极小消息</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">LL去掉了信号步骤，将8字节标志与8字节数据打包，用16字节原子存储一起传输，使接收方通过直接检查标志就能判断数据就绪。代价是有效负载带宽减半、scratch缓冲区使用翻倍。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">哨兵同步：中等消息</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">接收scratch缓冲区初始化为哨兵值（如 -NaN），数据直接写入，接收方轮询直到值从哨兵变化。<strong>保留完整有效带宽，使用更少的scratch空间。</strong> 缺点是需要每次迭代前重置缓冲区，且传输值不能等于哨兵值。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">双向通信与双缓冲</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>核心思想：每个rank与给定对等节点每迭代最多通信一次，从对等节点接收数据隐式地作为下一次发送的许可：类似于基于信用的流控制。这允许多次归约迭代而无需昂贵的全局内存屏障。</strong></p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="x4.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 4: 双向通信与双缓冲示例。两个rank交换分块输入，scratch空间分为Buffer 0和1。从对等节点接收数据隐式地作为下一次发送的许可，消除全局内存屏障。</figcaption></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">LL128 Atomic AllReduce</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">全新two-shot AllReduce算法，依赖原子加法而非显式标志。线程以8行为一组处理128字节（一个缓存行），每组的flag carrier对目标rank的scratch缓冲区执行atomic add。NVLink保证缓存行级别原子执行。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="x5.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 5: Two-shot LL128 atomic AllReduce算法概览。CTA内线程分为496个常规线程和16个额外线程。图A为ReduceScatter阶段，图B为AllGather阶段。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">该算法仅需D/N的scratch空间，FP32每128字节仅4额外字节（≈3% 开销）。限制：需要NVLink缓存行级原子加法，仅支持单/半精度加法，结果非确定性。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">微基准测试结果</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>4×GB200上，小消息AllReduce从NCCL的11.0μs降至2.37μs：距硬件SoL下限仅差7%。</strong> 8×H100上从18.0μs降至5.6μs。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="x11.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 11: 不同消息大小下AllReduce延迟对比。本文的low-latency内核在4×GB200上小消息延迟降至2.37μs，距SoL下限仅差7%。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">LL128 atomic在中等消息（4KB-256KB）上最优，极小消息用one-shot LL，更大消息用two-shot哨兵。随GPU数从4增至8，延迟增长接近对数级，证明无屏障设计有效控制了同步开销。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">端到端应用验证</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>vLLM推理（Llama-3.1-70B，4×GB200）：</strong> ITL从28.7ms降至26.2ms（<strong>降低8.7%</strong>），吞吐量提升9.5%。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="x13.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 13: 低延迟集体对vLLM推理的影响。行表示不同配置，列表示ITL和吞吐量。低延迟内核在各配置下均降低ITL并提升吞吐。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>cuSOLVERMp（8×H100）：</strong> 求解10000×10000矩阵，mp_sygvd执行时间从1.82秒降至0.78秒（<strong>加速2.3×</strong>）。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+本文系统地分析了GPU集体通信中延迟的来源，提出了四种消除全局内存屏障的技术，构建了接近硬件SoL下限的低延迟AllReduce实现。<strong>核心贡献不在单项技术，而在组合：LL协议 + 哨兵同步 + 双缓冲 + LL128 Atomic，每项针对不同的消息大小区间。</strong><br  /><br  />在LLM推理（vLLM）和科学计算（cuSOLVERMp）两个截然不同的领域中都验证了收益：延迟优化的集体通信是跨HPC和AI的通用需求。<br  /><br  /><strong>独立观点：</strong> 7% 的SoL差距令人印象深刻，但更值得关注的是方法论的转变：从「加更多带宽」转向「消除不必要的同步」。CUDA原子操作在NVLink缓存行级别的语义保证，被巧妙地复用于同步而非仅用于计算。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/pCRjhls1WFaiRglb2MtjBw" target="_blank" data-linktype="2">蚂蚁CausalMix: 将数据混合从超参搜索转换成因果推断</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nVqW9acA7NN1zeALDwRAsw" target="_blank" data-linktype="2">Google新论文RubricEM: 评分标准引导的深度研究Agent训练框架</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/L6krDtAzuCiX4y2KNYYvfQ" target="_blank" data-linktype="2">万亿参数RL实战：如何用28个H200节点训GLM-5</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://arxiv.org/abs/2607.16100</span></p>
+</section>
