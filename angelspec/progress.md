@@ -13,3 +13,4 @@
 
 ## Step 3: 渲染+推送 completed
 - 2026-07-30: render-article → preflight --fix → push-draft
+| Step 4d-i: 传送门 | completed |
