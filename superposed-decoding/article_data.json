@@ -1,0 +1,132 @@
+{
+  "title": "Superposed Decoding：一次自回归前向，白拿 k 个补全草稿，比 Nucleus 快 2.44 倍",
+  "summary": [
+    {
+      "key": "核心方法",
+      "body": "把 k 个草稿最近 token 的嵌入做加权叠加（superposition）作为下一次输入，一次前向同时生成 k 个高质量草稿"
+    },
+    {
+      "key": "关键机制",
+      "body": "每步 k² 个潜在草稿经 n-gram 插值过滤，缓存 top-k；依托 LLM 表示线性性，语义近似 Beam Search"
+    },
+    {
+      "key": "实验结果",
+      "body": "k≥3 时比标准解码快至少 2.44×，TriviaQA/NQ 覆盖提升 ≥5%，compute-normalized 人工评测偏爱 SPD，可与 Medusa/投机解码组合"
+    }
+  ],
+  "lead": [
+    "很多应用在你打字时提供多个补全草稿——GitHub 代码补全、Gmail 智能撰写、Apple 消息自动建议。底层都是语言模型跑一次自回归推理给一个草稿，所以给 k 个草稿就要**跑 k 次昂贵的语言模型**。**Superposed Decoding（SPD）提出新解码算法：用一次自回归前向的计算成本生成 k 个草稿。** 做法是把 k 个草稿最近 token 的嵌入做加权叠加，作为下一步输入；每步结合 top-k token 得到 k² 个新草稿，用计算开销极小的 n-gram 插值过滤掉不连贯生成，缓存 k 个最可能选项。在 Llama-2-7B 上，k≥3 时 SPD 至少快 2.44 倍，且在一致性、覆盖率和人工偏好上不逊于甚至胜过 Nucleus Sampling。"
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "背景：多草稿生成的成本困境",
+      "paras": [
+        "商业调查发现 80% 的电商网站提供自动补全功能。随着大语言模型普及，自动补全草稿遍布更广的应用——Gmail Smart Compose 的短句建议、GitHub Copilot 的代码片段。**这些选项让用户能权衡不同措辞，提高至少一个建议符合意图的概率。虽然语言模型支撑了这些多建议，但每多一个建议就要多一次推理（batch size=1），计算开销巨大。**",
+        "语言模型用自回归推理为给定前缀生成合理的下一个 token 序列。解码算法如 Greedy Decoding、Top-k 采样、Beam Search、Nucleus Sampling 提供了各种获取生成结果的方式。Greedy 每一步选最可能 token，最终只产生一个自动补全建议；Top-k 从最高概率的 k 个 token 采样；Beam Search 每步从 k² 个可能草稿里挑最可能的 k 个束；Nucleus Sampling 特别擅长生成自然文本。**Top-k、Beam Search、Nucleus 都能生成多个建议，但代价是都要多次自回归推理。**"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "fig00.png",
+            "caption": "Figure 1: 要为前缀生成 k 个自动补全建议，Nucleus Sampling 等现有方法需多次前向；Superposed Decoding 用一次自回归前向生成 k 个草稿。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "核心思想：Token Superposition",
+      "paras": [
+        "Superposed Decoding 的关键洞察来自语言模型表示的表观线性性：**对 k 个草稿各自最近 token 的嵌入做加权线性组合（superposition），其结果作为下一个解码步的单独输入，能高保真地近似所有 k 个草稿的真实隐状态。** 利用这一点，SPD 只需一次前向就能覆盖所有草稿，而不是每个草稿一次。",
+        "**第一步**：k 个草稿都从前缀 M 初始化，对同一 next-token 分布贪心选第 i 个最可能 token 作为第 i 个草稿，记录各自概率作为分数。**后续步**：构造 x̃_{t-1}，它是 k 个草稿最近 token 嵌入的叠加，作为 LM 在时间步 t 的输入——一次自回归推理覆盖所有 k 个草稿，而非往常的每草稿一次。",
+        "公式上，完整生成用联合概率累计：每个草稿的概率 = 首 token 概率 × 后续各步插值后分布的概率乘积。**这样每步从 k 个草稿 × k 个 top token 得到 k² 个潜在新草稿，按联合概率排序后缓存 top-k 进入下一步。**"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig01.png",
+            "caption": "Figure 2: Superposed Decoding 依赖把当前 k 个草稿最近 token 的叠加嵌入作为 LM 输入，一次前向覆盖所有草稿。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "N-Gram 插值：过滤不连贯草稿",
+      "paras": [
+        "因为每个草稿都有各自的上文线索和语法，不能盲目对所有草稿直接用 xt 的分布。**SPD 把叠加分布与 n-gram 模型给出的草稿特定 next-token 分布做插值，得到每个草稿独有的最终分布，从而在候选间保持上下文差异。**",
+        "**N-gram 插值（n∈[2,6]）计算开销极低**，还能在推理时灵活切换兴趣领域（编程、医疗、金融等），因为 n-gram 模型与 LM 解耦。它通过选择最可能且最连贯的续写（top-k 草稿）进入下一步，显著提升生成连贯性。",
+        "**为什么有效**：SPD 的有效性根植于同时发现的 LLM 表征线性性质——叠加嵌入与各成分 token 嵌入保持线性关系，使 SPD 在语义上近似 Beam Search。这对短生成尤其贴合，且无需任何额外训练即可开箱即用地套在任何语言模型上。"
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": "fig02.png",
+            "caption": "Figure 3: Llama-2-7B 上叠加嵌入与各成分 token 嵌入保持线性关系，平均余弦相似度 ≥ 阈值，验证 SPD 的可行性。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "实验设置与对比基线",
+      "paras": [
+        "主要实验在 Llama-2-7B 上进行，对比基线包括 Greedy Decoding、Beam Search、Nucleus Sampling、Top-k 采样。评测维度涵盖：**生成质量**（困惑度衡量自然度与连贯性）、**事实性覆盖**（TriviaQA、Natural Questions）、**延迟**（batch size=1 下生成固定长度草稿的墙钟时间）、**人工评测**（Mechanical Turk）、**推理时扩展**。",
+        "SPD 与 Medusa、多 token 预测、投机解码、量化、剪枝、架构优化等效率技术正交：Medusa 需要额外微调解码头，多 token 预测需要重新训练，而 **SPD 开箱即用、无需任何训练**，并且可与其他方法组合，实现普遍覆盖增益。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig03.png",
+            "caption": "Figure 4: compute-normalized 设置下 SPD 与 Nucleus Sampling 的定性文本生成对比（前缀采样自 OpenWebText）。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "结果一：质量与事实覆盖不输基线",
+      "paras": [
+        "**生成质量**：SPD 在 Llama-2-7B 上生成的 k 个草稿，其困惑度与 Nucleus Sampling 相当甚至更低——更自然、更连贯，且能生成一个有连贯多样性的草稿集。这意味着 SPD 并非牺牲质量换速度。",
+        "**事实性覆盖**：与 Greedy Decoding 相比，SPD 的 P@1 精度相当，但在用多草稿时（P@2,3）显著提升事实性覆盖。**在 TriviaQA 和 Natural Questions 上，用 3 个草稿时 SPD 将生成正确答案的概率提升至少 5%。** 对事实型评测任务，多草稿覆盖率的价值特别明显。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "fig04.png",
+            "caption": "Figure 5: SPD 在 P@1 上与 Greedy Decoding 精度相当，并在 TriviaQA/NQ 上通过多草稿（P@2,3）提升事实性覆盖。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "结果二：延迟与人工偏好",
+      "paras": [
+        "**延迟**：在 batch size=1、从 15 token 前缀生成 10 token 草稿的设置下，SPD 的墙钟耗时远低于 Nucleus 等标准解码。**k≥3 时 SPD 至少快 2.44 倍**，且草稿按生成时的概率排序，用户在 compute-normalized 设置下更偏爱 SPD 的输出。",
+        "**人工评测**：经过对大量前缀的广泛人工评测（Mechanical Turk），SPD 的草稿在直接对比（1v1）中与 Nucleus Sampling 同样受青睐，而在 compute-normalized 设置（3v1、3v2）下**偏好度最高领先 20%**。因为 SPD 一次前向生成 3 个草稿，在相同算力下能提供是 Nucleus 数倍的建议多样性。",
+        "**通用性与组合**：SPD 在 Mistral 7B 上同样工作，生成质量与长度与前缀长度鲁棒，且能可靠生成长内容。把 SPD 与 Nucleus Sampling 组合时，随推理时计算扩展获得显著的准确率提升——SPD 生成每个 Nucleus 采样——配对、甚至单个 Nucleus 草稿的多个建议，覆盖增益普遍提升。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig06.png",
+            "caption": "Figure 6: batch size=1、从 15 token 前缀生成 10 token 草稿的平均墙钟时间，SPD 显著快于标准解码。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig07.png",
+            "caption": "Figure 7: 草稿按 SPD 生成时获得的概率排序，在 compute-normalized 设置下胜过 Nucleus Sampling。"
+          }
+        ]
+      }
+    }
+  ],
+  "conclusion": [
+    "Superposed Decoding 的价值在一个看似矛盾的结合：**它同时把「多草稿」和「单次前向」两个目标统一**——所有标准多建议解码方法（Beam Search、Nucleus、Top-k）都必须为每个草稿独立跑一次自回归，而 SPD 用 token 叠加把 k 个草稿的隐态信息压缩进一次前向。这种对 LLM 表征线性性的利用（叠加嵌入≈成分嵌入的真实隐态），是方法成立的前提，也解释了它为何在语义上近似 Beam Search。",
+    "它不追求替换现有解码器，而是作为可正交叠加的层——无需训练、开箱即用，能与 Medusa、投机解码、量化等任一层效率技术组合。当推理算力成为瓶颈、而用户又需要多个建议的场景（补全、草稿、事实覆盖），SPD 以接近免费的代价把建议数从 1 扩到 k，是对投机解码思想（用一次前向买多个 token）在「多个候选轨迹」维度的自然延伸。"
+  ],
+  "reference_url": "https://arxiv.org/html/2405.18400v6"
+}
