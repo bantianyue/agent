@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import json, os, sys
+
+_article_dir = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.getcwd())
+
+DATA = {
+    "title": "SkillSmith：让 LLM 像读文字一样推理自己的权重——把参数化技能和文本知识无缝合成",
+    "summary": [
+        {"key": "核心思想", "body": "把模型权重当作 LLM 能原生推理的另一种模态，用 prefix-tuning 做参数化技能，让 LLM 同时摄入权重和文本完成指令驱动的参数合成"},
+        {"key": "方法亮点", "body": "SkillSmith 端到端直接输出新的 prefix 权重；构造 Composite-SNI 合成组合泛化数据集；retriever 方案应对未知源任务映射"},
+        {"key": "关键结果", "body": "在 Composite-SNI / SNI / MMLU-ProX 上，SkillSmith 显著超过纯文本或纯重量端基线，且作为参数初始化优于 direct 训练"},
+    ],
+    "lead": [
+        "LLM 驱动的 agentic 系统要自主解决复杂问题，靠两条机制：从过往经验合成基于文本的知识与流程，以及为重复出现的子目标构建参数化（权重空间）技能库。**但至今研究基本把两者当作正交追求——要么用文本合成与反思整理知识，要么用权重合并巩固参数化技能；文本与权重在同一个周期内无缝结合、用于针对性性能提升，几乎没被探索。** SkillSmith 弥合这道模态鸿沟：把模型权重当作 LLM 能原生推理的附加模态。它用 prefix-tuning 实例化参数化学习，让增强后的 LLM（即 SkillSmith）同时摄入 prefix 权重和捕获目标能力关系的丰富文本数据，进行指令引导的参数合成，直接输出体现目标技能的新的 prefix 权重。实验表明它显著超过纯文本和纯权重端基线，解锁了单模态适应够不到的性能增益。",
+    ],
+    "sections": [
+        {
+            "type": "h2",
+            "title": "为什么：文本与权重被割裂",
+            "paras": [
+                "LLM 已从静态对话界面演化为 agentic 系统的驱动核心，能解决需要复杂多步推理的问题。这类系统的核心在于能从过往经验学习和适应。当前这种适应由两个强大但各自孤立的机制驱动：**第一是文本知识的合成**——agent 用自然语言（自我反思、结构化记忆、prompt 生成）指导后续推理与规划；**第二是构建参数化技能库**——通过参数高效微调（PEFT）把学到行为固化成可独立检索或合并的模块化权重，以高效处理重复子目标。",
+                "尽管 agentic 研究蓬勃，社区仍把文本推理和参数化技能获得视为正交追求。**我们认为这种割裂限制了 agentic 系统的潜力。** 让 agent 能同时在权重空间和文本上推理，可以解锁跨参数化技能的组合泛化，且组合与泛化的轴能通过指令文本灵活引导。",
+                "举一个具体例子：某个 agent 拥有一套解决各子任务的模型（参数化技能），以及部署它们的丰富文本策略。过去互动中，它在一个会话训练了英译 Twi 语的 prefix-cache，在另一个会话编译了分析英文法律文档的详尽笔记。当遇到新任务（例如分析一份 Twi 语法律文档），agent 推理出解法需要组合既有技能：英译 Twi、Twi 语言建模、法律文档分析。**但尽管 agent 能文本化地表达这种迁移，目前没有任何机制让它把这种推理连同权重空间的翻译技能、Twi 语言技能一起，直接合成为新问题对应的任务权重。**",
+            ],
+            "fig_after": {
+                "2": [{"src": "fig00.png", "caption": "Figure 1: SkillSmith 高层流水线 (i) 与架构 (ii)。由文本和 prefix-cache 权重组成的源任务包——连同说明如何合这些任务包以服务于目标任务的文本理由——作为输入喂给增强 LLM，直接生成将调制下游 LLM 到目标任务的 prefix-cache。"}]
+            }
+        },
+        {
+            "type": "h2",
+            "title": "方法：权重作为可推理模态",
+            "paras": [
+                "这项工作的核心主张：**权重空间输入可以被当作一种附加模态，由适当增强的预训练 LLM 原生处理。** 这个增强 LLM 就是 SkillSmith，被训练成同时在文本和权重空间输入上推理，从而能为下游部署直接生成任务专属的参数化技能。",
+                "具体实现分步：先把**参数化技能学习实例化为 prefix-tuning**（prefix-tuning 生成用于调制下游 LLM 的 prefix 缓存/权重）。然后训练 SkillSmith 摄入两方面：① prefix 权重，连同这些权重所解决问题对应的丰富文本元数据；② 额外文本元数据，捕获（权重）技能与期望目标能力之间的功能关系。**目标能力由高层文本描述或 few-shot 样本指定，SkillSmith 输出的 prefix 权重直接在目标任务上端到端优化**（类似 end-to-end 可微风格）。",
+                "这带来可灵活组合的两条优势：组合轴由指令文本驱动（能针对用户意图调节合成的方向），泛化轴落在权重空间（能直接产出可部署的技能）。SkillSmith 把参数空间当作可读、可合成的模态——这正是它区别于纯文本或纯权重基线的地方。",
+                "论文还梳理了一个重要空白：**现有 PEFT 合并工作几乎聚焦于 LoRA 模块，对 prefix-tuning 的简单合并方法缺乏系统 baseline。** 这篇工作补齐了对 prefix-tuning 的重量端合并方法的全面研究。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig01.png", "caption": "Figure 2: 由协同处理器处理的源任务包的连续表示。"}]
+            }
+        },
+        {
+            "type": "h2",
+            "title": "Composite-SNI：构造组合泛化数据集",
+            "paras": [
+                "要在规模上研究混合模态组合，需要知道任务间 ground-truth 关系的数据集。为此论文贡献了一套**数据生成流程**，产出 Composite-SNI——一个合成的组合泛化数据集。",
+                "方法：系统性提示 Gemini 2.5，从 Super Natural Instructions（SNI）数据集的**两个输入任务**出发，生成需要同时具备这两个任务技能组合的新任务。**这样创造了一个「目标能力对应的真实输入任务已知」的环境**——尤其适合验证 SkillSmith 在已知源选择下能否原样组合技能。",
+                "数据统计颇具规模：**每个生成的组合任务平均约 69 个样本实例，部分任务实例数超过 150；基础 SNI 任务在最终组合任务列表中出现频次差异巨大，有的 SNI 任务出现在超过 200 个组合任务中，但多数平均出现在 48 个下游任务里。** 论文将展示这种合成数据能被有效引导（bootstrap）——在任务数量有限的环境里，用合成数据帮助启动「文本+权重」的组合学习。",
+            ],
+            "fig_after": {
+                "2": [{"src": "fig07.png", "caption": "Figure 8: 基础 SNI 任务出现在最终 composite-SNI 任务列表中的分布统计。部分 SNI 任务出现在 200 多个 composite-SNI 任务中，但多数平均出现在 48 个下游任务里。"}]
+            }
+        },
+        {
+            "type": "h2",
+            "title": "结果：已知源任务下的合成",
+            "paras": [
+                "论文**用 4B Gemma 3 同时作为 SkillSmith 和下游任务求解器**，在 Composite-SNI、SNI、MMLU-ProX 三个数据集上评测。先看有 ground-truth 源任务设置的 Composite-SNI：这能排除近似检索选取源任务带来的噪音，做无混淆的分析。",
+                "**在 15 个 meta-test 任务上，SkillSmith 在合成文本与 prefix-cache 信息、解决新目标能力上显著胜过所有基线**（图3 Elo）。零样本（zero-shot）模式下——在目标任务上做任何直接训练前评测合成的 prefix-cache——SkillSmith 稳定超过全部方案。**这印证了它的核心设计：语言模型能像处理文本一样，原生推理自己的模块化权重。**",
+                "**SNI 与 MMLU-ProX**：SkillSmith 在 SNI 的 10 个严格 heldout meta-test 任务（图4）与 MMLU-ProX 的 6 个 meta-test 任务（图5）上同样获得更高 Elo。图6 用 spider 图对比不同方法在多个维度上的 NLL（越小越好），图7 进一步把 15 个 Composite-SNI meta-test 任务按三类拆解，观察不同方法组的泛化差异。",
+                "**最关键的结论之一是参数初始化优势**：把 SkillSmith 生成的 prefix 权重作为初始参数，在目标任务上进一步微调后，得到的表示**要么优于、要么持平所有其它方法**——包括直接用上下文示例（ICL）初始化后训练 prefix-cache 的方法。也就是说，SkillSmith 提供一个显著更优的针对性适应初始化，让参数空间成为可读、可合成、可扩展的模态。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig02.png", "caption": "Figure 3: 各方法的 Elo 评分，越高越好。在 Composite-SNI 数据集的 15 个 meta-test 任务上，SkillSmith 胜过一批基线。"}],
+                "2": [{"src": "fig03.png", "caption": "Figure 4: Elo 评分在用作 meta-test 的 10 个 SNI 任务上计算。这些任务被严格 heldout，且未参与 CSNI 的构造。检索到有噪音的源任务时 SkillSmith 仍能提取组合相关信号。"}],
+                "3": [{"src": "fig04.png", "caption": "Figure 5: Elo 评分在用作 meta-test 的 6 个 MMLU-ProX 任务上计算。"}]
+            }
+        },
+        {
+            "type": "h2",
+            "title": "retriever 方案：应对未知源映射",
+            "paras": [
+                "真实场景中，目标能力对应的输入任务集往往未知。**论文为此引入一个基于 retriever 的方法：当 set 输入任务到目标能力的 ground-truth 映射未知时**，先检索一组候选源任务，再把它们喂给 SkillSmith。",
+                "在必然引入噪音的 noisy 设置下，**即便没有 ground-truth，合成一组智能挑选的源任务也能提升目标任务性能**（图10）。SkillSmith 仍然能从候选源任务中提取并组合有效信号（如果存在的话），在等条件下生成的 prefix 权重优于基线。",
+                "这增强了 SkillSmith 的实用价值：**它不依赖任务映射的先验知识，而是靠模型对「哪些技能该组合来达成目标」的语义判断**——正是把权重当作文本一样可推理的模态才使得这种判断成为可能。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig09.png", "caption": "Figure 10: 结果证明即使在缺少 ground-truth 时，合成一组智能挑选的源任务也能提升目标任务性能（Elo）。"}]
+            }
+        },
+    ],
+    "conclusion": [
+        "SkillSmith 回答了一个此前近乎空白的问题：参数化技能（权重）和文本知识能否在同一个周期内被模型原生地一起推理、合成。答案是能——**只要把权重当作另一种可读、可推断的模态**。通过 prefix-tuning 实例化参数化技能，并用增强 LLM 同时摄入权重与文本，SkillSmith 把「该组合哪些技能、朝什么方向合成」的判断交给了语言模型本身，输出可端到端优化的新 prefix 权重。",
+        "实验的三层证据相互印证：在已知源任务的干净设置下，SkillSmith 的零样本合成显著超过基线；在 SNI 与 MMLU-ProX 上同样领先；微调后作为初始化的表示优于直接训练。而 retriever 方案在未知映射的噪音场景下依然能提取组合信号，让这套方法从理想化设置走向实用。它提供一个更充分的 agentic 架构蓝图：**参数空间不是被合并的静态资产，而是能被 LLM 阅读和重写的调制介质**——这正是文字与权重两条 agent 学习路径走向融合的方向。",
+    ],
+    "reference_url": "https://arxiv.org/abs/2607.27497",
+    "title": "SkillSmith：让 LLM 像读文字一样推理自己的权重——把参数化技能和文本知识无缝合成",
+}
+
+out_path = os.path.join(_article_dir, "article_data.json")
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 {out_path} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA.get('sections', []))} sections)")
