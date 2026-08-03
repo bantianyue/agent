@@ -1,0 +1,210 @@
+[
+  [
+    "h1",
+    "RL Infra Orchestrator - Part 1: Main Loop"
+  ],
+  [
+    "p",
+    "Over the last year, a lot of the progress in frontier models has come from post-training. Pre-training still does the heavy lifting of teaching a model language and world knowledge, but ever since OpenAI's o1 and DeepSeek-R1, the RL stage that comes after is where a lot of the recent gains show up. It works especially well on verifiable domains like math and coding, and it lifts the model's other capabilities along the way, which is a big part of why tools like Claude Code, Codex, and Cursor feel so good to use. But getting a model to actually improve this way takes a serious amount of infrastructure, and that's where things get hard. Ask anyone who works in RL and they'll tell you the same thing: RL infra is hard."
+  ],
+  [
+    "p",
+    "This is the first post in a series on that infra, and we're starting with the orchestrator. There's enough going on inside it that I'm splitting it across five or six posts: the main loop first, then the dispatcher, weight syncing, how rollouts become training data, and so on. We'll read the actual code as we go, in Prime Intellect's prime-rl , one of my favorite frameworks."
+  ],
+  [
+    "h2",
+    "Three pieces"
+  ],
+  [
+    "p",
+    "The orchestrator only makes sense once you know the two things it sits between, so let's start there. Any RL setup has three parts: inference, the trainer, and the orchestrator."
+  ],
+  [
+    "li",
+    "Inference runs the model. You give it a prompt and it generates the model's response. If the task is single-turn, that's the whole story: prompt in, answer out. If there are tools or multiple turns, it keeps going. The model calls a tool, gets a result back, the environment replies, and the loop continues. That entire trajectory, the prompt plus the model's answers plus the tool calls and environment turns, is called a rollout . This part is usually served by something like vLLM or SGLang."
+  ],
+  [
+    "li",
+    "The trainer takes a batch of rollouts and updates the model. The idea is simple. Rollouts that earned a high reward get pushed up so the model produces more like them, and rollouts that earned a low reward get pushed down so it produces fewer. That's the whole loop: make the good behavior more likely and the bad behavior less likely."
+  ],
+  [
+    "li",
+    "The orchestrator is the piece that holds these two together. It hands prompts to inference, collects the finished rollouts as they come back, passes them to the trainer, and then coordinates pushing the trainer's new weights back onto inference so the model generating rollouts keeps improving."
+  ],
+  [
+    "p",
+    "The hard part is that it does all of this asynchronously. Nothing waits. The trainer keeps training on rollouts as they arrive, and inference keeps generating new ones at the same time, so neither one blocks the other. Keeping both systems in sync continuously, while still finishing training correctly and as fast as possible, is exactly why the orchestrator has so much to do."
+  ],
+  [
+    "h2",
+    "Five components"
+  ],
+  [
+    "p",
+    "So far we've been talking about the orchestrator like it's one thing, but it's really just a small set of components that each do one job. The orchestrator's whole role is to build these in setup() and then drive them. None of them know about each other, the orchestrator is the only thing that wires them together. There are five worth knowing:"
+  ],
+  [
+    "li",
+    "RolloutDispatcher. This is the scheduler. It decides which prompts to run next, sends them off to the inference engine through the verifiers environment, and as each rollout finishes it drops it onto a queue for the rest of the pipeline to pick up. Think of it as the thing keeping inference busy, it always tries to have as much work in flight as capacity allows."
+  ],
+  [
+    "li",
+    "TrainSink. This takes the finished rollouts and turns them into actual training data. That means tokenizing them, computing advantages (the reward signal the trainer learns from), and filtering out the junk. It collects rollouts as they arrive and, once it has enough to form a full batch, hands that batch back to be shipped to the trainer."
+  ],
+  [
+    "li",
+    "EvalSink. The same idea as the TrainSink, but for evaluation. It gathers the rollouts from an eval run and packages them up so we can measure how the model is doing, without any of the advantage or filtering logic since we're not training on them."
+  ],
+  [
+    "li",
+    "WeightWatcher. This one runs in the background and does a single thing: it watches for the trainer to publish new weights. The moment a new version shows up, it tells inference to reload, and bumps the shared policy version so the rest of the system knows we've moved a step forward. It's basically checking every second, \"are there new weights yet?\""
+  ],
+  [
+    "li",
+    "PeriodicLogger. The bookkeeper. On a fixed interval it collects the health stats of the whole pipeline, things like queue depth, how far ahead we are, how long each stage is taking, and logs them out to the console and to wandb. It doesn't affect training at all, it just gives you a live view of what the pipeline is doing."
+  ],
+  [
+    "p",
+    "All five get constructed in setup() , and it's worth seeing them side by side, because it makes the wiring concrete. Notice how they all get handed the same shared objects, self.policy , self.policy_inference , self.train_envs , that's how these otherwise independent pieces stay in sync:"
+  ],
+  [
+    "p",
+    "self . dispatcher = RolloutDispatcher ( train_envs = self . train_envs , eval_envs = self . eval_envs , policy_pool = self . policy_inference , policy = self . policy , max_inflight_rollouts = config . max_inflight_rollouts , ... ) self . train_sink = TrainSink ( config , tokenizer = self . tokenizer , train_envs = self . train_envs , batch_size = config . batch_size , ... ) self . eval_sink = EvalSink ( eval_envs = self . eval_envs ) if self . eval_envs is not None else None self . watcher = WeightWatcher ( config , policy = self . policy , inference = self . policy_inference , observers = [ self . dispatcher , self ], ... ) self . periodic_logger = PeriodicLogger ( name = \"Pipeline\" , collect = self . collect_pipeline_view , ... ) ( orchestrator.py:397 )"
+  ],
+  [
+    "p",
+    "So \"the orchestrator\" is really these five pieces plus the loop that drives them. The rest of this post is how they fit together."
+  ],
+  [
+    "h2",
+    "start()"
+  ],
+  [
+    "p",
+    "start() is the entry point. It first calls setup() , which builds and wires the five components (that's the construction code we just saw). It's mostly wiring, so we won't walk it line by line. The important part comes next: start() launches four things to run in the background at once:"
+  ],
+  [
+    "p",
+    "self . lag_task = asyncio . create_task ( self . lag_monitor . run (), name = \"event_loop_lag\" ) await self . periodic_logger . start () self . component_tasks = [ asyncio . create_task ( self . dispatcher . start (), name = \"dispatcher\" ), asyncio . create_task ( self . watcher . start (), name = \"watcher\" ), ] ( orchestrator.py:465 )"
+  ],
+  [
+    "p",
+    "The key thing here is asyncio.create_task . A normal function call blocks until it finishes. create_task is different: it schedules a coroutine to run in the background and returns immediately, so the next line runs right away. So these four, the lag monitor, the periodic logger, the dispatcher, and the watcher, all get kicked off and run concurrently on the same event loop, not one after another. That's what makes it asynchronous: the dispatcher generates rollouts, the watcher checks for weights, and neither waits on the other."
+  ],
+  [
+    "p",
+    "Once those background tasks are up, start() runs the main loop:"
+  ],
+  [
+    "p",
+    "await self . main_loop () ( orchestrator.py:484 )"
+  ],
+  [
+    "p",
+    "This is the fifth thing running alongside the other four, and it's where training actually happens: pull finished rollouts, batch them, ship them to the trainer, over and over. Let's break it down."
+  ],
+  [
+    "h2",
+    "main_loop()"
+  ],
+  [
+    "p",
+    "The main loop is really just one while loop that runs until the run is over:"
+  ],
+  [
+    "p",
+    "while not self . stopped . is_set (): ( orchestrator.py:507 )"
+  ],
+  [
+    "p",
+    "self.stopped is a flag. As long as nobody has set it, the loop keeps going. When training is finished (or something asks it to shut down), that flag gets set and the loop exits. So everything below happens over and over, once per trip around the loop."
+  ],
+  [
+    "p",
+    "The first real thing each trip does is grab a finished episode from the dispatcher:"
+  ],
+  [
+    "p",
+    "episode = await asyncio . wait_for ( self . dispatcher . out_q . get (), timeout = 0.5 ) ( orchestrator.py:518 )"
+  ],
+  [
+    "p",
+    "The dispatcher runs in the background dropping finished rollouts onto a queue, and here the main loop pulls one off. \"Finished\" means fully done: every turn played out, tools called, environment replied, the whole trajectory complete. How the dispatcher decides what to run is its own topic, so we'll get to it in a later post. For now: one completed episode comes out of this line."
+  ],
+  [
+    "p",
+    "(The timeout=0.5 just means if nothing shows up in half a second, the loop goes around again and re-checks the stop flag, so it never blocks forever.)"
+  ],
+  [
+    "p",
+    "Next, every rollout in that episode gets stamped with its metadata:"
+  ],
+  [
+    "p",
+    "for rollout in episode : rollout . stamp ( run , env_name =... , group_id =... , episode_id =... , policy_version =... ) ( orchestrator.py:534 )"
+  ],
+  [
+    "p",
+    "This is where each rollout gets tagged with the things we'll need to know about it later: which environment it came from, which group it belongs to, its episode id, and which policy version generated it. That last one, the policy version, matters a lot later when we figure out how \"stale\" a rollout is, but for now it's just labeling. Every rollout that flows through the system carries these tags from here on."
+  ],
+  [
+    "p",
+    "Then the episode gets handed to the right sink. If it's an eval episode it goes to the eval sink, and if it's a train episode it goes to the train sink. The train case is the one we care about:"
+  ],
+  [
+    "p",
+    "train_batch = await self . train_sink . add ( episode ) if train_batch is not None and not self . draining and not self . stopped . is_set (): await self . finalize_train_batch ( train_batch ) ( orchestrator.py:555 )"
+  ],
+  [
+    "p",
+    "Most of the time add() returns nothing, because the sink is still collecting rollouts and doesn't have a full batch yet. But every so often the episode we just added is the one that fills the batch up. When that happens, add() hands back a complete TrainBatch , and we call finalize_train_batch on it. That's the moment a batch is ready to go to the trainer."
+  ],
+  [
+    "h2",
+    "finalize_train_batch()"
+  ],
+  [
+    "p",
+    "This is the function that actually ships a batch to the trainer, and it's the most important function in the loop. A batch only gets here once the sink has collected enough rollouts to be full, so this runs roughly once per training step. A few steps inside it are worth calling out:"
+  ],
+  [
+    "li",
+    "Draining at the end of training ( orchestrator.py:576 ). If we've already produced all the steps we were asked to ( max_steps ), we don't ship this batch. Instead we flip into \"drain\" mode and stop making new train rollouts, because we don't want to overshoot. This is the graceful wind-down at the end of a run."
+  ],
+  [
+    "li",
+    "The empty-batch guard ( orchestrator.py:586 ). Sometimes a batch comes back with nothing trainable in it (everything got filtered out). We count those, and if we get ten empty batches in a row we stop the run, because something is clearly wrong. Otherwise a bad env could silently spin forever producing nothing."
+  ],
+  [
+    "li",
+    "The version hold, the important one ( orchestrator.py:613 ). This is the heart of the whole async design. Before shipping batch number step , the orchestrator checks that the trainer has actually caught up. Specifically it waits until the trainer has published policy version step - 1 - TARGET_LAG . If the trainer is behind, this line just parks and waits for it. required_version = step - 1 - TARGET_LAG if not config . bench and self . policy . version < required_version : while True : self . version_advanced . clear () if self . policy . version >= required_version : break await self . version_advanced . wait () That while loop is the \"parking.\" It sleeps until the weight watcher signals that a new policy version landed, wakes up, checks whether the trainer has caught up to required_version , and if not, goes back to waiting. Remember self.policy is the shared object, so the moment the watcher bumps the version, this loop sees it. TARGET_LAG is set to 1, so the orchestrator runs exactly one step ahead of the trainer and no further. Why one? The bigger the lag, the older the weights that generated your rollouts, so the data drifts further from the policy you're training. A lag of one is the smallest gap that still lets generation and training overlap instead of taking turns. The exact number is more a tuning knob than a hard rule, but that's the intuition: enough lag to keep both sides busy, not so much that the data goes stale."
+  ],
+  [
+    "li",
+    "Stamping how stale each rollout is ( orchestrator.py:627 ). This is worth slowing down on, because it's where the term \"off-policy\" actually shows up. Here is the situation. Inference generates a rollout using whatever policy version it currently has loaded, say version 3. But by the time that rollout works its way through the pipeline and the trainer actually trains on it, the policy might already be on version 4 or 5. So the rollout was produced by an older version of the model than the one being updated. That is exactly what \"off-policy\" means: the data wasn't generated by the current policy, it was generated by an earlier one. This line measures that gap for each rollout: for r in batch . rollouts : if self . train_envs . get ( r . env_name ) . sampler . samples_from_live_policy : r . off_policy_steps = ( step - 1 ) - r . policy_version It takes the current step and subtracts the version that generated the rollout, and that number is how many versions stale the rollout is. It even counts the time the rollout spent sitting in the queue, because the policy can move forward while a rollout is just waiting to be processed. This staleness number isn't cosmetic. The trainer needs it to correct for the fact that the data is slightly off-policy, so a rollout that's more stale gets weighted differently from a fresh one. We're not doing that correction here, we're just tagging each rollout with how old it is so the trainer can."
+  ],
+  [
+    "li",
+    "Shipping the batch ( orchestrator.py:644 ). This is the actual handoff to the trainer: await self . sender . send ( TrainingBatch ( examples = batch . samples , step = step )) self . progress . step += 1 self . update_dispatch_gate () In order: just above these lines it saves the trained-on rollouts to disk for the record, then it sends the TrainingBatch to the trainer (the real payload, tokenized rollouts with their advantages and staleness tags), bumps the step counter so the orchestrator is now on the next step, and re-checks the dispatch gate, the throttle that pauses the dispatcher if it's getting too far ahead. Then the loop goes back around for the next batch."
+  ],
+  [
+    "h2",
+    "Finishing the run"
+  ],
+  [
+    "p",
+    "The loop runs like that until we hit max_steps . Then the orchestrator flips into drain mode (the draining step from earlier) and stops making new train rollouts, but keeps running the loop to let in-flight work finish. Once the pipeline is empty, it sets the stop flag and breaks out."
+  ],
+  [
+    "p",
+    "Then it writes a final checkpoint so you can resume later, and shuts down the background tasks and inference connections. Cleanup gets a few minutes; if something wedges, it force-kills the process, since everything important is already on disk."
+  ],
+  [
+    "p",
+    "And that's the orchestrator. Strip away the details and it's a surprisingly simple idea: five decoupled components, three background loops, and one main loop that pulls finished rollouts, batches them, and ships them to the trainer, all while never letting itself drift more than one step ahead. Everything we glossed over, how the dispatcher actually schedules rollouts, how weights get from the trainer back onto inference, how a raw rollout becomes tokenized training data, is a piece hanging off this same loop."
+  ],
+  [
+    "p",
+    "Thanks for reading — if you made it all the way down here, I appreciate it."
+  ]
+]
