@@ -1,0 +1,109 @@
+{
+  "title": "RL Infra Orchestrator 主循环：异步训练基础设施的设计解剖",
+  "summary": [
+    {
+      "key": "核心对象",
+      "body": "orchestrator 夹在 inference（跑模型出 rollout）和 trainer（用 rollout 更新模型）之间，异步手递手"
+    },
+    {
+      "key": "五大组件",
+      "body": "RolloutDispatcher（调度）、TrainSink（收训练数据的输出）、EvalSink、WeightWatcher（后台盯权重文件）、PeriodicLogger（记账）"
+    },
+    {
+      "key": "主循环",
+      "body": "一个 while 循环 + asyncio 任务，从队列取 episode、打戳、路由到 sink，finalize_train_batch 负责把批次真正送到 trainer"
+    }
+  ],
+  "lead": [
+    "过去一年，前沿模型的大量进展来自 post-training。预训练仍然承担着教模型语言和世界知识的主要工作，但自从 OpenAI 的 o1 和 DeepSeek-R1 之后，后续的 RL 阶段才是近期大量提升出现的地方。它在数学和编程等可验证领域尤其有效，还顺带提升了模型的其他能力，这正是 Claude Code、Codex、Cursor 等工具用起来如此顺手的重要原因。但要让模型真正以这种方式改进，需要大量的基础设施，难点就在这里。问任何一个做 RL 的人，他们都会告诉你同样的话：RL 基础设施很难。",
+    "这套基础设施，我们从 orchestrator 讲起。它内部有足够多的内容，我打算拆成五六篇来写：先是主循环，然后是 dispatcher、权重同步、rollout 如何变成训练数据，等等。我们会一边读实际代码一边讲，代码来自 Prime Intellect 的 prime-rl，这是我最喜欢的框架之一。"
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "三块拼图",
+      "paras": [
+        "只有了解了 orchestrator 所连接的两端，才能真正理解它，所以先从这里开始。任何 RL 架构都包含三部分：inference、trainer 和 orchestrator。",
+        "inference 负责运行模型。给它一个 prompt，它就生成模型的响应。如果任务是单轮，整个过程就这些：prompt 进，答案出。如果有工具调用或多个轮次，它会继续下去。模型调用工具、拿到结果、环境回复，循环继续。完整的轨迹——prompt 加上模型的回答，再加上工具调用和环境轮次——被称为 rollout。这一部分通常由 vLLM 或 SGLang 这样的引擎承担。",
+        "trainer 接收一批 rollout 并更新模型。思路很简单：获得高奖励的 rollout 会被推高，让模型更多地产出类似结果；获得低奖励的 rollout 会被压低，让模型减少这类产出。整个循环就这些：让好行为更可能发生，坏行为更不可能发生。",
+        "orchestrator 是把这两者结合在一起的组件。它把 prompt 交给 inference，收集返回的已完成 rollout，传给 trainer，然后协调把 trainer 的新权重推回 inference，让生成 rollout 的模型持续改进。",
+        "难点在于这一切都是异步进行的。谁都不等待。trainer 持续用陆续到达的 rollout 训练，inference 同时持续生成新的 rollout，两者互不阻塞。一边持续保持两个系统同步，一边还要正确且尽可能快地完成训练——这正是 orchestrator 有这么多事情要做的原因。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "五个组件",
+      "paras": [
+        "到目前为止，我们一直把 orchestrator 当作一个单一组件来讨论，但它实际上只是一小组各司其职的组件。orchestrator 的全部职责就是在 setup() 中构建它们，然后驱动它们。组件之间互不知晓彼此，orchestrator 是唯一把它们串联起来的东西。其中有五个值得了解：",
+        "RolloutDispatcher。这是 scheduler。它决定接下来运行哪些 prompts，通过 verifiers environment 将它们发送到 inference engine，并在每个 rollout 完成时将其放到 queue 上，供 pipeline 的其余部分拾取。可以把它看作是让 inference 保持繁忙的组件：它总是尝试在 capacity 允许的情况下，让尽可能多的 work 处于 in flight 状态。",
+        "TrainSink。它接收完成的 rollouts，并将它们转换为实际的 training data。这意味着对它们进行 tokenizing，计算 advantages（trainer 学习所用的 reward signal），并过滤掉无用内容。它会在 rollouts 到达时收集它们，一旦收集到足够组成一个完整 batch 的量，就将该 batch 交回，以便发送给 trainer。",
+        "EvalSink。与 TrainSink 的思路相同，但用于 evaluation。它从一次 eval run 中收集 rollouts 并打包，以便我们衡量 model 的表现，不包含任何 advantage 或 filtering 逻辑，因为我们不基于它们进行训练。",
+        "WeightWatcher。它在后台运行，只做一件事：监视 trainer 发布新的 weights。一旦新版本出现，它就会告诉 inference 重新加载（reload），并提升共享的 policy version，以便系统其余部分知道我们又前进了一步。它基本上每秒检查一次：“是否有新的 weights？”",
+        "PeriodicLogger。记账员（bookkeeper）。它按固定间隔收集整个 pipeline 的健康统计信息，例如 queue depth、我们领先多少、每个阶段耗时多少，并将它们记录到 console 和 wandb。它完全不影响 training，只是让你实时了解 pipeline 正在做什么。",
+        "这五个都在 setup() 中构造，值得并排查看，因为它让 wiring 变得具体。注意它们都被传递了相同的共享对象：self . policy , self . policy_inference , self . train_envs , 这就是这些原本独立的组件保持同步的方式：",
+        "self . dispatcher = RolloutDispatcher ( train_envs = self . train_envs , eval_envs = self . eval_envs , policy_pool = self . policy_inference , policy = self . policy , max_inflight_rollouts = config . max_inflight_rollouts , ... ) self . train_sink = TrainSink ( config , tokenizer = self . tokenizer , train_envs = self . train_envs , batch_size = config . batch_size , ... ) self . eval_sink = EvalSink ( eval_envs = self . eval_envs ) if self . eval_envs is not None else None self . watcher = WeightWatcher ( config , policy = self . policy , inference = self . policy_inference , observers = [ self . dispatcher , self ], ... ) self . periodic_logger = PeriodicLogger ( name = \"Pipeline\" , collect = self . collect_pipeline_view , ... ) ( orchestrator.py:397 )",
+        "因此，“the orchestrator”实际上就是这五个组件加上驱动它们的 loop。本文其余部分介绍它们如何组合在一起。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "start()",
+      "paras": [
+        "start() 是入口点。它首先调用 setup()，该函数构建并连接五个组件（就是我们刚看到的构造代码）。它主要是连接工作，所以我们不会逐行讲解。接下来是重要部分：start() 一次性启动四个在后台运行的任务：",
+        "self . lag_task = asyncio . create_task ( self . lag_monitor . run (), name = \"event_loop_lag\" ) await self . periodic_logger . start () self . component_tasks = [ asyncio . create_task ( self . dispatcher . start (), name = \"dispatcher\" ), asyncio . create_task ( self . watcher . start (), name = \"watcher\" ), ] ( orchestrator.py:465 )",
+        "这里的关键是 asyncio.create_task。普通函数调用会阻塞直到完成。create_task 不同：它将协程调度到后台运行并立即返回，所以下一行会立刻执行。因此这四个任务——lag monitor、periodic logger、dispatcher 和 watcher——都会被启动并在同一事件循环上并发运行，而不是一个接一个地执行。这正是异步的原理：dispatcher 生成 rollouts，watcher 检查权重，两者互不等待。",
+        "当这些后台任务启动后，start() 运行主循环：",
+        "await self . main_loop () ( orchestrator.py:484 )",
+        "这是与另外四个任务并行的第五个任务，也是训练实际发生的地方：反复拉取完成的 rollouts、分批打包、发送给 trainer。让我们来分解一下。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "main_loop()",
+      "paras": [
+        "主循环实际上就是一个 while 循环，循环直到运行结束：",
+        "while not self . stopped . is_set (): ( orchestrator.py:507 )",
+        "self.stopped 是一个标志。只要没有人设置它，循环就会继续。当训练结束（或有东西要求它关闭）时，该标志被设置，循环退出。因此，下面的所有内容一遍又一遍地发生，每次循环一圈执行一次。",
+        "每轮循环真正要做的第一件事，是从 dispatcher 中取出一个已完成的 episode：",
+        "episode = await asyncio . wait_for ( self . dispatcher . out_q . get (), timeout = 0.5 ) ( orchestrator.py:518 )",
+        "dispatcher 在后台运行，将已完成的 rollout 放入队列，主循环在这里取出一个。“完成”意味着完全结束：每个回合都已执行完毕，工具被调用，环境给出回复，整个 trajectory 完整。dispatcher 如何决定运行什么是一个独立的话题，我们将在后续文章中讨论。目前：这一行会产出一个完整的 episode。",
+        "（timeout=0.5 只是表示如果半秒内没有内容，循环就会再次执行并重新检查停止标志，因此它永远不会永久阻塞。）",
+        "接下来，该 episode 中的每个 rollout 都会被标记上其 metadata：",
+        "for rollout in episode : rollout . stamp ( run , env_name =... , group_id =... , episode_id =... , policy_version =... ) ( orchestrator.py:534 )",
+        "这是为每个 rollout 打上我们稍后会需要的各种标签的地方：它来自哪个 environment、属于哪个 group、它的 episode id，以及由哪个 policy version 生成。最后一项 policy version 在之后判断 rollout 有多“陈旧”（stale）时非常重要，但目前只是打标签。从此刻起，系统中流经的每个 rollout 都会携带这些标签。",
+        "然后该 episode 会被交给对应的 sink。如果是 eval episode，就进入 eval sink；如果是 train episode，就进入 train sink。我们关心的是 train 的情况：",
+        "train_batch = await self . train_sink . add ( episode ) if train_batch is not None and not self . draining and not self . stopped . is_set (): await self . finalize_train_batch ( train_batch ) ( orchestrator.py:555 )",
+        "大多数情况下，add() 不会返回任何内容，因为 sink 仍在收集 rollouts，尚未凑齐一个完整的 batch。但偶尔，我们刚刚加入的 episode 恰好填满了 batch。这时，add() 会返回一个完整的 TrainBatch，然后我们对它调用 finalize_train_batch。这就是一个 batch 准备送往 trainer 的时刻。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "finalize_train_batch()",
+      "paras": [
+        "这个函数真正把一个 batch 发送给 trainer，是整个循环中最重要的函数。只有在 sink 收集到足够多的 rollout 并填满 batch 后，batch 才会到达这里，因此它大约每个训练步运行一次。其中有几个步骤值得指出来：",
+        "训练结束时的 draining（orchestrator.py:576）。如果我们已经完成了要求的所有步骤（max_steps），就不再发送这个 batch，而是切换到 \"drain\" 模式，并停止生成新的 train rollout，因为我们不想超出目标。这是运行结束时优雅的收尾过程。",
+        "空 batch 保护（orchestrator.py:586）。有时一个 batch 中没有任何可训练的内容（所有内容都被过滤掉了）。我们会统计这种情况，如果连续出现十个空 batch，就停止运行，因为显然出了问题。否则，一个坏 env 可能会无声地一直空转，什么也不产出。",
+        "版本保持，这是最重要的一个（orchestrator.py:613）。它是整个异步设计的核心。在发送编号为 step 的 batch 之前，orchestrator 会检查 trainer 是否真的跟上了。具体来说，它会一直等到 trainer 发布了策略版本 step - 1 - TARGET_LAG。如果 trainer 落后了，这一行就只是停驻等待。required_version = step - 1 - TARGET_LAG if not config . bench and self . policy . version < required_version : while True : self . version_advanced . clear () if self . policy . version >= required_version : break await self . version_advanced . wait () 那个 while 循环就是所谓的 \"parking\"。它会休眠，直到 weight watcher 发出新策略版本已到达的信号，然后醒来，检查 trainer 是否已经追上 required_version，如果没有，就再回去等待。记住 self.policy 是共享对象，所以 watcher 一更新版本，这个循环就能看到。TARGET_LAG 设为 1，所以 orchestrator 恰好领先 trainer 一步，不会更多。为什么是一步？滞后越大，生成 rollout 时所使用的权重就越旧，数据与你正在训练的策略之间的漂移就越大。滞后为 1 是仍然可以让生成和训练重叠而不是交替进行的最小间隔。确切的数字更像是一个调优旋钮，而不是硬性规则，但直觉是这样的：足够的滞后让双方都保持忙碌，但又不能太多让数据变得过时。",
+        "标记每个 rollout 有多陈旧（orchestrator.py:627）。这一点值得放慢节奏来理解，因为 \"off-policy\" 这个词正是在这里出现的。情况是这样的：推理使用当前加载的策略版本（比如说版本 3）生成一个 rollout。但当这个 rollout 走完流水线、trainer 真正基于它训练时，策略可能已经到了版本 4 或 5。所以这个 rollout 是由比当前更新模型更旧的版本生成的。这正是 \"off-policy\" 的含义：数据并非由当前策略生成，而是由更早的策略生成。这一行对每个 rollout 度量这个差距：for r in batch . rollouts : if self . train_envs . get ( r . env_name ) . sampler . samples_from_live_policy : r . off_policy_steps = ( step - 1 ) - r . policy_version 它取当前步数，减去生成该 rollout 的版本，得到的就是这个 rollout 过时了多少个版本。它甚至把 rollout 在队列中等待的时间也算进去了，因为当一个 rollout 在等待处理时，策略也可能向前推进。这个陈旧度数不是装饰性的。trainer 需要它来校正数据略微 off-policy 的事实，因此更陈旧的 rollout 与新鲜的 rollout 会被赋予不同的权重。我们在这里不做这种校正，只是给每个 rollout 打上年龄标签，供 trainer 使用。",
+        "发送批次（orchestrator.py:644）。这就是实际交接到 trainer 的过程：await self . sender . send ( TrainingBatch ( examples = batch . samples , step = step )) self . progress . step += 1 self . update_dispatch_gate () 按顺序：就在这几行上面，它把已训练过的 rollouts 保存到磁盘作为记录，然后发送 TrainingBatch 给 trainer（真正的负载，即带有优势值和陈旧标记的 tokenized rollouts），推进 step 计数器使 orchestrator 进入下一步，并重新检查 dispatch gate——这个节流阀会在 dispatcher 领先太多时暂停它。然后循环回到开头处理下一个批次。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "运行收尾",
+      "paras": [
+        "循环就这样一直运行，直到达到 max_steps。然后 orchestrator 切换至 drain 模式（即之前的 draining 步骤），不再生成新的训练 rollout，但会继续运行循环，让进行中的工作完成。一旦管道清空，就设置停止标志并跳出循环。",
+        "然后写入最终 checkpoint，以便之后恢复，并关闭后台任务和推理连接。清理过程需要几分钟；如果某个环节卡住，它会强制终止进程，因为所有重要数据都已写入磁盘。",
+        "这就是 orchestrator 的全部。去掉细节后，这是一个出人意料的简单思路：五个解耦组件、三个后台循环，以及一个主循环——拉取完成的 rollout，打包成批次，发送给 trainer，同时始终不让自己领先超过一步。我们略过的所有内容——dispatcher 实际如何调度 rollout、权重如何从 trainer 回到推理端、原始 rollout 如何变成 tokenized 训练数据——都是挂在这个循环上的一个环节。",
+        "感谢阅读——如果你能一路看到这里，我非常感激。"
+      ]
+    }
+  ],
+  "conclusion": [
+    "循环就这样一直运行，直到达到 max_steps。然后 orchestrator 切换至 drain 模式（即之前的 draining 步骤），不再生成新的训练 rollout，但会继续运行循环，让进行中的工作完成。一旦管道清空，就设置停止标志并跳出循环。",
+    "然后写入最终 checkpoint，以便之后恢复，并关闭后台任务和推理连接。清理过程需要几分钟；如果某个环节卡住，它会强制终止进程，因为所有重要数据都已写入磁盘。",
+    "这就是 orchestrator 的全部。去掉细节后，这是一个出人意料的简单思路：五个解耦组件、三个后台循环，以及一个主循环——拉取完成的 rollout，打包成批次，发送给 trainer，同时始终不让自己领先超过一步。我们略过的所有内容——dispatcher 实际如何调度 rollout、权重如何从 trainer 回到推理端、原始 rollout 如何变成 tokenized 训练数据——都是挂在这个循环上的一个环节。",
+    "感谢阅读——如果你能一路看到这里，我非常感激。"
+  ],
+  "reference_url": "https://vivekvkashyap.github.io/posts/rl-infra-orchestrator-part-1.html"
+}
