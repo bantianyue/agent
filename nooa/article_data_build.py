@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import json, os, sys
+
+_article_dir = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.getcwd())
+
+DATA = {
+    "title": "NVIDIA NOOA：把 Agent 当 Python 对象写——方法即动作、docstring 即 prompt、类型注解即契约",
+    "summary": [
+        {"key": "核心范式", "body": "Agent 是一个 Python 对象：方法=动作、字段=状态、docstring=prompt、类型注解=契约，开发者与模型共用同一套编程模型"},
+        {"key": "五种 Pythonic 表达", "body": "复用 Python 抽象、agentic loop 当方法调用、确定性工作移出 loop、解锁模型的 Python 知识、harness 暴露为显式 API"},
+        {"key": "实验结果", "body": "能力测试 97.9% 通过率；SWE-bench Verified 82.2%；ARC-AGI-3 单 agent+一页 skill 达 50.2%，推进分数-成本前沿"},
+    ],
+    "lead": [
+        "传统 Agent 开发被拆散在 prompt 模板、工具 schema、回调代码和工作流图里。**NVIDIA Object-Oriented Agents（NOOA）提出更简单的做法：Agent 就是一个 Python 对象。** 它的方法就是模型能执行的动作，字段就是它的状态，docstring 就是 prompt，类型注解就是契约。方法体是 `...` 的在运行时由 LLM 驱动的 agent loop 补全，方法体正常的方法就是标准确定性 Python。**开发者和 Agent 用同一个接口，所以 agent 行为可以像其他软件一样被测试、追踪、重构、改进。**",
+    ],
+    "sections": [
+        {
+            "type": "h2",
+            "title": "为什么：Agent 框架的抽象负担",
+            "paras": [
+                "随着对 AI agent 兴趣的增长，agent 开发工具包爆发式涌现，每个都有自己的开发者侧和模型侧抽象。这些系统暴露了实用的原语——工具、记忆、工作流、交接、追踪、代码执行——但**往往把 agent 源码拆散在 prompt 模板、schema、回调、配置文件、编排代码里**。因此学一个新 agent 框架，常常意味着为那些在普通编程语言里已有成熟对等物的能力（类型化接口、变量作用域、控制流、异步执行、对象状态）再学一套新编程模型。这些抽象不但对开发者熟悉，也广泛出现在模型训练数据里。",
+                "**NOOA 受 PyTorch 启发**——PyTorch 证明了强大的运行时也能给用户呈现简单的 Python 编程模型。NOOA 把同一概念用到 agent 上：Python 已有正确抽象的地方，NOOA 就直接用。Agent 动作、辅助逻辑、harness 扩展点都是普通 Python 程序，对开发者熟悉、贴近 LLM 训练过的代码分布、因此编码 agent 能直接理解。对于 agent 特有、在标准 Python 没有对应物的概念（context 构造、事件历史、模型可见状态），NOOA 用简单 Pythonic API 暴露。**这带来双重好处：消除人类学习曲线，同时保证 agent 即时就绪。**",
+                "论文的三项贡献：① 提出「agent-as-a-Python-object」编程模型与设计原则；② 识别出六个模型侧能力（NOOA 是首个把它们组合到同一界面的）：类型化 I/O、live 对象上的传引用、代码即动作、可编程 loop 工程、显式对象状态、模型可调用的 context/events harness API；③ 证明当前模型能有效使用这个界面——针对性能力测试 + SWE-bench Verified + Terminal-Bench 2.0，并在 ARC-AGI-3 交互推理基准上把多 agent 世界模型系统压进单个 agent + 一页 skill，同时推进分数-成本帕累托前沿。",
+            ],
+            "fig_after": {
+                "2": [{"src": "fig00.png", "caption": "Figure 5: NOOA 记忆系统。MemoryManager.install(agent) 把记忆挂到未修改的 agent 上；agent 通过七种工具（写入为绿色、主动检索为蓝色）自建自己的存储。"
+                }]
+            }
+        },
+        {
+            "type": "h2",
+            "title": "设计原则：五条",
+            "paras": [
+                "**P1. 复用 Python 抽象**：已有成熟 Python 抽象就直接采用，而非引入 DSL。类定义 agent、方法定义能力、字段持有显式模型可见的持久状态、类型注解定义契约、asyncio 表达并发、异常传达失败、控制流是普通 Python——开发者与 agent 都可用。",
+                "**P2. 把 agentic loop 重构成方法调用**：应用层看到一个 agentic loop，就是一次带类型化输入/输出的普通 Python 方法调用，而非无结构的文本交换。参数以 live Python 对象的引用方式传入，harness 渲染有界的预览和 context、把参数和对象状态注入 loop，并在返回给调用者前校验返回值。",
+                "**P3. 把确定性工作移出 agentic loop**：LLM 擅长语义判断、综合、开放式任务；精确规则、算术、解析、状态转移应放进确定性方法。这个边界在代码里局部可见：真实方法体做确定性工作，省略号（`...`）方法体做 agentic loop。",
+                "**P4. 解锁模型已有的 Python 知识**：LLM 已经会写 Python、会用流行的 Python 库。让模型写普通 Python 而非工具调用，NOOA 利用了这份知识。CodeAct 代码可以用普通循环与条件、asyncio 并发、数据库客户端查询、绘图库可视化、普通 import 扩展——无需定制 prompt、读文档或学新 DSL。这让 NOOA 异常易用，同时最大化 agent 就绪度。",
+                "**P5. 把 harness 暴露为显式 API**：agent 特有的概念——结构化 context、context 渲染、事件历史——作为 Python API 暴露给开发者和模型。接口尽量镜像内置类型或现有库，使其熟悉且显然。Agent 能访问自己的 context，并通过 Pythonic 原语管理它。",
+                "完整 Agent 就是一个 Python 类——同时是源码、prompt 表面、类型契约、工具接口、状态边界。方法体含 `...` 的成为 agentic 方法（harness 以 LLM 驱动的 loop 运行它）；普通方法体是按原样执行的确定性 Python。",
+            ],
+            "fig_after": {
+                "2": [{"src": "fig02.png", "caption": "Figure 8: ARC-AGI-3 舰队中的记忆参与（25 个游戏；一个决策=一次以 submit_actions 结尾的 agent 轮）。左：每决策的主动检索次数对性能；右：每决策的记忆写入对性能。"}]
+            }
+        },
+        {
+            "type": "h2",
+            "title": "Agent Loop：strategies 与 Pythonic 表达",
+            "paras": [
+                "NOOA agent 是暴露模型可调用行为的 Python 对象，通过类型化方法、字段、docstring。开发者也用普通 Python 写它。运行时 harness 直接执行普通方法，把省略号方法体实现为 LLM loop。**NOOA 通过 strategies 实现 agentic 方法**：strategy 以装饰器声明，保留方法普通 Python 签名与类型化边界，但控制其 agentic 执行——渲染什么 context、如何执行轮次、如何校验候选输出。strategy 是逐方法的，也是扩展点。",
+                "内置两个 strategy：**Predict** 是单次 strategy，适合分类或提取——渲染 context、让模型给一个值、按 Python 返回类型校验输出，失败时跑本地重试 loop。**CodeAct** 把同一契约推广为迭代式 Python REPL——模型可调用 `execute_python(...)` 计算、检查内部 agent 状态、调用辅助函数或其它生成方法；harness 记录观测、重渲染更新后的状态、重复，直到模型以类型校验通过的值调用 `return_result(...)`。同一个 agent 可混合两种 strategy，按任务给每个方法选合适的执行模式。",
+                "**方法声明规定了 loop**：签名给模型结构化输入与输出校验契约、docstring 成为 prompt、self 上的方法和导入的库成为可调用工具。**输入不限于文本**——例如 triage 收到一张图片和一个 live Order 对象，按引用而非序列化进 prompt 传入。这把 prompt 工程拉回软件工程——行为可被测试、追踪、重构、版本化、优化。",
+                "模型调用 agentic 方法时同 agent 内串行化，独立调用不交错轮次；嵌套同 agent 调用遵循栈纪律（调用者暂停直到被调者返回，两者追加到同一事件历史）；其它方法和其他 agent 在 Python 标准 async/await 并发模型下并行。",
+            ],
+            "fig_after": {
+                "2": [{"src": "fig03.png", "caption": "Figure 9: ARC-AGI-3 舰队中各接口的记忆系统使用（25 个游戏）。左：各记忆类型在写入、自发注入、主动读取通道内的占比；右：各记忆类型在上下文中的占比。"}]
+            }
+        },
+        {
+            "type": "h2",
+            "title": "能力测试：模型零样本即会用",
+            "paras": [
+                "**能力测试在 440 条记录（88 测试 × 5 次）上评估每个模型。** 整体通过率 97.9%（4309/4400）。GPT-5.5 100%、Gemini 3.5 Flash 99.8%、GLM-5.2 99.8%、Claude Opus 4.8 99.5%、Gemini 3.1 Pro 99.5%、Nemotron 3 Ultra 98.6%、Kimi K2.6 98.0%、Claude Haiku 4.5 97.7%、GPT-5.4 Mini 94.8%、Nemotron 3 Nano 30B 91.6%。",
+                "**重要含义：接口本身对当代 LLM 不是负担。** 模型懂 Python——能读对象文档、用类型化参数调用方法、用返回值、修改对象状态、返回满足类型契约的值。这种零样本流畅性验证了框架的经验 agent 就绪度：**通过把 agentic 结构表达为原生软件抽象，彻底移除了其它框架引入的接口摩擦。**",
+                "**压力测试暴露剩余前沿**：残余失败集中在六个 stress 族（最像 agentic 工作的测试，而非单次工具调用）：大批量中逐项簿记、从噪音中恢复等。这些缺口正是后续要对付的方向。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "SWE-bench Verified 与 Terminal-Bench 2.0",
+            "paras": [
+                "**SWE-bench Verified 通过率**（发布时 leaderboard SOTA 为专用 agent + Opus 4.5 的 79.2%）。NOOA 在 GPT-5.5 xhigh 下达 82.2%（off 67.2 / high 78.8），在 Opus 4.6 下达 79.8%（off 76.8 / high 79.8）；对比 OpenCode 1.14.33 最高 78.6%、PI v0.72.1 最高 78.2%。**NOOA 多个配置超过发布时 SOTA。**",
+                "**Terminal-Bench 2.0（89 任务，任务通过率 %）**（发布时 SOTA 为 NexAU-AHE + GPT-5.5 的 84.7%）。NOOA 在 GPT-5.5 high/xhigh 下达 73.0%（off 46.1），Opus 4.6 达 65.2%（off 64.0）；对比 OpenCode 最高 60.7%、PI 最高 75.3%。NOOA 的整体得分-成本曲线落在前沿。",
+                "**CyberGym L1 漏洞发现**：在安全基准上，agent 必须检查代码库、识别安全相关 bug、产出一致触发它的 PoC 来验证。Agentic 漏洞发现出了名的难、极耗 context——崩溃报告很长。NOOA 在此展现把长期上下文交给记忆子系统处理的价值。",
+            ],
+            "fig_after": {
+                "2": [{"src": "fig01.png", "caption": "Figure 7: 两小时舰队预算下的 ARC-AGI-3（每舰队 25 个游戏，每游戏一个 NOOA agent）。舰队平均 RHAE 对墙钟时间——世界模型 skill + 记忆子系统在 GPT-5.5 上达 50.2%。"}]
+            }
+        },
+        {
+            "type": "h2",
+            "title": "ARC-AGI-3：多 agent 系统压进单 agent",
+            "paras": [
+                "**ARC-AGI-3 交互推理基准上，NOOA 界面把多 agent 世界模型系统压缩进单个 agent + 一页 skill**，同时推进分数-成本帕累托前沿。在两小时舰队预算下（每舰队 25 个游戏、每游戏一个 NOOA agent），世界模型 skill 配记忆子系统在 GPT-5.5 上达到舰队平均 RHAE 50.2%。",
+                "这篇论文对比了 DreamTeam 多 agent 系统与 NOOA 单 agent 世界模型示例的方法论（Table 9），记录了从 DreamTeam 到单 agent + 一页 skill 的转变、包含/红队审计、世界模型使用证据与失败模式，以及 play 中的记忆系统使用。**记忆子系统设计被详细剖析（Figure 5/8/9）**：MemoryManager.install 把记忆挂到未修改的 agent 上，agent 通过七种工具自建存储并主动检索，每个决策的记忆参与（写入与主动检索频次）与性能相关。",
+                "**框架与 harness 对比**：调研十四个 agent 框架和 harness，发现社区正广泛朝着这些能力收敛——往往是实验性或部分特性。NOOA 把它们整合到同一接口上，论文给出对比以促进进一步采纳。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig02.png", "caption": "Figure 8: ARC-AGI-3 舰队中的记忆参与对性能（每决策主动检索次数、每决策记忆写入）。"}]
+            }
+        },
+    ],
+    "conclusion": [
+        "NOOA 用一个彻底的再定义切进 agent 工程：agent 不再是被编排脚本驱动的一堆 prompt 和工具，而是一个普通 Python 对象。**方法就是动作、字段就是状态、docstring 就是 prompt、类型注解就是契约——开发者和模型共享同一套编程模型**。这不是刻意求简，而是直击 agent 开发痛点的对症下药：LLM 训练数据里遍布的正是普通 Python，而不是各家框架自造的 DSL。",
+        "实验证据支撑了这套设计的有效性：能力测试 97.9% 的整体通过率说明当代模型无需任何框架特定训练就能熟练使用界面；SWE-bench Verified 82.2% 与 Terminal-Bench 2.0 73.0% 的成绩让 NOOA 落在分数-成本前沿；ARC-AGI-3 上把多 agent 世界模型系统压进单 agent + 一页 skill 并推进帕累托前沿，则展示了「对象界面」这个抽象能多大程度简化 agent 系统。它把 prompt 工程真正拉回软件工程，让 agent 行为可以被测试、追踪、重构、版本化——这是 agent 开发从手艺走向工程的关键一步。",
+    ],
+    "reference_url": "https://arxiv.org/html/2607.20709v1",
+    "title": "NVIDIA NOOA：把 Agent 当 Python 对象写——方法即动作、docstring 即 prompt、类型注解即契约",
+}
+
+out_path = os.path.join(_article_dir, "article_data.json")
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 {out_path} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA.get('sections', []))} sections)")
