@@ -1,0 +1,109 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心对象</strong>：orchestrator夹在inference（跑模型出rollout）和trainer（用rollout更新模型）之间，异步手递手<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">五大组件</strong>：RolloutDispatcher（调度）、TrainSink（收训练数据的输出）、EvalSink、WeightWatcher（后台盯权重文件）、PeriodicLogger（记账）<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">主循环</strong>：一个while循环 + asyncio任务，从队列取episode、打戳、路由到sink，finalize_train_batch负责把批次真正送到trainer</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">过去一年，前沿模型的大量进展来自post-training。预训练仍然承担着教模型语言和世界知识的主要工作，但自从OpenAI的o1和DeepSeek-R1之后，后续的RL阶段才是近期大量提升出现的地方。它在数学和编程等可验证领域尤其有效，还顺带提升了模型的其他能力，这正是Claude Code、Codex、Cursor等工具用起来如此顺手的重要原因。但要让模型真正以这种方式改进，需要大量的基础设施，难点就在这里。问任何一个做RL的人，他们都会告诉你同样的话：RL基础设施很难。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这套基础设施，我们从orchestrator讲起。它内部有足够多的内容，我打算拆成五六篇来写：先是主循环，然后是dispatcher、权重同步、rollout如何变成训练数据，等等。我们会一边读实际代码一边讲，代码来自Prime Intellect的prime-rl，这是我最喜欢的框架之一。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">三块拼图</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">只有了解了orchestrator所连接的两端，才能真正理解它，所以先从这里开始。任何RL架构都包含三部分：inference、trainer和orchestrator。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">inference负责运行模型。给它一个prompt，它就生成模型的响应。如果任务是单轮，整个过程就这些：prompt进，答案出。如果有工具调用或多个轮次，它会继续下去。模型调用工具、拿到结果、环境回复，循环继续。完整的轨迹：prompt加上模型的回答，再加上工具调用和环境轮次：被称为rollout。这一部分通常由vLLM或SGLang这样的引擎承担。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">trainer接收一批rollout并更新模型。思路很简单：获得高奖励的rollout会被推高，让模型更多地产出类似结果；获得低奖励的rollout会被压低，让模型减少这类产出。整个循环就这些：让好行为更可能发生，坏行为更不可能发生。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">orchestrator是把这两者结合在一起的组件。它把prompt交给inference，收集返回的已完成rollout，传给trainer，然后协调把trainer的新权重推回inference，让生成rollout的模型持续改进。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">难点在于这一切都是异步进行的。谁都不等待。trainer持续用陆续到达的rollout训练，inference同时持续生成新的rollout，两者互不阻塞。一边持续保持两个系统同步，一边还要正确且尽可能快地完成训练：这正是orchestrator有这么多事情要做的原因。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">五个组件</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">到目前为止，我们一直把orchestrator当作一个单一组件来讨论，但它实际上只是一小组各司其职的组件。orchestrator的全部职责就是在setup() 中构建它们，然后驱动它们。组件之间互不知晓彼此，orchestrator是唯一把它们串联起来的东西。其中有五个值得了解：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">RolloutDispatcher。这是scheduler。它决定接下来运行哪些prompts，通过verifiers environment将它们发送到inference engine，并在每个rollout完成时将其放到queue上，供pipeline的其余部分拾取。可以把它看作是让inference保持繁忙的组件：它总是尝试在capacity允许的情况下，让尽可能多的work处于in flight状态。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>TrainSink。它接收完成的rollouts，并将它们转换为实际的training data。这意味着对它们进行tokenizing，计算advantages（trainer学习所用的reward signal），并过滤掉无用内容。它会在rollouts到达时收集它们，一旦收集到足够组成一个完整batch的量，就将该batch交回，以便发送给trainer。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">EvalSink。与TrainSink的思路相同，但用于evaluation。它从一次eval run中收集rollouts并打包，以便我们衡量model的表现，不包含任何advantage或filtering逻辑，因为我们不基于它们进行训练。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">WeightWatcher。它在后台运行，只做一件事：监视trainer发布新的weights。一旦新版本出现，它就会告诉inference重新加载（reload），并提升共享的policy version，以便系统其余部分知道我们又前进了一步。它基本上每秒检查一次：“是否有新的weights？”</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">PeriodicLogger。记账员（bookkeeper）。它按固定间隔收集整个pipeline的健康统计信息，例如queue depth、我们领先多少、每个阶段耗时多少，并将它们记录到console和wandb。它完全不影响training，只是让你实时了解pipeline正在做什么。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这五个都在setup() 中构造，值得并排查看，因为它让wiring变得具体。注意它们都被传递了相同的共享对象：self . policy , self . policy_inference , self . train_envs , 这就是这些原本独立的组件保持同步的方式：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">self . dispatcher = RolloutDispatcher ( train_envs = self . train_envs , eval_envs = self . eval_envs , policy_pool = self . policy_inference , policy = self . policy , max_inflight_rollouts = config . max_inflight_rollouts , ... ) self . train_sink = TrainSink ( config , tokenizer = self . tokenizer , train_envs = self . train_envs , batch_size = config . batch_size , ... ) self . eval_sink = EvalSink ( eval_envs = self . eval_envs ) if self . eval_envs is not None else None self . watcher = WeightWatcher ( config , policy = self . policy , inference = self . policy_inference , observers = [ self . dispatcher , self ], ... ) self . periodic_logger = PeriodicLogger ( name = "Pipeline" , collect = self . collect_pipeline_view , ... ) ( orchestrator.py:397 )</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因此，“the orchestrator”实际上就是这五个组件加上驱动它们的loop。本文其余部分介绍它们如何组合在一起。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">start()</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">start() 是入口点。它首先调用setup()，该函数构建并连接五个组件（就是我们刚看到的构造代码）。它主要是连接工作，所以我们不会逐行讲解。接下来是重要部分：start() 一次性启动四个在后台运行的任务：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">self . lag_task = asyncio . create_task ( self . lag_monitor . run (), name = "event_loop_lag" ) await self . periodic_logger . start () self . component_tasks = [ asyncio . create_task ( self . dispatcher . start (), name = "dispatcher" ), asyncio . create_task ( self . watcher . start (), name = "watcher" ), ] ( orchestrator.py:465 )</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>这里的关键是asyncio.create_task。普通函数调用会阻塞直到完成。create_task不同：它将协程调度到后台运行并立即返回，所以下一行会立刻执行。因此这四个任务：lag monitor、periodic logger、dispatcher和watcher：都会被启动并在同一事件循环上并发运行，而不是一个接一个地执行。这正是异步的原理：dispatcher生成rollouts，watcher检查权重，两者互不等待。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">当这些后台任务启动后，start() 运行主循环：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">await self . main_loop () ( orchestrator.py:484 )</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这是与另外四个任务并行的第五个任务，也是训练实际发生的地方：反复拉取完成的rollouts、分批打包、发送给trainer。让我们来分解一下。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">main_loop()</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">主循环实际上就是一个while循环，循环直到运行结束：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">while not self . stopped . is_set (): ( orchestrator.py:507 )</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">self.stopped是一个标志。只要没有人设置它，循环就会继续。当训练结束（或有东西要求它关闭）时，该标志被设置，循环退出。因此，下面的所有内容一遍又一遍地发生，每次循环一圈执行一次。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每轮循环真正要做的第一件事，是从dispatcher中取出一个已完成的episode：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">episode = await asyncio . wait_for ( self . dispatcher . out_q . get (), timeout = 0.5 ) ( orchestrator.py:518 )</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">dispatcher在后台运行，将已完成的rollout放入队列，主循环在这里取出一个。“完成”意味着完全结束：每个回合都已执行完毕，工具被调用，环境给出回复，整个trajectory完整。dispatcher如何决定运行什么是一个独立的话题，我们将在后续文章中讨论。目前：这一行会产出一个完整的episode。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">（timeout=0.5只是表示如果半秒内没有内容，循环就会再次执行并重新检查停止标志，因此它永远不会永久阻塞。）</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">接下来，该episode中的每个rollout都会被标记上其metadata：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">for rollout in episode : rollout . stamp ( run , env_name =... , group_id =... , episode_id =... , policy_version =... ) ( orchestrator.py:534 )</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>这是为每个rollout打上我们稍后会需要的各种标签的地方：它来自哪个environment、属于哪个group、它的episode id，以及由哪个policy version生成。最后一项policy version在之后判断rollout有多“陈旧”（stale）时非常重要，但目前只是打标签。从此刻起，系统中流经的每个rollout都会携带这些标签。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">然后该episode会被交给对应的sink。如果是eval episode，就进入eval sink；如果是train episode，就进入train sink。我们关心的是train的情况：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">train_batch = await self . train_sink . add ( episode ) if train_batch is not None and not self . draining and not self . stopped . is_set (): await self . finalize_train_batch ( train_batch ) ( orchestrator.py:555 )</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">大多数情况下，add() 不会返回任何内容，因为sink仍在收集rollouts，尚未凑齐一个完整的batch。但偶尔，我们刚刚加入的episode恰好填满了batch。这时，add() 会返回一个完整的TrainBatch，然后我们对它调用finalize_train_batch。这就是一个batch准备送往trainer的时刻。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">finalize_train_batch()</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这个函数真正把一个batch发送给trainer，是整个循环中最重要的函数。只有在sink收集到足够多的rollout并填满batch后，batch才会到达这里，因此它大约每个训练步运行一次。其中有几个步骤值得指出来：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">训练结束时的draining（orchestrator.py:576）。如果我们已经完成了要求的所有步骤（max_steps），就不再发送这个batch，而是切换到 "drain" 模式，并停止生成新的train rollout，因为我们不想超出目标。这是运行结束时优雅的收尾过程。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">空batch保护（orchestrator.py:586）。有时一个batch中没有任何可训练的内容（所有内容都被过滤掉了）。我们会统计这种情况，如果连续出现十个空batch，就停止运行，因为显然出了问题。否则，一个坏env可能会无声地一直空转，什么也不产出。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">版本保持，这是最重要的一个（orchestrator.py:613）。它是整个异步设计的核心。在发送编号为step的batch之前，orchestrator会检查trainer是否真的跟上了。具体来说，它会一直等到trainer发布了策略版本step - 1 - TARGET_LAG。如果trainer落后了，这一行就只是停驻等待。required_version = step - 1 - TARGET_LAG if not config . bench and self . policy . version< required_version : while True : self . version_advanced . clear () if self . policy . version >= required_version : break await self . version_advanced . wait () 那个while循环就是所谓的 "parking"。它会休眠，直到weight watcher发出新策略版本已到达的信号，然后醒来，检查trainer是否已经追上required_version，如果没有，就再回去等待。记住self.policy是共享对象，所以watcher一更新版本，这个循环就能看到。TARGET_LAG设为1，所以orchestrator恰好领先trainer一步，不会更多。为什么是一步？滞后越大，生成rollout时所使用的权重就越旧，数据与你正在训练的策略之间的漂移就越大。滞后为1是仍然可以让生成和训练重叠而不是交替进行的最小间隔。确切的数字更像是一个调优旋钮，而不是硬性规则，但直觉是这样的：足够的滞后让双方都保持忙碌，但又不能太多让数据变得过时。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">标记每个rollout有多陈旧（orchestrator.py:627）。这一点值得放慢节奏来理解，因为 "off-policy" 这个词正是在这里出现的。情况是这样的：推理使用当前加载的策略版本（比如说版本3）生成一个rollout。但当这个rollout走完流水线、trainer真正基于它训练时，策略可能已经到了版本4或5。所以这个rollout是由比当前更新模型更旧的版本生成的。这正是 "off-policy" 的含义：数据并非由当前策略生成，而是由更早的策略生成。这一行对每个rollout度量这个差距：for r in batch . rollouts : if self . train_envs . get ( r . env_name ) . sampler . samples_from_live_policy : r . off_policy_steps = ( step - 1 ) - r . policy_version它取当前步数，减去生成该rollout的版本，得到的就是这个rollout过时了多少个版本。它甚至把rollout在队列中等待的时间也算进去了，因为当一个rollout在等待处理时，策略也可能向前推进。这个陈旧度数不是装饰性的。trainer需要它来校正数据略微off-policy的事实，因此更陈旧的rollout与新鲜的rollout会被赋予不同的权重。我们在这里不做这种校正，只是给每个rollout打上年龄标签，供trainer使用。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">发送批次（orchestrator.py:644）。这就是实际交接到trainer的过程：await self . sender . send ( TrainingBatch ( examples = batch . samples , step = step )) self . progress . step += 1 self . update_dispatch_gate () 按顺序：就在这几行上面，它把已训练过的rollouts保存到磁盘作为记录，然后发送TrainingBatch给trainer（真正的负载，即带有优势值和陈旧标记的tokenized rollouts），推进step计数器使orchestrator进入下一步，并重新检查dispatch gate：这个节流阀会在dispatcher领先太多时暂停它。然后循环回到开头处理下一个批次。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">运行收尾</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">循环就这样一直运行，直到达到max_steps。然后orchestrator切换至drain模式（即之前的draining步骤），不再生成新的训练rollout，但会继续运行循环，让进行中的工作完成。一旦管道清空，就设置停止标志并跳出循环。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">然后写入最终checkpoint，以便之后恢复，并关闭后台任务和推理连接。清理过程需要几分钟；如果某个环节卡住，它会强制终止进程，因为所有重要数据都已写入磁盘。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这就是orchestrator的全部。去掉细节后，这是一个出人意料的简单思路：五个解耦组件、三个后台循环，以及一个主循环：拉取完成的rollout，打包成批次，发送给trainer，同时始终不让自己领先超过一步。我们略过的所有内容：dispatcher实际如何调度rollout、权重如何从trainer回到推理端、原始rollout如何变成tokenized训练数据：都是挂在这个循环上的一个环节。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">感谢阅读：如果你能一路看到这里，我非常感激。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+循环就这样一直运行，直到达到max_steps。然后orchestrator切换至drain模式（即之前的draining步骤），不再生成新的训练rollout，但会继续运行循环，让进行中的工作完成。一旦管道清空，就设置停止标志并跳出循环。<br  /><br  />然后写入最终checkpoint，以便之后恢复，并关闭后台任务和推理连接。清理过程需要几分钟；如果某个环节卡住，它会强制终止进程，因为所有重要数据都已写入磁盘。<br  /><br  />这就是orchestrator的全部。去掉细节后，这是一个出人意料的简单思路：五个解耦组件、三个后台循环，以及一个主循环：拉取完成的rollout，打包成批次，发送给trainer，同时始终不让自己领先超过一步。我们略过的所有内容：dispatcher实际如何调度rollout、权重如何从trainer回到推理端、原始rollout如何变成tokenized训练数据：都是挂在这个循环上的一个环节。<br  /><br  />感谢阅读：如果你能一路看到这里，我非常感激。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://vivekvkashyap.github.io/posts/rl-infra-orchestrator-part-1.html</span></p>
+</section>
