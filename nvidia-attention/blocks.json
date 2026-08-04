@@ -1,0 +1,332 @@
+[
+  [
+    "p",
+    "As agentic and long-context workloads become common, the context lengths increase and attention consumes a larger share of inference time (Figure 1). Because attention now dominates that cost, how it is designed—not just how it is implemented—increasingly determines a model’s inference performance. Shaping model architecture around how GPUs execute it is the premise of AI model co-design. For a discussion of how model design choices impact both throughput and interactivity without sacrificing accuracy, see the previous post, AI Model Co-Design: Hardware-Friendly LLM Design ."
+  ],
+  [
+    "p",
+    "This post examines how group size (query heads per KV head), head dimension, and sequence length shape the performance of dense attention, where every query attends to all keys and values along the sequence length. We distill that analysis, together with how attention is parallelized across GPUs, into four practical guidelines: a co-design checklist that helps model developers raise inference throughput and interactivity on NVIDIA GPUs. Stay tuned for a post covering sparse attention."
+  ],
+  [
+    "figure",
+    {
+      "src": "https://developer-blogs.nvidia.com/wp-content/uploads/2026/07/attention-prefill-time-ai-model.webp",
+      "caption": "Figure 1. DeepSeek-R1 prefill time breakdown at 4K, 32K, and 128K context lengths, where the attention share rises from 18% to 85%"
+    }
+  ],
+  [
+    "p",
+    "Every analysis is grounded in two sources: analytical formulas from GEMM-shape arithmetic, and measured data from prefill and decode kernels with FP8 for both attention compute and the KV cache."
+  ],
+  [
+    "figure",
+    {
+      "src": "",
+      "caption": "Table 1. Notations used in the equations featured in this post"
+    }
+  ],
+  [
+    "h2",
+    "How are prefill and decode two different problems?"
+  ],
+  [
+    "p",
+    "Prefill processes the full prompt in parallel, producing large GEMM-M (= ISL × \\(G\\)) matmuls that are compute-bound. Without speculative decoding , decode generates one token at a time, producing small GEMM-M (= \\(G\\)) matmuls and becoming memory-bound by KV cache reads from high-bandwidth memory (HBM)."
+  ],
+  [
+    "p",
+    "Speculative decoding increases GEMM-M and can shift decode toward compute-bound. Because the query lengths, KV access, and bottleneck differ for prefill and decode (Table 2), each parameter is analyzed separately for each phase."
+  ],
+  [
+    "figure",
+    {
+      "src": "",
+      "caption": "Table 2. Prefill and decode differ in query length, KV context, attention GEMM-M, and primary bottleneck"
+    }
+  ],
+  [
+    "p",
+    "Note: With prefix caching, common in agentic and multiturn apps, a new turn may have a short ISL while attending to a large prefix cache. With a short ISL but long prefix cache, prefill behaves like decode."
+  ],
+  [
+    "h2",
+    "How arithmetic intensity governs compute- versus memory-bound behavior"
+  ],
+  [
+    "p",
+    "The roofline bounds GPU performance by compute and bandwidth ceilings, as previously explained . Arithmetic intensity determines which binds (Equation 1):"
+  ],
+  [
+    "p",
+    "Arithmetic Intensity = Total FLOPs / Total bytes accessed"
+  ],
+  [
+    "p",
+    "The ridge point marks the transition from memory-bound to compute-bound. Prefill lies well above it and is compute-bound, while decode lies below it and is memory-bound (Figure 2). Speculative decoding raises decode arithmetic intensity and can move it toward the ridge."
+  ],
+  [
+    "figure",
+    {
+      "src": "https://developer-blogs.nvidia.com/wp-content/uploads/2026/07/roofline-plot-prefill-decode.webp",
+      "caption": "Figure 2. Roofline model showing decode on the memory-bound ramp and prefill on the compute-bound plateau"
+    }
+  ],
+  [
+    "h2",
+    "How does the FlashAttention kernel compute attention on GPU?"
+  ],
+  [
+    "p",
+    "FlashAttention computes attention without materializing the full attention matrix. It streams tiles of \\(Q\\), \\(K\\), and \\(V\\) from HBM to on-chip SRAM and fuses three steps into one pass:"
+  ],
+  [
+    "li",
+    "First, batched matmul (BMM1) scores queries against keys"
+  ],
+  [
+    "li",
+    "Second, online softmax normalizes the scores using a running max and sum"
+  ],
+  [
+    "li",
+    "Third, second batched matmul (BMM2) weights the values"
+  ],
+  [
+    "p",
+    "The BMMs run on Tensor Cores while the softmax exponentials run on special-function units. The BMM shapes drive the arithmetic intensity analysis that follows."
+  ],
+  [
+    "figure",
+    {
+      "src": "https://developer-blogs.nvidia.com/wp-content/uploads/2026/07/flashattention-overview.webp",
+      "caption": "Figure 3. FlashAttention kernel with BMM1 and BMM2 on Tensor Cores and fused online softmax on special-function units. Image adapted from  FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness"
+    }
+  ],
+  [
+    "h2",
+    "GEMM shapes"
+  ],
+  [
+    "p",
+    "Attention performance follows from the shapes of its two matmuls. Table 3 lists the per-phase (Batch, M, N, K) dimensions of BMM1 and BMM2."
+  ],
+  [
+    "figure",
+    {
+      "src": "",
+      "caption": "Table 3. GEMM (Batch, M, N, K) shapes for BMM1 and BMM2"
+    }
+  ],
+  [
+    "p",
+    "For decode, GEMM-M = \\(G\\), usually 8-16, far below a GPU tile-M of 64 or 128, limiting parallel work per tile. Larger \\(G\\) loads less KV per token and amortizes each load across more query heads, improving utilization. The next section quantifies this effect."
+  ],
+  [
+    "h2",
+    "Group size"
+  ],
+  [
+    "p",
+    "Group size (\\(G\\)) is the number of query heads that share one KV head. MHA has \\(G\\) = 1, GQA has \\(G\\) = 4, 8, 16, …, and MQA has \\(G\\) = QH."
+  ],
+  [
+    "p",
+    "Arithmetic intensity as a function of \\(G\\). In the following formulas, “Bytes” refers to HBM bytes moved. For simplicity, assume 1 byte per element (that is, FP8 KV cache)."
+  ],
+  [
+    "h3",
+    "Prefill"
+  ],
+  [
+    "p",
+    "As \\(G\\) grows, the 1/\\(G\\) vanishes and arithmetic intensity approaches 2 × ISL. At ISL = 32K, raising \\(G\\) from 8 to 16 improves arithmetic intensity by under 6%. In other words, prefill is dominated by ISL, not \\(G\\). Figure 4 confirms this, varying \\(G\\) from 1 (MHA) to 64 (MQA) changes prefill runtime by under 1%. Equations 2, 3, and 4:"
+  ],
+  [
+    "p",
+    "FLOPs = 4 × PB × QH × ISL² × Hsz (constant in \\(G\\)) Bytes = 2 × PB × KH × Hsz × ISL × (\\(G\\) + 1) Arithmetic Intensity = 2 × \\(G\\) × ISL / (\\(G\\) + 1) = 2 × ISL / (1 + 1/\\(G\\)) → 2 × ISL as \\(G\\) → ∞"
+  ],
+  [
+    "h3",
+    "Decode (GEMM-M = \\(G\\))"
+  ],
+  [
+    "p",
+    "Doubling \\(G\\) doubles decode arithmetic intensity. Raising \\(G\\) from 1 to 8 gives an 8x gain by reducing memory traffic and improving GPU compute utilization. It is independent of KVSL: arithmetic intensity stays near 2 × \\(G\\), so decode remains memory-bound unless \\(G\\) is very large. Models such as NVIDIA Nemotron 3 adopted GQA with two KV heads, which makes decode more efficient. Equations 5, 6, and 7:"
+  ],
+  [
+    "p",
+    "FLOPs = 4 × DB × QH × KVSL × Hsz (constant in \\(G\\)) Bytes = 2 × DB × KH × Hsz × (\\(G\\) + KVSL) Arithmetic Intensity = 2 × \\(G\\) × KVSL / (\\(G\\) + KVSL) ≈ 2 × \\(G\\) (when KVSL ≫ \\(G\\))"
+  ],
+  [
+    "p",
+    "Figure 4 shows decode runtime falls about 2x per doubling of \\(G\\) because halving the KV heads halves the data loaded per token. Beyond \\(G\\) = 16, the KVSL = 32K curve flattens. Its per-step kernel is small enough that two costs dominate: fixed setup and post-processing overhead, and the flash-decoding reduction from splitting KV across SMs to stay parallel with few KV heads. The longer KVSL = 128K kernel better amortizes these costs and continues tracking the 2x trend."
+  ],
+  [
+    "p",
+    "Note: Speculative decoding raises effective GEMM-M to (1+\\(D\\)) × \\(G\\), where \\(D\\) is the number of draft tokens. Once large enough to fill compute tiles, decode moves toward compute-bound."
+  ],
+  [
+    "figure",
+    {
+      "src": "https://developer-blogs.nvidia.com/wp-content/uploads/2026/07/normalized-runtime-versus-g.webp",
+      "caption": "Figure 4. Normalized runtime versus  \\(G\\)  (QH=64, Hsz=128, PB=1, DB=8; prefill ISL and decode KVSL as 32K and 128K). Prefill is flat in \\(G\\) (compute-bound); decode falls ~2x per doubling of \\(G\\) (memory-bound), from MHA (\\(G\\)=1) to MQA (\\(G\\)=64)"
+    }
+  ],
+  [
+    "p",
+    "Guideline 1: Choose \\(G\\) for decode efficiency and push it high. Prefill runtime is flat in \\(G\\), while decode arithmetic intensity ≈ 2 × \\(G\\), so higher \\(G\\) improves decode speed and GPU utilization. Speculative decoding is another lever to boost performance at a given \\(G\\)."
+  ],
+  [
+    "h2",
+    "Head dimension"
+  ],
+  [
+    "p",
+    "Unlike group size, head dimension (Hsz) does not affect arithmetic intensity. Doubling Hsz doubles both FLOPs (Equations 2 and 5) and bytes (Equations 3 and 6), leaving their ratio unchanged. Yet Figure 5 shows runtime increasing with Hsz because attention kernels perform three types of work that scale differently with Hsz."
+  ],
+  [
+    "li",
+    "Matmul: Grows with Hsz, but in aligned steps. The previous post recommends model dimensions that are multiples of 128 to align with GPU tile sizes and cache-line widths. A partially filled tile costs as much as a full tile, so Hsz = 64 pays for 128. Hsz ≥ 512 pushes close to the tensor memory (TMEM) capacity limit. That makes 128 and 256 the efficient choices."
+  ],
+  [
+    "li",
+    "Memory (the KV state): Also grows with Hsz. Since the GPU moves data in 128-byte units, memory access, like matmul, is most efficient when Hsz is multiple of 128."
+  ],
+  [
+    "li",
+    "Softmax is different: Its cost is independent of Hsz because it operates on attention-score matrix (query tokens × keys), which has no head dimension. Equations 8 and 9:"
+  ],
+  [
+    "p",
+    "Softmax ops (prefill) ≈ PB × QH × ISL² Softmax ops (decode) ≈ DB × QH × KVSL"
+  ],
+  [
+    "p",
+    "The balance between these determines Hsz cost in each phase (Figure 5)."
+  ],
+  [
+    "figure",
+    {
+      "src": "https://developer-blogs.nvidia.com/wp-content/uploads/2026/07/normalized-runtime-versus-hsz.webp",
+      "caption": "Figure 5. Normalized runtime versus Hsz (QH=64, \\(G\\)=32, PB=1, DB=8; prefill ISL and decode KVSL as 32K and 128K). Runtime rises with Hsz"
+    }
+  ],
+  [
+    "p",
+    "Prefill is compute-bound (matmul plus softmax). As Hsz grows, matmul FLOPs grow while softmax stays fixed. If prefill were pure matmul, doubling Hsz would double runtime; but the fixed softmax does not scale, so runtime rises less than Hsz does. Figure 5 confirms this: prefill climbs with Hsz but slower than Hsz grows. A wider Hsz amortizes softmax, shifting more kernel time to matmul and making prefill less softmax-bound."
+  ],
+  [
+    "p",
+    "Decode is memory-bound (streaming the KV cache). Larger Hsz increases KV bytes per token (Equation 6), so runtime should scale with Hsz. Figure 5 confirms this, though slightly sublinearly because setup, post-processing, and flash-decoding reduction overheads don’t scale with Hsz and weigh more on the shorter KVSL = 32K kernel."
+  ],
+  [
+    "p",
+    "Guideline 2 : Use Hsz of 128 or 256. Hsz doesn’t change arithmetic intensity but must align with the hardware . Typically, Hsz = 64 still pays for a 128-wide tile, while Hsz ≥ 512 pushes close to the TMEM capacity limit. That makes 128 and 256 the sweet spot."
+  ],
+  [
+    "h2",
+    "Sequence length"
+  ],
+  [
+    "p",
+    "Sequence length (ISL / KVSL) affects prefill and decode differently, because it enters each phase through a different variable: prefill processes all ISL input tokens together, while each decode step reads a KV cache of length KVSL. The two therefore scale at different rates (Figure 6)."
+  ],
+  [
+    "h3",
+    "Prefill scales quadratically"
+  ],
+  [
+    "p",
+    "Prefill performs ISL² work (every token attends to every token), while KV traffic grows only proportional to ISL (Eq. 2, 3). Arithmetic intensity therefore rises linearly with ISL, keeping prefill well above the ridge point and compute-bound. Doubling ISL should roughly quadruple runtime (Figure 6). At short ISL, scaling is below 4x because fixed setup and post-processing overheads dominate; quadratic scaling appears once ISL is large enough to amortize them."
+  ],
+  [
+    "h3",
+    "Decode scales linearly"
+  ],
+  [
+    "p",
+    "Each step reads the full KV cache to generate one token, so bytes grow with KVSL while per-step work remains small (Equations 5 and 6). Arithmetic intensity stays near 2 × \\(G\\), well below the ridge point, so decode remains memory-bound at all lengths. Doubling KVSL should double runtime, which Figure 6 confirms. At short KVSL, scaling is below 2x because setup, post-processing, and flash-decoding reduction overheads don’t scale with KVSL. Their share shrinks as KVSL grows."
+  ],
+  [
+    "figure",
+    {
+      "src": "https://developer-blogs.nvidia.com/wp-content/uploads/2026/07/normalized-runtime-versus-sequence-length.webp",
+      "caption": "Figure 6. Normalized runtime versus sequence length (QH=64, \\(G\\)=32, Hsz=256, PB=1, DB=8). Prefill scales as O(n²) with ISL; decode as O(n) with KVSL; both scale below the ideal rate at short lengths"
+    }
+  ],
+  [
+    "p",
+    "Guideline 3 : Reduce effective KV state where possible. The use case sets sequence length, but the cost is asymmetric: prefill grows as ISL², while decode grows linearly with KVSL. Reduce effective KV state through KV-cache compression, sparse or sliding-window attention, or hybrid model architectures (like Nemotron 3) where only some layers carry the growing global KV state."
+  ],
+  [
+    "h2",
+    "Tensor parallelism splits attention heads across GPUs"
+  ],
+  [
+    "p",
+    "Tensor parallelism (TP) splits the attention heads across GPUs, giving each GPU QH/TP query heads and KH/TP KV heads. It shards heads, not tokens. In Table 3, only the batch dimension, containing KH/TP, shrinks; the per-GPU GEMM shape and arithmetic intensity remain unchanged."
+  ],
+  [
+    "p",
+    "TP has a practical limit: KV heads must divide evenly across GPUs. Once TP > KH, a group’s query heads span multiple ranks, each requiring a copy of the shared KV head. This duplicates KV state, adding memory and bandwidth overhead without benefit (Figure 7). Thus, keep TP ≤ KH so each GPU owns at least one complete group: one KV head and its \\(G\\) query heads."
+  ],
+  [
+    "p",
+    "Models with few KV heads (Nemotron 3 with two, for example), quickly exhaust TP because the cache cannot be sharded below one KV head per GPU without duplication. Attention must then scale differently: Attention Data Parallelism (ADP) shards requests, while KV Parallelism (KVP) shards long-sequence KV caches across GPUs. The FFN scales separately with Expert Parallelism (EP)."
+  ],
+  [
+    "p",
+    "TensorRT-LLM combines these as Wide EP (ADP for attention plus EP for the FFN), and Helix Parallelism (KVP for attention plus EP for the FFN). In both cases, KH determines efficient scaling."
+  ],
+  [
+    "figure",
+    {
+      "src": "https://developer-blogs.nvidia.com/wp-content/uploads/2026/07/atention-sharding-strategies.webp",
+      "caption": "Figure 7. Attention sharding strategies: when TP > KH, the KV cache is duplicated, adding memory and bandwidth overhead"
+    }
+  ],
+  [
+    "p",
+    "Guideline 4 : Let KH determine the parallelism strategy. Keep TP ≤ KH so each GPU has a full KV head. Models with few KV heads (MQA with 1, or GQA with 2) exhaust TP quickly and are better served by ADP or KVP for attention plus EP for the MoE FFN (implemented as Wide EP and Helix Parallelism in TensorRT-LLM)."
+  ],
+  [
+    "h2",
+    "Get started co-designing AI model attention"
+  ],
+  [
+    "p",
+    "Use the four guidelines summarized below as a model design checklist to get started co-designing AI model attention. These choices can improve GPU utilization, inference speed, throughput, and interactivity on the same hardware."
+  ],
+  [
+    "li",
+    "Guideline 1 : Choose the group size (\\(G\\)) for decode and push it high. Prefill is not sensitive to group size."
+  ],
+  [
+    "li",
+    "Guideline 2 : Use a head dimension (Hsz) = 128 or 256 to align with the GPU tiles and 128-byte transfers while staying within TMEM budget. A larger head also hides softmax in prefill."
+  ],
+  [
+    "li",
+    "Guideline 3 : Reduce effective KV state through KV-cache compression, sparse or sliding-window attention, or hybrid models."
+  ],
+  [
+    "li",
+    "Guideline 4 : Match parallelism to KV head count (KH). Keep TP ≤ KH and scale a few KH models with Wide EP and Helix Parallelism ."
+  ],
+  [
+    "h3",
+    "Acknowledgments"
+  ],
+  [
+    "p",
+    "This post is an NVIDIA cross-team effort. We are grateful to Timmy Liu, Jatin Mitra, Tiyasa Mitra, Bhargava Gopireddy, Brian Pharris, Julien Demouth, and Eduardo Alvarez for their help."
+  ],
+  [
+    "h2",
+    "Tags"
+  ],
+  [
+    "h2",
+    "About the Authors"
+  ]
+]
