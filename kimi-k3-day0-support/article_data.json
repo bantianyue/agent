@@ -25,15 +25,14 @@
     {
       "type": "h2",
       "title": "KDA：K3 的新型注意力架构",
+      "paras": []
+    },
+    {
+      "type": "h3",
+      "title": "混合注意力架构",
       "paras": [
         "对于推理系统而言，Kimi K3 带来的变化远不止简单地增加模型参数规模。更重要的是，K3 引入了一种全新的混合注意力架构，将 KDA（Kimi Delta Attention）与 MLA（Multi-head Latent Attention）相结合。",
-        "在开源的 K3 配置中，模型共包含 93 个解码器层，其中 69 层采用 KDA，24 层采用 MLA。这些层通常按照连续三个 KDA 层后接一个 MLA 层的模式组织。因此，与传统模型中所有层依赖统一注意力机制不同，K3 同时采用两种根本不同的方式来表征和维护模型内部的历史信息。",
-        "MLA 遵循潜在注意力设计：每个 token 都会生成自己的潜在 KV，因此缓存仍会随上下文长度增长，这与传统 Transformer 的 KV Cache 一致。",
-        "根本性变化来自 KDA。它不再存储每一个历史的 Key 和 Value，而是将历史循环压缩为固定大小的状态。逐通道衰减因子和 Delta Correction 控制新信息如何更新该状态，而固定长度的 Convolution Window 则保留最近的局部上下文。",
-        "因此，对于每个 KDA 层，需要持续维护的历史信息不再是长序列的 KV 对，而是两类状态：",
-        "Recurrent state：循环更新的历史状态；",
-        "Convolution window：包含最近 token 的局部窗口。",
-        "随着新 token 的到来，两种状态都会就地更新，而不是像传统 KV Cache 那样持续增长。该设计的关键优势在于，推理期间所需的缓存量不再随上下文长度线性扩展。即使面对百万 token 的上下文，KDA 层维护的循环状态仍保持固定大小，从而显著降低长上下文推理的内存压力。"
+        "在开源的 K3 配置中，模型共包含 93 个解码器层，其中 69 层采用 KDA，24 层采用 MLA。这些层通常按照连续三个 KDA 层后接一个 MLA 层的模式组织。因此，与传统模型中所有层依赖统一注意力机制不同，K3 同时采用两种根本不同的方式来表征和维护模型内部的历史信息。"
       ],
       "fig_after": {
         "1": [
@@ -45,15 +44,38 @@
       }
     },
     {
+      "type": "h3",
+      "title": "KDA 的工作原理",
+      "paras": [
+        "MLA 遵循潜在注意力设计：每个 token 都会生成自己的潜在 KV，因此缓存仍会随上下文长度增长，这与传统 Transformer 的 KV Cache 一致。",
+        "根本性变化来自 KDA。它不再存储每一个历史的 Key 和 Value，而是将历史循环压缩为固定大小的状态。逐通道衰减因子和 Delta Correction 控制新信息如何更新该状态，而固定长度的 Convolution Window 则保留最近的局部上下文。",
+        "因此，对于每个 KDA 层，需要持续维护的历史信息不再是长序列的 KV 对，而是两类状态：",
+        "Recurrent state：循环更新的历史状态；",
+        "Convolution window：包含最近 token 的局部窗口。",
+        "随着新 token 的到来，两种状态都会就地更新，而不是像传统 KV Cache 那样持续增长。该设计的关键优势在于，推理期间所需的缓存量不再随上下文长度线性扩展。即使面对百万 token 的上下文，KDA 层维护的循环状态仍保持固定大小，从而显著降低长上下文推理的内存压力。"
+      ]
+    },
+    {
       "type": "h2",
       "title": "KDA 给推理系统带来哪些新挑战？",
+      "paras": []
+    },
+    {
+      "type": "h3",
+      "title": "为何前缀匹配不再等于缓存可复用",
       "paras": [
         "KDA 大幅降低长上下文推理期间的缓存开销，但也从根本上改变了缓存的语义。",
         "在传统 Transformer 中，每个 token 都有自己独立的 Key 和 Value。推理框架可以使用 Radix Tree 等结构来识别跨请求的最长公共前缀，复用相应的 KV Cache，并跳过冗余的 Prefill 计算。在这种设置下，Prefix Cache 复用几乎等同于 KV Cache 复用：一旦 token 前缀匹配，就可以直接恢复与该前缀关联的缓存。",
         "KDA 打破了这种等价性。在 Kimi K3 中，MLA 层仍然维护 token 级别的 latent KV，而 KDA 层维护通过顺序处理整个前缀产生的 Recurrent State。因此，两种根本不同的缓存形式在同一模型中共存。",
         "更重要的是，KDA 状态不能像 KV Cache 那样被任意截断。假设一个请求已处理了 10,000 个 token，系统仅在 10,000-token 位置存储了 KDA 状态。如果另一个请求只共享前 8,000 个 token，则无法在 8,000-token 边界处从该状态恢复。已存储的状态已经包含了后续 2,000 个 token 的信息，无法逆转递归过程来重建更早的状态。",
         "因此，token 级前缀匹配并不必然意味着相应的 KDA 缓存可以恢复。为了保证恢复后的执行与不间断执行等价，MLA KV 和完整的 KDA 状态都必须可用，并且对齐到相同的前缀边界。这意味着 KDA-aware Prefix Cache 必须在选定的前缀边界处显式存储检查点。即使 MLA KV 匹配到了更长前缀，如果对应的 KDA 检查点不可用，系统也必须回退到最近的合法边界，并重新计算该边界之后的所有内容。",
-        "因此，对于 Kimi K3 来说，Prefix Cache 复用不再只是存储和恢复一段 KV Cache 的问题。系统必须联合管理 MLA KV 和 KDA Recurrent States，同时确保两者能够在相同的前缀边界处一致恢复。",
+        "因此，对于 Kimi K3 来说，Prefix Cache 复用不再只是存储和恢复一段 KV Cache 的问题。系统必须联合管理 MLA KV 和 KDA Recurrent States，同时确保两者能够在相同的前缀边界处一致恢复。"
+      ]
+    },
+    {
+      "type": "h3",
+      "title": "检查点：密度与开销的权衡",
+      "paras": [
         "DeepSeek V4 的 SWA（Sliding Window Attention）也存在类似问题，但其解决方案相对直接：系统可以按固定间隔存储检查点，例如每 128 个 token 存储一次。然而，对于 KDA 而言，这种策略代价过高，因为每个检查点要大得多。根据 KV Cache Size Calculator，单个 KDA 检查点会引入约 0.4 GiB 的固定缓存开销。若检查点间隔为 128 个 token，一个 100 万 token 上下文的请求仅 KDA 状态就需要大约 3 TB 的存储空间。即使采用 10,000 个 token 这样更粗略的间隔，同一请求仍需要大约 40 GB 的额外缓存。",
         "然而，增大检查点间隔会引入另一个问题。Prefix Cache 复用只能延伸到最近的可恢复 KDA 检查点。检查点越稀疏，实际可复用的前缀就越短。",
         "假设每 10,000 个 token 存储一次检查点：",
@@ -61,13 +83,10 @@
         "如果两个 910,000 token 的请求共享前 905,000 个 token，缓存复用率看起来仍然很高。然而，由于最近的检查点位于 900,000 token 处，系统必须再次重新计算 10,000 个 token，而不是原来的 5,000 个 token，导致相同的两倍计算量增加。",
         "这些并非罕见边缘情况。事实上，它们与 Agentic（智能体原生）工作负载的典型特征高度吻合：交互轮次多、每轮新增 token 数量少，且连续轮次之间通常有超过 95% 的上下文是共享的。在此类场景中，有效的 Prefix Cache 命中率哪怕仅下降几个百分点，也会导致需要重新计算的 token 数量大幅增加。",
         "因此，KDA 缓存管理面临一个根本性权衡。更密集的检查点能提供更细粒度的恢复，并提高有效 Prefix Cache 命中率，但同时也会导致缓存消耗快速增长。更稀疏的检查点能降低存储开销，但每次缓存命中后系统需要重新计算更长的后缀，从而削弱缓存的性能收益。",
-        "这是支持 Kimi K3 高效复用 Prefix Cache 必须解决的核心挑战。",
-        "KDA 引入的变更不仅影响单实例内的 Prefix Cache 复用，还影响分离式推理架构中的缓存管理。在传统 Transformer 中，跨实例缓存复用和 Prefill–Decode 分离都围绕 KV Blocks 的统一抽象构建。只要 token 前缀匹配，相应的 KV Cache 就可以直接复用或迁移。然而，对于 Kimi K3，缓存现在由两种不同类型的状态组成：MLA KV 和 KDA State。MLA KV 仍然可以按 token 或 block 粒度进行管理，而 KDA State 只能从与特定前缀边界关联的检查点恢复。因此，跨实例复用不再仅仅是寻找最长匹配 token 前缀的问题。系统必须确保 MLA KV 和 KDA State 在同一个恢复点同时可用且一致，而不能自由组合来自不同来源的缓存数据。",
-        "同样的问题也影响 Prefill–Decode 分离。Prefill 和 Decode 阶段之间需要传输的不再仅仅是 KV Blocks 的集合，而是一组异构模型状态，包括 MLA latent history 和 KDA Recurrent States。为每种状态类型设计独立的传输协议，不仅会增加系统复杂性，还会将模型特定的架构细节暴露给调度和通信层。因此，Prefill–Decode 分离必须从 KV Cache 传输演变为更通用的模型状态传输抽象。",
-        "在多模态工作负载中，分离式流水线进一步扩展为 Encoder–Prefill–Decode（EPD）。系统不仅需要传输 Prefill 阶段产生的 MLA 和 KDA 状态，还需要传输 Encoder 生成的视觉嵌入（visual embeddings）。因此，构建一个能够跨不同执行阶段高效移动不同类型模型状态的统一数据平面，成为分离式 Kimi K3 推理面临的新挑战。"
+        "这是支持 Kimi K3 高效复用 Prefix Cache 必须解决的核心挑战。"
       ],
       "fig_after": {
-        "6": [
+        "0": [
           {
             "src": "fig00.png",
             "caption": ""
@@ -76,40 +95,25 @@
       }
     },
     {
+      "type": "h3",
+      "title": "对分离式推理的连带影响",
+      "paras": [
+        "KDA 引入的变更不仅影响单实例内的 Prefix Cache 复用，还影响分离式推理架构中的缓存管理。在传统 Transformer 中，跨实例缓存复用和 Prefill–Decode 分离都围绕 KV Blocks 的统一抽象构建。只要 token 前缀匹配，相应的 KV Cache 就可以直接复用或迁移。然而，对于 Kimi K3，缓存现在由两种不同类型的状态组成：MLA KV 和 KDA State。MLA KV 仍然可以按 token 或 block 粒度进行管理，而 KDA State 只能从与特定前缀边界关联的检查点恢复。因此，跨实例复用不再仅仅是寻找最长匹配 token 前缀的问题。系统必须确保 MLA KV 和 KDA State 在同一个恢复点同时可用且一致，而不能自由组合来自不同来源的缓存数据。",
+        "同样的问题也影响 Prefill–Decode 分离。Prefill 和 Decode 阶段之间需要传输的不再仅仅是 KV Blocks 的集合，而是一组异构模型状态，包括 MLA latent history 和 KDA Recurrent States。为每种状态类型设计独立的传输协议，不仅会增加系统复杂性，还会将模型特定的架构细节暴露给调度和通信层。因此，Prefill–Decode 分离必须从 KV Cache 传输演变为更通用的模型状态传输抽象。",
+        "在多模态工作负载中，分离式流水线进一步扩展为 Encoder–Prefill–Decode（EPD）。系统不仅需要传输 Prefill 阶段产生的 MLA 和 KDA 状态，还需要传输 Encoder 生成的视觉嵌入（visual embeddings）。因此，构建一个能够跨不同执行阶段高效移动不同类型模型状态的统一数据平面，成为分离式 Kimi K3 推理面临的新挑战。"
+      ]
+    },
+    {
       "type": "h2",
       "title": "SGLang × Mooncake：KDA 感知的 Radix Tree 与跨实例缓存复用",
+      "paras": []
+    },
+    {
+      "type": "h3",
+      "title": "KDA 感知的 Radix Tree 与稀疏检查点",
       "paras": [
         "为适应 KDA 对 Prefix Cache 语义带来的变化，SGLang 在其现有 Radix Tree 上扩展了 KDA 感知（KDA-aware）的检查点机制。Radix Tree 仍然跨请求匹配 token 前缀，但可恢复位置不再仅由最长匹配 token 前缀决定。相反，MLA KV 和 KDA State 必须同时可用且在同一前缀边界保持一致。",
-        "因此，SGLang 在 Radix Tree 中维护稀疏的 KDA 检查点。当请求匹配到现有 token 前缀时，系统会在匹配路径上搜索最近的有效检查点，同时恢复相应的 MLA KV 和 KDA State，并重新计算该检查点未覆盖的部分。",
-        "为了解决上述检查点存储开销与缓存命中率之间的权衡，SGLang采用了一种稀疏检查点管理策略，在有限的缓存预算下最大化 Prefix Cache 重用的收益。",
-        "首先，在检查点选择方面，SGLang 并不依赖简单的固定间隔策略，而是根据请求执行阶段来选择更有价值的检查点位置：",
-        "Prefill 阶段：Prefill 通常按块执行，因此 SGLang 优先在块边界存储检查点。这样将检查点的创建与现有调度流程对齐，避免为保留中间状态而引入额外的同步开销。",
-        "Decode 阶段：由于每个生成的 token 都可能成为未来请求共享前缀的一部分，SGLang 在 Decode 期间按固定间隔创建检查点，在恢复粒度与缓存开销之间取得平衡。",
-        "Radix Tree 分支点：当多个请求共享某个前缀或在某一位置分叉时，该位置更可能成为未来请求的缓存命中点。因此 SGLang 优先保留这些高复用价值位置的检查点。",
-        "通过这种策略，检查点不再均匀分布在所有 token 位置上，而是集中在更可能被重用的前缀边界处。",
-        "其次，在检查点预算管理方面，SGLang 必须限制 KDA States 占用的 GPU memory 量。即使每个单独的缓存命中能带来显著收益，沿每条 Radix Tree 路径存储过多检查点也会迅速耗尽缓存容量。因此 SGLang 限制每条路径上保留的检查点数量，并将此约束与 LRU（Least Recently Used）策略结合，以淘汰价值较低的状态：",
-        "长时间未被访问的检查点会被优先回收。",
-        "频繁访问路径上的检查点会被保留。",
-        "新生成的检查点仅在当前缓存压力允许的情况下替换现有状态。",
-        "实际上，SGLang 将检查点管理转化为一个感知访问模式的缓存优化问题。更多的状态预算被分配给具有更高价值和更大复用概率的位置，而不常用的状态会被及时释放。",
-        "这种稀疏检查点机制避免了固定间隔检查点过高的 GPU 内存开销，同时也减少了因检查点过稀疏而导致的回放量。因此，KDA 感知的 Prefix Cache 复用可以高效扩展到长上下文和 Agentic（智能体原生）工作负载。",
-        "在稀疏检查点管理的基础上，SGLang 进一步降低 KDA States 的存储开销。并非每个缓存的检查点都立即需要用于计算，如果长期以高精度格式保留所有状态，将消耗大量 GPU 内存。因此，SGLang 将当前运行请求使用的活动状态与存储在 Radix Tree 中的缓存状态分离开来。活动状态保留在运行时状态池中，而非活动检查点则被移至独立的缓存池，并以压缩格式存储。",
-        "SGLang 当前还提供一条可选的本地检查点压缩路径。它将非活动 Recurrent States 压缩为 INT8，以牺牲部分恢复精度换取更大的本地缓存容量。对于占存储空间绝大部分的 KDA temporal state，SGLang 按通道计算量化参数并将状态压缩为 INT8。体积小得多的 local window state 则保持原始精度。与以 BF16 存储完整 KDA State 相比，这种方法大幅降低了每个检查点的存储成本，从而在相同缓存预算下保留更多可复用的前缀状态。",
-        "当请求命中压缩检查点时，SGLang 不会直接从压缩表示继续执行。相反，它先将检查点恢复到新的活动状态槽中，重建相应的局部窗口状态，然后以正常精度恢复计算。由于压缩仅在检查点存储时进行，解压仅在检查点命中时进行，每个 token 的 KDA 状态更新始终以原始精度运行。这避免了因重复量化和反量化而可能导致的误差累积。",
-        "KDA States 在 Decode 期间持续更新，而 Prefix Cache 中的共享状态必须保持不变。与写入后不再变化的 MLA KV Cache 不同，KDA State 无法在多个请求之间直接共享，因为一个请求的更新可能会影响其他请求的执行。为了安全复用 KDA States，SGLang 通过三种机制将每请求的执行状态与共享检查点分离开来：Copy-on-Write（写时复制）、Snapshot（快照）和 Donate（捐赠）。",
-        "Copy-on-Write：从共享检查点安全恢复。当请求命中 Radix Tree 中的 KDA 检查点时，SGLang 不会直接在共享状态上继续执行。相反，它首先将与检查点关联的 KDA State 复制到请求拥有的私有执行槽中。后续计算仅更新该私有状态，保持附加在 Radix Tree 上的共享检查点不变。这使得多个请求能够安全地复用同一个 Prefix Cache 节点，同时独立推进各自的状态。",
-        "Snapshot：将运行时状态转换为可复用状态。默认情况下，请求执行期间产生的 KDA State 仅归属于当前请求。当请求到达新的可缓存前缀边界时，SGLang 将当前运行时状态保存为新的 Snapshot，并将其附加到 Radix Tree 以供后续请求恢复。为防止 Snapshot 操作与 Forward 期间的状态更新发生竞争，SGLang 将状态复制调度到 Forward Stream 上，并依赖 CUDA Stream 排序来保证安全读写。Snapshot 还会交替写入额外的缓冲区，避免新 Snapshot 覆盖仍被 Radix Tree 引用的旧状态。",
-        "Donate：降低检查点创建开销。如果每次创建 Snapshot 都将整个 KDA State 复制到缓存树中，会产生大量数据移动开销。因此 SGLang 引入了 Donate 机制。一旦 Snapshot 完成，系统直接将对应状态槽的所有权转移给 Radix Tree，仅更新状态索引，而不再复制底层数据。借助 Donate，检查点创建从大规模状态复制变为轻量级元数据转移，显著降低了将 KDA State 集成到 Prefix Cache 复用中的管理开销。",
-        "由于 MLA KV 和 KDA State 在分配粒度和生命周期上存在差异，SGLang 最初通过两个独立的内存池管理它们。MLA KV Blocks 和 KDA State Blocks 从独立预留的 GPU 内存池中分配。这种设计使两类缓存逻辑隔离，但要求系统根据预期工作负载预先估算它们的容量比例。",
-        "然而，在实际推理工作负载中，缓存需求往往难以预测。当短请求占主导时，KDA State Pool 可能首先耗尽。在长上下文工作负载中，MLA KV Pool 反而可能成为瓶颈，即使另一个池中仍有未使用的 GPU 内存。这种不平衡降低了整体 GPU 内存利用率。",
-        "为解决此问题，SGLang 提供可选的 Unified Memory 模式，在共享物理容量池中管理 MLA KV Blocks 和 KDA State Blocks。两类缓存保留各自的逻辑结构和分配粒度，但从相同的底层 GPU 内存容量中分配，使内存使用能够根据实际工作负载动态调整。",
-        "在实现中，Unified Memory 预留一块连续的 GPU 内存区域。KDA State Blocks 和 MLA KV Blocks 从相向的两端向内增长，二者之间的空间作为共享空闲容量池。当对象被释放时，系统用对应端的对象填补产生的空洞，保持可用区域连续，并减少长时间运行工作负载中的内存碎片。",
-        "需要注意的是，“unified”指的是物理容量的统一管理。它并不意味着将 MLA KV 和 KDA State 强制放入相同大小的页中。每种缓存类型仍使用最适合自身特性的布局进行分配和管理；它们只是在 GPU 内存层面共享未使用的容量。",
-        "此模式可通过 `--enable-unified-memory` 显式启用，使 SGLang 能够更灵活地适应不同请求分布下 Kimi K3 混合注意力架构的缓存需求。",
-        "上述优化解决了单个 SGLang 实例内的 KDA 感知前缀缓存管理问题。然而，在大规模推理部署中，单个实例的 GPU 缓存容量仍然有限，许多具有高复用价值的长上下文前缀无法被无限期保留。",
-        "为了进一步扩大缓存复用范围，SGLang 将 Mooncake 集成到其 KDA 感知缓存系统中。通过 HiCache，缓存对象可以超越单机 GPU 内存，扩展到更大的共享缓存层。当新请求到达时，系统不仅可以查询本地 Radix Tree Cache，还可以从 Mooncake 检索其他推理实例产生的缓存状态，在当前实例上恢复并继续执行。",
-        "Mooncake 不参与 KDA State 的生成、更新或恢复语义。因此，它无需理解模型内部注意力机制之间的差异。它的职责是高效管理和传输 SGLang 已确定为有效且可复用的缓存对象。这种职责分离使得 SGLang 和 Mooncake 可以独立处理正确性与分布式扩展性：SGLang 决定哪些状态可以复用，而 Mooncake 决定这些状态如何在实例之间移动。",
-        "借助 HiCache 和 Mooncake 的跨实例缓存能力，Kimi K3 的 MLA KV 和 KDA State 可以突破单个 GPU 实例的内存限制，在更大的推理集群中共享。这提高了缓存命中率，减少了长上下文推理、多轮对话和 agentic 工作负载中的冗余计算。"
+        "因此，SGLang 在 Radix Tree 中维护稀疏的 KDA 检查点。当请求匹配到现有 token 前缀时，系统会在匹配路径上搜索最近的有效检查点，同时恢复相应的 MLA KV 和 KDA State，并重新计算该检查点未覆盖的部分。"
       ],
       "fig_after": {
         "1": [
@@ -117,8 +121,59 @@
             "src": "fig02.png",
             "caption": "Image source: https://www.lmsys.org/blog/2026-07-27-kimi-k3-day0-support/"
           }
-        ],
-        "23": [
+        ]
+      }
+    },
+    {
+      "type": "h3",
+      "title": "检查点选择：跟随执行阶段",
+      "paras": [
+        "为了解决上述检查点存储开销与缓存命中率之间的权衡，SGLang采用了一种稀疏检查点管理策略，在有限的缓存预算下最大化 Prefix Cache 重用的收益。",
+        "首先，在检查点选择方面，SGLang 并不依赖简单的固定间隔策略，而是根据请求执行阶段来选择更有价值的检查点位置：",
+        "Prefill 阶段：Prefill 通常按块执行，因此 SGLang 优先在块边界存储检查点。这样将检查点的创建与现有调度流程对齐，避免为保留中间状态而引入额外的同步开销。",
+        "Decode 阶段：由于每个生成的 token 都可能成为未来请求共享前缀的一部分，SGLang 在 Decode 期间按固定间隔创建检查点，在恢复粒度与缓存开销之间取得平衡。",
+        "Radix Tree 分支点：当多个请求共享某个前缀或在某一位置分叉时，该位置更可能成为未来请求的缓存命中点。因此 SGLang 优先保留这些高复用价值位置的检查点。",
+        "通过这种策略，检查点不再均匀分布在所有 token 位置上，而是集中在更可能被重用的前缀边界处。"
+      ]
+    },
+    {
+      "type": "h3",
+      "title": "检查点预算管理：LRU 替换",
+      "paras": [
+        "其次，在检查点预算管理方面，SGLang 必须限制 KDA States 占用的 GPU memory 量。即使每个单独的缓存命中能带来显著收益，沿每条 Radix Tree 路径存储过多检查点也会迅速耗尽缓存容量。因此 SGLang 限制每条路径上保留的检查点数量，并将此约束与 LRU（Least Recently Used）策略结合，以淘汰价值较低的状态：",
+        "长时间未被访问的检查点会被优先回收。",
+        "频繁访问路径上的检查点会被保留。",
+        "新生成的检查点仅在当前缓存压力允许的情况下替换现有状态。",
+        "实际上，SGLang 将检查点管理转化为一个感知访问模式的缓存优化问题。更多的状态预算被分配给具有更高价值和更大复用概率的位置，而不常用的状态会被及时释放。",
+        "这种稀疏检查点机制避免了固定间隔检查点过高的 GPU 内存开销，同时也减少了因检查点过稀疏而导致的回放量。因此，KDA 感知的 Prefix Cache 复用可以高效扩展到长上下文和 Agentic（智能体原生）工作负载。"
+      ]
+    },
+    {
+      "type": "h3",
+      "title": "压缩与共享：INT8、Copy-on-Write、Snapshot、Donate",
+      "paras": [
+        "在稀疏检查点管理的基础上，SGLang 进一步降低 KDA States 的存储开销。并非每个缓存的检查点都立即需要用于计算，如果长期以高精度格式保留所有状态，将消耗大量 GPU 内存。因此，SGLang 将当前运行请求使用的活动状态与存储在 Radix Tree 中的缓存状态分离开来。活动状态保留在运行时状态池中，而非活动检查点则被移至独立的缓存池，并以压缩格式存储。",
+        "SGLang 当前还提供一条可选的本地检查点压缩路径。它将非活动 Recurrent States 压缩为 INT8，以牺牲部分恢复精度换取更大的本地缓存容量。对于占存储空间绝大部分的 KDA temporal state，SGLang 按通道计算量化参数并将状态压缩为 INT8。体积小得多的 local window state 则保持原始精度。与以 BF16 存储完整 KDA State 相比，这种方法大幅降低了每个检查点的存储成本，从而在相同缓存预算下保留更多可复用的前缀状态。",
+        "当请求命中压缩检查点时，SGLang 不会直接从压缩表示继续执行。相反，它先将检查点恢复到新的活动状态槽中，重建相应的局部窗口状态，然后以正常精度恢复计算。由于压缩仅在检查点存储时进行，解压仅在检查点命中时进行，每个 token 的 KDA 状态更新始终以原始精度运行。这避免了因重复量化和反量化而可能导致的误差累积。",
+        "KDA States 在 Decode 期间持续更新，而 Prefix Cache 中的共享状态必须保持不变。与写入后不再变化的 MLA KV Cache 不同，KDA State 无法在多个请求之间直接共享，因为一个请求的更新可能会影响其他请求的执行。为了安全复用 KDA States，SGLang 通过三种机制将每请求的执行状态与共享检查点分离开来：Copy-on-Write（写时复制）、Snapshot（快照）和 Donate（捐赠）。",
+        "Copy-on-Write：从共享检查点安全恢复。当请求命中 Radix Tree 中的 KDA 检查点时，SGLang 不会直接在共享状态上继续执行。相反，它首先将与检查点关联的 KDA State 复制到请求拥有的私有执行槽中。后续计算仅更新该私有状态，保持附加在 Radix Tree 上的共享检查点不变。这使得多个请求能够安全地复用同一个 Prefix Cache 节点，同时独立推进各自的状态。",
+        "Snapshot：将运行时状态转换为可复用状态。默认情况下，请求执行期间产生的 KDA State 仅归属于当前请求。当请求到达新的可缓存前缀边界时，SGLang 将当前运行时状态保存为新的 Snapshot，并将其附加到 Radix Tree 以供后续请求恢复。为防止 Snapshot 操作与 Forward 期间的状态更新发生竞争，SGLang 将状态复制调度到 Forward Stream 上，并依赖 CUDA Stream 排序来保证安全读写。Snapshot 还会交替写入额外的缓冲区，避免新 Snapshot 覆盖仍被 Radix Tree 引用的旧状态。",
+        "Donate：降低检查点创建开销。如果每次创建 Snapshot 都将整个 KDA State 复制到缓存树中，会产生大量数据移动开销。因此 SGLang 引入了 Donate 机制。一旦 Snapshot 完成，系统直接将对应状态槽的所有权转移给 Radix Tree，仅更新状态索引，而不再复制底层数据。借助 Donate，检查点创建从大规模状态复制变为轻量级元数据转移，显著降低了将 KDA State 集成到 Prefix Cache 复用中的管理开销。"
+      ]
+    },
+    {
+      "type": "h3",
+      "title": "内存池与 Unified Memory",
+      "paras": [
+        "由于 MLA KV 和 KDA State 在分配粒度和生命周期上存在差异，SGLang 最初通过两个独立的内存池管理它们。MLA KV Blocks 和 KDA State Blocks 从独立预留的 GPU 内存池中分配。这种设计使两类缓存逻辑隔离，但要求系统根据预期工作负载预先估算它们的容量比例。",
+        "然而，在实际推理工作负载中，缓存需求往往难以预测。当短请求占主导时，KDA State Pool 可能首先耗尽。在长上下文工作负载中，MLA KV Pool 反而可能成为瓶颈，即使另一个池中仍有未使用的 GPU 内存。这种不平衡降低了整体 GPU 内存利用率。",
+        "为解决此问题，SGLang 提供可选的 Unified Memory 模式，在共享物理容量池中管理 MLA KV Blocks 和 KDA State Blocks。两类缓存保留各自的逻辑结构和分配粒度，但从相同的底层 GPU 内存容量中分配，使内存使用能够根据实际工作负载动态调整。",
+        "在实现中，Unified Memory 预留一块连续的 GPU 内存区域。KDA State Blocks 和 MLA KV Blocks 从相向的两端向内增长，二者之间的空间作为共享空闲容量池。当对象被释放时，系统用对应端的对象填补产生的空洞，保持可用区域连续，并减少长时间运行工作负载中的内存碎片。",
+        "需要注意的是，“unified”指的是物理容量的统一管理。它并不意味着将 MLA KV 和 KDA State 强制放入相同大小的页中。每种缓存类型仍使用最适合自身特性的布局进行分配和管理；它们只是在 GPU 内存层面共享未使用的容量。",
+        "此模式可通过 `--enable-unified-memory` 显式启用，使 SGLang 能够更灵活地适应不同请求分布下 Kimi K3 混合注意力架构的缓存需求。"
+      ],
+      "fig_after": {
+        "2": [
           {
             "src": "fig03.png",
             "caption": "Image source: https://www.lmsys.org/blog/2026-07-27-kimi-k3-day0-support/"
@@ -127,33 +182,27 @@
       }
     },
     {
+      "type": "h3",
+      "title": "集成 Mooncake 实现跨实例复用",
+      "paras": [
+        "上述优化解决了单个 SGLang 实例内的 KDA 感知前缀缓存管理问题。然而，在大规模推理部署中，单个实例的 GPU 缓存容量仍然有限，许多具有高复用价值的长上下文前缀无法被无限期保留。",
+        "为了进一步扩大缓存复用范围，SGLang 将 Mooncake 集成到其 KDA 感知缓存系统中。通过 HiCache，缓存对象可以超越单机 GPU 内存，扩展到更大的共享缓存层。当新请求到达时，系统不仅可以查询本地 Radix Tree Cache，还可以从 Mooncake 检索其他推理实例产生的缓存状态，在当前实例上恢复并继续执行。",
+        "Mooncake 不参与 KDA State 的生成、更新或恢复语义。因此，它无需理解模型内部注意力机制之间的差异。它的职责是高效管理和传输 SGLang 已确定为有效且可复用的缓存对象。这种职责分离使得 SGLang 和 Mooncake 可以独立处理正确性与分布式扩展性：SGLang 决定哪些状态可以复用，而 Mooncake 决定这些状态如何在实例之间移动。",
+        "借助 HiCache 和 Mooncake 的跨实例缓存能力，Kimi K3 的 MLA KV 和 KDA State 可以突破单个 GPU 实例的内存限制，在更大的推理集群中共享。这提高了缓存命中率，减少了长上下文推理、多轮对话和 agentic 工作负载中的冗余计算。"
+      ]
+    },
+    {
       "type": "h2",
       "title": "vLLM × Mooncake：K3 的混合缓存管理与跨实例复用",
+      "paras": []
+    },
+    {
+      "type": "h3",
+      "title": "Hybrid KV Cache Manager：统一两类缓存",
       "paras": [
         "与 SGLang 基于 Radix Tree 的状态管理方法不同，vLLM 从统一缓存管理框架出发。它将 MLA KV 和 KDA State 都纳入 Hybrid KV Cache Manager，然后结合灵活的缓存保留策略与 Mooncake 的分布式缓存能力，实现跨实例复用。",
         "如前所述，Kimi K3 中的 MLA KV Cache 和 KDA State 在生命周期、更新语义和复用粒度上存在显著差异。因此，传统 KV Cache 管理机制无法直接适用。",
-        "为了解决这个问题，vLLM 通过 Hybrid KV Cache Manager 扩展其现有 KV Cache 管理框架，使单个 Scheduler 能够协调具有不同生命周期的两类缓存对象。全注意力层继续使用 Paged KV Blocks 进行 token 级 KV Cache，而 KDA 层额外维护循环状态和卷积状态。两类状态共享相同的请求调度流水线，但遵循不同的缓存管理模型：MLA KV 以 token 或 block 粒度追加，写入后不可变；而 KDA State 通过可缓存的循环状态检查点或状态块记录可恢复的执行点，同时每个运行中的请求维护自己独立的活跃副本。",
-        "为防止 KDA State 管理限制 Prefix Cache 复用的匹配粒度，vLLM 将逻辑前缀匹配与状态存储的物理位置解耦。请求匹配基于细粒度的链式前缀哈希，可以在物理状态块内部识别匹配，而不是将物理 KV block 作为最小匹配单元。这使得系统能够在更细的粒度上定位共享前缀。",
-        "与此同时，KDA State Blocks 无需覆盖每个 token 位置。它们只存储在选定的前缀边界上。当请求从共享前缀恢复执行时，vLLM 首先将相应的 KDA State 复制到请求私有存储中，再继续计算。这可以防止就地更新破坏被其他请求共享的缓存状态。",
-        "在 vLLM 中，KDA State 不像 MLA KV 那样为每个 token 分配独立的缓存条目。相反，它使用更大的 State Blocks 作为管理的基本单元。每个 State Block 存储处理一段连续 token 后产生的循环状态和卷积状态。这种设计降低了状态分配和管理开销，但引入了一个新问题：请求之间实际共享前缀的长度很少与 State Block 边界精确对齐。",
-        "如果 Prefix Cache 匹配仅限于 KDA State Block 边界，那么位于更细粒度前缀位置的有效 KDA state 检查点将无法被直接复用。例如，假设一个 KDA State Block 覆盖 4,096 个 token，而两个请求共享一个 4,480 token 的前缀。传统的块对齐缓存只能识别前 4,096 个 token，从而迫使后续请求复用一个比实际可用更短的前缀。",
-        "为了解决这个问题，vLLM 引入了 Fine-Grained Partial Hits，将前缀匹配的粒度与 KDA State 的物理存储粒度解耦。系统继续使用大型 KDA State Blocks 管理底层状态，同时允许在每个 State Block 内记录更细粒度的 Prefix Entries。",
-        "一旦针对某个 token 边界生成了有效的 KDA State Block，该位置就可以作为合法的恢复点，即使它落在尚未完全填充的 State Block 内部。在上面的例子中，vLLM 可以直接在 4,480-token 位置记录一个 Prefix Entry，使后续请求能够从更长的共享前缀恢复，而无需额外创建 KDA State 的完整副本。",
-        "KDA State 的引入使检查点成为 Prefix Cache 复用的关键资源。然而，由于每个 KDA State 都有可观的存储占用，在每个前缀位置都存储一个并不现实。为了确定如何将有限的缓存预算分配给最可能被复用的位置，vLLM 提供了两种互补的 KDA State 保留策略：Interval-Based Retention 和 Marconi-Style Selective Retention。前者利用已知的结构边界提供稳定的恢复点，后者则根据运行时访问模式动态识别具有真正复用价值的前缀。",
-        "策略 1：Interval-Based Retention ——在结构化边界存储检查点。",
-        "在具有清晰上下文结构的工作负载中（例如多轮对话和 agentic（智能体原生）任务），某些前缀边界天然具有更高的复用概率。因此 vLLM 支持按固定间隔存储 KDA 检查点，同时保留每个 Prompt 结束时的状态。",
-        "例如，系统可以每隔固定数量的 token 创建一个检查点，并自动在每个 Prompt 边界保留 KDA State。相比机械地按均匀间隔分布检查点，Prompt 末尾的 State 通常对真实工作负载更有价值。在多轮对话中，下一个请求通常会复用上一轮的整个 Prompt，因此从该 Prompt 末尾恢复可以消除大量冗余计算。",
-        "用户可以通过 VLLM_PREFIX_CACHE_RETENTION_INTERVAL 配置该间隔。当此值设置为 0 时，vLLM 会禁用周期性检查点创建，仅保留 Prompt 末尾的 State，从而降低以多轮对话为主的工作负载的缓存开销。",
-        "策略 2：Marconi 风格的选择性保留——仅缓存真正热的前缀。",
-        "固定间隔策略可以捕获可预测的复用模式，但无法预先判断动态出现的共享前缀——例如系统 Prompt、代码仓库快照或工具定义——是否会被复用。如果在该前缀首次出现时立即保存 KDA State，可能会让一次性前缀消耗大量缓存容量。",
-        "因此 vLLM 引入了 Marconi 风格的选择性保留，基于一个简单的原则：第二次命中时才缓存。",
-        "当某个前缀首次出现时，系统会记录其访问元数据，但不会立即存储对应的 KDA State。只有当后续请求再次命中同一前缀——表明其具有实际复用价值——vLLM 才会在该位置创建 KDA 检查点。这可以防止一次性的长 Prompt 浪费缓存预算，同时自动将频繁访问的热前缀提升为可复用状态。",
-        "这两种策略共同覆盖了可预测的复用边界以及运行时发现的热前缀模式。",
-        "上述优化解决了单个 vLLM 实例内的统一 MLA KV 与 KDA State 管理、细粒度前缀匹配和状态恢复问题。针对大规模分布式推理，vLLM 进一步通过 KV Connector 集成 Mooncake，将 Hybrid Cache 从单实例存储扩展到跨实例共享。",
-        "对于 Kimi K3 这类混合注意力模型，Mooncake 不再存储单一的 KV Block，而是存储与同一前缀关联的一组 Hybrid Cache 对象。MLA KV 继续以 Paged KV Blocks 形式表示，KDA State 则以 Snapshot 形式存储在前缀对应的位置。为避免不同缓存类型之间的冲突，vLLM 使用 Cache Group、Prefix Hash 和并行配置等信息来区分写入 Mooncake 的对象，确保 MLA KV、KDA State 以及不同 rank 的数据保持正确对齐。",
-        "为了将细粒度部分命中机制扩展到远程缓存，vLLM 同时将每个细粒度前缀条目对应的 KDA State 存储到 Mooncake 中。写入过程中，系统不仅保留完整块，还保留经过 Scheduler Alignment 验证的 Partial States，使远程实例能够命中相同的细粒度前缀边界。MLA KV 与 KDA State 使用一致的前缀标识符进行管理，确保远程恢复时两种缓存类型始终对应相同的逻辑前缀。",
-        "当请求到达新的推理实例时，vLLM 同时查询本地缓存和 Mooncake 远程缓存，确定各来源可用的 MLA KV 与 KDA State 范围，再协调本地与远程结果以选定最终的 Hybrid Cache Boundary。如果 Mooncake 提供更长的完整 MLA 与 KDA 状态对，系统加载远程缓存并取代较短的本地命中；如果远程缓存无法提供更长的一致状态，vLLM 继续使用本地缓存，避免不必要的数据传输。",
-        "通过 KV Connector 集成 Mooncake，vLLM 将 Hybrid Cache 的生命周期从单个实例的 GPU 内存扩展到分布式缓存层。vLLM 负责维护 MLA KV 与 KDA State 之间的语义一致性，Mooncake 则提供高效的跨实例存储与数据传输。二者结合使 Kimi K3 的长上下文状态不仅能在单机内复用，还能在大规模推理集群中复用，显著降低多轮对话、coding agents 及其他高复用负载中的冗余计算。"
+        "为了解决这个问题，vLLM 通过 Hybrid KV Cache Manager 扩展其现有 KV Cache 管理框架，使单个 Scheduler 能够协调具有不同生命周期的两类缓存对象。全注意力层继续使用 Paged KV Blocks 进行 token 级 KV Cache，而 KDA 层额外维护循环状态和卷积状态。两类状态共享相同的请求调度流水线，但遵循不同的缓存管理模型：MLA KV 以 token 或 block 粒度追加，写入后不可变；而 KDA State 通过可缓存的循环状态检查点或状态块记录可恢复的执行点，同时每个运行中的请求维护自己独立的活跃副本。"
       ],
       "fig_after": {
         "2": [
@@ -161,20 +210,60 @@
             "src": "fig07.png",
             "caption": "Image source: https://vllm.ai/blog/2026-07-27-k3"
           }
-        ],
-        "6": [
+        ]
+      }
+    },
+    {
+      "type": "h3",
+      "title": "细粒度前缀匹配：Fine-Grained Partial Hits",
+      "paras": [
+        "为防止 KDA State 管理限制 Prefix Cache 复用的匹配粒度，vLLM 将逻辑前缀匹配与状态存储的物理位置解耦。请求匹配基于细粒度的链式前缀哈希，可以在物理状态块内部识别匹配，而不是将物理 KV block 作为最小匹配单元。这使得系统能够在更细的粒度上定位共享前缀。",
+        "与此同时，KDA State Blocks 无需覆盖每个 token 位置。它们只存储在选定的前缀边界上。当请求从共享前缀恢复执行时，vLLM 首先将相应的 KDA State 复制到请求私有存储中，再继续计算。这可以防止就地更新破坏被其他请求共享的缓存状态。",
+        "在 vLLM 中，KDA State 不像 MLA KV 那样为每个 token 分配独立的缓存条目。相反，它使用更大的 State Blocks 作为管理的基本单元。每个 State Block 存储处理一段连续 token 后产生的循环状态和卷积状态。这种设计降低了状态分配和管理开销，但引入了一个新问题：请求之间实际共享前缀的长度很少与 State Block 边界精确对齐。",
+        "如果 Prefix Cache 匹配仅限于 KDA State Block 边界，那么位于更细粒度前缀位置的有效 KDA state 检查点将无法被直接复用。例如，假设一个 KDA State Block 覆盖 4,096 个 token，而两个请求共享一个 4,480 token 的前缀。传统的块对齐缓存只能识别前 4,096 个 token，从而迫使后续请求复用一个比实际可用更短的前缀。",
+        "为了解决这个问题，vLLM 引入了 Fine-Grained Partial Hits，将前缀匹配的粒度与 KDA State 的物理存储粒度解耦。系统继续使用大型 KDA State Blocks 管理底层状态，同时允许在每个 State Block 内记录更细粒度的 Prefix Entries。",
+        "一旦针对某个 token 边界生成了有效的 KDA State Block，该位置就可以作为合法的恢复点，即使它落在尚未完全填充的 State Block 内部。在上面的例子中，vLLM 可以直接在 4,480-token 位置记录一个 Prefix Entry，使后续请求能够从更长的共享前缀恢复，而无需额外创建 KDA State 的完整副本。"
+      ],
+      "fig_after": {
+        "3": [
           {
             "src": "fig06.png",
             "caption": "Image source: https://vllm.ai/blog/2026-07-22-kimi-k3-preview"
           }
-        ],
-        "10": [
+        ]
+      }
+    },
+    {
+      "type": "h3",
+      "title": "KDA State 保留策略一：Interval-Based Retention",
+      "paras": [
+        "KDA State 的引入使检查点成为 Prefix Cache 复用的关键资源。然而，由于每个 KDA State 都有可观的存储占用，在每个前缀位置都存储一个并不现实。为了确定如何将有限的缓存预算分配给最可能被复用的位置，vLLM 提供了两种互补的 KDA State 保留策略：Interval-Based Retention 和 Marconi-Style Selective Retention。前者利用已知的结构边界提供稳定的恢复点，后者则根据运行时访问模式动态识别具有真正复用价值的前缀。",
+        "策略 1：Interval-Based Retention ——在结构化边界存储检查点。",
+        "在具有清晰上下文结构的工作负载中（例如多轮对话和 agentic（智能体原生）任务），某些前缀边界天然具有更高的复用概率。因此 vLLM 支持按固定间隔存储 KDA 检查点，同时保留每个 Prompt 结束时的状态。",
+        "例如，系统可以每隔固定数量的 token 创建一个检查点，并自动在每个 Prompt 边界保留 KDA State。相比机械地按均匀间隔分布检查点，Prompt 末尾的 State 通常对真实工作负载更有价值。在多轮对话中，下一个请求通常会复用上一轮的整个 Prompt，因此从该 Prompt 末尾恢复可以消除大量冗余计算。",
+        "用户可以通过 VLLM_PREFIX_CACHE_RETENTION_INTERVAL 配置该间隔。当此值设置为 0 时，vLLM 会禁用周期性检查点创建，仅保留 Prompt 末尾的 State，从而降低以多轮对话为主的工作负载的缓存开销。"
+      ],
+      "fig_after": {
+        "1": [
           {
             "src": "fig08.png",
             "caption": "Image source: https://vllm.ai/blog/2026-07-27-k3"
           }
-        ],
-        "14": [
+        ]
+      }
+    },
+    {
+      "type": "h3",
+      "title": "KDA State 保留策略二：Marconi 选择性保留",
+      "paras": [
+        "策略 2：Marconi 风格的选择性保留——仅缓存真正热的前缀。",
+        "固定间隔策略可以捕获可预测的复用模式，但无法预先判断动态出现的共享前缀——例如系统 Prompt、代码仓库快照或工具定义——是否会被复用。如果在该前缀首次出现时立即保存 KDA State，可能会让一次性前缀消耗大量缓存容量。",
+        "因此 vLLM 引入了 Marconi 风格的选择性保留，基于一个简单的原则：第二次命中时才缓存。",
+        "当某个前缀首次出现时，系统会记录其访问元数据，但不会立即存储对应的 KDA State。只有当后续请求再次命中同一前缀——表明其具有实际复用价值——vLLM 才会在该位置创建 KDA 检查点。这可以防止一次性的长 Prompt 浪费缓存预算，同时自动将频繁访问的热前缀提升为可复用状态。",
+        "这两种策略共同覆盖了可预测的复用边界以及运行时发现的热前缀模式。"
+      ],
+      "fig_after": {
+        "0": [
           {
             "src": "fig09.gif",
             "caption": "Image source: https://vllm.ai/blog/2026-07-27-k3"
@@ -183,13 +272,35 @@
       }
     },
     {
+      "type": "h3",
+      "title": "通过 KV Connector 集成 Mooncake",
+      "paras": [
+        "上述优化解决了单个 vLLM 实例内的统一 MLA KV 与 KDA State 管理、细粒度前缀匹配和状态恢复问题。针对大规模分布式推理，vLLM 进一步通过 KV Connector 集成 Mooncake，将 Hybrid Cache 从单实例存储扩展到跨实例共享。",
+        "对于 Kimi K3 这类混合注意力模型，Mooncake 不再存储单一的 KV Block，而是存储与同一前缀关联的一组 Hybrid Cache 对象。MLA KV 继续以 Paged KV Blocks 形式表示，KDA State 则以 Snapshot 形式存储在前缀对应的位置。为避免不同缓存类型之间的冲突，vLLM 使用 Cache Group、Prefix Hash 和并行配置等信息来区分写入 Mooncake 的对象，确保 MLA KV、KDA State 以及不同 rank 的数据保持正确对齐。",
+        "为了将细粒度部分命中机制扩展到远程缓存，vLLM 同时将每个细粒度前缀条目对应的 KDA State 存储到 Mooncake 中。写入过程中，系统不仅保留完整块，还保留经过 Scheduler Alignment 验证的 Partial States，使远程实例能够命中相同的细粒度前缀边界。MLA KV 与 KDA State 使用一致的前缀标识符进行管理，确保远程恢复时两种缓存类型始终对应相同的逻辑前缀。",
+        "当请求到达新的推理实例时，vLLM 同时查询本地缓存和 Mooncake 远程缓存，确定各来源可用的 MLA KV 与 KDA State 范围，再协调本地与远程结果以选定最终的 Hybrid Cache Boundary。如果 Mooncake 提供更长的完整 MLA 与 KDA 状态对，系统加载远程缓存并取代较短的本地命中；如果远程缓存无法提供更长的一致状态，vLLM 继续使用本地缓存，避免不必要的数据传输。",
+        "通过 KV Connector 集成 Mooncake，vLLM 将 Hybrid Cache 的生命周期从单个实例的 GPU 内存扩展到分布式缓存层。vLLM 负责维护 MLA KV 与 KDA State 之间的语义一致性，Mooncake 则提供高效的跨实例存储与数据传输。二者结合使 Kimi K3 的长上下文状态不仅能在单机内复用，还能在大规模推理集群中复用，显著降低多轮对话、coding agents 及其他高复用负载中的冗余计算。"
+      ]
+    },
+    {
       "type": "h2",
       "title": "TokenSpeed × Mooncake：从 Flat KV 到多模态 EPD 的统一数据平面",
+      "paras": []
+    },
+    {
+      "type": "h3",
+      "title": "从 KV 传输到统一数据平面",
       "paras": [
         "传统的 Prefill–Decode（PD）分离主要解决推理节点之间的 KV Cache 传输问题。Prefill 节点处理完输入上下文后，将得到的 KV Blocks 发送给 Decode 节点，由后者继续生成。然而，对于 Kimi K3 等下一代模型，传输的数据不再是同质的 KV Cache 块集合。",
         "Kimi K3 采用结合 MLA 与 KDA 的混合注意力架构，其状态生命周期、更新粒度和物理布局均与传统 KV Cache 不同。继续沿用传统 KV Cache 抽象来管理和传输各状态类型，不仅会增加系统复杂度，还会让模型特有的架构细节渗入调度、缓存和网络传输层。",
         "因此，面向下一代分离式推理系统的挑战不再仅仅是传输 KV Cache，而是如何高效传输异构的模型中间状态。TokenSpeed 通过 Flat KV 解决这一问题，将 MLA KV 与 KDA State 表示为统一、可传输的数据单元。结合 Mooncake 的高性能传输能力，该数据面超越了传统 PD 分离，支持多模态 Encoder–Prefill–Decode（EPD）分离。",
-        "因此，Mooncake 不再仅仅是 Prefill 与 Decode 之间的 KV 传输通道，而是成为横跨模型不同执行阶段的统一状态传输基础设施。",
+        "因此，Mooncake 不再仅仅是 Prefill 与 Decode 之间的 KV 传输通道，而是成为横跨模型不同执行阶段的统一状态传输基础设施。"
+      ]
+    },
+    {
+      "type": "h3",
+      "title": "Flat KV：统一的页粒度表示",
+      "paras": [
         "为应对 MLA KV 与 KDA State 的异构物理管理需求，TokenSpeed 引入了 Flat KV，将两类状态统一纳入页粒度（page-granularity）管理模型。其核心思想是：不同模型状态无需共享相同的内部数据布局，但应可映射到统一的缓存管理单元。",
         "在 Flat KV 中，单个页可存储 1,536 个 token 的 MLA 潜在历史，或一份完整的 KDA 循环快照。换言之，随 token 增长的 MLA KV 与固定大小的 KDA State 都被抽象为相同大小的页对象，并通过统一的页分配器进行管理。",
         "TokenSpeed 将 Kimi K3 的 69 个 KDA 层分为三组，每组 23 层。这些组与全注意力组一起映射到 24 个物理 slab 上。不同类型的状态共享同一页地址空间：给定的全局页 ID 始终映射到固定的物理位置，使 MLA KV 与 KDA 快照能够使用相同的分配、回收与所有权管理机制。",
@@ -197,12 +308,32 @@
         "Prefix Cache 可通过统一接口管理 MLA KV 页与 KDA State 页。",
         "写时复制（Copy-on-Write）等状态操作可复用相同的页生命周期管理。",
         "在 PD 分离架构中，系统只需传输页，无需为不同类型的状态设计单独的传输协议。",
-        "因此，Flat KV 不仅仅是把两种数据类型放入同一内存池。它重新定义了分离式推理的缓存抽象：KV Cache 不再局限于 token 级别的 Key 和 Value 张量，而是成为一种统一的基于页的表示形式，能够承载异构模型的中间状态。",
+        "因此，Flat KV 不仅仅是把两种数据类型放入同一内存池。它重新定义了分离式推理的缓存抽象：KV Cache 不再局限于 token 级别的 Key 和 Value 张量，而是成为一种统一的基于页的表示形式，能够承载异构模型的中间状态。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "fig05.png",
+            "caption": "Image source: https://lightseek.org/blog/tokenspeed-kimi-k3.html"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h3",
+      "title": "PD 分离的页级传输",
+      "paras": [
         "在 Flat KV 基于页的表示基础上，TokenSpeed 将 PD 分离中的传输单元从传统的 KV Blocks 扩展为统一的页。MLA KV 和 KDA State 都可以表示为相同的数据移动单元，并通过共享的页 ID 空间和元数据格式进行管理。",
         "Mooncake 随后在页级别处理跨节点数据传输。Prefill 节点只需提供需要传输的页 ID 及其关联的元数据。Mooncake Transfer Engine 可以直接定位并传输 GPU 缓冲区中相应的物理区域，而无需了解页面中包含的是 MLA KV 还是 KDA State。",
         "在实现中，Prefill 节点首先确定必须从 Flat KV 页表中传输哪些页，然后生成相应的页元数据，包括全局页 ID 和物理地址映射。基于这些元数据，Mooncake Transfer Engine 直接在已注册的 GPU 缓冲区之间传输物理页，无需 CPU 暂存或额外的数据格式转换。",
         "收到页后，Decode 节点使用相同的全局页 ID 空间重建相应的缓存视图。由于 MLA KV 页和 KDA State 页共享统一的页管理模型，Decode 端不需要针对不同状态类型分别设置接收和恢复路径。Flat KV 映射层将每个物理页解释为相应的逻辑缓存对象。",
-        "因此，Flat KV 和 Mooncake 建立了明确的职责分离：TokenSpeed 将异构模型状态转换为统一的页表示，而 Mooncake 负责在 Prefill 和 Decode 节点之间高效传输这些页。模型架构的变化仅影响 Flat KV 映射逻辑，底层传输路径保持不变。",
+        "因此，Flat KV 和 Mooncake 建立了明确的职责分离：TokenSpeed 将异构模型状态转换为统一的页表示，而 Mooncake 负责在 Prefill 和 Decode 节点之间高效传输这些页。模型架构的变化仅影响 Flat KV 映射逻辑，底层传输路径保持不变。"
+      ]
+    },
+    {
+      "type": "h3",
+      "title": "迈向多模态 EPD 分离",
+      "paras": [
         "由于 Kimi K3 原生支持视觉输入，其推理流水线不再局限于 Prefill 和 Decode 阶段，而是需要扩展为 Encoder–Prefill–Decode (EPD) 三阶段架构。为支持这一设计，TokenSpeed 将 Encoder 从原先嵌入 Prefill 的计算中分离出来，使其成为独立的服务阶段，并利用 Mooncake 构建跨越所有三个阶段的数据传输路径。",
         "在 TokenSpeed 的 EPD 架构中，Encoder、Prefill 和 Decode 各自拥有独立的工作线程池、调度策略和扩缩容能力。SMG（Serving Management Gateway）负责请求编排、阶段间路由和请求状态关联，使得三个阶段可以根据各自的工作负载特性独立部署和扩缩容。",
         "Encoder 专注于视觉输入处理，可根据图像数量和分辨率等因素独立扩展。Prefill 将视觉嵌入与文本上下文结合并执行上下文计算，Decode 则负责后续 token 生成。通过解耦这些阶段，涉及多图像或高分辨率输入的视觉密集型请求不再直接与语言模型的 Prefill 和 Decode 阶段竞争计算资源。",
@@ -212,13 +343,7 @@
         "TokenSpeed 在 E→P 和 P→D 两条路径上复用相同的内存注册、端点发现和传输完成跟踪机制，而非为视觉嵌入和 KV 状态维护独立的数据通道。因此，Mooncake 无需理解阶段间传输对象的具体语义，只需高效移动 GPU 内存中的数据对象即可。"
       ],
       "fig_after": {
-        "5": [
-          {
-            "src": "fig05.png",
-            "caption": "Image source: https://lightseek.org/blog/tokenspeed-kimi-k3.html"
-          }
-        ],
-        "17": [
+        "0": [
           {
             "src": "fig04.png",
             "caption": ""
