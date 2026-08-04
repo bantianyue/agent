@@ -1,0 +1,352 @@
+\section{Multi-Stage Learning Framework}
+\label{sec:multi-stage-learning-framework}
+
+DME follows a two-stage training design. The first stage performs large-scale contrastive pre-training to build a general multimodal embedding space across heterogeneous retrieval tasks. The second stage refines this embedding space with two complementary mechanisms:
+Evidence-Grounded Typed Latent Reasoning, which grounds the retrieval representation
+in selected multimodal evidence and typed latent states, and Cross-Conditional
+Reconstruction, which applies NTP/MTP to enforce fine-grained counterpart semantics
+in the readout representation. We describe the training objective of each stage and then summarize the final joint objective.
+
+\subsection{Training Data and Supervision Sources}
+\label{sec:training-data-supervision}
+
+DME uses different supervision sources across training stages. Stage 1 and Stage 2 both rely on contrastive query--document pairs, while Stage 2-A additionally uses synthetic structured supervision for evidence grounding and typed latent reasoning. We describe these data sources separately in this section, and leave the detailed objectives to the following subsections.
+
+\paragraph{Stage-1 contrastive data.}
+
+The primary goal of Stage 1 is to equip the model with fundamental multimodal embedding capabilities. Specifically, this stage aims to align representations from text, image, and video modalities into a unified semantic space, learning high-quality and well-aligned embeddings through large-scale contrastive training.
+
+To this end, we construct a heterogeneous training corpus covering three major modality groups. For text data, we aggregate a suite of widely used open-domain retrieval and question-answering datasets~\cite{MS-MARCO,NQ,hotpotqa,triviaqa}, which jointly provide supervision for passage retrieval, open-domain question answering, and multi-hop reasoning. For image data, we leverage large-scale image–text corpora~\cite{CC12M,megapairs} to learn cross-modal semantic matching. For video data, we curate a large-scale video--text alignment corpus, providing dense frame-level and clip-level supervision.
+
+In addition to these public datasets, we further incorporate a set of in-house proprietary datasets, including high-quality image caption data, long-form text matching data, synthetic text-to-image pairs, and long-video caption data. These private sources complement the public corpora by improving caption quality, expanding long-context textual supervision, and increasing coverage over diverse visual and temporal scenarios. All examples are normalized into a unified (query, positive) format. We apply data cleaning to remove empty samples, corrupted media, low-quality captions, low-resolution images, and near-duplicate examples. During training, we use only in-batch negatives, with task-aware grouping to avoid trivial cross-modality negatives. In total, Stage 1 is trained on approximately 25M query--document pairs.
+
+\paragraph{Stage-2 contrastive data.}
+The objective of this stage is to comprehensively improve the model's retrieval capability across specialized scenarios and complex multimodal tasks. To this end, we construct a diverse mixture of instruction-formatted retrieval data. This dataset includes the training set from MMEB-v2~\cite{VLM2VecV2}, supplemented by a wide array of public multimodal retrieval and question-answering datasets, covering image--text retrieval, video--text retrieval, visual--document retrieval, question answering, classification-style retrieval, and mixed-modality retrieval. In addition to in-batch negatives, we incorporate hard negatives when available, including annotated distractors, retrieval-mined candidates, and semantically similar examples within the same task family. All examples are normalized into a unified (instruction, query, positive) format, while sampling ratios are balanced across task families to prevent large datasets from dominating the training process.
+
+\paragraph{Stage-2A structured CoT supervision data.}
+The supervision signals for Stage 2-A are generated from the original query--positive--negative retrieval samples using Seed-2.0-Pro~\cite{seed2} as the teacher model. For each raw sample, we first normalize it into a structured triplet. The teacher then generates item-level structured anchor records for the query and positive document. When a hard negative is available, we also generate a negative-side structured anchor record, which is mainly used to construct rejection-oriented trajectory supervision rather than as an anchor-grounding target.
+
+We use the term \emph{structured anchor record} to distinguish the supervision data from the model anchor tokens introduced later. A structured anchor record is not a learnable token. Instead, it is a teacher-generated item-level annotation that contains modality-specific evidence entries and a short \emph{local summary}. The evidence entries may be text spans, image regions, or video frame references. The local summary is generated jointly with the evidence entries; if it is missing or invalid, we derive a fallback summary from the first valid text, image, or video evidence entry. For text-only and classification-style samples, a lightweight heuristic path can directly use short text or label semantics as the local summary.
+
+The teacher outputs structured annotations rather than model tokens. Each record contains query-side and positive-side evidence annotations, an optional negative-side evidence record used to construct rejection supervision, item-level local summaries, and a short typed retrieval trajectory. Structured evidence may refer to text spans, image regions, or video frame indices. During preprocessing, these fields are aligned to the serialized Qwen3.5 input to obtain token-, patch-, or frame-level supervision targets. The local summaries and trajectory-state descriptions are encoded offline into cached semantic targets.
+
+The typed trajectory describes the relation among the query, positive document, and optional negative document. Each step contains a retrieval role, references to previously generated evidence entries, and a short state description. The supported roles include \texttt{localize}, \texttt{align\_pos}, \texttt{reject\_neg}, and \texttt{summarize}. Query and positive evidence provide anchor-grounding supervision, whereas negative-side evidence is used only to construct rejection-oriented trajectory states.
+
+\begin{tcolorbox}[
+    colback=blue!5,
+    colframe=blue!65!black,
+    title={Structured Supervision for Stage 2-A},
+    fonttitle=\bfseries,
+    boxrule=0.8pt,
+    arc=2pt
+]
+\small
+\begin{tabular}{p{0.24\linewidth}p{0.68\linewidth}}
+\texttt{query\_anchor} &
+Query-side text, image, or video evidence entries with structured locations and semantic labels. \\
+
+\texttt{pos\_anchor} &
+Positive-side evidence used together with query evidence for anchor-grounding supervision. \\
+
+\texttt{neg\_anchor} &
+Optional negative-side evidence used to construct \texttt{reject\_neg} states; not used as an anchor hit target. \\
+
+\texttt{local\_summary} &
+A short item-level semantic summary encoded offline for summary-conditioned supervision. \\
+
+\texttt{traj} &
+A short typed trajectory whose steps contain a retrieval role, referenced evidence ids, and a state description. \\
+\end{tabular}
+\end{tcolorbox}
+
+
+\subsection{Stage 1: Large-Scale Contrastive Pre-training}
+\label{sec:stage1-contrastive-pretraining}
+
+Stage 1 aims to build a broad and stable multimodal embedding space before applying the Stage-2 semantic sufficiency objectives. At this stage, DME is trained as a standard bi-encoder retriever with large-scale heterogeneous query--document pairs. The model uses the Stage-1 readout token $\texttt{<emb>}$ introduced in Section~\ref{sec:two-stage-learning-pipeline}, and does not yet use anchor tokens, typed latent states, or reconstruction supervision. This design makes Stage 1 simple and scalable, while providing a strong initialization for the more structured Stage-2 training.
+
+The contrastive data mixture used in this stage is summarized in Section~\ref{sec:training-data-supervision}.
+Given an instruction-aware query template $T_q$ and a document template $T_d$, DME encodes each pair using the side-specific extraction functions defined in Eq.~\eqref{eq:bi-encoder-extraction}:
+\begin{equation}
+    \mathbf{z}_{q_i}
+    =
+    E_{\theta}^{q}
+    \left(
+        T_q(\iota_i,q_i)
+    \right),
+    \qquad
+    \mathbf{z}_{d_i^+}
+    =
+    E_{\theta}^{d}
+    \left(
+        T_d(\iota_i,d_i^+)
+    \right).
+\label{eq:stage1-pair-encoding}
+\end{equation}
+The embeddings are $\ell_2$-normalized and compared using the score in Eq.~\eqref{eq:retrieval-score}.
+
+\paragraph{Contrastive objective.}
+For each query $q_i$, let $\mathcal{D}_i^-$ denote its negative document set. In practice, $\mathcal{D}_i^-$ can be constructed from other documents in the same mini-batch and from the data mixture. The Stage-1 contrastive objective encourages the query representation to be closer to the positive document than to negative documents:
+\begin{equation}
+    \mathcal{L}_{\mathrm{S1}}^{\mathrm{CL}}
+    =
+    -
+    \frac{1}{B}
+    \sum_{i=1}^{B}
+    \log
+    \frac{
+        \exp
+        \left(
+            s_{\theta}(q_i, d_i^+ \mid \iota_i) / \tau_{\mathrm{CL}}
+        \right)
+    }{
+        \exp
+        \left(
+            s_{\theta}(q_i, d_i^+ \mid \iota_i) / \tau_{\mathrm{CL}}
+        \right)
+        +
+        \sum_{d^- \in \mathcal{D}_i^-}
+        \exp
+        \left(
+            s_{\theta}(q_i, d^- \mid \iota_i) / \tau_{\mathrm{CL}}
+        \right)
+    },
+\label{eq:stage1-cl}
+\end{equation}
+where $B$ is the mini-batch size, $\tau_{\mathrm{CL}}$ is the temperature parameter, and $s_{\theta}(\cdot,\cdot)$ is the vector-similarity score defined in Section~\ref{sec:task-formulation}.
+
+\paragraph{Role of Stage 1.}
+Stage 1 provides the foundation for the full DME training pipeline. It aligns heterogeneous modalities into a common embedding space, gives the model broad task coverage, and produces a stable retrieval geometry for large-scale nearest-neighbor search. However, the supervision in this stage remains pair-level: it optimizes whether a query and a document should be close, but does not explicitly model which evidence supports the match or whether the embedding preserves fine-grained counterpart semantics. These limitations motivate the two Stage-2 components introduced in the following subsections.
+
+\subsection{Stage 2-A: Evidence-Grounded Typed Latent Reasoning}
+\label{sec:stage2a-typed-latent-reasoning}
+
+Stage 2-A introduces an evidence-grounded latent reasoning module that encourages the retrieval representation to depend on evidence supporting the query--document match. Stage-1 contrastive learning supervises the final similarity score, but does not explicitly determine where the encoder should attend or what retrieval role an intermediate hidden state should represent. Stage 2-A addresses this limitation through modality-aware anchor tokens and a small number of typed query-side latent states.
+
+The structured CoT records described in Section~\ref{sec:training-data-supervision} provide three forms of supervision: localized evidence targets, item-level local summaries, and typed retrieval-state descriptions. The design follows a compact loop from evidence grounding to retrieval optimization: anchors identify where to look, summary targets constrain what the selected evidence means, typed latent states organize retrieval-specific information, and the resulting representation is used by the contrastive objective.
+
+\paragraph{Evidence grounding.}
+For readability, we suppress the sample index in the main text. Let $s\in\{q,d\}$ denote the query or document side, and let $m(r)$ denote the modality associated with anchor $r$. For anchor hidden state $\mathbf{a}_{s,r}$ and content-token hidden state $\mathbf{x}_{s,j}$ from the same modality, DME computes:
+\begin{equation}
+    p_{s,r}(j)
+    =
+    \operatorname{softmax}_{
+        j\in\mathcal{I}_{m(r)}(s)
+    }
+    \left(
+        \frac{
+            \left(
+                W_q^{a}\mathbf{a}_{s,r}
+            \right)^{\top}
+            \left(
+                W_k^{a}\mathbf{x}_{s,j}
+            \right)
+        }{
+            \sqrt{d_a}
+        }
+    \right),
+\end{equation}
+where $\mathcal{I}_{m(r)}(s)$ denotes the content tokens belonging to the modality of anchor $r$. The corresponding side-level evidence pool is:
+\begin{equation}
+    \mathbf{e}_{s,\mathrm{pool}}
+    =
+    \operatorname{Mean}_{r}
+    \left(
+        \sum_{
+            j\in\mathcal{I}_{m(r)}(s)
+        }
+        p_{s,r}(j)
+        \mathbf{x}_{s,j}
+    \right).
+\label{eq:stage2a-evidence-pool}
+\end{equation}
+
+Teacher-generated evidence targets supervise the anchor distributions through an evidence hit loss $\mathcal{L}_{\mathrm{hit}}$. Cached local-summary embeddings additionally supervise the semantic content of the pooled evidence through $\mathcal{L}_{\mathrm{sum}}$. The evidence assignment, assignment balancing, and summary-conditioned objectives are detailed in Appendix~\ref{app:stage2a-details}.
+
+\paragraph{Typed latent supervision.}
+The query side additionally contains a small number of latent states associated with retrieval roles such as semantic localization, positive alignment, and negative rejection. Semantic states are aligned with cached teacher-state embeddings, positive-alignment states are trained to retrieve the corresponding positive document, and rejection states are trained to prefer the positive document over a paired hard negative. We summarize these objectives as:
+\begin{equation}
+    \mathcal{L}_{\mathrm{typed}}
+    =
+    \lambda_{\mathrm{sem}}
+    \mathcal{L}_{\mathrm{sem}}
+    +
+    \lambda_{\mathrm{align}}
+    \mathcal{L}_{\mathrm{align}}
+    +
+    \lambda_{\mathrm{reject}}
+    \mathcal{L}_{\mathrm{reject}}.
+\label{eq:stage2a-typed-loss}
+\end{equation}
+The definitions of the three terms are provided in Appendix~\ref{app:stage2a-details}.
+
+\paragraph{Evidence-enhanced readout.}
+Let $\mathbf{h}_{q,R}^{\mathrm{traj}}$ denote the terminal query-side latent state. The query readout combines this terminal state with the query-side evidence pool. The document side uses its standard readout state together with the document-side evidence pool:
+\begin{equation}
+    \mathbf{r}_q
+    =
+    \mathbf{h}_{q,R}^{\mathrm{traj}}
+    +
+    \alpha\,
+    \operatorname{sg}
+    \left(
+        W_e
+        \mathbf{e}_{q,\mathrm{pool}}
+    \right),
+    \qquad
+    \mathbf{r}_d
+    =
+    \mathbf{h}_{d,\mathrm{read}}
+    +
+    \alpha\,
+    \operatorname{sg}
+    \left(
+        W_e
+        \mathbf{e}_{d,\mathrm{pool}}
+    \right),
+\label{eq:stage2a-readout}
+\end{equation}
+where $\operatorname{sg}(\cdot)$ denotes stop-gradient. The final query and document embeddings are:
+\begin{equation}
+    \mathbf{z}_s
+    =
+    \operatorname{norm}
+    \left(
+        W_{\mathrm{emb}}
+        \mathbf{r}_s
+    \right),
+    \qquad
+    s\in\{q,d\}.
+\label{eq:stage2a-embedding}
+\end{equation}
+
+The Stage-2A objective is:
+\begin{equation}
+    \mathcal{L}_{\mathrm{S2A}}
+    =
+    \lambda_{\mathrm{hit}}
+    \mathcal{L}_{\mathrm{hit}}
+    +
+    \lambda_{\mathrm{sum}}
+    \mathcal{L}_{\mathrm{sum}}
+    +
+    \mathcal{L}_{\mathrm{typed}}.
+\label{eq:stage2a-objective}
+\end{equation}
+
+This formulation links evidence selection to retrieval without introducing explicit textual reasoning. The latent states remain inside the encoder forward pass, while the structured teacher targets provide supervision for evidence grounding and retrieval-oriented latent representations.
+
+
+\subsection{Stage 2-B: Cross-Conditional Reconstruction with NTP and MTP}
+\label{sec:stage2b-cross-conditional-self-decoding}
+
+
+While Stage 2-A improves \emph{how} an embedding is formed, Stage 2-B constrains \emph{how much} counterpart-side information the final vector must retain. Under pair-level similarity supervision alone, the fine-grained generative understanding inherited from the MLLM backbone tends to degrade, and the embedding is never required to preserve the counterpart semantics that distinguish a relevant pair. Stage 2-B closes this gap by turning the retrieval embedding itself into a semantic bottleneck that must be sufficient to \emph{reconstruct} the counterpart-side textual content during training. Concretely, the query embedding is used as a prefix condition to decode the document-side text, and the document embedding is symmetrically used to decode the query-side text. This cross-conditional reconstruction injects fine-grained, token-level supervision into the embedding, while leaving the inference-time retrieval interface unchanged. We instantiate it with two complementary objectives: Next Token Prediction (NTP), which supervises the next token, and Multi-Token Prediction (MTP), which additionally supervises multiple future tokens so that the embedding captures longer-range counterpart semantics.
+
+\paragraph{Embedding as a prefix condition.}
+Stage 2-B reuses the Stage-2 readout representation introduced in Section~\ref{sec:stage2a-typed-latent-reasoning}. For a query $q$ and a document $d$ under instruction $\iota$, the readout vectors $r_q$ and $r_d$ produce the retrieval embeddings $z_q=\mathrm{norm}(W_{\text{emb}}r_q)$ and $z_d=\mathrm{norm}(W_{\text{emb}}r_d)$. We use the \emph{pre-normalization} embedding directly as the decoding condition, without any additional projection:
+\begin{equation}
+\tilde{\mathbf{z}}_q = W_{\text{emb}}\,r_q,
+\qquad
+\tilde{\mathbf{z}}_d = W_{\text{emb}}\,r_d .
+\label{eq:s2b-prefix}
+\end{equation}
+The vector $\tilde{\mathbf{z}}_q$ (resp. $\tilde{\mathbf{z}}_d$) is then placed at the first position of the decoding sequence as a single prefix token, so that all subsequently decoded tokens attend to it under the causal attention of the shared backbone $F_\theta$. Because the same vector also yields the retrieval embedding after $\ell_2$ normalization, any information required to reconstruct the counterpart text is forced to pass through the embedding itself, which is exactly the bottleneck we want to supervise.
+
+\paragraph{Next Token Prediction (NTP).}
+Consider the Query-to-Document (Q$\rightarrow$D) direction. Let the document-side text be $x_d=(x_d^1,\dots,x_d^T)$. We prepend the query prefix $\tilde{\mathbf{z}}_q$ and feed the concatenated sequence back into the same backbone for autoregressive decoding:
+\begin{equation}
+\mathbf{h}_t = F_\theta\!\left([\,\tilde{\mathbf{z}}_q\,;\,
+x_d^{1},\dots,x_d^{t-1}\,]\right),
+\qquad t=1,\dots,T,
+\label{eq:s2b-decode-hidden}
+\end{equation}
+where $[\cdot\,;\cdot]$ denotes sequence concatenation and $\mathbf{h}_t$ is the decoder hidden state at step $t$. The next-token distribution is obtained by a softmax over the vocabulary $\mathcal{V}$:
+\begin{equation}
+P_\theta\!\left(x_d^{t}\mid \tilde{\mathbf{z}}_q, x_d^{<t}\right)
+= \frac{\exp\!\left(\mathbf{e}_{x_d^{t}}^{\top}\mathbf{h}_t\right)}
+{\sum_{v\in\mathcal{V}}\exp\!\left(\mathbf{e}_{v}^{\top}\mathbf{h}_t\right)},
+\label{eq:s2b-softmax}
+\end{equation}
+where $\mathbf{e}_v$ is the embedding of token $v$. The NTP loss is the cross-entropy computed \emph{only} over document-side text tokens:
+\begin{equation}
+\mathcal{L}_{\text{NTP}}^{q\rightarrow d}
+= -\frac{1}{T}\sum_{t=1}^{T}
+\log P_\theta\!\left(x_d^{t}\mid \tilde{\mathbf{z}}_q, x_d^{<t}\right).
+\label{eq:s2b-ntp-q2d}
+\end{equation}
+Symmetrically, the Document-to-Query (D$\rightarrow$Q) direction conditions on the document embedding $\tilde{\mathbf{z}}_d$ to reconstruct the query-side text $x_q=(x_q^1,\dots,x_q^{T'})$:
+\begin{equation}
+\mathcal{L}_{\text{NTP}}^{d\rightarrow q}
+= -\frac{1}{T'}\sum_{t=1}^{T'}
+\log P_\theta\!\left(x_q^{t}\mid \tilde{\mathbf{z}}_d, x_q^{<t}\right).
+\label{eq:s2b-ntp-d2q}
+\end{equation}
+
+\paragraph{Multi-Token Prediction (MTP).}
+NTP only supervises the immediate next token, so the embedding may encode short-range surface cues rather than the longer-range semantics needed for fine-grained matching. Following the multi-token prediction objective~\cite{MultiTokenPrediction,DeepSeekV3}, we extend the decoding supervision to $D$ additional future tokens at every position. Different from parallel-head designs, we adopt the \emph{sequential} formulation that keeps a complete causal chain at each prediction depth. We describe the Q$\rightarrow$D direction; the D$\rightarrow$Q direction is symmetric.
+
+We attach $D$ lightweight MTP modules on top of the conditional decoder. The $k$-th module ($k=1,\dots,D$) consists of a Transformer block $\mathrm{TRM}_k$ and a projection $M_k\in\mathbb{R}^{h\times 2h}$, and it \emph{shares} the input embedding layer $\mathrm{Emb}(\cdot)$ and the output head $\mathrm{OutHead}(\cdot)$ with the main decoder. Let $\mathbf{h}_t^{0}\!=\!\mathbf{h}_t$ denote the main-decoder hidden state from Eq.~\eqref{eq:s2b-decode-hidden}. At depth $k$, the module combines the depth-$(k\!-\!1)$ representation with the embedding of the $(t\!+\!k)$-th document token:
+\begin{equation}
+\mathbf{h}_t^{\prime k}
+= M_k\!\left[\,\mathrm{RMSNorm}\!\left(\mathbf{h}_t^{k-1}\right);\,
+\mathrm{RMSNorm}\!\left(\mathrm{Emb}(x_d^{\,t+k})\right)\right],
+\label{eq:s2b-mtp-combine}
+\end{equation}
+\begin{equation}
+\mathbf{h}_{1:T-k}^{k} = \mathrm{TRM}_k\!\left(\mathbf{h}_{1:T-k}^{\prime k}\right),
+\qquad
+P_{t}^{k}
+= \mathrm{OutHead}\!\left(\mathbf{h}_t^{k}\right),
+\label{eq:s2b-mtp-head}
+\end{equation}
+where $[\cdot\,;\cdot]$ is concatenation and $P_{t}^{k}\in\mathbb{R}^{|\mathcal{V}|}$ is the predicted distribution for the $(t\!+\!k)$-th token. Each depth contributes a cross-entropy term, and the Q$\rightarrow$D MTP loss averages over the $D$ depths:
+\begin{equation}
+\mathcal{L}_{\text{MTP}}^{q\rightarrow d}
+= \frac{1}{D}\sum_{k=1}^{D}
+\left(-\frac{1}{T-k}\sum_{t=1}^{T-k}
+\log P_{t}^{k}\!\left[x_d^{\,t+k}\right]\right),
+\label{eq:s2b-mtp-q2d}
+\end{equation}
+where $P_{t}^{k}[\cdot]$ selects the probability of the ground-truth token. The D$\rightarrow$Q loss $\mathcal{L}_{\text{MTP}}^{d\rightarrow q}$ is defined analogously by conditioning on $\tilde{\mathbf{z}}_d$ and decoding the query-side text. Predicting several tokens ahead densifies the token-level signal and forces the embedding to pre-plan counterpart semantics beyond the immediate next token.
+
+\paragraph{Training-only supervision, inference-time efficiency.}
+Both NTP and MTP are pure training-time objectives. The decoding pass and the $D$ MTP modules are used only to back-propagate token-level gradients into the shared backbone and the readout; they are discarded at inference time. DME therefore remains a standard bi-encoder retriever: each query or document is encoded once into a dense vector, and retrieval is performed by vector similarity without any decoding, autoregressive generation, or cross-encoder scoring. As a result, cross-conditional reconstruction strengthens what the embedding must preserve while adding zero overhead to the online retrieval pipeline.
+
+\paragraph{Stage 2-B objective.}
+We combine the bidirectional NTP and MTP terms into the Stage-2B objective:
+\begin{equation}
+    \mathcal{L}_{\mathrm{S2B}}
+    =
+    \lambda_{\mathrm{NTP}}
+    \left(
+        \mathcal{L}_{\mathrm{NTP}}^{q\rightarrow d}
+        +
+        \mathcal{L}_{\mathrm{NTP}}^{d\rightarrow q}
+    \right)
+    +
+    \lambda_{\mathrm{MTP}}
+    \left(
+        \mathcal{L}_{\mathrm{MTP}}^{q\rightarrow d}
+        +
+        \mathcal{L}_{\mathrm{MTP}}^{d\rightarrow q}
+    \right).
+\end{equation}
+Jointly optimizing the two directions forces each embedding to encode enough counterpart-side semantics to reconstruct its match, which is exactly the semantic sufficiency that Stage 2-B is designed to supplement.
+
+\subsection{Joint Training Objective}
+\label{sec:joint-training-objective}
+
+DME is optimized sequentially. Stage 1 uses the large-scale contrastive objective $\mathcal{L}_{\mathrm{S1}}^{\mathrm{CL}}$ defined in Eq.~\eqref{eq:stage1-cl}. During Stage 2, we continue contrastive retrieval training on the Stage-2 data mixture and denote this term as $\mathcal{L}_{\mathrm{S2}}^{\mathrm{CL}}$. It has the same form as the Stage-1 contrastive objective but is computed using the Stage-2 data and readout representations.
+
+The Stage-2 objective is
+\begin{equation}
+    \mathcal{L}_{\mathrm{S2}}
+    =
+    \mathcal{L}_{\mathrm{S2}}^{\mathrm{CL}}
+    +
+    \mathcal{L}_{\mathrm{S2A}}
+    +
+    \mathcal{L}_{\mathrm{S2B}}.
+\end{equation}
+The contrastive term maintains the global retrieval geometry, Stage 2-A provides evidence and latent-state supervision, and Stage 2-B encourages the readout representation to preserve counterpart-side textual semantics.
