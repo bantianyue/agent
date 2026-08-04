@@ -17,7 +17,6 @@
 
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">7月27日，Moonshot AI正式开源其下一代旗舰模型Kimi K3。K3总参数量达2.8万亿，采用高度稀疏的混合专家（MoE）架构，每个token仅激活896个专家中的16个。目前，它是全球参数规模最大的开源权重模型之一。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">除了庞大的参数规模，K3还对其模型架构进行了全面升级。它采用了全新的线性注意力机制Kimi Delta Attention（KDA），与MLA（Multi-head Latent Attention，多头潜在注意力）协同工作，构成混合注意力架构。这一设计原生支持100万token的上下文窗口，同时兼顾长上下文推理效率与模型性能。此外，K3原生支持视觉理解，并在多个基准测试中取得开源模型领先水平，涵盖代码、Agent（智能体）任务和复杂推理。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Mooncake一直是多代Kimi模型开发历程的组成部分，通过其解耦推理架构为大规模推理提供稳定高效的基础设施。作为K3推理生态的关键合作伙伴，Mooncake与SGLang、vLLM和TokenSpeed在K3开源当天即完成了Day-0集成支持，覆盖跨实例KV Cache复用、PD解耦和EPD解耦等关键领域。用户可以在Mooncake之上部署K3，开箱即用地获得大规模分布式推理能力。在多轮对话和Agentic（智能体原生）工作负载等场景中，Mooncake显著减少了冗余计算开销，并帮助充分释放K3的长上下文能力。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">然而，K3的影响远不止于让模型“更大”。与传统Transformer相比，K3引入的基于KDA的混合注意力机制从根本上改变了缓存的性质。系统不仅要管理传统的KV Cache，还要管理诸如循环状态（Recurrent States）等新的模型状态。因此，传统的Prefix Cache复用和解耦推理架构设计也必须随之演进。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本文将介绍SGLang、vLLM和TokenSpeed如何适应Kimi K3的新缓存语义，以及Mooncake如何与这些框架协作，为K3提供完整的分布式推理能力。</p>
 
@@ -36,12 +35,10 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">随着新token的到来，两种状态都会就地更新，而不是像传统KV Cache那样持续增长。该设计的关键优势在于，推理期间所需的缓存量不再随上下文长度线性扩展。即使面对百万token的上下文，KDA层维护的循环状态仍保持固定大小，从而显著降低长上下文推理的内存压力。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">KDA给推理系统带来哪些新挑战？</h2>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">为何前缀匹配不再等于缓存可复用</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">KDA大幅降低长上下文推理期间的缓存开销，但也从根本上改变了缓存的语义。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在传统Transformer中，每个token都有自己独立的Key和Value。推理框架可以使用Radix Tree等结构来识别跨请求的最长公共前缀，复用相应的KV Cache，并跳过冗余的Prefill计算。在这种设置下，Prefix Cache复用几乎等同于KV Cache复用：一旦token前缀匹配，就可以直接恢复与该前缀关联的缓存。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">KDA打破了这种等价性。在Kimi K3中，MLA层仍然维护token级别的latent KV，而KDA层维护通过顺序处理整个前缀产生的Recurrent State。因此，两种根本不同的缓存形式在同一模型中共存。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>更重要的是，KDA状态不能像KV Cache那样被任意截断。假设一个请求已处理了10,000个token，系统仅在10,000-token位置存储了KDA状态。如果另一个请求只共享前8,000个token，则无法在8,000-token边界处从该状态恢复。已存储的状态已经包含了后续2,000个token的信息，无法逆转递归过程来重建更早的状态。</strong></p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>因此，token级前缀匹配并不必然意味着相应的KDA缓存可以恢复。为了保证恢复后的执行与不间断执行等价，MLA KV和完整的KDA状态都必须可用，并且对齐到相同的前缀边界。这意味着KDA-aware Prefix Cache必须在选定的前缀边界处显式存储检查点。即使MLA KV匹配到了更长前缀，如果对应的KDA检查点不可用，系统也必须回退到最近的合法边界，并重新计算该边界之后的所有内容。</strong></p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因此，对于Kimi K3来说，Prefix Cache复用不再只是存储和恢复一段KV Cache的问题。系统必须联合管理MLA KV和KDA Recurrent States，同时确保两者能够在相同的前缀边界处一致恢复。</p>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">检查点：密度与开销的权衡</h3>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">DeepSeek V4的SWA（Sliding Window Attention）也存在类似问题，但其解决方案相对直接：系统可以按固定间隔存储检查点，例如每128个token存储一次。然而，对于KDA而言，这种策略代价过高，因为每个检查点要大得多。根据KV Cache Size Calculator，单个KDA检查点会引入约0.4 GiB的固定缓存开销。若检查点间隔为128个token，一个100万token上下文的请求仅KDA状态就需要大约3 TB的存储空间。即使采用10,000个token这样更粗略的间隔，同一请求仍需要大约40 GB的额外缓存。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
@@ -52,7 +49,6 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如果两个910,000 token的请求共享前905,000个token，缓存复用率看起来仍然很高。然而，由于最近的检查点位于900,000 token处，系统必须再次重新计算10,000个token，而不是原来的5,000个token，导致相同的两倍计算量增加。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这些并非罕见边缘情况。事实上，它们与Agentic（智能体原生）工作负载的典型特征高度吻合：交互轮次多、每轮新增token数量少，且连续轮次之间通常有超过95% 的上下文是共享的。在此类场景中，有效的Prefix Cache命中率哪怕仅下降几个百分点，也会导致需要重新计算的token数量大幅增加。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因此，KDA缓存管理面临一个根本性权衡。更密集的检查点能提供更细粒度的恢复，并提高有效Prefix Cache命中率，但同时也会导致缓存消耗快速增长。更稀疏的检查点能降低存储开销，但每次缓存命中后系统需要重新计算更长的后缀，从而削弱缓存的性能收益。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这是支持Kimi K3高效复用Prefix Cache必须解决的核心挑战。</p>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">对分离式推理的连带影响</h3>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">KDA引入的变更不仅影响单实例内的Prefix Cache复用，还影响分离式推理架构中的缓存管理。在传统Transformer中，跨实例缓存复用和Prefill–Decode分离都围绕KV Blocks的统一抽象构建。只要token前缀匹配，相应的KV Cache就可以直接复用或迁移。然而，对于Kimi K3，缓存现在由两种不同类型的状态组成：MLA KV和KDA State。MLA KV仍然可以按token或block粒度进行管理，而KDA State只能从与特定前缀边界关联的检查点恢复。因此，跨实例复用不再仅仅是寻找最长匹配token前缀的问题。系统必须确保MLA KV和KDA State在同一个恢复点同时可用且一致，而不能自由组合来自不同来源的缓存数据。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">同样的问题也影响Prefill–Decode分离。Prefill和Decode阶段之间需要传输的不再仅仅是KV Blocks的集合，而是一组异构模型状态，包括MLA latent history和KDA Recurrent States。为每种状态类型设计独立的传输协议，不仅会增加系统复杂性，还会将模型特定的架构细节暴露给调度和通信层。因此，Prefill–Decode分离必须从KV Cache传输演变为更通用的模型状态传输抽象。</p>
@@ -64,23 +60,16 @@
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Image source: https://www.lmsys.org/blog/2026-07-27-kimi-k3-day0-support/</figcaption></figure>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">检查点选择：跟随执行阶段</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为了解决上述检查点存储开销与缓存命中率之间的权衡，SGLang采用了一种稀疏检查点管理策略，在有限的缓存预算下最大化Prefix Cache重用的收益。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">首先，在检查点选择方面，SGLang并不依赖简单的固定间隔策略，而是根据请求执行阶段来选择更有价值的检查点位置：</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Prefill阶段：Prefill通常按块执行，因此SGLang优先在块边界存储检查点。这样将检查点的创建与现有调度流程对齐，避免为保留中间状态而引入额外的同步开销。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Decode阶段：由于每个生成的token都可能成为未来请求共享前缀的一部分，SGLang在Decode期间按固定间隔创建检查点，在恢复粒度与缓存开销之间取得平衡。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Radix Tree分支点：当多个请求共享某个前缀或在某一位置分叉时，该位置更可能成为未来请求的缓存命中点。因此SGLang优先保留这些高复用价值位置的检查点。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">通过这种策略，检查点不再均匀分布在所有token位置上，而是集中在更可能被重用的前缀边界处。</p>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">检查点预算管理：LRU替换</h3>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">其次，在检查点预算管理方面，SGLang必须限制KDA States占用的GPU memory量。即使每个单独的缓存命中能带来显著收益，沿每条Radix Tree路径存储过多检查点也会迅速耗尽缓存容量。因此SGLang限制每条路径上保留的检查点数量，并将此约束与LRU（Least Recently Used）策略结合，以淘汰价值较低的状态：</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">长时间未被访问的检查点会被优先回收。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">频繁访问路径上的检查点会被保留。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">新生成的检查点仅在当前缓存压力允许的情况下替换现有状态。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">实际上，SGLang将检查点管理转化为一个感知访问模式的缓存优化问题。更多的状态预算被分配给具有更高价值和更大复用概率的位置，而不常用的状态会被及时释放。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这种稀疏检查点机制避免了固定间隔检查点过高的GPU内存开销，同时也减少了因检查点过稀疏而导致的回放量。因此，KDA感知的Prefix Cache复用可以高效扩展到长上下文和Agentic（智能体原生）工作负载。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">具体而言，很少被访问的检查点优先回收、频繁访问路径上的检查点优先保留、新检查点仅在缓存压力允许时才替换现有状态（LRU策略）。</p>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">压缩与共享：INT8、Copy-on-Write、Snapshot、Donate</h3>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在稀疏检查点管理的基础上，SGLang进一步降低KDA States的存储开销。并非每个缓存的检查点都立即需要用于计算，如果长期以高精度格式保留所有状态，将消耗大量GPU内存。因此，SGLang将当前运行请求使用的活动状态与存储在Radix Tree中的缓存状态分离开来。活动状态保留在运行时状态池中，而非活动检查点则被移至独立的缓存池，并以压缩格式存储。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SGLang当前还提供一条可选的本地检查点压缩路径。它将非活动Recurrent States压缩为INT8，以牺牲部分恢复精度换取更大的本地缓存容量。对于占存储空间绝大部分的KDA temporal state，SGLang按通道计算量化参数并将状态压缩为INT8。体积小得多的local window state则保持原始精度。与以BF16存储完整KDA State相比，这种方法大幅降低了每个检查点的存储成本，从而在相同缓存预算下保留更多可复用的前缀状态。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">当请求命中压缩检查点时，SGLang不会直接从压缩表示继续执行。相反，它先将检查点恢复到新的活动状态槽中，重建相应的局部窗口状态，然后以正常精度恢复计算。由于压缩仅在检查点存储时进行，解压仅在检查点命中时进行，每个token的KDA状态更新始终以原始精度运行。这避免了因重复量化和反量化而可能导致的误差累积。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">KDA States在Decode期间持续更新，而Prefix Cache中的共享状态必须保持不变。与写入后不再变化的MLA KV Cache不同，KDA State无法在多个请求之间直接共享，因为一个请求的更新可能会影响其他请求的执行。为了安全复用KDA States，SGLang通过三种机制将每请求的执行状态与共享检查点分离开来：Copy-on-Write（写时复制）、Snapshot（快照）和Donate（捐赠）。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Copy-on-Write：从共享检查点安全恢复。当请求命中Radix Tree中的KDA检查点时，SGLang不会直接在共享状态上继续执行。相反，它首先将与检查点关联的KDA State复制到请求拥有的私有执行槽中。后续计算仅更新该私有状态，保持附加在Radix Tree上的共享检查点不变。这使得多个请求能够安全地复用同一个Prefix Cache节点，同时独立推进各自的状态。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Snapshot：将运行时状态转换为可复用状态。默认情况下，请求执行期间产生的KDA State仅归属于当前请求。当请求到达新的可缓存前缀边界时，SGLang将当前运行时状态保存为新的Snapshot，并将其附加到Radix Tree以供后续请求恢复。为防止Snapshot操作与Forward期间的状态更新发生竞争，SGLang将状态复制调度到Forward Stream上，并依赖CUDA Stream排序来保证安全读写。Snapshot还会交替写入额外的缓冲区，避免新Snapshot覆盖仍被Radix Tree引用的旧状态。</p>
@@ -98,12 +87,9 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">上述优化解决了单个SGLang实例内的KDA感知前缀缓存管理问题。然而，在大规模推理部署中，单个实例的GPU缓存容量仍然有限，许多具有高复用价值的长上下文前缀无法被无限期保留。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为了进一步扩大缓存复用范围，SGLang将Mooncake集成到其KDA感知缓存系统中。通过HiCache，缓存对象可以超越单机GPU内存，扩展到更大的共享缓存层。当新请求到达时，系统不仅可以查询本地Radix Tree Cache，还可以从Mooncake检索其他推理实例产生的缓存状态，在当前实例上恢复并继续执行。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Mooncake不参与KDA State的生成、更新或恢复语义。因此，它无需理解模型内部注意力机制之间的差异。它的职责是高效管理和传输SGLang已确定为有效且可复用的缓存对象。这种职责分离使得SGLang和Mooncake可以独立处理正确性与分布式扩展性：SGLang决定哪些状态可以复用，而Mooncake决定这些状态如何在实例之间移动。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">借助HiCache和Mooncake的跨实例缓存能力，Kimi K3的MLA KV和KDA State可以突破单个GPU实例的内存限制，在更大的推理集群中共享。这提高了缓存命中率，减少了长上下文推理、多轮对话和agentic工作负载中的冗余计算。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">vLLM × Mooncake：K3的混合缓存管理与跨实例复用</h2>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">Hybrid KV Cache Manager：统一两类缓存</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">与SGLang基于Radix Tree的状态管理方法不同，vLLM从统一缓存管理框架出发。它将MLA KV和KDA State都纳入Hybrid KV Cache Manager，然后结合灵活的缓存保留策略与Mooncake的分布式缓存能力，实现跨实例复用。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如前所述，Kimi K3中的MLA KV Cache和KDA State在生命周期、更新语义和复用粒度上存在显著差异。因此，传统KV Cache管理机制无法直接适用。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为了解决这个问题，vLLM通过Hybrid KV Cache Manager扩展其现有KV Cache管理框架，使单个Scheduler能够协调具有不同生命周期的两类缓存对象。全注意力层继续使用Paged KV Blocks进行token级KV Cache，而KDA层额外维护循环状态和卷积状态。两类状态共享相同的请求调度流水线，但遵循不同的缓存管理模型：MLA KV以token或block粒度追加，写入后不可变；而KDA State通过可缓存的循环状态检查点或状态块记录可恢复的执行点，同时每个运行中的请求维护自己独立的活跃副本。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">与SGLang基于Radix Tree的状态管理方法不同，vLLM从统一缓存管理框架出发。它将MLA KV和KDA State都纳入Hybrid KV Cache Manager，然后结合灵活的缓存保留策略与Mooncake的分布式缓存能力，实现跨实例复用。 具体地，vLLM通过Hybrid KV Cache Manager扩展其现有KV Cache管理框架，让单个Scheduler协调不同生命周期的两类缓存对象。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig07.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Image source: https://vllm.ai/blog/2026-07-27-k3</figcaption></figure>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">细粒度前缀匹配：Fine-Grained Partial Hits</h3>
@@ -116,7 +102,6 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为了解决这个问题，vLLM引入了Fine-Grained Partial Hits，将前缀匹配的粒度与KDA State的物理存储粒度解耦。系统继续使用大型KDA State Blocks管理底层状态，同时允许在每个State Block内记录更细粒度的Prefix Entries。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一旦针对某个token边界生成了有效的KDA State Block，该位置就可以作为合法的恢复点，即使它落在尚未完全填充的State Block内部。在上面的例子中，vLLM可以直接在4,480-token位置记录一个Prefix Entry，使后续请求能够从更长的共享前缀恢复，而无需额外创建KDA State的完整副本。</p>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">KDA State保留策略一：Interval-Based Retention</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">KDA State的引入使检查点成为Prefix Cache复用的关键资源。然而，由于每个KDA State都有可观的存储占用，在每个前缀位置都存储一个并不现实。为了确定如何将有限的缓存预算分配给最可能被复用的位置，vLLM提供了两种互补的KDA State保留策略：Interval-Based Retention和Marconi-Style Selective Retention。前者利用已知的结构边界提供稳定的恢复点，后者则根据运行时访问模式动态识别具有真正复用价值的前缀。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">策略1：Interval-Based Retention ：在结构化边界存储检查点。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Image source: https://vllm.ai/blog/2026-07-27-k3</figcaption></figure>
@@ -142,7 +127,6 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">传统的Prefill–Decode（PD）分离主要解决推理节点之间的KV Cache传输问题。Prefill节点处理完输入上下文后，将得到的KV Blocks发送给Decode节点，由后者继续生成。然而，对于Kimi K3等下一代模型，传输的数据不再是同质的KV Cache块集合。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Kimi K3采用结合MLA与KDA的混合注意力架构，其状态生命周期、更新粒度和物理布局均与传统KV Cache不同。继续沿用传统KV Cache抽象来管理和传输各状态类型，不仅会增加系统复杂度，还会让模型特有的架构细节渗入调度、缓存和网络传输层。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因此，面向下一代分离式推理系统的挑战不再仅仅是传输KV Cache，而是如何高效传输异构的模型中间状态。TokenSpeed通过Flat KV解决这一问题，将MLA KV与KDA State表示为统一、可传输的数据单元。结合Mooncake的高性能传输能力，该数据面超越了传统PD分离，支持多模态Encoder–Prefill–Decode（EPD）分离。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因此，Mooncake不再仅仅是Prefill与Decode之间的KV传输通道，而是成为横跨模型不同执行阶段的统一状态传输基础设施。</p>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">Flat KV：统一的页粒度表示</h3>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>为应对MLA KV与KDA State的异构物理管理需求，TokenSpeed引入了Flat KV，将两类状态统一纳入页粒度（page-granularity）管理模型。其核心思想是：不同模型状态无需共享相同的内部数据布局，但应可映射到统一的缓存管理单元。</strong></p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在Flat KV中，单个页可存储1,536个token的MLA潜在历史，或一份完整的KDA循环快照。换言之，随token增长的MLA KV与固定大小的KDA State都被抽象为相同大小的页对象，并通过统一的页分配器进行管理。</p>
@@ -153,11 +137,9 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Prefix Cache可通过统一接口管理MLA KV页与KDA State页。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">写时复制（Copy-on-Write）等状态操作可复用相同的页生命周期管理。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在PD分离架构中，系统只需传输页，无需为不同类型的状态设计单独的传输协议。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因此，Flat KV不仅仅是把两种数据类型放入同一内存池。它重新定义了分离式推理的缓存抽象：KV Cache不再局限于token级别的Key和Value张量，而是成为一种统一的基于页的表示形式，能够承载异构模型的中间状态。</p>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">PD分离的页级传输</h3>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在Flat KV基于页的表示基础上，TokenSpeed将PD分离中的传输单元从传统的KV Blocks扩展为统一的页。MLA KV和KDA State都可以表示为相同的数据移动单元，并通过共享的页ID空间和元数据格式进行管理。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Mooncake随后在页级别处理跨节点数据传输。Prefill节点只需提供需要传输的页ID及其关联的元数据。Mooncake Transfer Engine可以直接定位并传输GPU缓冲区中相应的物理区域，而无需了解页面中包含的是MLA KV还是KDA State。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在实现中，Prefill节点首先确定必须从Flat KV页表中传输哪些页，然后生成相应的页元数据，包括全局页ID和物理地址映射。基于这些元数据，Mooncake Transfer Engine直接在已注册的GPU缓冲区之间传输物理页，无需CPU暂存或额外的数据格式转换。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">收到页后，Decode节点使用相同的全局页ID空间重建相应的缓存视图。由于MLA KV页和KDA State页共享统一的页管理模型，Decode端不需要针对不同状态类型分别设置接收和恢复路径。Flat KV映射层将每个物理页解释为相应的逻辑缓存对象。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因此，Flat KV和Mooncake建立了明确的职责分离：TokenSpeed将异构模型状态转换为统一的页表示，而Mooncake负责在Prefill和Decode节点之间高效传输这些页。模型架构的变化仅影响Flat KV映射逻辑，底层传输路径保持不变。</p>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">迈向多模态EPD分离</h3>
@@ -169,7 +151,6 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在数据传输层，Mooncake从传统PD解耦的KV Cache通道演进为覆盖整个EPD管线的统一数据平面。端到端路径包含两类大规模数据传输：</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Encoder → Prefill：视觉嵌入传输。完成视觉编码后，Encoder使用Mooncake将生成的视觉嵌入直接从Encoder节点的GPU传输到Prefill节点的GPU。此过程既不需要CPU端序列化，也不需要中间共享文件系统，大幅降低了大规模视觉输入的数据移动开销。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Prefill → Decode：Flat KV页面传输。完成语言上下文计算后，Prefill阶段通过Mooncake将以Flat KV表示的MLA潜在历史状态和KDA循环状态发送到Decode节点。由于Flat KV已将不同的模型状态抽象为统一页面，Mooncake可以复用PD解耦中基于页面的传输机制。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">TokenSpeed在E→P和P→D两条路径上复用相同的内存注册、端点发现和传输完成跟踪机制，而非为视觉嵌入和KV状态维护独立的数据通道。因此，Mooncake无需理解阶段间传输对象的具体语义，只需高效移动GPU内存中的数据对象即可。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">相关链接</h2>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Kimi K3博客：https://www.kimi.com/blog/kimi-k3</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SGLang博客：https://www.lmsys.org/blog/2026-07-27-kimi-k3-day0-support</p>
@@ -197,22 +178,22 @@
 <div style="text-align:center;">
 <span class="portal-title">【传送门】</span>
 <div style="text-align:left;display:inline-block;" class="portal-links">
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
 </div>
 </div>
 

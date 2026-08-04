@@ -17,7 +17,6 @@
   "lead": [
     "7月27日，Moonshot AI 正式开源其下一代旗舰模型 Kimi K3。K3 总参数量达 2.8 万亿，采用高度稀疏的混合专家（MoE）架构，每个 token 仅激活 896 个专家中的 16 个。目前，它是全球参数规模最大的开源权重模型之一。",
     "除了庞大的参数规模，K3 还对其模型架构进行了全面升级。它采用了全新的线性注意力机制 Kimi Delta Attention（KDA），与 MLA（Multi-head Latent Attention，多头潜在注意力）协同工作，构成混合注意力架构。这一设计原生支持 100 万 token 的上下文窗口，同时兼顾长上下文推理效率与模型性能。此外，K3 原生支持视觉理解，并在多个基准测试中取得开源模型领先水平，涵盖代码、Agent（智能体）任务和复杂推理。",
-    "Mooncake 一直是多代 Kimi 模型开发历程的组成部分，通过其解耦推理架构为大规模推理提供稳定高效的基础设施。作为 K3 推理生态的关键合作伙伴，Mooncake 与 SGLang、vLLM 和 TokenSpeed 在 K3 开源当天即完成了 Day-0 集成支持，覆盖跨实例 KV Cache 复用、PD 解耦和 EPD 解耦等关键领域。用户可以在 Mooncake 之上部署 K3，开箱即用地获得大规模分布式推理能力。在多轮对话和 Agentic（智能体原生）工作负载等场景中，Mooncake 显著减少了冗余计算开销，并帮助充分释放 K3 的长上下文能力。",
     "然而，K3 的影响远不止于让模型“更大”。与传统 Transformer 相比，K3 引入的基于 KDA 的混合注意力机制从根本上改变了缓存的性质。系统不仅要管理传统的 KV Cache，还要管理诸如循环状态（Recurrent States）等新的模型状态。因此，传统的 Prefix Cache 复用和解耦推理架构设计也必须随之演进。",
     "本文将介绍 SGLang、vLLM 和 TokenSpeed 如何适应 Kimi K3 的新缓存语义，以及 Mooncake 如何与这些框架协作，为 K3 提供完整的分布式推理能力。"
   ],
@@ -148,12 +147,12 @@
       "paras": [
         "在稀疏检查点管理的基础上，SGLang 进一步降低 KDA States 的存储开销。并非每个缓存的检查点都立即需要用于计算，如果长期以高精度格式保留所有状态，将消耗大量 GPU 内存。因此，SGLang 将当前运行请求使用的活动状态与存储在 Radix Tree 中的缓存状态分离开来。活动状态保留在运行时状态池中，而非活动检查点则被移至独立的缓存池，并以压缩格式存储。",
         "SGLang 当前还提供一条可选的本地检查点压缩路径。它将非活动 Recurrent States 压缩为 INT8，以牺牲部分恢复精度换取更大的本地缓存容量。对于占存储空间绝大部分的 KDA temporal state，SGLang 按通道计算量化参数并将状态压缩为 INT8。体积小得多的 local window state 则保持原始精度。与以 BF16 存储完整 KDA State 相比，这种方法大幅降低了每个检查点的存储成本，从而在相同缓存预算下保留更多可复用的前缀状态。",
-        "当请求命中压缩检查点时，SGLang 不会直接从压缩表示继续执行。相反，它先将检查点恢复到新的活动状态槽中，重建相应的局部窗口状态，然后以正常精度恢复计算。由于压缩仅在检查点存储时进行，解压仅在检查点命中时进行，每个 token 的 KDA 状态更新始终以原始精度运行。这避免了因重复量化和反量化而可能导致的误差累积。",
         "KDA States 在 Decode 期间持续更新，而 Prefix Cache 中的共享状态必须保持不变。与写入后不再变化的 MLA KV Cache 不同，KDA State 无法在多个请求之间直接共享，因为一个请求的更新可能会影响其他请求的执行。为了安全复用 KDA States，SGLang 通过三种机制将每请求的执行状态与共享检查点分离开来：Copy-on-Write（写时复制）、Snapshot（快照）和 Donate（捐赠）。",
         "Copy-on-Write：从共享检查点安全恢复。当请求命中 Radix Tree 中的 KDA 检查点时，SGLang 不会直接在共享状态上继续执行。相反，它首先将与检查点关联的 KDA State 复制到请求拥有的私有执行槽中。后续计算仅更新该私有状态，保持附加在 Radix Tree 上的共享检查点不变。这使得多个请求能够安全地复用同一个 Prefix Cache 节点，同时独立推进各自的状态。",
         "Snapshot：将运行时状态转换为可复用状态。默认情况下，请求执行期间产生的 KDA State 仅归属于当前请求。当请求到达新的可缓存前缀边界时，SGLang 将当前运行时状态保存为新的 Snapshot，并将其附加到 Radix Tree 以供后续请求恢复。为防止 Snapshot 操作与 Forward 期间的状态更新发生竞争，SGLang 将状态复制调度到 Forward Stream 上，并依赖 CUDA Stream 排序来保证安全读写。Snapshot 还会交替写入额外的缓冲区，避免新 Snapshot 覆盖仍被 Radix Tree 引用的旧状态。",
         "Donate：降低检查点创建开销。如果每次创建 Snapshot 都将整个 KDA State 复制到缓存树中，会产生大量数据移动开销。因此 SGLang 引入了 Donate 机制。一旦 Snapshot 完成，系统直接将对应状态槽的所有权转移给 Radix Tree，仅更新状态索引，而不再复制底层数据。借助 Donate，检查点创建从大规模状态复制变为轻量级元数据转移，显著降低了将 KDA State 集成到 Prefix Cache 复用中的管理开销。"
-      ]
+      ],
+      "fig_after": {}
     },
     {
       "type": "h3",
@@ -194,11 +193,10 @@
       "type": "h3",
       "title": "Hybrid KV Cache Manager：统一两类缓存",
       "paras": [
-        "与 SGLang 基于 Radix Tree 的状态管理方法不同，vLLM 从统一缓存管理框架出发。它将 MLA KV 和 KDA State 都纳入 Hybrid KV Cache Manager，然后结合灵活的缓存保留策略与 Mooncake 的分布式缓存能力，实现跨实例复用。",
-        "为了解决这个问题，vLLM 通过 Hybrid KV Cache Manager 扩展其现有 KV Cache 管理框架，使单个 Scheduler 能够协调具有不同生命周期的两类缓存对象。全注意力层继续使用 Paged KV Blocks 进行 token 级 KV Cache，而 KDA 层额外维护循环状态和卷积状态。两类状态共享相同的请求调度流水线，但遵循不同的缓存管理模型：MLA KV 以 token 或 block 粒度追加，写入后不可变；而 KDA State 通过可缓存的循环状态检查点或状态块记录可恢复的执行点，同时每个运行中的请求维护自己独立的活跃副本。"
+        "与 SGLang 基于 Radix Tree 的状态管理方法不同，vLLM 从统一缓存管理框架出发。它将 MLA KV 和 KDA State 都纳入 Hybrid KV Cache Manager，然后结合灵活的缓存保留策略与 Mooncake 的分布式缓存能力，实现跨实例复用。 具体地，vLLM 通过 Hybrid KV Cache Manager 扩展其现有 KV Cache 管理框架，让单个 Scheduler 协调不同生命周期的两类缓存对象。"
       ],
       "fig_after": {
-        "1": [
+        "0": [
           {
             "src": "fig07.png",
             "caption": "Image source: https://vllm.ai/blog/2026-07-27-k3"
@@ -230,14 +228,13 @@
       "type": "h3",
       "title": "KDA State 保留策略一：Interval-Based Retention",
       "paras": [
-        "KDA State 的引入使检查点成为 Prefix Cache 复用的关键资源。然而，由于每个 KDA State 都有可观的存储占用，在每个前缀位置都存储一个并不现实。为了确定如何将有限的缓存预算分配给最可能被复用的位置，vLLM 提供了两种互补的 KDA State 保留策略：Interval-Based Retention 和 Marconi-Style Selective Retention。前者利用已知的结构边界提供稳定的恢复点，后者则根据运行时访问模式动态识别具有真正复用价值的前缀。",
         "策略 1：Interval-Based Retention ——在结构化边界存储检查点。",
         "在具有清晰上下文结构的工作负载中（例如多轮对话和 agentic（智能体原生）任务），某些前缀边界天然具有更高的复用概率。因此 vLLM 支持按固定间隔存储 KDA 检查点，同时保留每个 Prompt 结束时的状态。",
         "例如，系统可以每隔固定数量的 token 创建一个检查点，并自动在每个 Prompt 边界保留 KDA State。相比机械地按均匀间隔分布检查点，Prompt 末尾的 State 通常对真实工作负载更有价值。在多轮对话中，下一个请求通常会复用上一轮的整个 Prompt，因此从该 Prompt 末尾恢复可以消除大量冗余计算。",
         "用户可以通过 VLLM_PREFIX_CACHE_RETENTION_INTERVAL 配置该间隔。当此值设置为 0 时，vLLM 会禁用周期性检查点创建，仅保留 Prompt 末尾的 State，从而降低以多轮对话为主的工作负载的缓存开销。"
       ],
       "fig_after": {
-        "1": [
+        "0": [
           {
             "src": "fig08.png",
             "caption": "Image source: https://vllm.ai/blog/2026-07-27-k3"
@@ -300,8 +297,7 @@
         "该设计的核心价值在于，将 KDA State 从专用模型状态转化为可由现有 KV Cache 基础设施管理的页对象：",
         "Prefix Cache 可通过统一接口管理 MLA KV 页与 KDA State 页。",
         "写时复制（Copy-on-Write）等状态操作可复用相同的页生命周期管理。",
-        "在 PD 分离架构中，系统只需传输页，无需为不同类型的状态设计单独的传输协议。",
-        "因此，Flat KV 不仅仅是把两种数据类型放入同一内存池。它重新定义了分离式推理的缓存抽象：KV Cache 不再局限于 token 级别的 Key 和 Value 张量，而是成为一种统一的基于页的表示形式，能够承载异构模型的中间状态。"
+        "在 PD 分离架构中，系统只需传输页，无需为不同类型的状态设计单独的传输协议。"
       ],
       "fig_after": {
         "1": [
@@ -318,10 +314,10 @@
       "paras": [
         "在 Flat KV 基于页的表示基础上，TokenSpeed 将 PD 分离中的传输单元从传统的 KV Blocks 扩展为统一的页。MLA KV 和 KDA State 都可以表示为相同的数据移动单元，并通过共享的页 ID 空间和元数据格式进行管理。",
         "Mooncake 随后在页级别处理跨节点数据传输。Prefill 节点只需提供需要传输的页 ID 及其关联的元数据。Mooncake Transfer Engine 可以直接定位并传输 GPU 缓冲区中相应的物理区域，而无需了解页面中包含的是 MLA KV 还是 KDA State。",
-        "在实现中，Prefill 节点首先确定必须从 Flat KV 页表中传输哪些页，然后生成相应的页元数据，包括全局页 ID 和物理地址映射。基于这些元数据，Mooncake Transfer Engine 直接在已注册的 GPU 缓冲区之间传输物理页，无需 CPU 暂存或额外的数据格式转换。",
         "收到页后，Decode 节点使用相同的全局页 ID 空间重建相应的缓存视图。由于 MLA KV 页和 KDA State 页共享统一的页管理模型，Decode 端不需要针对不同状态类型分别设置接收和恢复路径。Flat KV 映射层将每个物理页解释为相应的逻辑缓存对象。",
         "因此，Flat KV 和 Mooncake 建立了明确的职责分离：TokenSpeed 将异构模型状态转换为统一的页表示，而 Mooncake 负责在 Prefill 和 Decode 节点之间高效传输这些页。模型架构的变化仅影响 Flat KV 映射逻辑，底层传输路径保持不变。"
-      ]
+      ],
+      "fig_after": {}
     },
     {
       "type": "h3",
@@ -332,8 +328,7 @@
         "Encoder 专注于视觉输入处理，可根据图像数量和分辨率等因素独立扩展。Prefill 将视觉嵌入与文本上下文结合并执行上下文计算，Decode 则负责后续 token 生成。通过解耦这些阶段，涉及多图像或高分辨率输入的视觉密集型请求不再直接与语言模型的 Prefill 和 Decode 阶段竞争计算资源。",
         "在数据传输层，Mooncake 从传统 PD 解耦的 KV Cache 通道演进为覆盖整个 EPD 管线的统一数据平面。端到端路径包含两类大规模数据传输：",
         "Encoder → Prefill：视觉嵌入传输。完成视觉编码后，Encoder 使用 Mooncake 将生成的视觉嵌入直接从 Encoder 节点的 GPU 传输到 Prefill 节点的 GPU。此过程既不需要 CPU 端序列化，也不需要中间共享文件系统，大幅降低了大规模视觉输入的数据移动开销。",
-        "Prefill → Decode：Flat KV 页面传输。完成语言上下文计算后，Prefill 阶段通过 Mooncake 将以 Flat KV 表示的 MLA 潜在历史状态和 KDA 循环状态发送到 Decode 节点。由于 Flat KV 已将不同的模型状态抽象为统一页面，Mooncake 可以复用 PD 解耦中基于页面的传输机制。",
-        "TokenSpeed 在 E→P 和 P→D 两条路径上复用相同的内存注册、端点发现和传输完成跟踪机制，而非为视觉嵌入和 KV 状态维护独立的数据通道。因此，Mooncake 无需理解阶段间传输对象的具体语义，只需高效移动 GPU 内存中的数据对象即可。"
+        "Prefill → Decode：Flat KV 页面传输。完成语言上下文计算后，Prefill 阶段通过 Mooncake 将以 Flat KV 表示的 MLA 潜在历史状态和 KDA 循环状态发送到 Decode 节点。由于 Flat KV 已将不同的模型状态抽象为统一页面，Mooncake 可以复用 PD 解耦中基于页面的传输机制。"
       ],
       "fig_after": {
         "0": [
