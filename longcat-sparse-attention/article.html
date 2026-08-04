@@ -1,0 +1,99 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">问题</strong>：DeepSeek稀疏注意力DSA的Lightning Indexer有O(L²) 打分开销 + 索引输出非连续导致硬件访问低效两大部署瓶颈<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">三策略</strong>：流感知索引（SI）合并HBM访问、跨层索引（CLI）把索引次数从L降到L/N、分层索引（HI）用coarse-to-fine缩小候选集<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">结果</strong>：69B→560B规模与全注意力持平；支持100万token原生训练，支撑LongCat-2.0（1.6T-A48B）</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">DeepSeek稀疏注意力（DSA）凭借其Lightning Indexer（闪电索引器）实现了高效的长上下文建模。<strong>但实际部署仍受两个系统级瓶颈制约</strong>：一是索引器昂贵的O(L²) 打分开销，二是其输出导致的低硬件效率、非连续的内存访问模式。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为此，论文提出<strong>LongCat Sparse Attention（LSA）</strong>：一个硬件-算法协同设计的框架，由三个互补且正交的策略构成：<strong>流感知索引</strong>（把分散的KV条目选择性转成硬件对齐的连续布局，实现合并的HBM访问）、<strong>跨层索引</strong>（复用单层的索引结果以摊销索引开销，配合跨层蒸馏）、以及<strong>分层索引</strong>（coarse-to-fine打分，逐步缩小每个查询的候选集，从而大幅降低索引计算）。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">背景：DSA的闪电索引器为何卡在部署</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">DSA用Lightning Indexer为每个查询挑出少量重要token，以稀疏注意力的方式让长上下文建模变得高效。<strong>但索引器本身有两种代价</strong>：打分要扫全序列（O(L²)），且选出的KV在内存里是分散、不连续的。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>瓶颈一：非合并的内存访问。</strong> token级稀疏选择迫使每次内存事务只读回一个不连续的KV向量，严重拉低高带宽内存（HBM）利用率。理想合并下，AI加速器单核可维持约50条在途cacheline（每条512B）；而DSA的非连续访问几乎无法利用这一点。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig00.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 1: 提出的LongCat Sparse Attention（LSA）架构，核心是流感知的分层跨层索引器（此处省略sink tokens）。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>瓶颈二：打分开销随上下文膨胀。</strong> 上下文越长，索引器要做的打分越多。这两大系统级瓶颈，正是LSA用三个<strong>彼此正交、可自然叠加</strong>的模块去解决的靶点。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">策略一：流感知索引（SI）：把分散KV排成连续布局</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">StreamingLLM发现一个关键规律：<strong>少量首部token（sink tokens）充当了注意力汇聚点，对稳定长上下文性能至关重要</strong>；同时存在少数的「流式头」（streaming heads），它们的注意力行为与其他头不同。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">LSA的流感知索引利用这一点：<strong>对sink tokens和流式头部，总是给予高优先级、把它们的KV整理进硬件对齐的连续布局</strong>；其余候选再按稀疏打分挑选。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 2: 全注意力LongCat-Flash-Lite（69B-A3B）模型上的注意力质量分布，该模型含14个带两个串行注意力层的shortcut MoE块。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这样做的效果是<strong>把原来「东一个西一个」的非连续KV访问，变成硬件亲和的合并访问（coalesced access）</strong>：一次内存事务读回多个连续元素，显著提升HBM利用率，这正是解决非合并访问瓶颈的直接手段。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">策略二：跨层索引（CLI）：一层算，多层共享</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">论文的分析发现：<strong>相邻层挑选出的Top-K token有很高的重叠度</strong>（Figure 3）：也就是说，逐层各自跑一遍索引器，很大程度是在重复劳动。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">跨层索引据此把连续层划分成CLI组（组大小N）：<strong>只有组内第一层真正执行索引器，后续N-1层直接复用第一层产出的索引集</strong>。索引器调用的总次数从L层降为L/N层，索引开销被直接摊销掉。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">但「朴素复用索引集」不做训练适配时会掉性能，所以论文引入<strong>跨层蒸馏（cross-layer distillation）</strong>：让被复用的那些层学会适应共享的索引，从而在不损失效果的前提下拿到减半甚至更省的索引计算。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 3: 全注意力LongCat-Flash-Lite（69B-A3B）上的跨层Top-K索引分析。每层从全注意力矩阵里独立挑选自己的Top-K token。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">策略三：分层索引（HI）：coarse-to-fine先粗后细</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">与其对所有候选都做昂贵的精打分，LSA用<strong>两阶段coarse-to-fine打分</strong>：便宜的粗阶段先召回一小批候选子序列，把昂贵的精打分限制在缩小后的候选集上。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>阶段一（块级粗过滤）</strong>：把序列切成大小为P的连续页，先做粗选择挑出Top-M页；对每页再切成B token的子块，预计算每块的粗评分，快速排除明显不相关的区域。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>阶段二（细粒度精打分）</strong>：只在粗阶段留下的候选子集上做完整、高精度的打分。<strong>这样索引计算的规模大幅缩小</strong>，直接缓解DSA的O(L²) 打分开销，且粗选的高质量保证精打分几乎不丢召回。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">实验：从69B到560B，全程追平全注意力</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">规模从<strong>69B-A3B一直到560B-A27B</strong>的广泛实验显示：<strong>LSA在通用与长上下文基准上都持续达到与全注意力持平（on par）的性能</strong>，同时换来大幅的推理/训练加速（如降低TTFT与TPOT，Figure 5；单层注意力训练延迟也更低，Figure 4/10）。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 4: 不同上下文长度下LSA与DSA的单注意力层训练延迟。柱形报告前向、反向与总延迟（含内核执行）。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">三个消融（Figure 6/7/8）分别验证了每个模块的独立贡献：流感知索引、跨层索引、分层索引各自的收益都能被隔离出来，且MTP（多token预测）指标保持稳定，说明稀疏改造没损害预测质量。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 5: LSA与DSA基线在端到端推理上的延迟对比：prefill的首token时间（TTFT，对数刻度）与decode的每输出token时间（TPOT）。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>LSA支持最长100万token的原生长上下文训练</strong>，并支撑了LongCat-2.0（1.6T-A48B）的开发；论文同时开源了整合LSA的LongCat-Flash-Lite-Sparse（69B-A3B）及更新后的长上下文训练语料。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 6: 流感知索引（SI）消融。“X% fixed”= 将预算K的X% 分配给固定窗口与sink tokens。(a) 相对MLA的训练损失差距。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">总体而言，LSA证明了稀疏注意力可以不必牺牲性能：只要把「索引」本身做得又快又硬件友好。对想要普及长上下文、又受制于DSA系统开销的团队来说，这套三管齐下的方案提供了即插即用的优化思路。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 7: 跨层索引（CLI）消融（base模型）。(a) 相对MLA的训练损失差距。(b) 长上下文验证损失。(c) Needle-in-a-haystack检索。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 8: 所有3步MTP的指标变化（DSA + CLI − MLA）。准确率与损失的差异在整个训练中紧贴零，确认稀疏改造未损害预测质量。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 9: 上下文长度扩展消融。(a) 128K阶段的损失差距（LSA − MLA）。(b) 512K阶段的损失差距。(c) SFT损失差距。</figcaption></figure>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+LongCat Sparse Attention的洞察很务实：DSA的闪电索引器让稀疏注意力在算法上成立，但<strong>真正落地难在系统层</strong>：打分贵、访问散。LSA不否定稀疏注意力，而是把索引本身重新设计成又快又硬件友好的组件。<br  /><br  />流感知索引处理了「访问散」，把sink与流式头的KV排成连续布局；跨层索引处理了「重复劳动」，一层算、多层共享，配合蒸馏不掉点；分层索引处理了「打分贵」，coarse-to-fine先把候选集砍小再做精打分。三者正交可叠加，换来从69B到560B全程追平全注意力、并支撑100万token原生训练与1.6T参数LongCat-2.0的成绩。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://arxiv.org/html/2608.01662v1</span></p>
+</section>
