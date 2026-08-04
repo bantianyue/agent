@@ -1,0 +1,610 @@
+[
+  [
+    "h1",
+    "Mixture-of-Kittens：面向 NVL72s 的开源 MoE megakernel"
+  ],
+  [
+    "p",
+    "Mixture-of-Kittens 是一个面向 NVL72s 的确定性 MoE 训练 megakernel，它将通信与计算融合到单个内核中，现已开源。"
+  ],
+  [
+    "p",
+    "Mixture-of-Kittens (MoK) 是我们为 NVL72s 打造的用于生产的 MoE 训练 megakernel，现已开源。"
+  ],
+  [
+    "p",
+    "随着我们扩展 Composer（我们的 Agentic（智能体原生）代码模型）的训练和推理，MoE 层一直是主要瓶颈。视工作负载和训练配置而定，它可能消耗超过一半的端到端训练时间。"
+  ],
+  [
+    "p",
+    "MoK 通过将全部 MoE 通信和计算融合到单个完全确定性的内核中来解决这一瓶颈。它现在支撑着数万块 GPU 上的 Composer 训练。"
+  ],
+  [
+    "p",
+    "你可以在 GitHub 上试用 MoK 并浏览代码。我们期待你的反馈和贡献。"
+  ],
+  [
+    "p",
+    "MoK 源于此前多次加速 MoE 层的尝试。过去一年，我们编写了自己的 MXFP8 和 NVFP4 训练内核，并为 MoE 推理开发了 \"warp decode\" 方法。"
+  ],
+  [
+    "p",
+    "但这些技术只优化了该层的计算部分，并假设 GPU 间通信会单独处理。在我们的生产工作负载中，通信已成为限制因素。这促使我们从第一性原理重新设计整个 MoE 层，将通信直接构建到内核中。"
+  ],
+  [
+    "p",
+    "此外，迁移到 GB300 NVL72 从两个重要方面改变了问题。首先，NVL72 是单个 NVLink 域内的多节点机架，能够在全部 72 个 GPU 上实现快速、细粒度的计算与通信重叠。"
+  ],
+  [
+    "p",
+    "其次，集成的 Grace CPU（GB300 中的“G”）相对于 GPU 往往较慢。我们发现 GPU 流很容易追赶上 CPU 侧的工作，导致 GPU 在此期间完全空闲。因此，我们必须积极地将 CPU 工作和 CPU-GPU 同步降至最低。"
+  ],
+  [
+    "p",
+    "我们针对这一系列挑战的解决方案是 Mixture-of-Kittens（MoK），这是一个为 NVL72 从第一性原理构建的高度优化的 MoE 训练 megakernel。MoK 将所有 MoE 通信和计算融合到单个内核中，完全确定性，并且相比公开可用的实现达到了最先进的性能。"
+  ],
+  [
+    "p",
+    "Mixture-of-Kittens 在 GB300 NVL72 上的 MXFP8 前向吞吐比最快的公开基线（NCCL + PyTorch DeepEP + PyTorch DeepEP + TransformerEngine HybridEP + Megatron）高出最多 2.37 倍。Mixture-of-Kittens 在 GB300 NVL72 上的 MXFP8 前向吞吐比最快的公开基线（NCCL + PyTorch DeepEP + PyTorch DeepEP + TransformerEngine HybridEP + Megatron）高出最多 2.37 倍。Mixture-of-Kittens 在 GB300 NVL72 上的 MXFP8 前向吞吐比最快的公开基线（NCCL + PyTorch DeepEP + PyTorch DeepEP + TransformerEngine HybridEP + Megatron）高出最多 2.37 倍。在我们跨多个 NVL72 机架的生产训练栈中，MoK 将端到端每秒 token 数提升了 1.41 倍。"
+  ],
+  [
+    "p",
+    "下面介绍 MoK 背后的关键思想，包括我们如何选择正确的通信方向、如何构造计算与通信的重叠，以及如何通过环形 token 缓冲区消除 CPU-GPU 同步。同时介绍 megakernel 设计、确定性、MXFP8 支持以及其他若干实现细节。"
+  ],
+  [
+    "h2",
+    "MoE 中的计算与通信重叠"
+  ],
+  [
+    "p",
+    "MoK 面向 DeepSeek-V3（DSV3）风格的 MoE 层，这种层广泛用于包括 GLM、Qwen、Kimi（最高到 K2.7）以及 DSV 本身在内的开放权重模型。这些层将 1 个共享专家与许多路由专家（通常数百个）组合在一起。"
+  ],
+  [
+    "p",
+    "对于进入 MoE 层的每个 token，路由器投影选择 top-k 个路由专家，并为每个专家分配路由器权重。然后，每个被选中的专家执行标准的前馈网络计算，包括 up 和 gate 投影、SwiGLU 激活以及 down 投影。该层使用路由器权重组合共享专家和路由专家的输出。"
+  ],
+  [
+    "p",
+    "我们使用以下符号："
+  ],
+  [
+    "li",
+    "D = 模型维度"
+  ],
+  [
+    "li",
+    "I = 专家中间维度"
+  ],
+  [
+    "li",
+    "E = 路由 top-k 专家集合"
+  ],
+  [
+    "li",
+    "输入 token x ∈ R D"
+  ],
+  [
+    "li",
+    "路由权重 s ∈ R ∣ E ∣"
+  ],
+  [
+    "li",
+    "专家权重 W up ​ ∈ R I × D , W gate ​ ∈ R I × D , W down ​ ∈ R D × I"
+  ],
+  [
+    "p",
+    "MoE 层计算："
+  ],
+  [
+    "p",
+    "通过 expert parallelism（EP），我们将 routed experts 分片，并将其权重分布到多个 GPU（即 rank）上。共同持有全部 expert 权重的 rank 数量称为 EP degree。例如，使用 256 个 routed experts 且 EP degree 为 64 时，每个 rank 持有 4 个 routed experts 以及 shared expert。因此，根据 router projection，token 必须在 MoE 层前后跨 GPU 传输。"
+  ],
+  [
+    "p",
+    "distributed MoE 最直接的实现会将每个 token 发送到持有其被分配 experts 的 rank（dispatch all-to-all），运行 FFN，将结果返回给每个 token 的原始 rank（combine all-to-all），并对 expert 输出取加权和。但由于通信时间可能和计算本身一样长，串行运行两者效率很低。"
+  ],
+  [
+    "p",
+    "标准的补救措施是通过 pipelining 将 dispatch/combine 1 通信与 per-expert FFN 重叠：传输一个 token chunk，在重叠传输下一个 chunk 的同时对其计算 FFN，然后重复。MoK 是该方案的一个变体，包含一组新颖的、目标特定的技术，使其比现有 baselines 更快。"
+  ],
+  [
+    "fig",
+    "fig00.png"
+  ],
+  [
+    "h2",
+    "选择正确的通信方向"
+  ],
+  [
+    "p",
+    "跨 GPU 发送 token 时，可以选择 push-based 机制（拥有 token 的 GPU 主动将其存储到远程目标 GPU），也可以选择 pull-based 机制（需要 token 的 GPU 从远程源 GPU 加载它们）。现有方法通常依赖 push-based 通信来跨 GPU scatter 和 gather token（例如 DeepEP）。"
+  ],
+  [
+    "p",
+    "通常认为 push 能更好地饱和 GPU 间链路，因为其涉及的协议通信更少，因此成为默认选择。然而我们的观察是，每种机制各有取舍，为每个通信算子选择正确的机制对于最大化性能至关重要，原因如下三点。"
+  ],
+  [
+    "h3",
+    "调度"
+  ],
+  [
+    "p",
+    "要尽可能快地 dispatch 和 combine token，必须满足以下条件："
+  ],
+  [
+    "li",
+    "机架内互连 72 个 GPU 的所有 NVLink 通道必须保持饱和。我们无法容忍 token 只在一部分（源 → 目标）通道上传输的时间段，因此 token 的选择必须确保每个源 rank 的发送在任意时刻均匀分布到所有目标 rank。"
+  ],
+  [
+    "li",
+    "发送到某个 rank 的 token 应按该 rank 的本地专家顺序到达。如果到达顺序无序，专家分组的 GEMM 需要等待更久才能凑齐完整的 token tile，之后张量核心矩阵乘法才能开始。"
+  ],
+  [
+    "li",
+    "本地复制必须为零。专家对应的 token 应直接落进连续内存，这样分组 GEMM 无需本地重排即可开始。"
+  ],
+  [
+    "li",
+    "满足上述三个条件的开销必须保持在最低水平。我们希望将大部分时间用于实际发送 token，而花很少时间进行调度或搜索待发送的 token。"
+  ],
+  [
+    "p",
+    "对于基于推送的分发（push-based dispatch），我们需要生成一个调度表，包含列 {src_index, dst_rank, dst_index}，其中 src_index 是本地输入激活缓冲区中的索引，dst_index 是 token 必须落到的目标 rank 内存位置。该表的行索引决定 token 在 NVLink 上的发送顺序。我们希望该表的行按 dst_rank 循环轮转，从而使每条已连接通道保持忙碌。"
+  ],
+  [
+    "p",
+    "在面向同一 dst_rank 的行中，dst_index 值必须在所有源 GPU 间均匀交错，并且还必须遵循该目标 rank 上递增的本地专家顺序。构建此表涉及多次排序，且每个 rank 的调度必须考虑其他所有 rank，因为不能有两个源 rank 写入同一个 dst_index。"
+  ],
+  [
+    "p",
+    "基于推送的调度：连续条目必须交错目标 rank，以实现网络完全饱和。"
+  ],
+  [
+    "p",
+    "基于拉取的调度：连续条目必须交错源 rank，以实现网络完全饱和。"
+  ],
+  [
+    "p",
+    "采用基于拉取的分发（pull-based dispatch）时，调度表简化为两列 {src_rank, src_index}，表的行索引直接对应本地目标缓冲区中的 token 索引。"
+  ],
+  [
+    "p",
+    "理论上，调度表中的行数与目标缓冲区中的行数应当一致（这需要较大的内存分配；后文会详述）。此处无需排序。我们遍历路由投影结果，每当发现应落在当前 rank 上的 token，就将其源 rank 和索引写入调度表。算法如下："
+  ],
+  [
+    "p",
+    "实际上，实现该算法的调度内核占 MoE 总运行时的不到 3%，且完全在设备端运行，无需任何 CPU-GPU 通信。"
+  ],
+  [
+    "p",
+    "我们还可以原样复用该调度表来实现 combine，只需选择基于推送的 combine，并将 {src_rank, src_index} 读作 {dst_rank, dst_index}。实际上，我们可以只构建一次调度表，然后在 forward 和 backward 的所有四个通信操作中复用它，具体选择如下："
+  ],
+  [
+    "li",
+    "基于拉取的前向分发"
+  ],
+  [
+    "li",
+    "基于推送的前向 combine"
+  ],
+  [
+    "li",
+    "基于拉取的反向 reverse-combine"
+  ],
+  [
+    "li",
+    "基于推送的反向 reverse-dispatch"
+  ],
+  [
+    "p",
+    "该调度在最坏情况下仅占几兆字节，因此我们可以将其保留以供复用，而不会带来任何内存压力。另一个额外好处是，这完全消除了 GPU 间多通道信号传递，稍后下文会进行说明。"
+  ],
+  [
+    "h3",
+    "NVLink 带宽利用率"
+  ],
+  [
+    "p",
+    "与任何网络系统一样，通过 NVLink 传输的所有用户数据（有效载荷）都会附带额外的协议元数据，其中包含源、目标、确认等信息，这些取决于网络协议。虽然 NVLink 通信协议的细节未公开，但我们可以观察链路上发送的数据并仔细推理。"
+  ],
+  [
+    "p",
+    "基于 push 的 NVLink 通信移动的总字节数更少（即协议元数据加有效载荷），并且几乎所有数据都沿一个方向发送，因此当所有通道完全繁忙时，它能实现更高的带宽利用率。"
+  ],
+  [
+    "p",
+    "另一方面，基于 pull 的传输总共移动更多字节，但协议元数据在链路两个方向上分布更分散。拉取方先沿一个方向发送元数据，再从另一方向接收更多元数据及有效载荷。"
+  ],
+  [
+    "p",
+    "我们可以通过编写一个简单的跨 GPU 传输内核，并使用 NCU 对其进行性能分析来验证这一点。例如，在我们的微基准测试中，通过 NVLink 发送一个 256x256 BF16 tile（131,072B），我们观察到以下结果："
+  ],
+  [
+    "p",
+    "在上表中，RX 指接收方向，TX 指发送方向。push 涉及的字节总数大约少 12.4 KB，理想情况下能带来更好的整体 NVLink 饱和。然而，NVLink 每个方向都有独立的通道。要达到 NVLink 规范中宣传的带宽（GB300 上第五代 NVLink 为 1.8 TB/s），流量必须双向全速流动。而对于 MoE dispatch/combine 这类工作负载，每次传输往往只有几千字节且不均衡，会在链路上留下执行气泡。"
+  ],
+  [
+    "p",
+    "在专家不平衡情况下分发 token 时，基于 pull 的通信比基于 push 的通信的 NVLink 带宽利用率高出最多 29%，因此是更好的选择。"
+  ],
+  [
+    "h3",
+    "信号通知"
+  ],
+  [
+    "p",
+    "信号通知必不可少，因为 GPU 必须知道 dispatch/combine 通信何时完成。GPU 只有在收到完成信号后才能开始处理接收到的 token。尽量减少这种信号通知开销至关重要，而选择正确的通信方向会产生显著影响。"
+  ],
+  [
+    "p",
+    "采用 push-based dispatch 或 pull-based combine 时，完成信号必须跨 GPU 传递。在 expert-grouped GEMM 开始之前，rank 必须等待最多 71 个对等节点的信号，并通过发出 memory fence 来刷新整个机架内的内存。此外，在信号传输期间，数据已经位于目的地。"
+  ],
+  [
+    "p",
+    "采用 pull-based dispatch 和 push-based combine 时，跨 GPU 的信号通知消失。每个 rank 发起一次 load，等待数据到达后即可立即开始使用。无需多节点同步。此外，只有单一实体执行信号通知，因此开销不会随 expert parallelism 的规模增长。"
+  ],
+  [
+    "p",
+    "这种信号通知开销相当大。在多节点微基准测试中，push-based dispatch 信号通知产生的延迟约为 pull-based dispatch 信号通知的 5.8 倍，分别为 103 µs 和 18 µs，而且这一成本在 megakernel 内会迅速累积。"
+  ],
+  [
+    "p",
+    "基于这些结果，MoK 采用 pull-based 前向 dispatch、push-based 前向 combine、pull-based 反向 reverse-combine 和 push-based 反向 reverse-dispatch。"
+  ],
+  [
+    "fig",
+    "fig01.png"
+  ],
+  [
+    "h2",
+    "合理组织计算与通信的重叠"
+  ],
+  [
+    "h3",
+    "计算-通信粒度"
+  ],
+  [
+    "p",
+    "计算-通信粒度是计算任务与通信任务相互通知完成状态的粒度。这带来了一个有趣的权衡。"
+  ],
+  [
+    "p",
+    "一个极端是通信可以非常细粒度。我们只发送足够让 Tensor Core（张量核心）启动一次完整矩阵乘加（MMA）指令的 token，例如在 Blackwell 上为 256 个，并持续将每次传输与矩阵乘法重叠执行。Comet 是这种方式的一个典型例子。"
+  ],
+  [
+    "p",
+    "另一个极端是通信可以非常粗粒度。我们一次性发送数千或数万个 token，等待整个 batch 全部到达后才开始 Tensor Core 运算。DeepEP 就是这方面的一个典型例子。"
+  ],
+  [
+    "p",
+    "两个极端都不是正确选择。最优点位于两者之间，取决于具体工作负载。"
+  ],
+  [
+    "p",
+    "如果通信过于细粒度，Tensor Core 永远无法完全饱和。Nvidia Tensor Core 是高度流水线化、带宽优化型加速器，我们需要持续向它们输送数据，而不是每执行几条 MMA 指令就遇到一次屏障等待。"
+  ],
+  [
+    "p",
+    "如果通信过于粗粒度，Tensor Core 等待第一批 token 到达以及最后一轮输出合并的时间就会过长。"
+  ],
+  [
+    "fig",
+    "fig02.png"
+  ],
+  [
+    "p",
+    "我们将每轮发送的一组 token 称为 minibatch。MoK 将 minibatch 大小设为可调参数，便于在运行工作负载前轻松扫描可能的配置。"
+  ],
+  [
+    "p",
+    "选择最优 minibatch 大小的一个粗略启发式方法是：考虑每个算子（例如 expert-grouped GEMM）需要多少个 wave。"
+  ],
+  [
+    "p",
+    "wave 是 GPU 上所有 SM 的一轮并发执行。如果任务太小（例如，一个专家分组的 GEMM 收到太少的 token），我们就会得到一个 partial wave，其中部分 SM 处于空闲状态。或者，我们可能会看到 tail effect，即最后一个 wave 只占用一部分 SM。"
+  ],
+  [
+    "p",
+    "我们发现，选择一个 minibatch size 使 FFN 中每个专家分组 GEMM 算子至少有两次完整 wave 是很有用的。这有两个原因：(1) 单个完整 wave 就足以让 tensor cores 完全饱和；(2) 使用两个 wave 时，第二个 wave 的 MMA 与第一个 wave 的 epilogue 和依赖算子（例如 SwiGLU 激活或下一个分组 GEMM）重叠，从而摊还 tail effect。"
+  ],
+  [
+    "p",
+    "具体来说，在 Blackwell GPU 上，对于 M × N × K GEMM（其中 K 是归约维度），要充分利用 tensor cores，意味着每个 SM 处理一个 128 × 256 的输出 tile，无论使用 1-SM 还是 2-SM MMA。"
+  ],
+  [
+    "li",
+    "T：每次传输的 token 数量（即 minibatch size）"
+  ],
+  [
+    "li",
+    "H：隐藏维度"
+  ],
+  [
+    "li",
+    "I：专家中间维度"
+  ],
+  [
+    "li",
+    "C：SM 数量"
+  ],
+  [
+    "p",
+    "我们希望每个 GEMM 产生足够的任务来填充至少两个 wave，同时将通信粒度保持尽可能小，以实现最大重叠。对于 up 和 gate 投影，由于两者互不依赖、同时运行，这意味着："
+  ],
+  [
+    "p",
+    "对于无法与其他算子并行运行的下投影（down projection）："
+  ],
+  [
+    "p",
+    "结合两者，所需条件是："
+  ],
+  [
+    "p",
+    "例如，以 Composer 2.5 的基础模型 Kimi 2.5 为例，其中 H = 7168，I = 2048。在 Blackwell GPU 上，C = 148，因此得到："
+  ],
+  [
+    "p",
+    "在我们对 Kimi 2.5 形状运行 MoK 前向的微基准测试中，观察到以下结果，与启发式规则大致匹配："
+  ],
+  [
+    "h3",
+    "调度重叠"
+  ],
+  [
+    "p",
+    "一旦通信粒度确定，下一个问题就是如何在 GPU 上调度不同任务（dispatch、combine、FFN），以实现高效重叠。为此，我们采用 SM 间重叠（inter-SM overlapping）技术，将部分 SM 分配给专家 FFN（comp SMs），部分分配给 dispatch/combine（comms SMs），并通过本地计数器让两组 SM 相互发信号。这之所以可行，是因为借助张量内存加速器（TMA）的加载与存储，我们能用不到三分之一的 SM 完全跑满 NVLink 带宽。"
+  ],
+  [
+    "p",
+    "我们以 SM 间重叠作为基础策略。在 MoE 前向传播中，comms SMs 开始执行基于拉取的 all-to-all dispatch，每当一个完整 minibatch 的 token 到达并准备好计算时，就向 comp SMs 发送信号。随后 comp SMs 对这些 token 原子地运行 MLP-SwiGLU，一旦所有经过下投影的计算完成，它们就通知 comms SMs token 已准备好进行 combine。"
+  ],
+  [
+    "p",
+    "comms SMs 会先遍历所有 dispatch 任务，然后才执行 combine all-to-all 任务，因此当 comms SMs 完成 dispatch 时，已经收到大量来自 comp SMs 的完成信号。随后 comms SMs 将转向基于推送的 combine，而 comp SMs 则完成最后到达 token 的 FFN。此外，在 comp SMs 等待第一次 dispatch 完成期间，我们还可以插入共享专家 FFN（shared expert FFN）。"
+  ],
+  [
+    "fig",
+    "fig03.png"
+  ],
+  [
+    "p",
+    "反向传播类似，但使用前向重放时会稍微复杂一些（下一节详述）。comms SM 执行 reverse-combine，并通知 comp SM 运行 FFN 反向（不包括 wgrad，即 3 个用于 3 个 dgrad 的专家分组 GEMM 以及 SwiGLU 激活反向）；一旦 FFN 完成且 token 准备好进行 reverse-dispatch，comp SM 就会通知 comms SM。"
+  ],
+  [
+    "p",
+    "我们在所有 minibatch 的 dgrad 完成后才执行剩余的 3 个 wgrad。延迟 wgrad 有两个原因：(1) reverse-dispatch 不依赖它们，因此 wgrad 可以与最后的 reverse-dispatch 重叠；(2) 由于 token 轴是 wgrad 的归约维度，一次性在整个 token 轴上累加可最大程度减少数值不稳定性。与前向传递一样，我们将完整的共享专家反向与第一轮 reverse-combine 重叠。"
+  ],
+  [
+    "fig",
+    "fig04.png"
+  ],
+  [
+    "h2",
+    "使用环形 token 缓冲区完全消除 CPU-GPU 同步"
+  ],
+  [
+    "p",
+    "最后一个缺失环节是处理 MoE 的动态性；我们无法预先知道会有多少 token 到达目标 rank。"
+  ],
+  [
+    "p",
+    "现有两种处理方式。第一种是 token 丢弃，即超出固定缓冲区大小的 token 会被直接忽略，永远不会进入专家 FFN。第二种是 CPU-GPU 同步，即根据路由结果计算出的每个 rank 的 token 数量发送到 CPU，CPU 利用它们分配精确大小的缓冲区。"
+  ],
+  [
+    "p",
+    "两者都有明显缺点。我们不想为了训练质量而丢弃 token，而 CPU-GPU 同步会阻止 GPU 流超前于 CPU 线程运行。"
+  ],
+  [
+    "p",
+    "在 GB300 NVL72 上，CPU-GPU 同步尤其昂贵，因为集成的 Grace CPU 非常慢。我们的追踪常常显示 GPU 内核受 CPU 工作瓶颈制约，例如日志记录或将训练指标推送到远程服务器，即便相同的训练栈在配备 Intel CPU 的 DGX 机器上不会引起此类问题。因此，我们希望尽可能减少 CPU-GPU 同步。"
+  ],
+  [
+    "p",
+    "在 MoK 中，我们通过环形 token 缓冲区（我们称之为 macrobatch）来解决这个问题。我们不再为 comms SM 分配一个大型且大部分未使用的目标缓冲区来传输 token，而是创建一个几百 MB 的固定大小环形缓冲区，并以 minibatch 为粒度循环使用它。"
+  ],
+  [
+    "p",
+    "高效实现 macrobatching 需要仔细重叠计算与通信。两者都不应因缓冲区槽位仍在使用或数据尚未到达而停滞。理想情况下，我们跨越 ring 边界进行重叠：在缓冲区尾部计算，同时向起始位置分发。"
+  ],
+  [
+    "p",
+    "关键思想是在性能允许的情况下尽早排空每个槽位，以便尽早复用。在 forward pass 中，dispatch 填充槽位，combine 排空槽位，为下一次 dispatch 释放槽位。"
+  ],
+  [
+    "p",
+    "然而，如果先运行所有 dispatch 再运行所有 combine，则必须等待所有 combine 完成后才能开始下一个 macrobatch，计算与通信的重叠要等到第一次 dispatch 完成后才会重新开始。"
+  ],
+  [
+    "p",
+    "为避免这一点，我们在 forward pass 中执行 dispatch-combine 交错。上一个 macrobatch 的某个 minibatch 的 combine 与下一个 macrobatch 对应 minibatch 的 dispatch 交错执行，后者使用 ring buffer 的同一区域。这样，缓冲区一被清空就会重新填充。注意，第一个 macrobatch 的 dispatch 与最后一个 macrobatch 的 combine 不会交错，因为它们没有对应的配对。"
+  ],
+  [
+    "fig",
+    "fig05.png"
+  ],
+  [
+    "h3",
+    "反转 ring 以最小化 backward 期间的 forward replay"
+  ],
+  [
+    "p",
+    "backward pass 稍微复杂一些，因为 backward megakernel 必须支持 forward activation replay。macrobatch buffer 是一个 ring，因此如果有多个 macrobatch，某些保存的 activations 会在 forward pass 期间被覆盖，必须重新计算。replay 只需要运行到 SwiGLU activation，因为 backward 只需要 down projection 的输入 activation 和输出梯度，不需要其 forward 输出。"
+  ],
+  [
+    "p",
+    "这里的一个关键优化是 reversed ring。如果按 macrobatch 升序消耗 tokens，最后一个 macrobatch 会使 ring buffer 部分填充，backward pass 最终需要 replay 更多 activations。因此 MoK 在 forward pass 期间按逆 macrobatch 顺序遍历 tokens，使得保存的 ring buffer 要么完全满，要么包含所有 tokens，从而最小化 backward pass 期间的 forward replay。"
+  ],
+  [
+    "h2",
+    "其他功能与实现细节"
+  ],
+  [
+    "h3",
+    "Megakernel"
+  ],
+  [
+    "p",
+    "我们使用 Megakernel 技术构建 MoK，其中指令在 SM 任务级别重叠，而不是由内核启动边界分隔。Megakernel 通常适合融合整个前向或反向步骤，但我们发现该技术对 MoK 很有用，原因有二：(1) 在没有 Megakernel 融合的情况下实现 minibatching 和 macrobatching 需要多次内核启动，增加启动边界开销；(2) 对于 SM 间重叠，我们发现带 green contexts 的多流在精确按预期划分 SM 方面不可靠，而软件划分能提供精确的分配保证。"
+  ],
+  [
+    "h3",
+    "确定性"
+  ],
+  [
+    "p",
+    "对于内部消融实验和 on-policy RL 后训练，我们将 MoK 设计为完全确定性的。浮点运算顺序固定，因此无论硬件调度和指令发射顺序如何，相同输入都会产生逐位相同的输出。"
+  ],
+  [
+    "h3",
+    "Cluster Launch Control (CLC) 用于 RDMA 重叠"
+  ],
+  [
+    "p",
+    "MoK megakernel 通过 CLC 调度其任务，以实现 RDMA 重叠。CLC 是 Blackwell 中引入的硬件原生工作窃取特性，是实现持久化 grid 内核的新方式。基于 CLC 的内核可以自然地让位于更高优先级流上的内核，而无需等待当前内核完全完成。这一点很重要，因为在训练期间，我们经常需要将机架内通信和计算与机架间 InfiniBand/RoCE 通信重叠，例如 FSDP all-gather，这些通信需要自己的 SM。没有 CLC，机架间通信将在 megakernel 之后串行执行，导致显著的性能下降。"
+  ],
+  [
+    "h3",
+    "MXFP8 支持"
+  ],
+  [
+    "p",
+    "MoK 同时支持 BF16 和 MXFP8 精度模式。我们使用 MXFP8 模式进行训练，因为它更快且不会导致数值问题。在 MXFP8 模式下，共享专家保持 BF16，因为我们发现这对训练稳定性有影响。"
+  ],
+  [
+    "p",
+    "MXFP8的一个额外开销是张量在送入tensor core之前必须完成量化。为尽量降低这一开销，我们（1）提供了优化的MXFP8量化内核，用于对权重进行预量化；（2）将激活量化融合到dispatch all-to-all、expert分组的GEMM和SwiGLU中。"
+  ],
+  [
+    "h3",
+    "Router 权重梯度计算"
+  ],
+  [
+    "p",
+    "MoK的反向传播还会计算Router权重梯度，采用SonicMoE风格的计算方式。它不保存完整的down-projection输出，而是由SwiGLU激活与down-projection dgrad的内积计算得到。该计算被融合到SwiGLU反向传播中，以避免额外的内存访问。"
+  ],
+  [
+    "h3",
+    "计算/通信 SM 调优"
+  ],
+  [
+    "p",
+    "计算SM与通信SM的最优比例取决于工作负载。本地token数量、模型形状以及硬件算力和网络带宽都会改变dispatch/combine任务相对于expert FFN任务所需的时间。即便在同一工作负载下，前向和反向传播的最优比例也不同。因此，MoK提供了可调参数，分别设置前向和反向的通信SM数量。"
+  ],
+  [
+    "h2",
+    "加速"
+  ],
+  [
+    "p",
+    "我们使用两类基准对MoK进行了评估：单个MoE层基准（我们发布了全部基准代码）以及跨多个NVL72机架的内部生产训练栈上的端到端基准。"
+  ],
+  [
+    "h3",
+    "MoE 层基准"
+  ],
+  [
+    "p",
+    "我们对单个 MoE 层的执行进行了基准测试：全局 token 调度、token 分发 all-to-all、专家 FFN、token 合并 all-to-all 以及最终的加权求和。我们分别对前向和反向传播进行了基准测试，涵盖 BF16 和 MXFP8 两种模式。所有测试均在单个 NVL72 机架内完成，EP 度为 64，路由前每 GPU 2,048 个 token。"
+  ],
+  [
+    "p",
+    "我们选择的基线需满足：(1) 同时支持 MoE 前向和反向传播；(2) 可在 NVL72 上运行："
+  ],
+  [
+    "li",
+    "NCCL + PyTorch"
+  ],
+  [
+    "li",
+    "DeepEP + PyTorch"
+  ],
+  [
+    "li",
+    "DeepEP + TransformerEngine"
+  ],
+  [
+    "li",
+    "HybridEP + Megatron，这是 NVIDIA 在 NVL72 上相对于 DeepEP + Megatron 的推荐方案。"
+  ],
+  [
+    "p",
+    "我们测试了广泛使用的开放权重模型的形状："
+  ],
+  [
+    "li",
+    "Kimi K2.7 Code shape ( E : 384, H : 7168, I : 2048, top-k: 8)"
+  ],
+  [
+    "li",
+    "GLM-5.2 shape ( E : 256, H : 6144, I : 2048, top-k: 8)"
+  ],
+  [
+    "li",
+    "Qwen3.5-397B-A17B shape ( E : 512, H : 4096, I : 1024, top-k: 10)"
+  ],
+  [
+    "li",
+    "DeepSeek-V4-Pro shape ( E : 384, H : 7168, I : 3072, top-k: 6)"
+  ],
+  [
+    "p",
+    "下面的图表展示了所有四种形状在所有基线下的结果："
+  ],
+  [
+    "p",
+    "Mixture-of-Kittens 在 GB300 NVL72s 上的 MXFP8 前向吞吐比最快的公开基线高出最多 2.37 倍 NCCL + PyTorch DeepEP + PyTorch DeepEP + TransformerEngine HybridEP + Megatron Mixture-of-Kittens Mixture-of-Kittens 在 GB300 NVL72s 上的 MXFP8 前向吞吐比最快的公开基线高出最多 2.37 倍 NCCL + PyTorch DeepEP + PyTorch DeepEP + TransformerEngine HybridEP + Megatron Mixture-of-Kittens Mixture-of-Kittens 在 GB300 NVL72s 上的 MXFP8 前向吞吐比最快的公开基线高出最多 2.37 倍 NCCL + PyTorch DeepEP + PyTorch DeepEP + TransformerEngine HybridEP + Megatron Mixture-of-Kittens .builder-export-chart { --bc-bg: #ffffff; --bc-title: #000000; --bc-fg: #26251e; --bc-fg60: rgba(38, 37, 30, 0.6); --bc-fg50: rgba(38, 37, 30, 0.5); --bc-fg40: rgba(38, 37, 30, 0.4); --bc-stroke025: rgba(38, 37, 30, 0.025); --bc-stroke05: rgba(38, 37, 30, 0.05); --bc-stroke10: rgba(38, 37, 30, 0.1); --bc-stroke15: rgba(38, 37, 30, 0.15); --bc-stroke20: rgba(38, 37, 30, 0.2); --bc-node-bg: #f7f7f4; --bc-chip-bg: rgba(255, 255, 255, 0.6); --bc-accent: #f54e00; --bc-green: #2c9f28; } [data-theme=\"dark\"] .builder-export-chart { --bc-bg: #000000; --bc-title: #ffffff; --bc-fg: #edecec; --bc-fg60: rgba(237, 236, 236, 0.6); --bc-fg50: rgba(237, 236, 236, 0.5); --bc-fg40: rgba(237, 236, 236, 0.4); --bc-stroke025: rgba(237, 236, 236, 0.025); --bc-stroke05: rgba(237, 236, 236, 0.05); --bc-stroke10: rgba(237, 236, 236, 0.1); --bc-stroke15: rgba(237, 236, 236, 0.15); --bc-stroke20: rgba(237, 236, 236, 0.2); --bc-node-bg: #1c1b16; --bc-chip-bg: rgba(255, 255, 255, 0.06); --bc-accent: #f54e00; --bc-green: #2c9f28; } @media (prefers-color-scheme: dark) { :root:not([data-theme=\"light\"]) .builder-export-chart { --bc-bg: #000000; --bc-title: #ffffff; --bc-fg: #edecec; --bc-fg60: rgba(237, 236, 236, 0.6); --bc-fg50: rgba(237, 236, 236, 0.5); --bc-fg40: rgba(237, 236, 236, 0.4); --bc-stroke025: rgba(237, 236, 236, 0.025); --bc-stroke05: rgba(237, 236, 236, 0.05); --bc-stroke10: rgba(237, 236, 236, 0.1); --bc-stroke15: rgba(237, 236, 236, 0.15); --bc-stroke20: rgba(237, 236, 236, 0.2); --bc-node-bg: #1c1b16; --bc-chip-bg: rgba(255, 255, 255, 0.06); --bc-accent: #f54e00; --bc-green: #2c9f28; } } .builder-export-chart .builder-export-chart-svg { font-family: var(--font-sans); display: block; } Expert-parallel MoE 吞吐：MXFP8 反向（GB300 NVL72s） NCCL + PyTorch DeepEP + PyTorch DeepEP + TransformerEngine HybridEP + Megatron Mixture-of-Kittens Expert-parallel MoE 吞吐：MXFP8 反向（GB300 NVL72s） NCCL + PyTorch DeepEP + PyTorch DeepEP + TransformerEngine HybridEP + Megatron Mixture-of-Kittens Expert-parallel MoE 吞吐：MXFP8 反向（GB300 NVL72s） NCCL + PyTorch DeepEP + PyTorch DeepEP + TransformerEngine HybridEP + Megatron Mixture-of-Kittens .builder-export-chart { --bc-bg: #ffffff; --bc-title: #000000; --bc-fg: #26251e; --bc-fg60: rgba(38, 37, 30, 0.6); --bc-fg50: rgba(38, 37, 30, 0.5); --bc-fg40: rgba(38, 37, 30, 0.4); --bc-stroke025: rgba(38, 37, 30, 0.025); --bc-stroke05: rgba(38, 37, 30, 0.05); --bc-stroke10: rgba(38, 37, 30, 0.1); --bc-stroke15: rgba(38, 37, 30, 0.15); --bc-stroke20: rgba(38, 37, 30, 0.2); --bc-node-bg: #f7f7f4; --bc-chip-bg: rgba(255, 255, 255, 0.6); --bc-accent: #f54e00; --bc-green: #2c9f28; } [data-theme=\"dark\"] .builder-export-chart { --bc-bg: #000000; --bc-title: #ffffff; --bc-fg: #edecec; --bc-fg60: rgba(237, 236, 236, 0.6); --bc-fg50: rgba(237, 236, 236, 0.5); --bc-fg40: rgba(237, 236, 236, 0.4); --bc-stroke025: rgba(237, 236, 236, 0.025); --bc-stroke05: rgba(237, 236, 236, 0.05); --bc-stroke10: rgba(237, 236, 236, 0.1); --bc-stroke15: rgba(237, 236, 236, 0.15); --bc-stroke20: rgba(237, 236, 236, 0.2); --bc-node-bg: #1c1b16; --bc-chip-bg: rgba(255, 255, 255, 0.06); --bc-accent: #f54e00; --bc-green: #2c9f28; } @media (prefers-color-scheme: dark) { :root:not([data-theme=\"light\"]) .builder-export-chart { --bc-bg: #000000; --bc-title: #ffffff; --bc-fg: #edecec; --bc-fg60: rgba(237, 236, 236, 0.6); --bc-fg50: rgba(237, 236, 236, 0.5); --bc-fg40: rgba(237, 236, 236, 0.4); --bc-stroke025: rgba(237, 236, 236, 0.025); --bc-stroke05: rgba(237, 236, 236, 0.05); --bc-stroke10: rgba(237, 236, 236, 0.1); --bc-stroke15: rgba(237, 236, 236, 0.15); --bc-stroke20: rgba(237, 236, 236, 0.2); --bc-node-bg: #1c1b16; --bc-chip-bg: rgba(255, 255, 255, 0.06); --bc-accent: #f54e00; --bc-green: #2c9f28; } } .builder-export-chart .builder-export-chart-svg { font-family: var(--font-sans); display: block; } Expert-parallel MoE 吞吐：BF16 前向（GB300 NVL72s） NCCL + PyTorch DeepEP + PyTorch DeepEP + TransformerEngine HybridEP + Megatron Mixture-of-Kittens Expert-parallel MoE 吞吐：BF16 前向（GB300 NVL72s） NCCL + PyTorch DeepEP + PyTorch DeepEP + TransformerEngine HybridEP + Megatron Mixture-of-Kittens Expert-parallel MoE 吞吐：BF16 前向（GB300 NVL72s） NCCL + PyTorch DeepEP + PyTorch DeepEP + TransformerEngine HybridEP + Megatron Mixture-of-Kittens .builder-export-chart { --bc-bg: #ffffff; --bc-title: #000000; --bc-fg: #26251e; --bc-fg60: rgba(38, 37, 30, 0.6); --bc-fg50: rgba(38, 37, 30, 0.5); --bc-fg40: rgba(38, 37, 30, 0.4); --bc-stroke025: rgba(38, 37, 30, 0.025); --bc-stroke05: rgba(38, 37, 30, 0.05); --bc-stroke10: rgba(38, 37, 30, 0.1); --bc-stroke15: rgba(38, 37, 30, 0.15); --bc-stroke20: rgba(38, 37, 30, 0.2); --bc-node-bg: #f7f7f4; --bc-chip-bg: rgba(255, 255, 255, 0.6); --bc-accent: #f54e00; --bc-green: #2c9f28; } [data-theme=\"dark\"] .builder-export-chart { --bc-bg: #000000; --bc-title: #ffffff; --bc-fg: #edecec; --bc-fg60: rgba(237, 236, 236, 0.6); --bc-fg50: rgba(237, 236, 236, 0.5); --bc-fg40: rgba(237, 236, 236, 0.4); --bc-stroke025: rgba(237, 236, 236, 0.025); --bc-stroke05: rgba(237, 236, 236, 0.05); --bc-stroke10: rgba(237, 236, 236, 0.1); --bc-stroke15: rgba(237, 236, 236, 0.15); --bc-stroke20: rgba(237, 236, 236, 0.2); --bc-node-bg: #1c1b16; --bc-chip-bg: rgba(255, 255, 255, 0.06); --bc-accent: #f54e00; --bc-green: #2c9f28; } @media (prefers-color-scheme: dark) { :root:not([data-theme=\"light\"]) .builder-export-chart { --bc-bg: #000000; --bc-title: #ffffff; --bc-fg: #edecec; --bc-fg60: rgba(237, 236, 236, 0.6); --bc-fg50: rgba(237, 236, 236, 0.5); --bc-fg40: rgba(237, 236, 236, 0.4); --bc-stroke025: rgba(237, 236, 236, 0.025); --bc-stroke05: rgba(237, 236, 236, 0.05); --bc-stroke10: rgba(237, 236, 236, 0.1); --bc-stroke15: rgba(237, 236, 236, 0.15); --bc-stroke20: rgba(237, 236, 236, 0.2); --bc-node-bg: #1c1b16; --bc-chip-bg: rgba(255, 255, 255, 0.06); --bc-accent: #f54e00; --bc-green: #2c9f28; } } .builder-export-chart .builder-export-chart-svg { font-family: var(--font-sans); display: block; } Expert-parallel MoE 吞吐：BF16 反向（GB300 NVL72s） NCCL + PyTorch DeepEP + PyTorch DeepEP + TransformerEngine HybridEP + Megatron Mixture-of-Kittens Expert-parallel MoE 吞吐：BF16 反向（GB300 NVL72s） NCCL + PyTorch DeepEP + PyTorch DeepEP + TransformerEngine HybridEP + Megatron Mixture-of-Kittens Expert-parallel MoE 吞吐：BF16 反向（GB300 NVL72s） NCCL + PyTorch DeepEP + PyTorch DeepEP + TransformerEngine HybridEP + Megatron Mixture-of-Kittens .builder-export-chart { --bc-bg: #ffffff; --bc-title: #000000; --bc-fg: #26251e; --bc-fg60: rgba(38, 37, 30, 0.6); --bc-fg50: rgba(38, 37, 30, 0.5); --bc-fg40: rgba(38, 37, 30, 0.4); --bc-stroke025: rgba(38, 37, 30, 0.025); --bc-stroke05: rgba(38, 37, 30, 0.05); --bc-stroke10: rgba(38, 37, 30, 0.1); --bc-stroke15: rgba(38, 37, 30, 0.15); --bc-stroke20: rgba(38, 37, 30, 0.2); --bc-node-bg: #f7f7f4; --bc-chip-bg: rgba(255, 255, 255, 0.6); --bc-accent: #f54e00; --bc-green: #2c9f28; } [data-theme=\"dark\"] .builder-export-chart { --bc-bg: #000000; --bc-title: #ffffff; --bc-fg: #edecec; --bc-fg60: rgba(237, 236, 236, 0.6); --bc-fg50: rgba(237, 236, 236, 0.5); --bc-fg40: rgba(237, 236, 236, 0.4); --bc-stroke025: rgba(237, 236, 236, 0.025); --bc-stroke05: rgba(237, 236, 236, 0.05); --bc-stroke10: rgba(237, 236, 236, 0.1); --bc-stroke15: rgba(237, 236, 236, 0.15); --bc-stroke20: rgba(237, 236, 236, 0.2); --bc-node-bg: #1c1b16; --bc-chip-bg: rgba(255, 255, 255, 0.06); --bc-accent: #f54e00; --bc-green: #2c9f28; } @media (prefers-color-scheme: dark) { :root:not([data-theme=\"light\"]) .builder-export-chart { --bc-bg: #000000; --bc-title: #ffffff; --bc-fg: #edecec; --bc-fg60: rgba(237, 236, 236, 0.6); --bc-fg50: rgba(237, 236, 236, 0.5); --bc-fg40: rgba(237, 236, 236, 0.4); --bc-stroke025: rgba(237, 236, 236, 0.025); --bc-stroke05: rgba(237, 236, 236, 0.05); --bc-stroke10: rgba(237, 236, 236, 0.1); --bc-stroke15: rgba(237, 236, 236, 0.15); --bc-stroke20: rgba(237, 236, 236, 0.2); --bc-node-bg: #1c1b16; --bc-chip-bg: rgba(255, 255, 255, 0.06); --bc-accent: #f54e00; --bc-green: #2c9f28; } } .builder-export-chart .builder-export-chart-svg { font-family: var(--font-sans); display: block; } MoK 相比最快的基线，在 MXFP8 前向、MXFP8 反向、BF16 前向、BF16 反向上分别最高快 2.37x、1.78x、1.92x、1.58x。"
+  ],
+  [
+    "h3",
+    "端到端基准测试"
+  ],
+  [
+    "p",
+    "除了针对公开可用实现的基准测试外，我们还报告了内部生产训练栈的加速效果。此前，我们的训练栈依赖基于 DeepEP 的实现，并使用自定义 MXFP8 MoE 计算内核进行 expert-parallelism。我们通过改变 MoE 层实现选择（DeepEP vs MoK）来比较端到端的 tokens per second 指标。基准测试在跨多个 GB300 NVL72 机架的 512 个 GPU 上进行。"
+  ],
+  [
+    "p",
+    "端到端训练吞吐对比（GB300 NVL72s） DeepEP-based Mixture-of-Kittens 端到端训练吞吐对比（GB300 NVL72s） DeepEP-based Mixture-of-Kittens 端到端训练吞吐对比（GB300 NVL72s） DeepEP-based Mixture-of-Kittens DeepEP-based MoK Tokens / second / GPU 760.9 1,070.2 (1.41x) MoK 相比我们之前基于 DeepEP 的生产环境，实现了约 41% 的 tokens-per-second 加速，使我们能够在 GB300 NVL72 基础设施上更高效地训练模型。"
+  ],
+  [
+    "h2",
+    "智能体时代的 Megakernel"
+  ],
+  [
+    "p",
+    "Mixture-of-Kittens 于今日全面开源。我们计划持续维护，欢迎社区反馈与贡献。我们希望这能降低 AI 研究的门槛，让更多研究者和实验室能够高效训练模型。MoK 还力求灵活。我们投入大量精力使其易于修改，这样借助 Agent（智能体），你可以快速将其适配到我们运行平台之外的平台。"
+  ],
+  [
+    "p",
+    "随着能够编写高性能内核的 AI 模型的出现，内核优化空间变得有趣得多。曾经需要手工编写的单算子内核，如今几乎全部由 AI 处理。只要给定正确的设计方向（例如如何特化 warp、使用哪些 PTX 指令），Agent 可以一次性生成最先进的内核。"
+  ],
+  [
+    "p",
+    "然而，更令人感兴趣的是这带来的新能力。去年，编写 megakernel 需要创建一层类似这样的简化抽象。今年，我们不再需要框架。相反，我们移除了额外的抽象层，并在 Agent 的帮助下，从零开始自行攻克了其中的复杂性。"
+  ],
+  [
+    "p",
+    "Agent 自动化了较简单的任务（例如单算子内核），并帮助我们更快地完成更难的任务（例如编写分布式 MoE megakernel），而且只需很小的团队。"
+  ],
+  [
+    "p",
+    "话虽如此，我们面前仍有很多工作要做，需要优化运行在数十万块 GPU 上的高风险 ML 工作负载。如果你对本文和这类工作感兴趣，我们期待你的来信。请通过 hiring@cursor.com 联系我们。"
+  ],
+  [
+    "h2",
+    "引用"
+  ],
+  [
+    "p",
+    "如果你使用这项工作，请引用："
+  ],
+  [
+    "p",
+    "Stuart H. Sul, Nash Brown, Henry Wildermuth, William Lin, and Federico Cassano. \"Mixture-of-Kittens: MoE Megakernel for NVL72s.\" Cursor Research, Aug 2026. https://github.com/cursor/mixture-of-kittens"
+  ],
+  [
+    "p",
+    "@misc { sul2026mok , title = { Mixture-of-Kittens: {MoE} Megakernel for {NVL72s} } , author = { Stuart H. Sul and Nash Brown and Henry Wildermuth and William Lin and Federico Cassano } , organization = { Cursor Research } , year = { 2026 } , publisher = { GitHub } , howpublished = { \\url{https://github.com/cursor/mixture-of-kittens} } , } 特别感谢 Chris Ré、Sasha Rush、Less Wright、Chen Lu 和 Nathan Wang 阅读本文并提供宝贵反馈。"
+  ]
+]
