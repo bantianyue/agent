@@ -87,9 +87,7 @@ DATA = {
                 "这套方法的收益本质来自两点：**把内存密集执行藏进 GEMM 计算**，以及**用跨 CTA 的片上数据共享省掉全局内存往返**。这也正是现代 GPU 架构上融合编译器该走的两个方向。",
             ],
             "fig_after": {
-                "1": [{"src": "fig08.png", "caption": "Figure 9：Self-Attention 性能。"}],
-                "2": [{"src": "fig09.png", "caption": "Figure 10：Target-Attention 性能。"}],
-                "3": [{"src": "fig10.png", "caption": "Figure 11：DLRM Bottom MLP 的性能。"}]
+                "1": [{"src": "fig08.png", "caption": "Figure 9：Self-Attention 性能。"}, {"src": "fig09.png", "caption": "Figure 10：Target-Attention 性能。"}, {"src": "fig10.png", "caption": "Figure 11：DLRM Bottom MLP 的性能。"}]
             }
         },
         {
