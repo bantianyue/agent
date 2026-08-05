@@ -1,0 +1,108 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心洞察</strong>：下游内存密集操作能和GEMM并发执行、被藏到计算背后：但现有编译器把计算/内存算子分开优化，融合边界僵化<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">ComFuse方案</strong>：Stage-Stream执行模型流水协调MatMul与reduction；空间数据共享跨CTA交换中间值；再支持背靠背GEMM（B2BGEMM）融合<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">结果</strong>：post-norm等负载全面优于TorchInductor，最高1.24x，三种pattern平均1.07-1.09x，融合模式更灵活且自动降级免手工内核</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">现代深度学习负载（推荐模型、大模型）的计算图越来越复杂，同时包含<strong>计算密集算子</strong>（GEMM）与<strong>内存密集子图</strong>（elementwise、reduction）。但主流DL编译器通常<strong>把这两类分开优化</strong>，形成僵硬的融合边界，限制跨算子优化与片上数据复用。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">ComFuse抓住一个机会：<strong>下游内存密集操作可以和计算密集算子并发执行，被完全藏到计算背后</strong>。它把这个机会自动化，生成融合内核处理「计算密集算子 + 依赖丰富、内存密集的elementwise-reduction子图」，还支持背靠背GEMM（B2BGEMM）融合：在多种负载上持续优于TorchInductor，最高1.24x。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">问题：计算与内存算子被分裂优化</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">传统编译器面向GEMM用Tensor Core深度优化，面向elementwise/reduction则走另一套图优化与内核生成：<strong>两类算子在编译层被割裂</strong>，每个kernel都让中间值进出一次全局内存，丢失跨算子重用机会。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig00.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 1：跨数据边界的计算密集与内存密集算子联合融合。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">现代GPU（如Hopper/Blackwell）支持<strong>跨CTA的空间数据共享</strong>：中间值能在片上跨CTA边界交换，不需要落回全局内存。这为「计算-内存联合融合」打开了新可能，尤其是下游elementwise/reduction要消费跨多个tile的MatMul输出时。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 2：MatMul + RMSNorm子图结构中的数据流。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">自动利用这种并发与共享，会引出新的编译难题：怎么切分、怎么调度、怎么处理跨tile的reduction同步边界：这是ComFuse要解决的。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">核心：Stage-Stream执行模型</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">ComFuse的骨干是一个<strong>Stage-Stream执行模型</strong>：把MatMul算作一个阶段（stage），把下游的内存密集子图（elementwise + reduction）算作另一个阶段，用<strong>流水调度（pipeline schedule）协调reduction执行与MatMul</strong>。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">关键点在于<strong>图内计算（Intra-DAG）</strong>与<strong>图间链接（Inter-DAG chaining）</strong>的分工：每个阶段内部按DAG调度，阶段之间通过可复用的片上缓冲衔接，从而让内存密集阶段的执行被上一阶段的计算<strong>遮住（hidden）</strong>。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 3：Stage-Stream执行模型的实例：MatMul + LayerNorm。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">针对跨tile的Reduction同步，ComFuse采用<strong>三级reduction方案</strong>：由于epilogue的reduction只沿一个逻辑维度聚合，同步边界被限制在tile的一个局部子集，而不是整张张量：这让并发成为可能，而不需要等全局同步。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 4：Stage-Stream执行模型中的三级reduction方案。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">扩展：背靠背GEMM（B2BGEMM）融合</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">ComFuse进一步支持<strong>B2BGEMM（back-to-back GEMM）</strong> 融合，把两个连续GEMM的compute-memory交互也纳入一致性调度，扩展了它可以覆盖的复杂模式。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">实现上分<strong>数据流调度（Dataflow Scheduling）</strong>、<strong>生产者warp组（Producer Warp Group）</strong>和<strong>消费者warp组（Consumer Warp Group）</strong>：生产者把第一个GEMM的tile交给消费者时，内存密集/第二GEMM重叠进行，避免中间落回全局内存。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 5：B2BGEMM并行任务调度。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这使ComFuse不止处理「MatMul + epilogue」，还能处理更一般的<strong>计算-内存交替模式</strong>，适用面更广。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">编译栈：从高层子程序到融合内核</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">ComFuse是一套<strong>自动化编译系统</strong>：把高层tensor子程序自动降级（lower）为优化过的融合内核，减少手工内核工程。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">编译栈分几步：<strong>代码翻译（Code Translate）</strong> →<strong>前端映射（Frontend Mapping）</strong> →<strong>reduction子图切分（Reduction Subgraph Splitting）</strong> →<strong>后端映射（Backend Mapping）</strong>。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 6：ComFuse编译栈。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">前端负责识别可融合的计算-内存结构并建模数据流；子图切分把复杂的reduction依赖拆成适合流水并发的形式；后端把调度方案映射到具体CUDA/CUTLASS结构上。用户给出高层算子即可，无需手写融合内核。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">实验：全面跑赢TorchInductor</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在post-norm及多种复杂计算场景下，<strong>ComFuse生成的融合内核全面优于TorchInductor</strong>：在所有评估工作负载上持续胜出，<strong>最高1.24x加速</strong>。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">三种代表性pattern下，ComFuse的平均加速分别为<strong>1.08x、1.09x、1.07x</strong>：速度提升稳定的同时，还能表达TorchInductor不支持的更灵活融合模式。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 7：Stage-Stream执行模型的总体性能对比。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">论文还评估了Self-Attention、Target-Attention、DLRM Bottom MLP等端到端场景，证明融合收益不只在孤立microbenchmark，也落到真实模型结构中。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 8：Stage-Stream执行模型的残差时间性能对比（残差时间 = 总时间 − MatMul时间），凸显被隐藏部分的收益。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">更多场景验证</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在Self-Attention、Target-Attention与DLRM Bottom MLP上，ComFuse都展示了超越TorchInductor的融合性能：说明它不只针对单一模板，而是能吃到多种「计算-内存」交互结构。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这套方法的收益本质来自两点：<strong>把内存密集执行藏进GEMM计算</strong>，以及<strong>用跨CTA的片上数据共享省掉全局内存往返</strong>。这也正是现代GPU架构上融合编译器该走的两个方向。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 9：Self-Attention性能。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig09.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 10：Target-Attention性能。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig10.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Figure 11：DLRM Bottom MLP的性能。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">结论</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">ComFuse证明：编译器不该把计算密集和内存密集算子当作两套毫不相干的世界。<strong>利用现代GPU的跨CTA片上共享 + 流水调度，内存密集子图可以被完全藏到GEMM背后</strong>，融合收益既真实又可自动获得。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对跑大模型post-norm、推荐模型DLRM、attention这类「GEMM后面拖着一长串elementwise/reduction」的团队，把这类模式交给这种自动融合编译，比手写CUTLASS epilogue更省力、也更灵活。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+ComFuse的启示是把「operator fusion」从同类算子之间，扩展到<strong>跨计算/内存类别</strong>的联合融合：不是把所有东西塞进一个大kernel，而是让内存密集部分<strong>偷跑在GEMM计算背后</strong>，再靠跨CTA的片上共享省掉中间张量的全局往返。<br  /><br  />结果是稳定且可复现的：全面超过TorchInductor、最高1.24x、平均1.07-1.09x，还支持B2BGEMM这类更复杂的计算-内存交互，且全程自动从高层算子降级，免去手工内核工程。对融合编译器来说，这是一条值得跟进的成熟路线。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://arxiv.org/abs/2608.03537v1</span></p>
+</section>
