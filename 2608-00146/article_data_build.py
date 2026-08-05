@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import json, os, sys
+
+_article_dir = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.getcwd())
+
+DATA = {
+    "title": "DiffusionGemma：用离散扩散把文本生成提速到 1500 token/s，还保住智能",
+    "summary": [
+        {"key": "核心突破", "body": "放弃逐 token 解码，改为并行迭代精炼 256-token 块；单张 H100 生成约 1500 output tokens/s，远快于带投机解码的 AR 模型"},
+        {"key": "高效训练", "body": "不从头训：从 Gemma 4 26B A4B MoE 微调，两阶段（SFT 教双向去噪 + SDRL 联合蒸馏与 RL）只用不到原模型 10% 的 token 预算"},
+        {"key": "Pareto 前沿", "body": "在生成速度与模型能力之间建立新 Pareto 前沿，保留思维模式/多模态/长上下文，甚至仍能做 AR 生成"},
+    ],
+    "lead": [
+        "大语言模型生成文本的天然瓶颈是**逐 token 顺序解码**。DiffusionGemma（Google DeepMind 开源实验模型）用**离散扩散**绕开它：不是一次解码一个 token，而是**并行迭代精炼 256-token 的块**，消除了传统自回归（AR）LLM 的序列解码瓶颈。",
+        "它不从头训练——通过把**混合专家（MoE）Gemma 4**（3.8B 激活 / 25.2B 总参）微调而来，训练预算不到原 AR 模型总训练 token 的 10%。在完整评测套件平均下，它单次前向生成约 20 个 token，单张 NVIDIA H100 上可达约 **1500 output tokens/s**，比带最先进投机解码的 AR 模型还快一大截。",
+    ],
+    "sections": [
+        {
+            "type": "h2",
+            "title": "核心思路：把逐 token 生成换成块级并行去噪",
+            "paras": [
+                "AR 模型一次解码一个 token，通信和内存带宽的利用被顺序依赖锁死。**离散扩散**的角度不同：先在噪声中初始化一个 256-token 的「画布（canvas）」，再由模型**多轮并行去噪**逐步把它们精炼成连贯文本。",
+                "去噪路径由一段**概率路径**定义：从干净的文本出发逐步加噪声（加噪路径），再训练模型沿反向把噪声样本一步步还原到干净分布（去噪路径）。采样轨迹是并行的——同一时刻多个 token 一起被精炼，吞吐因此不受单 token 顺序限制。",
+                "对长序列，DiffusionGemma 用**块自回归（block-autoregressive）解码**：一次生成一大段块，已有的块当作已确定文本，继续去噪下一个块，把块级并行和长文本一致性结合起来。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig02.png", "caption": "Figure 3：离散扩散概率路径与并行采样轨迹的示意。"}]
+            }
+        },
+        {
+            "type": "h2",
+            "title": "架构：在 Gemma 4 背骨上长成 encoder-decoder",
+            "paras": [
+                "DiffusionGemma 是一个 **encoder-decoder transformer**。作者没有从零预训练一个扩散模型，而是直接用**已公开的 Gemma 4 26B A4B MoE checkpoint** 初始化——用一点生成质量换取训练成本的大幅下降，还能继承背骨模型的扩展上下文窗口与原生多模态理解。",
+                "去噪时，模型从噪声输入预测 256-token 块；推理阶段拆成三件套：**块自回归解码**处理长序列、**去噪框架**精炼单个块、以及区分思考（thinking）与否的采样。",
+                "关键实验显示：微调后的权重**仍保留自回归采样的能力**（稍降性能），为未来的**混合 diffusion-AR 解码**铺路。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig01.png", "caption": "Figure 2：两阶段训练流水线总览——把自回归模型（Gemma 4 26B A4B）转成文本扩散模型。"}],
+                "2": [{"src": "fig03.png", "caption": "Figure 4：DiffusionGemma 的生成流水线（encoder-decoder 结构）。"}]
+            }
+        },
+        {
+            "type": "h2",
+            "title": "Stage 1 监督微调：教它双向去噪",
+            "paras": [
+                "SFT 之前模型完全不会去噪文本。作者用扩展微调让 Gemma 4 26B A4B 适应「从噪声输入预测 256-token 块」这个任务。",
+                "技术关键是**块对角注意力掩码**：每个块内允许双向注意力，但禁止模型条件化其他去噪块。对给定 canvas，模型通过 encoder KV cache 条件化 prompt 与之前（未损坏）的 token。",
+                "用**离散扩散 / 去噪损失**训练。实验显示适度 SFT 就能在非思维模式下表现良好，但**要做思考（thinking）行为，需要相当长的 SFT**——这是训练视角对模型的思维能力的刻画。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig04.png", "caption": "Figure 5：自适应停止让 DiffusionGemma 按任务复杂度动态调整去噪步数。"}],
+                "2": [{"src": "fig05.png", "caption": "Figure 8：SDRL 训练同时提升平均奖励并降低在线教师的有效去噪步数。"}]
+            }
+        },
+        {
+            "type": "h2",
+            "title": "Stage 2 SDRL：一次梯度更新同时提智能、压步数",
+            "paras": [
+                "SFT 后高去噪步数下质量强，但高级推理/编码弱于 AR 基线，且在**超低延迟所需的少步区间质量塌陷**。传统做法是把「reward 对齐」和「采样器蒸馏」拆成两个独立阶段。",
+                "作者用一个统一阶段 **SDRL（Sampler Distillation & RL）**同时优化两个目标：**提升生成质量/对齐**与**压缩去噪轨迹**。一条联合目标、一次梯度更新同时驱动两个轴，训练阶段共享、更高效。",
+                "这让模型学会了**少步解出好结果**——通过在线教师逐步收敛到更少的有效去噪步数，配合自适应停止，把推理成本进一步压低。",
+            ],
+            "fig_after": {
+                "2": [{"src": "fig06.png", "caption": "Figure 9：SDRL 显著推进了质量-速度 Pareto 前沿。"}]
+            }
+        },
+        {
+            "type": "h2",
+            "title": "推理优化：把单步 wall-clock 也压下去",
+            "paras": [
+                "扩散相对 AR 的吞吐优势取决于两个竞争量：每个去噪步解码更多 token（需要远少于 AR 的 forward passes），但每个 forward 处理 256-token canvas 因而慢 r 倍，总体相对 AR 吞吐约为 /r。",
+                "先把每 forward 产出的 token 数最大化（SFT + SDRL 已做），再**针对 GPU 级优化最小化每 forward 的消耗**，例如低 batch size 场景的专门优化。若能同时压低两个量，速度优势就体现出来。",
+                "逐个 forward 的 GPU 时间分解显示：DiffusionGemma 每步处理 256 个 token，单步延迟只增长 3.2 倍——换来的是吞吐数量级的提升。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig07.png", "caption": "Figure 11：单步 GPU 时间分解：DiffusionGemma 每步处理 256 token，单步延迟仅增 3.2x。"}],
+                "2": [{"src": "fig08.png", "caption": "Figure 12：Gemma 4 AR（含/不含 MTP）与 DiffusionGemma 的总吞吐与每用户吞吐的权衡。"}]
+            }
+        },
+        {
+            "type": "h2",
+            "title": "实验结果：新 Pareto 前沿",
+            "paras": [
+                "评测覆盖 4 种运行模式：文本扩散（TD）对自回归（AR）、各带/不带思考；对比对象包括 **Gemma 4 26B A4B（AR 来源）**、当代开源文本扩散模型 **LLaDA 2.1 Flash 100B、Nemotron Diffusion 14B**，以及专有 **Mercury 2 API**。",
+                "基准套件横跨数学推理（AIME/GSM8K/MGSM/Putna）、代码生成、通用知识、多模态理解、指令跟随与 agentic 能力。**平均每个 forward 约 20 token，单 H100 约 1500 output tokens/s**，同时整体能力与 AR 基线可比。",
+                "性能-速度权衡图上，DiffusionGemma 把**能力 × 速度的 Pareto 前沿**显著向前推——这是「快而不笨」的量化证明。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig09.png", "caption": "Figure 13：按能力域汇总的性能对比。"}],
+                "2": [{"src": "fig00.png", "caption": "Figure 1：质量 vs 输出解码速度的 Pareto 图——DiffusionGemma 对比 Gemma 4 模型族与其他扩散模型。"}]
+            }
+        },
+        {
+            "type": "h2",
+            "title": "扩散架构带来的额外好处",
+            "paras": [
+                "扩散范式的主打优势是低延迟，但它的架构还带来计算效率之外的好处：**双向推理与自我纠正**——模型能同时看到前后文，在生成中纠正之前的决策；**动态自适应计算**——按任务复杂度调整去噪步数，简单问题少步、难题多步；**结构化与约束输出**——能更好地遵守格式约束。",
+                "在一位数乘法等典型案例上，去噪轨迹让模型从「自信的错误」逐步走向正确的答案，展示了与 AR 单向扫描截然不同的修正方式。",
+                "限制方面，作者也坦承扩散微调后若做纯 AR 会有轻微质量损失，且当前主要在响应延迟敏感场景最亮眼——但保留的 AR 能力指向**混合 diffusion-AR 解码**的更灵活未来。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig10.png", "caption": "Figure 15：数学推理问题的去噪轨迹（放大到前 12 个 token），颜色强度表示模型置信度。"}]
+            }
+        },
+        {
+            "type": "h2",
+            "title": "结论",
+            "paras": [
+                "DiffusionGemma 证明了一条可行路径：**把现代最强 AR 背骨（Gemma 4）用不到 10% 的预算转成文本扩散模型**，换来 1500 token/s 的极致生成速度，同时几乎不牺牲能力——还在速度-智能图上开辟了新 Pareto 前沿。",
+                "SDRL 的「一次更新同时提智能 + 压步数」、块对角注意力与块自回归的组合，都是值得借鉴的工程决策。对响应延迟敏感的生产场景，这是 AR 之外一个真正可选、且开源可复现的答案。",
+            ],
+        },
+    ],
+    "conclusion": [
+        "DiffusionGemma 的核心是把「生成文本」从顺序解码问题重新定义为**并行去噪问题**：一个 256-token 的画布被轮番精炼，token 不再是瓶颈。靠着从 Gemma 4 26B A4B 微调起步和只占原模型 10% 的训练预算，它用离散扩散做成了又快又不太笨的模型——单 H100 约 1500 token/s。",
+        "更值得关注的是工程方法：SDRL 用一次更新同时提智能与蒸馏步数，块对角注意力保留双向去噪又隔离块间泄漏，而保留的 AR 能力让「混合 diffusion-AR 解码」成为可期的下一步。对吃满延迟预算的推理服务，这是一条已验证的开源新路。",
+    ],
+    "reference_url": "https://arxiv.org/abs/2608.00146",
+    "title": "DiffusionGemma：用离散扩散把文本生成提速到 1500 token/s，还保住智能",
+}
+
+out_path = os.path.join(_article_dir, "article_data.json")
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 {out_path} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA['sections'])} sections)")
