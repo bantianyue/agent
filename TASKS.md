@@ -582,3 +582,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-08-07 17:50 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-08-07 17:54 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0Vg2Ha0prOXXD24G8jLZIF6LsnHNnwwVT1G4SPFN1Vwn |
