@@ -568,3 +568,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-08-07 17:26 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-08-07 17:31 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0TKFHZqyjvcguQsqArwcpFf16FSoEnlOtuEf1Ksvut8b |
