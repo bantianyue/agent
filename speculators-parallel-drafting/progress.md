@@ -22,3 +22,4 @@
 
 创建时间: 2026-08-07
 来源: https://vllm.ai/blog/2026-07-28-speculators-parallel-drafting
+| Step 4d-i: 传送门 | completed |
