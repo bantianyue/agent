@@ -43,5 +43,20 @@
   "41": "producer_acquire() 调用发生得过早。在当前安排中，即使存在多个 epilogue 阶段，producer_acquire() 也会阻塞。此外，producer_tail() 位于错误的循环深度。它应当在所有 work tile 处理完毕后，将存储流水线排空一次。而按当前写法，它每个 work tile 排空一次。这些问题共同导致存储路径不必要地阻塞 MMA 工作。",
   "42": "在版本 3 中，我们的修复方案是将生产者尾部移出 warp 循环，并将 producer_acquire() 调用延迟到紧邻写入共享内存之前。具体来说，现在它直接位于 self.epilog_sync_barrier.arrive_and_wait() 之前。",
   "43": "我们在基准测试中使用两个 epilogue 阶段，epilogue 子块大小为 64 x 64。性能分析显示，从版本 2 到版本 3，长 scoreboard 停顿略有下降。",
-  "44": "总体而言，影响很小，且在基准测试的波动范围内，如图 9 所示。"
+  "44": "总体而言，影响很小，且在基准测试的波动范围内，如图 9 所示。",
+  "45": "版本 4：Warp 专用化存储（Warp-specialized Store）",
+  "46": "在像 GEMM 这样的计算密集型内核中，我们希望 Tensor Core 始终处于忙碌状态。这意味着需要始终有一个执行 MMA 工作的 warp 随时可被调度。实现这一目标的一种方式是 warp 专用化。我们已经在加载路径上这样做了，但存储仍由计算 warp 负责。",
+  "47": "在实现层面，存储 warp 必须在某个 SMEM 阶段可安全覆写时通知 MMA warp，而 MMA warp 则需要在该阶段包含完整的输出子块时告知存储 warp。因此，版本 4 添加了两个额外的命名屏障（named barrier）：",
+  "48": "共有 16 个硬件管理的命名屏障，barrier_id 用于标识使用这 16 个中的哪一个。num_threads 输入指定必须到达该屏障的线程总数，之后屏障才会释放。因此，我们将其设置为 MMA warp 与存储 warp 两者的线程总数。",
+  "49": "存储 warp 首先对其内部 TMA 存储流水线调用 producer_acquire。然后它到达 epilog_free_barrier，向 MMA warp 发出信号，表示该阶段可自由写入。MMA warp 在等待 epilog_free_barrier 直到信号到达后，通过将累加器子块从寄存器复制到 SMEM 来填充该阶段。随后 MMA warp 执行 async.shared fence 使 SMEM 写入可见，之后它们到达 epilog_ready_barrier，发出阶段已填充的信号。存储 warp 在等待 epilog_ready_barrier 后，通过发起从 SMEM 到 GMEM 的 TMA 拷贝来排空该阶段。它还会调用 producer_commit() 记录本次存储，后续的 producer_acquire() 将等待该记录完成。",
+  "50": "图 10 展示了版本 4 内核结构的高级概览。",
+  "51": "Version 4 的基准测试结果如图 11 所示。",
+  "52": "我们观察到 2k 和 16k 处性能提升约 1%，其余情况保持不变。",
+  "53": "Version 5：消除 SFA bank 冲突",
+  "54": "Version 5 解决了 bank 冲突。虽然此版本中的改动本身不会对性能产生实质性影响，但在可行时促进高效加载仍是良好实践。我们也认为相关讨论具有教学价值。",
+  "55": "SMEM 由 32 个 4 字节宽的 bank 组成。如果 warp 发出访问请求，且 32 个 bank 上的地址各不相同，SMEM 可在单个周期内提供数据。但若同一 bank 中被请求了多个地址，这些请求会被串行处理，这被称为 bank 冲突。注意，如果多个 lane 请求同一 bank 中的相同地址，可以通过广播在单个周期内提供数据。",
+  "56": "Nsight 指标 “L1 Wavefronts Shared Excessive” 可作为此类 bank 冲突的信号。Nsight 报告该指标为 8.39M，且 SFA fragment 从 SMEM 到寄存器的复制操作是导致该指标的全部原因。要理解该数字为何被报告，我们需同时检查 SMEM 布局和 SFA 的 thread-value (TV) 布局。",
+  "57": "SFA 的 SMEM 布局为：",
+  "58": "((32,4), REST_M), ((16,4), 1, REST_K)) : (((16, 4), 512 * REST_K), ((0, 1), 4, 512))",
+  "59": "M 子布局 (32,4):(16,4) 将 128×128 CTA tile 的 m 坐标分解为"
 }
