@@ -48,7 +48,7 @@ for i,x in enumerate(c):
         if tx: para_list.append(tx)
     elif tp=='code':
         para_list.append(code_block(x['text']))
-    elif tp=='li':
+    elif tp in ('li','ref'):
         if in_ref:
             para_list.append(f"• {x['text']}")  # 保留原文引用
         else:

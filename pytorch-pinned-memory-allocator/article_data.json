@@ -1,70 +1,144 @@
 {
   "summary": [
     {
-      "key": "要点关键词1",
-      "body": "核心内容。替换本占位。"
+      "key": "核心观点",
+      "body": "Pinned memory 一旦被 CUDA graph 捕获、或因 copy 事件未完成而无法释放，就可能永久滞留——PyTorch 每个 pinned buffer 内部都套着事件跟踪，你删除 tensor 并不能真正归还内存。"
     },
     {
-      "key": "要点关键词2",
-      "body": "核心内容。替换本占位。"
+      "key": "关键机制",
+      "body": "CachingHostAllocator 只在事件确认 DMA 完成后才把块放回空闲链表；CUDA graph 会把 host buffer 烘焙成永久固定件，导致 pinned 内存实际上没人还回去。"
     },
     {
-      "key": "要点关键词3",
-      "body": "核心内容。替换本占位。"
+      "key": "实用建议",
+      "body": "想真正归还 pinned 内存：torch.accelerator.empty_host_cache()（注意不是 empty_cache），或用 PYTORCH_ALLOC_CONF=pinned_max_cached_size_mb 控制单块上限。"
     }
+  ],
+  "lead": [
+    "披露声明。\n本文由 Claude（Anthropic 的编程助手）起草，并由 ezyang 编辑。",
+    "很长一段时间，我总以为 pinned memory 是你在代码中四处\n洒下的东西，用来向 GPU 做 async transfers。事实上，\n旧的 Caffe2 曾\n把每一个 CPU tensor 都 pin 住，\n即使它从未真正参与过 GPU 计算。在这种模式下，你可能以为需要\n一个 pinned memory 分配器，以便按需分配和释放 pinned\nmemory。",
+    "然而，如果你仔细思考 async transfers 对\npinned memory 生命周期的含义，以及对 CUDA graphs 的含义，就会明白\n你其实……并不真正想释放 pinned memory。tl;dr：",
+    "CUDA graphs 禁止这样做：captured graph 会将 host\nbuffer 的地址固化进其节点，因此任何参与\ngraphed copy 的 pinned buffer 都必须在该地址保持存活，只要 graph\n被重放。",
+    "重新 pin 的成本很高：cudaHostAlloc 需要花费毫秒级时间，\n因此，在稳态下释放内存只是意味着在下次迭代中再次支付该代价。",
+    "使用 pinned memory 的工作负载具有固定的工作集：每一步\nshape 都相同，因此在步骤之间释放不会带来任何收益。",
+    "其余部分将详细讲解其中的机制。",
+    "顺便说一句，要想快速验证这一论断，值得看看 Megatron-LM 和 vLLM\n到底如何使用 pinned memory，因为两者都从不\n释放它。两者都有自己的 pinned pool。两者都提前分配并持有\n内存直到进程退出。其中一个有一个 config flag，其全部\n文档记载用途就是阻止 pinned buffers 被释放。"
   ],
   "sections": [
     {
       "type": "h2",
-      "title": "正文第一章标题",
+      "title": "pinned memory 的实际用途",
       "paras": [
-        "第一段正文文字。",
-        "第二段正文文字。"
-      ],
-      "figs": [
-        {
-          "src": "fig1.png",
-          "caption": "图片说明文字"
-        }
-      ]
-    },
-    {
-      "type": "h3",
-      "title": "子标题示例",
-      "paras": [
-        "子标题下的段落。"
+        "Pinned (page-locked) host memory 指操作系统承诺不会交换或\n移动的内存，这使 GPU 的 DMA 引擎能够通过物理\n地址直接读写它。这给你带来四点好处：",
+        "带宽。从 pageable memory 进行的拷贝必须经过 driver-internal\nbounce buffer 中转。pinned memory 直接通过 interconnect 传输，\n在 PCIe 上通常可达到 2-3 倍性能，在 NVLink C2C 上更高。",
+        "异步性。从 pageable memory 执行 copy_(non_blocking=True) 实际上\n无法与任何操作重叠：驱动程序必须分阶段拷贝，因此会阻塞。\n只有从 pinned memory 发起时，non_blocking=True 才能在传输完成前返回，\n并让拷贝与计算重叠。如果你试图用计算掩盖传输延迟却忘了 pin，\n那就什么也没得到。",
+        "直接硬件路径。RDMA NICs 和 GPUDirect Storage 需要已注册的\npage-locked buffers。没有 pageable 选项。",
+        "CUDA graph 中的 D2H。下文详述，但简而言之：涉及 pageable memory 的 async copy\n表现为同步行为，而同步操作\n在图捕获期间不允许。"
       ]
     },
     {
       "type": "h2",
-      "title": "含表格的章节",
+      "title": "复杂之处：你并不拥有你以为自己拥有的 buffer。",
       "paras": [
-        "下面是一张示例表格。"
-      ],
-      "table": {
-        "head": [
-          "列1",
-          "列2",
-          "列3"
-        ],
-        "rows": [
-          [
-            "A",
-            "B",
-            "C"
-          ],
-          [
-            "D",
-            "<strong style=\"color:#0F4C81;\">E</strong>",
-            "F"
-          ]
-        ]
-      }
+        "当你发出时",
+        "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>gpu_tensor.copy_(cpu_pinned, non_blocking=True)</code></pre>",
+        "调用会立即返回，DMA 仍在执行中。缓冲区并不\n能安全重用：当 Python 语句结束或最后一个引用\n释放时；只有复制真正在流上完成时才可安全重用，\n而只有 GPU 知道何时完成。如果过早回收缓冲区，\n会得到静默的数据损坏。",
+        "PyTorch 的固定内存分配器可帮助你避免这个 use-after-free 问题。\n每次涉及固定内存的 copy_(non_blocking=True) 都会记录一个 CUDA 事件\n到主机块\n(aten/src/ATen/native/cuda/Copy.cu:481-486)：",
+        "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>const auto&amp; host_tensor = (dst_device == kCPU ? dst_tensor : src_tensor);\nauto* ptr = (dst_device == kCPU ? dst : src);\nauto* ctx = host_tensor.storage().data_ptr().get_context();\nat::getHostAllocator(at::kCUDA)-&gt;record_event(ptr, ctx, stream.unwrap());</code></pre>",
+        "注意，它同时以数据指针和存储上下文为键，因此一个切片\n固定张量的切片，或通过 from_blob 基于分配器内存构建的张量，仍然\n归属于正确的块。释放时，块被放置到事件队列中\n并且在所有已记录事件结束前不会返回空闲列表\n(参见 aten/src/ATen/core/CachingHostAllocator.h:428-500)。设置\nPYTORCH_ALLOC_CONF=pinned_use_background_threads:true 会将轮询移到\n一个辅助线程上，从而避开分配快速路径。",
+        "由于 Python 中的释放始终是隐式的（通过引用计数），我个人\n认为，确保已释放的缓冲区不会被过早重用，是 PyTorch\n固定内存分配器提供的一个非常重要的防误用机制。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "CUDA 图将缓冲区变成永久固定装置",
+      "paras": [
+        "CUDA 图会将设备地址和主机地址固化到被捕获的节点中。如果\nD2H 复制是图的一部分，它每次重放时都会写入一个固定的主机地址，\n永远如此。这带来两个后果：",
+        "这就是为什么对图友好的代码要这样工作。如果你想从设备读回\n某些内容（loss、grad norm、NaN 检查、采样 token\nid、KV cache 长度），并且希望整个 step 保持在单个图内，\n你需要在启动时分配一个固定的暂存缓冲区，将 D2H 复制捕获到\n其中，并在重放后从主机读取。另一种选择是在 step 中间进行\n设备到主机的同步，这会让一切脱离图。",
+        "Megatron 正好有一个配置标志用于此目的\n(megatron/core/model_parallel_config.py:480)：",
+        "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>cpu_offloading_retain_pinned_cpu_buffers: bool = False\n&quot;&quot;&quot;If True, the pinned CPU buffers are retained after offloading and reused for the\n   next iteration. It is useful for cuda graphs capture.\n&quot;&quot;&quot;</code></pre>",
+        "一个标志，其全部用途是：不要归还固定内存，因为\nCUDA graphs 需要稳定的地址。",
+        "PyTorch 的 host allocator 在内部编码了相同的不变量。在 stream capture 期间分配的块永远不会被回收\n(aten/src/ATen/core/CachingHostAllocator.h:481-493):",
+        "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>// If the block was ever used, block-&gt;event_count_ will be above\n// 0 and thus can never be recycled by\n// process_events_for_specific_size. Thus, this block will never\n// be returned again. &quot;Leaking&quot; memory like this is intentional\n// to avoid subtle cuda graph problems described here: ...</code></pre>"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "固定内存使用的一些示例",
+      "paras": [
+        "你不必使用 PyTorch 的固定内存分配器；自己调用 cudaHostRegister 相对\n简单。",
+        "vLLM 在 worker 初始化时一次性分配其 host 端输入缓冲区，大小调整为\nmax_num_reqs，并在进程的整个生命周期内每一步复用它们\n(vllm/v1/worker/gpu_model_runner.py，\n大约二十个 pin_memory=PIN_MEMORY 分配，大部分在初始化时)。这是\n对图友好的 input-prep 模式：在 host 上填充固定缓冲区，一次\n异步 H2D，重放图。",
+        "对于 KV offload，vLLM 更进一步，完全绕过 PyTorch 的分配器\n(vllm/v1/simple_kv_offload/cuda_mem_ops.py:23-32):",
+        "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>def pin_tensor(tensor: torch.Tensor) -&gt; None:\n    &quot;&quot;&quot;Pin a CPU tensor via cudaHostRegister.\n\n    This bypasses PyTorch&#x27;s CUDACachingHostAllocator which rounds\n    every ``pin_memory=True`` allocation up to the next power of 2\n    (e.g. 100 GB becomes 128 GB).\n    &quot;&quot;&quot;\n    err = torch.cuda.cudart().cudaHostRegister(tensor.data_ptr(), tensor.nbytes, 0)</code></pre>",
+        "Megatron 有自己的固定内存池，\nOffloadTensorPool，\n它是构建在 PyTorch 固定内存池之上的抽象：",
+        "所有三个实现（PyTorch、vLLM、Megatron）有一个共同点：\n在稳定运行期间，它们都不会将固定内存归还给操作系统。\n它们分配一个工作集，复用该工作集，并一直持有到进程退出。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "那么，删除张量会解除其固定吗？不会",
+      "paras": [
+        "当对固定张量的最后一个引用消失时，PyTorch 会记录所有接触过它的流上的事件，一旦这些事件完成，该内存块就进入空闲列表（maybe_cache_block, CachingHostAllocator.h:808）。没有任何代码调用 cudaFreeHost。这些页面保持页锁定状态并已在驱动程序中注册。",
+        "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>import gc, torch\n\nMiB = 1024 * 1024\n\ndef report(label):\n    s = torch.cuda.host_memory_stats()\n    print(f&quot;{label:20} owned={s[&#x27;allocated_bytes.current&#x27;]//MiB:5} MiB&quot;\n          f&quot;  checked_out={s[&#x27;active_bytes.current&#x27;]//MiB:5} MiB&quot;\n          f&quot;  cudaFreeHost calls={s[&#x27;num_host_free&#x27;]}&quot;)\n\nt = torch.empty(256 * MiB, dtype=torch.uint8, pin_memory=True)\nreport(&quot;after alloc&quot;)\n\ndel t\ngc.collect()\ntorch.cuda.synchronize()\nreport(&quot;after del&quot;)          # checked_out -&gt; 0, owned stays at 256 MiB\n\ntorch.accelerator.empty_host_cache()\nreport(&quot;after empty_cache&quot;)  # owned drops, num_host_free increments</code></pre>",
+        "active_bytes 是已签出给调用方的内存；allocated_bytes 是分配器拥有的内存，包括活跃和缓存部分。删除张量会将字节从前者移动到后者，只有 empty_cache 才会将它们从后者移除。",
+        "在分析 PyTorch 中的内存分配时，必须区分三件不同的事情。释放张量是引用计数且确定性的。使内存块可复用是延迟的，但只会延迟到流事件完成，而且这种延迟是正确性要求，而不是惰性。将页面归还给操作系统永远不会自动发生。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "当你确实想要收回它时，以及如何收回",
+      "paras": [
+        "对于独占机器的训练任务来说，“一次分配并持有”是正确的。\n有两种情况并非如此：",
+        "对于这些情况，你可以强制将 pinned memory 归还给操作系统：",
+        "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>torch.accelerator.empty_host_cache()   # public, device-generic, 2.12+\ntorch._C._host_emptyCache()            # CUDA-only, private, since 2.5</code></pre>",
+        "torch.cuda.empty_cache() 并不会这样做。它只是为设备分配器调用\n_cuda_emptyCache，并且有意不提供\ntorch.cuda.empty_host_cache()。",
+        "empty_cache 只回收位于空闲列表上的内存块，因此它是安全的，\n可以在任何时间调用；如果仍有异步传输正在进行，它释放的内存可能少于\n你的预期。",
+        "如果完全刷新过于粗暴（之后每次分配该大小的内存都要付出一次\n耗时数毫秒的全新 cudaHostAlloc），则改为限制缓存大小：",
+        "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>PYTORCH_ALLOC_CONF=pinned_max_cached_size_mb:512</code></pre>",
+        "超过此大小的内存块会在其复制事件完成后立即释放，而不是\n被缓存。此外还有 pinned_max_round_threshold_mb，它会禁用给定大小之上的\n二次幂舍入；它晚于上面提到的 vLLM 的 cudaHostRegister 变通方案出现，\n并且可以解决同样的 100 GB 变成 128 GB 的问题。",
+        "有一点在任何情况下都不会释放：如果你启用了\npinned_reserve_segment_size_mb，该内存块会被 free_block 明确跳过\n(aten/src/ATen/cuda/CachingHostAllocator.cpp:95)，并且按设计会一直存活到进程\n退出。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "解除内存固定",
+      "paras": [
+        "如果你想把 pinned memory 视为发生在普通 CPU 内存上的一种属性，\n你可以直接在普通 CPU tensor 上使用 cudaHostRegister / cudaHostUnregister，\n这些函数可通过公开的 torch.cuda.cudart() 从 Python 访问。PyTorch 附带了一个\n四行包装器，位于\ntorch/cuda/_pin_memory_utils.py\n（它是私有的，但底层调用不是），分布式检查点使用它\n作为暂存缓冲区。你将获得完全显式的生存期，没有缓存，没有舍入；但你必须\n确保事件处理正确。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "不使用 CUDA 可以使用锁页内存吗？",
+      "paras": [
+        "_pin_memory 是一个加速器专属的 API，在没有\n加速器时会报错（例如纯 CPU 构建）。这可能有点\n不方便，如果你有时喜欢用 CPU 设备测试。除了写那种烦人的条件表达式测试（\nt.pin_memory() if torch.accelerator.is_available() else t）之外，我确实没什么建议。",
+        "注意，从技术上讲，可以在没有加速器\n参与的情况下获得页锁定主机内存：例如被 mlock 的缓冲区，或\nO_DIRECT / libaio NVMe 卸载所需的页对齐分配。这与 CUDA 无关，\nPyTorch 不为此提供 API。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "结论",
+      "paras": [
+        "希望这能解答你关于锁页内存以及\n如何使用它的一些疑问。确实，直接从 Python 实现你自己的\n锁页内存分配器相当容易，而且你应该可以随意这样做\n如果合适的话（不过我怀疑你要是这么做了，就不需要这篇文章了。）但\n我认为内置的锁页内存分配器也相当好用，而且你\n大多数情况下应该考虑不使用它，如果你想要精确大小匹配而不是\n二次幂桶，或者如果你承诺自己处理\n释放。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "参考资料",
+      "paras": [
+        "• aten/src/ATen/core/CachingHostAllocator.h – generic implementation, plus\nNote [HostAllocator design] at line 168",
+        "• aten/src/ATen/cuda/CachingHostAllocator.cpp – CUDA specialization",
+        "• aten/src/ATen/native/cuda/Copy.cu:481 – where copies record host events",
+        "• torch/cuda/_pin_memory_utils.py – explicit register/unregister",
+        "• Pinned memory options in the CUDA notes",
+        "• Graph-based CPU Offloading for TorchTitan – which needed its own pinned pool too",
+        "• expose host_emptyCache to python (#134919)",
+        "• Introduce a unified API to empty the host cache memory (#171270)"
+      ]
     }
   ],
   "conclusion": [
-    "结语分析内容1。",
-    "结语分析内容2。"
+    "pinned memory 是高性能 host-device 传输的根基——带宽、异步 copy、RDMA、CUDA graph 内 D2H 都离不开它。但正因为它被 CUDA graph 和 copy 事件‘钉住’，PyTorch 的 CachingHostAllocator 在删除张量后并不会立刻把内存还给系统：只要还有 in-flight 的异步操作引用它，块就留在缓存里，直到事件确认完毕。",
+    "如果你真的想强制归还：用 torch.accelerator.empty_host_cache()（它不会像 empty_cache 那样只清理空闲链表），或通过 pinned_max_cached_size_mb 让超大块用完即释放。记住，唯一永不释放的是被 CUDA graph 捕获的 buffer——除非重建图。"
   ],
-  "reference_url": "https://arxiv.org/html/XXXX.XXXXX"
+  "reference_url": "https://docs.pytorch.org/devlogs/eager/2026-08-09-pinned-memory-allocator/",
+  "title": "Pinned memory：它是干什么的，以及为什么没人把它还回去"
 }
