@@ -596,3 +596,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-08-10 15:08 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-08-10 15:20 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0bYKqdLygvJq3-eodEXrgc2y6b_eHnucNBJ-gIMh8zRB |
