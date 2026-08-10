@@ -148,4 +148,4 @@ DATA = {
 }
 out_path = os.path.join(_article_dir, "article_data.json")
 open(out_path,"w",encoding="utf-8").write(json.dumps(DATA, ensure_ascii=False, indent=2))
-print(f"OK {len(json.dumps(DATA,ensure_ascii=False))} chars, {len(sections)} sections")
+print(f"OK {len(json.dumps(DATA,ensure_ascii=False))} chars, {len(DATA.get('sections',[]))} sections")
