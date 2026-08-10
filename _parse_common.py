@@ -62,25 +62,10 @@ p=P(); p.feed(body)
 
 # 转 content
 content=[]
-for t,val in p.out:
-    if t=='img':
-        # 已单独收集为 img (src,alt)
-        if isinstance(val,str):
-            content.append({'type':'img','src':val,'caption':''})
-    elif t in ('h1','h2','h3','h4'):
-        if val: content.append({'type':('h2' if t in('h1','h2') else t), 'text':val})
-    elif t=='pre':
-        content.append({'type':'code','text':val})
-    elif t in ('p','li'):
-        if val: content.append({'type':t,'text':val})
-
-# 图已经是 ('img',src,alt) 格式 需要重新对齐：上面 handle 里 img 直接 append tuple
-# 修正：重新处理 out
-content=[]
 imgs=[]
 for item in p.out:
     if item[0]=='img':
-        imgs.append(item)
+        imgs.append(item)  # (img, src, alt)
     else:
         t,val = item
         if t in ('h1','h2','h3','h4'):
