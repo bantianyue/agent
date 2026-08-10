@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""article_data_build.py — MiniMax-M3 MI355X 推理优化"""
+import json, os, sys
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+DATA = {
+    "summary": [{"key": "核心亮点", "body": "在 AMD Instinct MI355X 上，用 ATOM/AITER + EAGLE3 + ATOMesh 协同优化 MiniMax-M3 推理：ATOM 在线量化加速 attention GEMM，EAGLE3 做推测解码，ATOMesh 做分布式 prefill/decode 分离。"}, {"key": "关键机制", "body": "AITER 稀疏注意力 + FP8 KV 缓存 + page-16 减少带宽占用；EAGLE3 用更小块 draft 模型并行，减少 target-model 逐 token 前向；FP4/FP8 服务模式下吞吐显著提升。"}, {"key": "工程权衡", "body": "分布式推理靠 ATOMesh P/D 分离：decode 节点常驻、prefill 弹性缩放，KV 通过 Mooncake 传输，兼顾吞吐与每 GPU 服务能力。"}],
+    "lead": ["在 AMD Instinct™ MI355X GPU 上，使用 ATOM、AITER 和 ATOMesh 对 MiniMax-M3 推理进行了一组优化。更广泛的背景（所用推理引擎与分布式服务层）请参阅 ROCm 博客中的 ATOM 和 ATOMesh 相关文章。", "我们将分项说明：", "量化、注意力、KV 缓存、推测解码与分离推理中的系统级瓶颈。", "ATOM 在线量化用于加速 attention GEMM。", "AITER sparse attention、FP8 KV cache 和 page-16 SHUFFLE 布局。", "EAGLE3 speculative decoding，用于减少 target-model 前向计算。", "ATOMesh P/D disaggregation，用于分布式 MiniMax-M3 serving。", "最终，你将理解这些优化如何协同工作，提升 serving throughput、降低 token latency，并在 MiniMax-M3 workloads 上保持准确率。"],
+    "sections": [
+        {
+            "type": "h2",
+            "title": "为什么 MiniMax-M3 优化很重要",
+            "paras": [
+                "MiniMax-M3 是一款高性能大语言模型，推理路径复杂。它结合了混合专家（MoE）、稀疏注意力、长上下文 KV 缓存管理和量化检查点。仅优化一个内核是不够的。要在 AMD Instinct™ MI355X GPU 上实现更高的服务效率，必须考虑完整的推理路径。",
+                "MiniMax-M3 优化工作近期聚焦于四大领域：",
+                "领域",
+                "优化",
+                "量化",
+                "针对注意力线性层和 GEMM 加速的在线量化",
+                "注意力运行时",
+                "AITER 稀疏注意力、FP8 KV cache 和 page-16 SHUFFLE KV 布局",
+                "投机解码",
+                "EAGLE3 推测解码，优化草稿与目标执行",
+                "分离式推理",
+                "ATOMesh P/D 分离与 MiniMax-M3 稀疏索引器-键缓存传输",
+                "这些改动共同改善了最重要的服务瓶颈：注意力 GEMM 开销、KV 缓存带宽、稀疏注意力调度和目标模型前向频率。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "注意力 GEMM 的在线量化",
+            "paras": [
+                "ATOM 提供多种在线量化方法，可在不重新生成完整模型的情况下，为高效的 GEMM 执行准备检查点权重。这些方法包括将 BF16 权重量化为 FP8 或 FP4，以及在同一数据类型内进行格式转换，例如从 FP8 块缩放权重转换为 FP8 PTPC 权重。这对于 MiniMax-M3 量化检查点尤为有用，因为性能敏感路径（尤其是注意力）可以使用更低比特的 GEMM，或在切换到不同量化方案（如 PTPC）时保持 FP8。有关支持的在线量化模式和配置选项的完整列表，请参阅 ATOM 在线量化指南。",
+                "对于 MiniMax-M3，ATOM 仅在能提升 GEMM 吞吐的位置应用在线量化：注意力线性层和部分稠密 MLP 层。lm_head、嵌入层、视觉组件、多模态投影器和 MoE 层等模块被排除在外，因此 MoE 权重保持其现有的量化格式。该选择性策略同时覆盖 MiniMaxAI/MiniMax-M3-MXFP8 和 Quark 量化模型（如 amd/MiniMax-M3-MXFP4），其中部分注意力层保持 BF16，仍可受益于 PTPC FP8 在线量化。实现细节参见 ROCm/ATOM #1335 和 ROCm/ATOM #1370。",
+                "以 MiniMaxAI/MiniMax-M3-MXFP8 为例，选定的注意力 GEMM 权重从其 1x32 块缩放 checkpoint 表示加载，并在模型加载期间转换为 PTPC FP8。该转换使用 GPU 逐元素内核，因此仅增加少量一次性的权重加载开销。PTPC 权重物化后，请求时的推理直接使用它们，无需承担额外的在线量化延迟。图 1 展示了这一加载时转换路径以及保持原始格式的模块。",
+                "图 1. MiniMax-M3 在线量化路径。",
+                "下面是一个在线量化的配置示例：",
+                "<pre style=\"background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;\"><code>--online_quant_config '{\"global_quant_config\": \"ptpc_fp8\", \"exclude_layer\": [\"lm_head\", \"model.embed_tokens\", \"vision_tower\", \"multi_modal_projector\", \"patch_merge_mlp\", \"*block_sparse_moe\"]}'</code></pre>",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "AITER 稀疏注意力与 FP8 KV 缓存",
+            "paras": [
+                "第二个优化方向针对注意力运行时。这不是单一的内核改动，而是需要在推理框架 ATOM 和算子库 AITER 之间进行联合设计与调优。AITER 为 prefill 和 decode 提供高性能注意力算子，而 ATOM 则暴露使用这些算子所需的高效稀疏元数据、KV 缓存布局和 page-size 配置。",
+                "MiniMax-M3 还具有模型特定的稀疏注意力行为，包括分组查询头（grouped query heads）和按 KV 头选择的块（per-KV-head block selection）。这些细节决定了稀疏索引器、块表和 page-16 KV 缓存布局的表示方式。",
+                "具体而言，MiniMax-M3 具有 q_head=64 和 kv_head=4，可视为 4 个 KV 头稀疏注意力组，每组包含 q_head=16 和 kv_head=1。对每个查询 token 和 KV 头，索引器选择 16 个逻辑块，每个逻辑块覆盖 128 个 token。不同的 KV 头拥有独立的 top-k 索引器，可以选择不同的 KV 块。图 2 展示了这些逻辑块如何映射到 AITER paged-attention 路径所使用的 page-16 SHUFFLE KV 缓存布局。",
+                "图 2. MiniMax-M3 KV 缓存布局。",
+                "上述布局的具体实现横跨 ATOM 和 AITER：",
+                "在 ATOM 侧，我们将 MiniMax-M3 稀疏注意力重构为标准 Attention 和 PagedAttentionImpl 框架，引入 SparseMHAPagedAttentionImpl，并新增了 page-16 SHUFFLE KV cache 路径，配合 AITER gluon paged-attention runner 用于解码（decode）和预填充（prefill）。这使得 MiniMax-M3 在保留模型特定稀疏行为的同时，复用标准注意力元数据绑定，并允许稀疏索引 top-k 路径直接生成压缩后的稀疏块表，从而避免额外的块表构建启动，减少 HBM 往返。实现细节见 ROCm/ATOM #1334。",
+                "在 AITER 侧，我们为 fused_qknorm_idxrqknorm 增加了 SHUFFLE KV cache 布局支持，使用独立的 K 和 V cache 张量，并通过 asm_layout 标志选择 page-16 SHUFFLE 寻址路径。我们还通过将硬编码的 FP8 最大值替换为 AITER 的 opus::finfo<cache_t>::max() 辅助函数，改进了 FP8 正确性，确保逐 token 缩放路径使用正确的、与架构相关的 FP8 范围。实现细节见 ROCm/aiter #3795 和 ROCm/aiter #3892。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "EAGLE3 推测解码",
+            "paras": [
+                "我们还为 MiniMax-M3 增加了 EAGLE3 推测解码支持。EAGLE3 使用轻量级草稿模型提出多个 token，然后通过 MiniMax-M3 目标模型验证这些提议。对于贪心解码，这在保持目标模型输出的同时，减少目标模型平均前向传播次数。",
+                "目标模型的注意力解码路径被扩展为支持 max_q_len > 1，从而实现多 token 推测验证。在草稿模型侧，token 首先进入非分片嵌入路径，然后依次执行：使用 4 卡张量并行的注意力、all-reduce、融合 RMSNorm/Quant、使用 4 卡张量并行的 MLP、另一次 all-reduce，以及 N 维度在张量并行 rank 间切分的 LM head GEMM。该优化新增了多条融合路径，包括 RMSNorm + Quant 融合与三重 RMSNorm 融合。它还引入了分布式贪心 argmax，其中每个 rank 将其 M x (N/TP) logits 分片规约为逐 token 的 (max, index) 对。仅这些 [M, 2] 的逐 rank 结果会被跨张量并行 rank 进行 all-gather，而不是完整的 [M, N] logits，随后执行最终的跨 rank argmax。图 3 总结了这一优化的草稿模型执行路径。实现细节见 ROCm/ATOM #1333。",
+                "图 3. MiniMax-M3 EAGLE3 使用融合草稿模型执行和分布式 argmax 来降低投机解码开销。",
+                "使用 --num-speculative-tokens 3，验证的 GSM8K 运行测得：",
+                "指标",
+                "值",
+                "每次前向平均接受的 token 数",
+                "3.20",
+                "整体草稿接受率",
+                "73.45%",
+                "首个草稿 token 接受率",
+                "85.8%",
+                "第二个草稿 token 接受率",
+                "73.7%",
+                "第三个草稿 token 接受率",
+                "60.9%",
+                "该接受率分布说明了 EAGLE3 为何能在保持输出一致性的同时减少 MiniMax-M3 目标模型的计算量。端到端解码吞吐取决于服务配置，包括序列长度、批量大小、并发数、模型格式和软件版本。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "分布式推理与 ATOMesh",
+            "paras": [
+                "ATOMesh 支持 prefill/decode 分离，可在分布式 GPU 资源上为大模型提供推理服务。这对 MiniMax-M3 尤其有用：长上下文 prefill 与稀疏注意力 decode 存在不同的扩展瓶颈，将两个阶段分离后，部署可为各阶段独立分配资源。",
+                "针对 MiniMax-M3，我们在 ATOMesh 中新增了 MiniMax-M3 专属的缓存传输路径，使 P/D 分离同时传输标准 K/V 缓存和各稀疏注意力层维护的稀疏索引器键缓存。这确保解码 worker 能获得正确选择 top-k 历史块所需的元数据，因为稀疏索引器键缓存无法在缓存命中后从常规 K/V 缓存重建。该 P/D 分离与缓存传输流程见图 4。实现细节见 ROCm/ATOM #1368。",
+                "图4. 基于Mooncake RDMA KV和indexer-key缓存传输的ATOMesh上MiniMax-M3 P/D分离。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "性能预览",
+            "paras": [
+                "在FP4服务模式下，搭载于AMD Instinct™ MI355X GPU上的ATOM MiniMax-M3在所测交互性范围内实现了业界领先的性能。图5、图6和图7展示了不同服务配置下的FP4吞吐曲线。",
+                "图5. 搭载ATOM的MI355X上MiniMax-M3 FP4 8K/1K每GPU服务吞吐与已发布的InferenceX测量结果对比。来源：SemiAnalysis、InferenceX，搭载ATOM的MI355X上FP4 8K/1K MiniMax-M3，数据截至2026年7月11日。",
+                "图6. 搭载ATOM和M3 EAGLE的MI355X上MiniMax-M3 FP4 8K/1K每GPU服务吞吐与已发布的InferenceX测量结果对比。来源：SemiAnalysis、InferenceX，搭载ATOM和M3 EAGLE的MI355X上FP4 8K/1K MiniMax-M3，数据截至2026年7月11日。",
+                "图7. 搭载Mooncake ATOMesh的MI355X上MiniMax-M3 FP4 8K/1K每GPU服务吞吐与已发布的InferenceX测量结果对比。来源：SemiAnalysis、InferenceX，搭载Mooncake ATOMesh的MI355X上FP4 8K/1K MiniMax-M3，数据截至2026年7月11日。",
+                "可通过遵循 MiniMax-M3 MXFP4/MXFP8 使用指南重现这些性能结果，该指南包含启动命令、在线量化配置、EAGLE3 设置、精度测试、基准测试脚本，以及请求形状和并发设置等详细服务参数。",
+            ],
+            "fig_after": {
+                "4": [
+                    {"src": "fig07.png", "caption": ""},
+                    {"src": "fig06.png", "caption": ""},
+                    {"src": "fig08.png", "caption": ""},
+                ],
+            },
+        },
+        {
+            "type": "h2",
+            "title": "总结",
+            "paras": [
+                "在 AMD Instinct™ MI355X GPU 上优化 MiniMax-M3 需要的不仅仅是单一内核改进。最佳结果来自协调量化、注意力执行、KV 缓存布局、分布式缓存传输和解码策略。",
+                "ATOM 在线量化加速注意力 GEMM，AITER 稀疏注意力和 FP8 KV 缓存减少注意力运行时开销和内存移动，EAGLE3 推测解码降低解码期间的有效目标模型工作负载，ATOMesh 支持 MiniMax-M3 缓存传输以实现 P/D 分离。这些优化共同提供了一条在 AMD Instinct™ MI355X GPU 上实现更高吞吐 MiniMax-M3 服务并保持精度的实用路径。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "其他资源",
+            "paras": [
+                "ROCm/ATOM 仓库",
+                "ROCm/AITER 仓库",
+                "ATOM：通过软硬件协同优化释放 AMD Instinct 的极致推理性能",
+                "ATOMesh：释放 AMD 硬件潜力，实现可扩展的 LLM（大语言模型）服务",
+                "支持 MiniMaxAI/MiniMax-M3-MXFP8",
+                "Quark 模型的在线量化",
+                "MiniMax-M3 AITER sparse attention 与 SHUFFLE KV cache",
+                "AITER SHUFFLE KV cache 布局",
+                "AITER FP8 scaling 更新",
+                "支持 MiniMax-M3 EAGLE3 speculative decoding",
+                "MiniMax-M3 模型",
+                "MiniMax-M3 MXFP4 模型",
+                "MiniMax-M3 EAGLE3 草稿模型",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "致谢",
+            "paras": [
+                "我们感谢 AMD Quark 团队、AMD ATOM 团队和 AMD AITER 团队的贡献与支持。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "免责声明",
+            "paras": [
+                "本文档中的信息仅供参考，可能包含技术不准确之处、遗漏和笔误。本文所含信息可能随时更改，并可能因多种原因变得不准确，包括但不限于产品和路线图变更、组件和主板版本变更、新型号和/或产品发布、不同制造商之间的产品差异、软件变更、BIOS 刷新、固件升级等。任何计算机系统都存在无法完全防止或缓解的安全漏洞风险。AMD 不承担更新、更正或修订此信息的义务。但 AMD 保留随时修订此信息并更改本文内容的权利，且无义务通知任何人此类修订或变更。此信息按“原样”提供。AMD 不对本文内容作任何陈述或保证，并不对本文信息中可能出现的任何不准确、错误或遗漏承担责任。AMD 明确不承担任何关于不侵权、适销性或特定用途适用性的默示保证。在任何情况下，AMD 均不对任何人因使用本文所含任何信息而产生的任何依赖、直接、间接、特殊或其他后果性损害承担责任，即使 AMD 已明确被告知此类损害的可能性。AMD、AMD 箭头徽标及其组合是 Advanced Micro Devices, Inc. 的商标。本出版物中使用的其他产品名称仅用于标识目的，可能是其各自公司的商标。© 2026 Advanced Micro Devices, Inc. 保留所有权利",
+            ],
+        },
+    ],
+    "conclusion": ["MiniMax-M3 在 MI355X 上的优化说明：要让超大 MoE 模型在 AMD 数据中心 GPU 上跑出高吞吐，必须同时做算子级（ATOM 在线量化、稀疏注意力、FP8 KV）与系统级（EAGLE3 推测解码、ATOMesh 分布式分离）的协同设计。", "AITER 的算子加速 + ATOMesh 的弹性调度把 prefill/decode 拆开，使 decode 节点保持常驻低延迟、prefill 按需扩容，配合 MXFP4/MXFP8 量化，FP4 服务模式下每 GPU 吞吐可达 8K/1K 场景下的发布级水平。"],
+    "reference_url": "https://rocm.blogs.amd.com/software-tools-optimization/minimax-m3-mi355/README.html",
+    "title": "在 AMD Instinct MI355X 上扩展 MiniMax-M3 推理：分布式服务与算子协同设计",
+}
+out_path = os.path.join(_article_dir, "article_data.json")
+open(out_path,"w",encoding="utf-8").write(json.dumps(DATA, ensure_ascii=False, indent=2))
+print(f"OK {len(json.dumps(DATA,ensure_ascii=False))} chars, {len(sections)} sections")

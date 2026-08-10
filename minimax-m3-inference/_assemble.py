@@ -11,12 +11,13 @@ def tr(i):
     return trans.get(str(bid), '') if bid is not None else ''
 def is_cn(s): return len(re.findall(r'[\u4e00-\u9fff]', s)) > 0
 
-# 去重标题+目录 heading 文本
+# 去重标题+目录 heading 文本 + lead 显式收集
+LEAD_IDX=set([3,4,5,6,7,8,9,10])
 SKIP=set([0,1,2])
 lead = []
-for i in [3,4,5,6,8,9,10]:
-    if i in content and content[i]['type']=='p' and i not in SKIP:
-        t=tr(i).strip()
+for i in sorted(LEAD_IDX):
+    if i < len(content) and content[i]['type']=='p':
+        t=tr(i).strip().rstrip('#').strip()
         if t and not t.startswith('#'): lead.append(t)
 
 # sections
@@ -34,7 +35,7 @@ def flush():
 
 CODE='style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,\'Courier New\',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"'
 for i,x in enumerate(content):
-    if i in SKIP: continue
+    if i in SKIP or i in LEAD_IDX: continue
     t=x['type']
     if t=='h2':
         flush(); cur=tr(i).strip().rstrip('#').strip()
