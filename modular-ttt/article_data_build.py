@@ -4,10 +4,6 @@
 """
 import json, os, sys
 
-# 读取已翻译的译文
-_trans = json.load(open(os.path.join(os.path.dirname(__file__), "_translations.json"), encoding="utf-8"))
-tr = lambda i: _trans.get(str(i), "")
-
 DATA = {
     "summary": [
         {"key": "核心框架", "body": "Modular TTT 把 TTT 内学习器表示为有向无环图，自动组合三遍计算，无需为每个变体手推更新规则。"},
