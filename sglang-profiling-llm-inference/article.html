@@ -19,27 +19,27 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">作为系列博客的第一篇，我使用单个NVIDIA L4 GPU上的Qwen3.5-0.8B模型，这样算力较弱的用户也能进行性能分析并跟进。除了模型较小之外，它还包含许多较新的架构设计，使trace仍然可读。</p>
 
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">首先理解模型</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">This blog is my attempt to learn how to profile an llm served using sglang and its in built torch profiler integration that comes out of box. The idea here would be try and understand when I hit sglang serve on my command prompt, can I recognize the CPU side and GPU side events and understand the question "where is most of my time and compute going?"</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">For this first of many blogs, im using Qwen3.5-0.8B on a single NVIDIA L4 GPU, so a lot of people with lesser compute can also profile and follow along. Besides being a small model, it also has a lot of the newer architecture designs and makes the trace still readable.</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Before opening the profiler, it helps to know what patterns/layers we expect to see. Make sure you understand the model very well. For this run, the important model stats are</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">parameters - 0.8B</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">hidden dim - 1024</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">embedding dim - 248k</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">layers - 24</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">a pattern of 6 groups of 3 x (Gated DeltaNet + FFN) followed by 1 x (Gated Attention + FFN)</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">context length - 262k tokens</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">this means using bf16, the weights take about -</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本博客旨在学习如何对使用sglang服务的LLM（大语言模型）进行性能分析，并利用其开箱即用的内置torch profiler集成。思路是：当我在命令行执行sglang serve时，能否识别CPU侧和GPU侧的事件，并理解“我的时间和计算主要用在哪里？”这个问题。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">作为系列博客的第一篇，我使用单个NVIDIA L4 GPU上的Qwen3.5-0.8B模型，这样算力较弱的用户也能进行性能分析并跟进。除了模型较小之外，它还包含许多较新的架构设计，使trace仍然可读。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在打开性能分析器之前，先了解我们预期会看到哪些模式/层会很有帮助。请确保你非常理解模型。对于本次运行，重要的模型统计信息如下：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">参数 - 0.8B</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">隐藏维度 - 1024</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">嵌入维度 - 248k</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">层数 - 24</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">6组3 x (Gated DeltaNet + FFN) 后接1 x (Gated Attention + FFN) 的模式</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">上下文长度 - 262k tokens</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">使用bf16时，权重大约占用 -</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig01.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">在层堆叠之后，SGLang准备解码并为采样计算logits。</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">For batch size 1 decode, we can do a basic math roofline check to understand what kind of bottleneck to expect.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于batch size为1的解码，我们可以进行一次基本的数学roofline检查，以了解预期会遇到哪类瓶颈。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">主要prefill计算区域。峰值以重复组的形式出现。</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">The compute roof is way higher than the bandwidth roof. So before looking at any trace, my starting assumption is that for batch size 1 decode, this workload is going to be much closer to memory bound than compute bound. The profiler should either confirm that or explain why that mental model is wrong.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">计算上限远高于带宽上限。因此，在查看任何trace之前，我的初始假设是：对于batch size为1的解码，此工作负载的瓶颈更接近内存受限而非计算受限。profiler应当要么证实这一点，要么解释为什么该心智模型是错误的。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">设置</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Now we make use of the profiling endpoint to record CPU and GPU activities and seperate the prefill and decode into two traces so its easier to read.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">现在我们利用profiling端点来记录CPU和GPU活动，并将prefill和decode分离为两个trace，便于阅读。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig03.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">点击图形回放会显示捕获的CUDA图中启动的内核。</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Here I say wait for 5 steps (warmup), then profile the next 2 steps. The profiler captures two forward passes during decode.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这里我设置等待5步（warmup），然后对后续2步进行性能分析。分析器在decode期间捕获了两次前向传播。</p>
 <pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code>curl -X POST http://127.0.0.1:30000/start_profile \
   -H &quot;Content-Type: application/json&quot; \
   -d &#x27;{
@@ -51,40 +51,40 @@
     &quot;record_shapes&quot;: true,
     &quot;with_stack&quot;: true
   }&#x27;</code></pre>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Then I sent a single request with the serving benchmark</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">随后我通过serving benchmark发送了单个请求。</p>
 <pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code>python -m sglang.bench_serving --backend sglang --num-prompts 1</code></pre>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">By the way something to keep in mind, CUDA launches are asynchronous. This means the CPU timeline can show a kernel launch earlier, while the actual kernel runs later on the GPU lane and this intially tripped me up a lot. So when reading the trace, I mostly stuck to reading the CPU side first to understand who launched the work, and the GPU side to understand where the device time went.</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">To view the traces, open Perfetto UI and load the trace files generated after profiling.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">另外要记住，CUDA启动是异步的：CPU时间线上可能先显示内核启动，而实际内核稍后才在GPU时间线上运行，这最初让我困惑了很久。因此阅读trace时，我主要先看CPU侧以了解谁启动了工作，再看GPU侧以了解设备时间花在哪里。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">要查看trace，打开Perfetto UI并加载profiling后生成的trace文件。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Prefill部分</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">This is the full prefill region for our single request. Prefill is the phase where the model consumes the prompt tokens and produces a single token. The top half of the profiler has the CPU side operations and lower half is the GPU side operations.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这是我们单个请求的完整prefill区域。Prefill是模型消耗提示词token并生成单个token的阶段。分析器的上半部分显示CPU侧操作，下半部分显示GPU侧操作。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">📷 Decode区域。由于我分析了两个步骤，因此有两次decode阶段。</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Are you able to spot your first pattern? The peaks seem to be grouped into 3 with a smaller peak in between. Another striking thing is the first peak being way bigger compared to the others. Keep this in mind and we will unravel each feature as we progress in the blog.</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Cool, if you scroll into the tinier peak to the left most side and zoom in a bit, you will see a lot of setup work. This includes starting the torch profiler, sglang getting ready to prepare the batch of inputs, setting up CUDA streams everything lining up to run the forward pass.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">你是否能发现第一个模式？峰值似乎被分成3组，中间有一个较小的峰值。另一个引人注目的是第一个峰值比其他峰值大得多。请记住这一点，随着我们的深入，我们将逐一揭示每个特征。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">好的，如果你滚动到最左侧那个较小的峰值并放大一些，你会看到大量的初始化工作。这包括启动torch profiler、sglang准备输入批次、设置CUDA流，一切都为运行前向传播而就绪。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">prefill侧内核</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Another cool thing you can do is if you want to know the kernel a particular cpu activity launched, you can click on the operation and it will link you to the exact kernel it launched with some information.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">另一个很酷的功能是，如果你想了解某个CPU活动启动了哪个内核，你可以点击该操作，它会将你链接到它启动的具体内核，并附带一些信息。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig06.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">第一个峰值稍大一些，因为它包含了额外的初始化和索引/复制工作。</figcaption></figure>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig07.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">词表投影内核的详细信息。</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">In this case, we can see a host-to-device copy from pinned CPU memory to the GPU. For this run it is probably request metadata, token ids, or some small tensor needed by the scheduler.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这种情况下，我们可以看到从固定CPU内存到GPU的主机到设备拷贝。对于这次运行，可能是请求元数据、token ID或调度器需要的某个小张量。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">模式1 - 重复的峰值</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Now we are inside the main prefill compute region. Remember from the zoomed out view we had these repeating peaks but they appear in groups. Well, these peaks are not random and if you remember the model architecture, these peaks matches exactly the group structure we had.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">现在我们位于主prefill计算区域内。回想缩小的视图，这些重复的峰值成组出现。这些峰值并非随机，如果你记得模型架构，它们与我们的分组结构完全吻合。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig08.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">高亮区域是需要重点关注的解码计算路径。</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">To jog your memory a bit, Qwen3.5-0.8B has 6 repeated groups. Each group has 3 Gated DeltaNet blocks followed by 1 full-attention block. So in the profiler, I expect to see something like -</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">帮你回忆一下，Qwen3.5-0.8B有6个重复组。每组有3个Gated DeltaNet块，后接1个全注意力块。因此，在profiler中，我预期会看到类似这样的内容：</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">[GDN + FFN] [GDN + FFN] [GDN + FFN] [Attention + FFN]</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">[GDN + FFN] [GDN + FFN] [GDN + FFN] [Attention + FFN]</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">... repeated 6 times</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Now, let's zoom into the first peak and see what operations are going on in there.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">... 重复6次</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">现在，放大第一个峰值，看看其中在执行哪些操作。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig09.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">调度器准备请求、启动性能分析、设置流并构建批次。</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Why do I think the first peak in the first group is way larger than the others? My assumption is going to be that the first hybrid block usually has some extra setup cost compared to the other blocks.</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Now scroll onto the next 2 peaks and the smaller peak within the first group.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为什么我认为第一组中的第一个峰值远大于其他峰值？我的假设是，第一个混合块相比其他块通常有一些额外的设置开销。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">接着滚动到接下来的两个峰值，以及第一组内较小的峰值。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig10.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">接下来的峰值与GDN块和较小的全注意力块对应。</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">These are the GDN blocks including kernels like -</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这些是GDN块，包含如下内核：</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">causal_conv1d_fn</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">fused_qkv_split_gdn_prefill</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">fused_gdn_gating</p>
@@ -95,11 +95,11 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">recompute_w_u_fwd</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">chunk_gated_delta_rule_fwd_h</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">chunk_fwd_kernel_o</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">You can also verify this by clicking on the kernels in the GPU section</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">您还可以通过点击GPU部分中的内核来验证这一点。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig11.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">一个小的异步复制，关联回CPU端的启动。</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">The smaller fourth peak is the full-attention block which uses FlashInfer. For this short prompt of 45 tokens, full attention is not actually the bottleneck.</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Pattern alert! From the kernels section, we have repeating green thick sections and towards the end a final big blue kernel. Keep this mind for the next section.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">较小的第四个峰值是使用FlashInfer的全注意力块。对于这个只有45个token的短提示词，全注意力实际上并不是瓶颈。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">模式提醒！在内核部分，我们看到重复的绿色粗条，最后是一个大的蓝色内核。请记住这一点，下一节会用到。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">最终词表投影</h2>
 <pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code>memory bandwidth for my gpu = 300 GB/s
 weights to move per token = 1.6 GB
@@ -112,29 +112,29 @@ bf16 tensor throughput ~ 121 TFLOP/s
 
 compute-limited throughput = 121000 / 1.6
                            = 75k tokens/s</code></pre>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">If you push past the whole repeating peaks into the final section, the server moves into cleanup and prepares for decode. This includes the final projection to logits, sampling, and copying the result back to CPU. This section is easy to ignore, but in this trace the logits processor contains one of the most expensive kernels.</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">If you click the CPU side aten::mm and expand the args, PyTorch shows:</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如果你越过所有重复的峰值，进入最后一段，服务器会进入清理阶段，并为解码做准备。这包括最终投影到logits、采样，以及将结果复制回CPU。这一部分容易被忽略，但在这个trace中，logits processor包含了代价最高的内核之一。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如果你点击CPU端的aten::mm并展开参数，PyTorch会显示：</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Input type:    ['c10::BFloat16', 'c10::BFloat16'] Input strides: [[1024, 1], [1, 1024]] Input dims:    [[1, 1024], [1024, 248320]]</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Conceptually, this is:[1, 1024] @ [1024, 248320] = [1, 248320]</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Since the vocab size is huge, this turns into a large matrix vector style projection. Even though it runs only once during prefill for this prompt, it is still one of the slowest kernels in the section.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">从概念上讲，这就是：[1, 1024] @ [1024, 248320] = [1, 248320]</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">由于词表规模巨大，这变成了一个大型矩阵向量式投影。尽管在此提示的prefill期间仅运行一次，但它仍然是该部分中最慢的内核之一。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig12.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">第一个解码步骤，聚焦CPU端执行。</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">The kernel details are also quite useful to read (you can do more with Nsight)</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">内核细节也相当值得阅读（使用Nsight可以做更多操作）</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">grid:  [31040, 1, 1] block: [8, 8, 1] registers/thread: 168 shared memory: 288 occupancy: 25%</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">What's this grid shape? 248320 vocab elements / 8 = 31040</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Cool, the final linear head is projecting one 1024 wide hidden vector across a very large vocab dimension. If I were optimizing this path, I would look closely at whether this projection can be fused or look for similar optimizations.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这个网格形状是什么？248320个词表元素 / 8 = 31040</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">不错，最终的线性头将一个1024宽的隐藏向量投影到非常大的词表维度上。如果我要优化这条路径，我会仔细研究这个投影是否可以融合，或寻找类似的优化。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">主要预填充内核</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Now let's look at the most prominent kernels that are running in this workload.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下面来看此工作负载中运行的最突出的内核。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig13.png"></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">The final gemv kernel is indeed the most expensive despite being invoked only a single time. The 128x128 BF16 GEMM appears 24 times, which lines up with one large projection-style operation per block. The smaller CUTLASS BF16 GEMM appears 18 times, which lines up nicely with the 18 GDN blocks.</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Kernel names alone can be quite noisy and hard to understand sometimes, so understanding the model layout and data flow together can make the trace much easier to reason about.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最后的gemv内核虽然仅被调用一次，但确实是最昂贵的。128x128 BF16 GEMM出现了24次，与每个块一次大型投影式操作相吻合。较小的CUTLASS BF16 GEMM出现了18次，与18个GDN块恰好对应。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">仅凭内核名称有时会显得嘈杂且难以理解，因此结合模型布局和数据流来理解，会让trace更容易分析。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">解码阶段</h2>
 <pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code>0.8B parameters * 2 bytes = 1.6 GB</code></pre>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Decode is a different workload compared to prefill. During prefill, the model processes the entire prompt sequence so many operations have enough work to become decent GEMMs. But during decode with smaller batch sizees, the model is mostly processing one new token at a time and a lot of projection work collapses into skinny matrix vector operations.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">解码是与预填充不同的工作负载。预填充阶段，模型处理整个提示序列，许多操作有足够的计算量，从而成为像样的GEMM。而解码阶段批次大小更小，模型大多一次处理一个新token，大量投影工作收缩为瘦长的矩阵向量运算。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig14.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">重复出现的蓝色条柱是GEMV系列内核。</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">In this trace, the highlighted region is the important part. The surrounding regions is mostly profiler setup/shutdown, input setup, synchronization, and bookkeeping. Those are worth understanding, but they are not the main model compute path.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在此trace中，高亮区域是重要部分。周围区域主要是profiler的启动/关闭、输入设置、同步和簿记。这些值得理解，但它们不是模型的主要计算路径。</p>
 <pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code>apt-get update
 apt-get install -y cuda-toolkit-13-2
 
@@ -143,21 +143,21 @@ source .venv/bin/activate
 uv pip install --prerelease=allow sglang
 
 sglang serve --model-path Qwen/Qwen3.5-0.8B</code></pre>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">On the left, SGLang loads the batch and copies this decode step's inputs into fixed CUDA graph buffers. In the middle is where the actual decode work happens. Suprise surprise! Unlike prefill, the CPU timeline does not show every model layer as a deep stack of individual launches, because the decode path is using CUDA graph replay.</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Before the graph replay, there are a few small kernels and copies for setup. These are not the layer stack. They are mostly preparing the fixed buffers and execution state needed by the captured graph.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">左侧，SGLang加载批次并将此decode步骤的输入复制到固定的CUDA graph缓冲区。中间是实际decode工作发生的地方。出乎意料的是，与prefill不同，CPU时间线没有将每个模型层显示为单个启动的深层堆栈，因为decode路径使用的是CUDA graph replay。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在graph replay之前，有一些用于设置的小内核和复制操作。这些不是层堆栈。它们主要是在准备捕获图所需的固定缓冲区和执行状态。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig15.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">在graph replay之前会运行一些设置内核。</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Once you click into the graph replay region, the GPU kernels become visible under that replay. This is the view that matters for decode.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">点击进入graph replay区域后，GPU内核在该replay下方可见。这是对decode至关重要的视图。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig16.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">主机到设备的复制量很小，可能是token id或请求元数据。</figcaption></figure>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Decode阶段由瘦GEMV主导。</h2>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Perfetto UI地址：https://ui.perfetto.dev/</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">The repeated blue bars are the same GEMV family we saw around the vocab projection. In the decode phase, they just keep showing up and this is because for a batch size 1 decode, it simply turns many linear layers into matrix-vector style operations.</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">This is the core performance issue. GEMV has much lower arithmetic intensity than a large GEMM. You stream a lot of weights from memory, but there is not enough reuse to keep the tensor cores busy in the same way a chunky prefill GEMM can. So even on a GPU with plenty of compute, the decode path can become memory-bandwidth limited.</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">The tiny red/green/purple blips are other kernels from the hybrid blocks which are important, but for this batch size 1 run, the shape of the trace is mostly screaming one thing - the decode path is a long sequence of skinny projections.</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">This also explains why batching changes the story. If you increase batch size, some of these skinny operations become less skinny. The workload gets closer to GEMM-like behavior, and the GPU has more opportunity to reuse weights and do useful math per byte loaded. That does not make batching free, because KV cache, latency, scheduling, and memory pressure all matter, but it explains why single-request decode is such a hard shape for GPUs.</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Where to go from here?</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">The next step from here would be to repeat this analysis with larger batches and longer prompts. That would separate which bottlenecks are specific to batch size 1 decode from the ones that stay painful even when the GPU has more parallel work to chew on.</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">重复出现的蓝色条柱与我们之前在vocab projection周围看到的GEMV家族相同。在decode阶段，它们不断出现，这是因为对于batch size 1的decode，它只是将许多线性层转化为矩阵-向量式操作。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这是核心性能问题。GEMV的算术强度远低于大型GEMM。从内存中读取大量权重，但没有足够的复用来让张量核心像庞大的prefill GEMM那样保持忙碌。因此，即使GPU计算能力充足，decode路径也可能受内存带宽限制。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>这些微小的红/绿/紫色小点是来自混合块的其他kernel，它们很重要，但对于这次batch size 1的运行，trace的形状主要表明一件事：decode路径是一长串瘦长的投影运算。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>这也解释了为什么batching会改变情况。如果增大batch size，其中一些瘦长运算就不再那么瘦长。工作负载更接近GEMM类行为，GPU有更多机会复用权重，并在每次加载的字节上执行更多有效计算。这并不表示batching没有代价，因为KV cache、延迟、调度和内存压力都很重要，但它解释了为什么单请求decode对GPU来说是如此困难的形状。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">接下来该怎么做？</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下一步是使用更大的batch和更长的prompt重复这一分析。这样就可以区分哪些瓶颈是batch size 1 decode特有的，哪些即使在GPU有更多并行工作可处理时仍然棘手。</p>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
@@ -174,22 +174,22 @@ sglang serve --model-path Qwen/Qwen3.5-0.8B</code></pre>
 <div style="text-align:center;">
 <span class="portal-title">【传送门】</span>
 <div style="text-align:left;display:inline-block;" class="portal-links">
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
 </div>
 </div>
 
