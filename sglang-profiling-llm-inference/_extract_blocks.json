@@ -1,0 +1,462 @@
+[
+  {
+    "id": 0,
+    "type": "text",
+    "content": "This blog is my attempt to learn how to profile an llm served using sglang and its in built torch profiler integration that comes out of box. The idea here would be try and understand when I hit sglang serve on my command prompt, can I recognize the CPU side and GPU side events and understand the question \"where is most of my time and compute going?\""
+  },
+  {
+    "id": 1,
+    "type": "text",
+    "content": "For this first of many blogs, im using Qwen3.5-0.8B on a single NVIDIA L4 GPU, so a lot of people with lesser compute can also profile and follow along. Besides being a small model, it also has a lot of the newer architecture designs and makes the trace still readable."
+  },
+  {
+    "id": 2,
+    "type": "text",
+    "content": "Understanding the Model First"
+  },
+  {
+    "id": 3,
+    "type": "text",
+    "content": "Before opening the profiler, it helps to know what patterns/layers we expect to see. Make sure you understand the model very well. For this run, the important model stats are"
+  },
+  {
+    "id": 4,
+    "type": "text",
+    "content": "parameters - 0.8B "
+  },
+  {
+    "id": 5,
+    "type": "text",
+    "content": "hidden dim - 1024 "
+  },
+  {
+    "id": 6,
+    "type": "text",
+    "content": "embedding dim - 248k "
+  },
+  {
+    "id": 7,
+    "type": "text",
+    "content": "layers - 24 "
+  },
+  {
+    "id": 8,
+    "type": "text",
+    "content": "a pattern of 6 groups of 3 x (Gated DeltaNet + FFN) followed by 1 x (Gated Attention + FFN) "
+  },
+  {
+    "id": 9,
+    "type": "text",
+    "content": "context length - 262k tokens"
+  },
+  {
+    "id": 10,
+    "type": "text",
+    "content": "this means using bf16, the weights take about -"
+  },
+  {
+    "id": 11,
+    "type": "text",
+    "content": "After the layer stack, SGLang prepares decode and computes logits for sampling."
+  },
+  {
+    "id": 12,
+    "type": "text",
+    "content": "For batch size 1 decode, we can do a basic math roofline check to understand what kind of bottleneck to expect.\n"
+  },
+  {
+    "id": 13,
+    "type": "text",
+    "content": "The main prefill compute region. The peaks appear in repeating groups."
+  },
+  {
+    "id": 14,
+    "type": "text",
+    "content": "The compute roof is way higher than the bandwidth roof. So before looking at any trace, my starting assumption is that for batch size 1 decode, this workload is going to be much closer to memory bound than compute bound. The profiler should either confirm that or explain why that mental model is wrong."
+  },
+  {
+    "id": 15,
+    "type": "text",
+    "content": "Setup"
+  },
+  {
+    "id": 16,
+    "type": "text",
+    "content": "Clicking the graph replay shows the kernels launched by the captured CUDA graph."
+  },
+  {
+    "id": 17,
+    "type": "text",
+    "content": "Now we make use of the profiling endpoint to record CPU and GPU activities and seperate the prefill and decode into two traces so its easier to read."
+  },
+  {
+    "id": 18,
+    "type": "text",
+    "content": "Here I say wait for 5 steps (warmup), then profile the next 2 steps. The profiler captures two forward passes during decode."
+  },
+  {
+    "id": 19,
+    "type": "text",
+    "content": "curl -X POST http://127.0.0.1:30000/start_profile \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"output_dir\": \"/workspace/traces\",\n    \"start_step\": 5,\n    \"num_steps\": 2,\n    \"activities\": [\"CPU\", \"GPU\"],\n    \"profile_by_stage\": true,\n    \"record_shapes\": true,\n    \"with_stack\": true\n  }'"
+  },
+  {
+    "id": 20,
+    "type": "text",
+    "content": "Then I sent a single request with the serving benchmark"
+  },
+  {
+    "id": 21,
+    "type": "text",
+    "content": "\npython -m sglang.bench_serving --backend sglang --num-prompts 1"
+  },
+  {
+    "id": 22,
+    "type": "text",
+    "content": "By the way something to keep in mind, CUDA launches are asynchronous. This means the CPU timeline can show a kernel launch earlier, while the actual kernel runs later on the GPU lane and this intially tripped me up a lot. So when reading the trace, I mostly stuck to reading the CPU side first to understand who launched the work, and the GPU side to understand where the device time went."
+  },
+  {
+    "id": 23,
+    "type": "text",
+    "content": "To view the traces, open Perfetto UI and load the trace files generated after profiling."
+  },
+  {
+    "id": 24,
+    "type": "text",
+    "content": "Prefill Section"
+  },
+  {
+    "id": 25,
+    "type": "text",
+    "content": "📷The decode region. Since I profiled two steps, there are two decode passes."
+  },
+  {
+    "id": 26,
+    "type": "text",
+    "content": "This is the full prefill region for our single request. Prefill is the phase where the model consumes the prompt tokens and produces a single token. The top half of the profiler has the CPU side operations and lower half is the GPU side operations."
+  },
+  {
+    "id": 27,
+    "type": "text",
+    "content": "Are you able to spot your first pattern? The peaks seem to be grouped into 3 with a smaller peak in between. Another striking thing is the first peak being way bigger compared to the others. Keep this in mind and we will unravel each feature as we progress in the blog."
+  },
+  {
+    "id": 28,
+    "type": "text",
+    "content": "Cool, if you scroll into the tinier peak to the left most side and zoom in a bit, you will see a lot of setup work. This includes starting the torch profiler, sglang getting ready to prepare the batch of inputs, setting up CUDA streams everything lining up to run the forward pass."
+  },
+  {
+    "id": 29,
+    "type": "text",
+    "content": "prefill side kernels"
+  },
+  {
+    "id": 30,
+    "type": "text",
+    "content": "Another cool thing you can do is if you want to know the kernel a particular cpu activity launched, you can click on the operation and it will link you to the exact kernel it launched with some information."
+  },
+  {
+    "id": 31,
+    "type": "text",
+    "content": "The first peak is a little larger because it includes extra setup and indexing/copy work."
+  },
+  {
+    "id": 32,
+    "type": "text",
+    "content": "The vocab projection kernel details."
+  },
+  {
+    "id": 33,
+    "type": "text",
+    "content": "In this case, we can see a host-to-device copy from pinned CPU memory to the GPU. For this run it is probably request metadata, token ids, or some small tensor needed by the scheduler."
+  },
+  {
+    "id": 34,
+    "type": "text",
+    "content": "Pattern 1 - The Repeating Peaks"
+  },
+  {
+    "id": 35,
+    "type": "text",
+    "content": "The highlighted region is the decode compute path to focus on."
+  },
+  {
+    "id": 36,
+    "type": "text",
+    "content": "Now we are inside the main prefill compute region. Remember from the zoomed out view we had these repeating peaks but they appear in groups. Well, these peaks are not random and if you remember the model architecture, these peaks matches exactly the group structure we had."
+  },
+  {
+    "id": 37,
+    "type": "text",
+    "content": "To jog your memory a bit, Qwen3.5-0.8B has 6 repeated groups. Each group has 3 Gated DeltaNet blocks followed by 1 full-attention block. So in the profiler, I expect to see something like -"
+  },
+  {
+    "id": 38,
+    "type": "text",
+    "content": "[GDN + FFN] [GDN + FFN] [GDN + FFN] [Attention + FFN] "
+  },
+  {
+    "id": 39,
+    "type": "text",
+    "content": "[GDN + FFN] [GDN + FFN] [GDN + FFN] [Attention + FFN] "
+  },
+  {
+    "id": 40,
+    "type": "text",
+    "content": "... repeated 6 times"
+  },
+  {
+    "id": 41,
+    "type": "text",
+    "content": "Now, let's zoom into the first peak and see what operations are going on in there."
+  },
+  {
+    "id": 42,
+    "type": "text",
+    "content": "The scheduler prepares the request, starts profiling, sets streams, and builds the batch."
+  },
+  {
+    "id": 43,
+    "type": "text",
+    "content": "Why do I think the first peak in the first group is way larger than the others? My assumption is going to be that the first hybrid block usually has some extra setup cost compared to the other blocks."
+  },
+  {
+    "id": 44,
+    "type": "text",
+    "content": "Now scroll onto the next 2 peaks and the smaller peak within the first group."
+  },
+  {
+    "id": 45,
+    "type": "text",
+    "content": "The next peaks line up with GDN blocks and the smaller full-attention block."
+  },
+  {
+    "id": 46,
+    "type": "text",
+    "content": "These are the GDN blocks including kernels like -"
+  },
+  {
+    "id": 47,
+    "type": "text",
+    "content": "causal_conv1d_fn"
+  },
+  {
+    "id": 48,
+    "type": "text",
+    "content": " fused_qkv_split_gdn_prefill"
+  },
+  {
+    "id": 49,
+    "type": "text",
+    "content": " fused_gdn_gating"
+  },
+  {
+    "id": 50,
+    "type": "text",
+    "content": " ChunkGatedDeltaRuleFunction"
+  },
+  {
+    "id": 51,
+    "type": "text",
+    "content": " l2norm_fwd"
+  },
+  {
+    "id": 52,
+    "type": "text",
+    "content": " chunk_local_cumsum"
+  },
+  {
+    "id": 53,
+    "type": "text",
+    "content": " chunk_gated_delta_rule_fwd_kkt_solve"
+  },
+  {
+    "id": 54,
+    "type": "text",
+    "content": " recompute_w_u_fwd"
+  },
+  {
+    "id": 55,
+    "type": "text",
+    "content": " chunk_gated_delta_rule_fwd_h"
+  },
+  {
+    "id": 56,
+    "type": "text",
+    "content": " chunk_fwd_kernel_o"
+  },
+  {
+    "id": 57,
+    "type": "text",
+    "content": "You can also verify this by clicking on the kernels in the GPU section"
+  },
+  {
+    "id": 58,
+    "type": "text",
+    "content": "A small async copy linked back to the CPU-side launch."
+  },
+  {
+    "id": 59,
+    "type": "text",
+    "content": "The smaller fourth peak is the full-attention block which uses FlashInfer. For this short prompt of 45 tokens, full attention is not actually the bottleneck."
+  },
+  {
+    "id": 60,
+    "type": "text",
+    "content": "Pattern alert! From the kernels section, we have repeating green thick sections and towards the end a final big blue kernel. Keep this mind for the next section."
+  },
+  {
+    "id": 61,
+    "type": "text",
+    "content": "The Final Vocab Projection"
+  },
+  {
+    "id": 62,
+    "type": "text",
+    "content": "If you push past the whole repeating peaks into the final section, the server moves into cleanup and prepares for decode. This includes the final projection to logits, sampling, and copying the result back to CPU. This section is easy to ignore, but in this trace the logits processor contains one of the most expensive kernels."
+  },
+  {
+    "id": 63,
+    "type": "text",
+    "content": "If you click the CPU side aten::mm and expand the args, PyTorch shows:"
+  },
+  {
+    "id": 64,
+    "type": "text",
+    "content": "Input type:    ['c10::BFloat16', 'c10::BFloat16'] Input strides: [[1024, 1], [1, 1024]] Input dims:    [[1, 1024], [1024, 248320]]"
+  },
+  {
+    "id": 65,
+    "type": "text",
+    "content": "Conceptually, this is:[1, 1024] @ [1024, 248320] = [1, 248320]"
+  },
+  {
+    "id": 66,
+    "type": "text",
+    "content": "Since the vocab size is huge, this turns into a large matrix vector style projection. Even though it runs only once during prefill for this prompt, it is still one of the slowest kernels in the section."
+  },
+  {
+    "id": 67,
+    "type": "text",
+    "content": "The first decode step, zoomed into CPU-side execution."
+  },
+  {
+    "id": 68,
+    "type": "text",
+    "content": "The kernel details are also quite useful to read (you can do more with Nsight)"
+  },
+  {
+    "id": 69,
+    "type": "text",
+    "content": "grid:  [31040, 1, 1] block: [8, 8, 1] registers/thread: 168 shared memory: 288 occupancy: 25% "
+  },
+  {
+    "id": 70,
+    "type": "text",
+    "content": "What's this grid shape? 248320 vocab elements / 8 = 31040"
+  },
+  {
+    "id": 71,
+    "type": "text",
+    "content": "Cool, the final linear head is projecting one 1024 wide hidden vector across a very large vocab dimension. If I were optimizing this path, I would look closely at whether this projection can be fused or look for similar optimizations."
+  },
+  {
+    "id": 72,
+    "type": "text",
+    "content": "Top Prefill Kernels"
+  },
+  {
+    "id": 73,
+    "type": "text",
+    "content": "Now let's look at the most prominent kernels that are running in this workload."
+  },
+  {
+    "id": 74,
+    "type": "text",
+    "content": "The final gemv kernel is indeed the most expensive despite being invoked only a single time. The 128x128 BF16 GEMM appears 24 times, which lines up with one large projection-style operation per block. The smaller CUTLASS BF16 GEMM appears 18 times, which lines up nicely with the 18 GDN blocks."
+  },
+  {
+    "id": 75,
+    "type": "text",
+    "content": "Kernel names alone can be quite noisy and hard to understand sometimes, so understanding the model layout and data flow together can make the trace much easier to reason about."
+  },
+  {
+    "id": 76,
+    "type": "text",
+    "content": "Decode Phase"
+  },
+  {
+    "id": 77,
+    "type": "text",
+    "content": "Decode is a different workload compared to prefill. During prefill, the model processes the entire prompt sequence so many operations have enough work to become decent GEMMs. But during decode with smaller batch sizees, the model is mostly processing one new token at a time and a lot of projection work collapses into skinny matrix vector operations."
+  },
+  {
+    "id": 78,
+    "type": "text",
+    "content": "The repeated blue bars are GEMV-family kernels."
+  },
+  {
+    "id": 79,
+    "type": "text",
+    "content": "In this trace, the highlighted region is the important part. The surrounding regions is mostly profiler setup/shutdown, input setup, synchronization, and bookkeeping. Those are worth understanding, but they are not the main model compute path."
+  },
+  {
+    "id": 80,
+    "type": "text",
+    "content": "On the left, SGLang loads the batch and copies this decode step's inputs into fixed CUDA graph buffers. In the middle is where the actual decode work happens. Suprise surprise! Unlike prefill, the CPU timeline does not show every model layer as a deep stack of individual launches, because the decode path is using CUDA graph replay."
+  },
+  {
+    "id": 81,
+    "type": "text",
+    "content": "Before the graph replay, there are a few small kernels and copies for setup. These are not the layer stack. They are mostly preparing the fixed buffers and execution state needed by the captured graph."
+  },
+  {
+    "id": 82,
+    "type": "text",
+    "content": "A few setup kernels run before the graph replay."
+  },
+  {
+    "id": 83,
+    "type": "text",
+    "content": "Once you click into the graph replay region, the GPU kernels become visible under that replay. This is the view that matters for decode."
+  },
+  {
+    "id": 84,
+    "type": "text",
+    "content": "The host-to-device copy is tiny, probably token ids or request metadata."
+  },
+  {
+    "id": 85,
+    "type": "text",
+    "content": "Decode Is Dominated by Skinny GEMV"
+  },
+  {
+    "id": 86,
+    "type": "text",
+    "content": "The repeated blue bars are the same GEMV family we saw around the vocab projection. In the decode phase, they just keep showing up and this is because for a batch size 1 decode, it simply turns many linear layers into matrix-vector style operations."
+  },
+  {
+    "id": 87,
+    "type": "text",
+    "content": "This is the core performance issue. GEMV has much lower arithmetic intensity than a large GEMM. You stream a lot of weights from memory, but there is not enough reuse to keep the tensor cores busy in the same way a chunky prefill GEMM can. So even on a GPU with plenty of compute, the decode path can become memory-bandwidth limited."
+  },
+  {
+    "id": 88,
+    "type": "text",
+    "content": "The tiny red/green/purple blips are other kernels from the hybrid blocks which are important, but for this batch size 1 run, the shape of the trace is mostly screaming one thing - the decode path is a long sequence of skinny projections."
+  },
+  {
+    "id": 89,
+    "type": "text",
+    "content": "This also explains why batching changes the story. If you increase batch size, some of these skinny operations become less skinny. The workload gets closer to GEMM-like behavior, and the GPU has more opportunity to reuse weights and do useful math per byte loaded. That does not make batching free, because KV cache, latency, scheduling, and memory pressure all matter, but it explains why single-request decode is such a hard shape for GPUs."
+  },
+  {
+    "id": 90,
+    "type": "text",
+    "content": "Where to go from here?"
+  },
+  {
+    "id": 91,
+    "type": "text",
+    "content": "The next step from here would be to repeat this analysis with larger batches and longer prompts. That would separate which bottlenecks are specific to batch size 1 decode from the ones that stay painful even when the GPU has more parallel work to chew on."
+  }
+]
