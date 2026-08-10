@@ -617,3 +617,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-08-11 00:47 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-08-11 01:17 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0QXn_ojeuDfQIQsqWm-09Xgj2ITohuZhmyTPlGSHTuoI |
