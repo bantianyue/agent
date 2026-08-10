@@ -1,0 +1,257 @@
+[
+  {
+    "id": 0,
+    "type": "text",
+    "content": "Disclosure. This post was drafted by Claude (Anthropic’s coding\nassistant) with editing from ezyang."
+  },
+  {
+    "id": 1,
+    "type": "text",
+    "content": "For quite some time, I used to think of pinned memory as something you\nsprinkled around your code to let you do async transfers to GPU. In fact, the\nold Caffe2 used to\npin every single CPU tensor,\neven if it never actually participated in GPU compute. Under this regime, you might imagine that you\nneed an allocator for pinned memory that lets you allocate and free pinned\nmemory as necessary."
+  },
+  {
+    "id": 2,
+    "type": "text",
+    "content": "However, if you think carefully about the implications of async transfers on\npinned memory lifetime, as well as the implications for CUDA graphs, it turns\nout that you don’t… really want to ever free pinned memory. The tl;dr:"
+  },
+  {
+    "id": 3,
+    "type": "text",
+    "content": "CUDA graphs forbid it: a captured graph bakes the host\nbuffer’s address into its nodes, so any pinned buffer that participates in a\ngraphed copy must stay alive at that address for as long as the graph is\nreplayed."
+  },
+  {
+    "id": 4,
+    "type": "text",
+    "content": "Re-pinning is expensive: cudaHostAlloc costs milliseconds,\nso freeing in steady state just means paying that again on the next iteration."
+  },
+  {
+    "id": 5,
+    "type": "text",
+    "content": "The workloads that use pinned memory have a fixed working set: same\nshapes every step, so releasing between steps buys nothing."
+  },
+  {
+    "id": 6,
+    "type": "text",
+    "content": "The rest of this post works through the mechanics."
+  },
+  {
+    "id": 7,
+    "type": "text",
+    "content": "By the way, as a shortcut to believing this claim, it’s worth looking at how\nMegatron-LM and vLLM actually use pinned memory, because neither of them ever\nreleases it. Both have their own pinned pools. Both allocate up front and hold\nthe memory until the process exits. One of them has a config flag whose entire\ndocumented purpose is to stop pinned buffers from being freed."
+  },
+  {
+    "id": 8,
+    "type": "text",
+    "content": "What pinned memory is actually for"
+  },
+  {
+    "id": 9,
+    "type": "text",
+    "content": "Pinned (page-locked) host memory is memory the OS has promised not to swap or\nmove, which lets the GPU’s DMA engines read and write it directly by physical\naddress. This buys you four things:"
+  },
+  {
+    "id": 10,
+    "type": "text",
+    "content": "Bandwidth. A copy from pageable memory has to be staged through a\ndriver-internal bounce buffer. Pinned memory goes straight over the interconnect\nand typically gets you 2-3x on PCIe, more on NVLink C2C."
+  },
+  {
+    "id": 11,
+    "type": "text",
+    "content": "Asynchrony. copy_(non_blocking=True) from pageable memory does not\nactually overlap with anything: the driver has to stage the copy, so it blocks.\nOnly from pinned memory does non_blocking=True return before the transfer\ncompletes and let the copy overlap with compute. If you were trying to hide\ntransfer latency behind compute and forgot to pin, you got nothing."
+  },
+  {
+    "id": 12,
+    "type": "text",
+    "content": "Direct-to-hardware paths. RDMA NICs and GPUDirect Storage require\nregistered, page-locked buffers. There is no pageable option."
+  },
+  {
+    "id": 13,
+    "type": "text",
+    "content": "D2H inside a CUDA graph. More on this below, but briefly: an async copy\ntouching pageable memory behaves synchronously, and synchronizing operations\nare not permitted during graph capture."
+  },
+  {
+    "id": 14,
+    "type": "text",
+    "content": "The complication: you don’t own the buffer when you think you do"
+  },
+  {
+    "id": 15,
+    "type": "text",
+    "content": "When you issue"
+  },
+  {
+    "id": 16,
+    "type": "text",
+    "content": "the call returns immediately and the DMA is still in flight. The buffer is not\nsafe to reuse when the Python statement finishes, nor when the last reference\ndrops; it is safe to reuse when the copy actually completes on the stream, and\nonly the GPU knows when that is. If you recycle the buffer early, you get\nsilent data corruption."
+  },
+  {
+    "id": 17,
+    "type": "text",
+    "content": "PyTorch’s pinned memory allocator helps you avoid this use-after-free problem.\nEvery copy_(non_blocking=True) involving pinned memory records a CUDA event\nagainst the host block\n(aten/src/ATen/native/cuda/Copy.cu:481-486):"
+  },
+  {
+    "id": 18,
+    "type": "text",
+    "content": "Note that it keys on both the data pointer and the storage context, so a slice\nof a pinned tensor, or one built with from_blob over allocator memory, still\nattributes to the right block. On free, the block is parked in an event queue\nand is not returned to the free list until every recorded event has retired\n(aten/src/ATen/core/CachingHostAllocator.h:428-500). Setting\nPYTORCH_ALLOC_CONF=pinned_use_background_threads:true moves that polling to a\nhelper thread so it stays off the allocation fast path."
+  },
+  {
+    "id": 19,
+    "type": "text",
+    "content": "Because frees in Python are always implicit (via refcount), my personal\nopinion is that making sure freed buffers don’t get reused too early is a very\nimportant anti-footgun that PyTorch’s pinned memory allocator provides."
+  },
+  {
+    "id": 20,
+    "type": "text",
+    "content": "CUDA graphs turn buffers into permanent fixtures"
+  },
+  {
+    "id": 21,
+    "type": "text",
+    "content": "A CUDA graph bakes device and host addresses into the captured nodes. If a\nD2H copy is part of the graph, it writes to one fixed host address on every\nreplay, forever. Two consequences:"
+  },
+  {
+    "id": 22,
+    "type": "text",
+    "content": "This is why graph-friendly code works the way it does. If you want to read\nsomething back from the device (loss, grad norm, a NaN check, sampled token\nids, KV cache lengths) and you want the whole step to stay inside one graph,\nyou allocate a pinned staging buffer once at startup, capture the D2H copy into\nit, and read it on the host after the replay. The alternative is a\ndevice-to-host sync in the middle of your step, which un-graphs everything."
+  },
+  {
+    "id": 23,
+    "type": "text",
+    "content": "Megatron has a config flag for exactly this\n(megatron/core/model_parallel_config.py:480):"
+  },
+  {
+    "id": 24,
+    "type": "text",
+    "content": "A flag whose entire purpose is: do not give the pinned memory back, because\nCUDA graphs need stable addresses."
+  },
+  {
+    "id": 25,
+    "type": "text",
+    "content": "PyTorch’s host allocator encodes the same invariant internally. Blocks\nallocated during stream capture are never recycled\n(aten/src/ATen/core/CachingHostAllocator.h:481-493):"
+  },
+  {
+    "id": 26,
+    "type": "text",
+    "content": "Some examples of pinned memory usage"
+  },
+  {
+    "id": 27,
+    "type": "text",
+    "content": "You don’t have to use PyTorch’s pinned memory allocator; it’s relatively\nsimple to call cudaHostRegister yourself."
+  },
+  {
+    "id": 28,
+    "type": "text",
+    "content": "vLLM allocates its host-side input buffers once at worker init, sized to\nmax_num_reqs, and reuses them every step for the duration of the process\n(vllm/v1/worker/gpu_model_runner.py,\nsome twenty pin_memory=PIN_MEMORY allocations, mostly at init). This is the\ngraph-friendly input-prep pattern: fill the pinned buffer on the host, one\nasync H2D, replay the graph."
+  },
+  {
+    "id": 29,
+    "type": "text",
+    "content": "For KV offload, vLLM goes further and bypasses PyTorch’s allocator entirely\n(vllm/v1/simple_kv_offload/cuda_mem_ops.py:23-32):"
+  },
+  {
+    "id": 30,
+    "type": "text",
+    "content": "Megatron has its own pinned pool,\nOffloadTensorPool,\nwhich it builds as an abstraction over PyTorch’s pinned memory pool:"
+  },
+  {
+    "id": 31,
+    "type": "text",
+    "content": "All three implementations (PyTorch’s, vLLM’s, Megatron’s) have one thing in\ncommon: none of them ever return pinned memory to the OS during steady-state\noperation. They allocate a working set, reuse it, and hold it until the\nprocess exits."
+  },
+  {
+    "id": 32,
+    "type": "text",
+    "content": "So, does deleting the tensor unpin it? No"
+  },
+  {
+    "id": 33,
+    "type": "text",
+    "content": "When the last reference to a pinned tensor drops, PyTorch records events on any\nstreams that touched it, and once those retire, the block goes on a free list\n(maybe_cache_block, CachingHostAllocator.h:808). Nothing calls\ncudaFreeHost. The pages stay page-locked and registered with the driver."
+  },
+  {
+    "id": 34,
+    "type": "text",
+    "content": "active_bytes is memory checked out to callers; allocated_bytes is memory\nthe allocator owns, active plus cached. Deleting a tensor moves bytes from the\nfirst to the second, and only empty_cache removes them from the second."
+  },
+  {
+    "id": 35,
+    "type": "text",
+    "content": "When reasoning about memory allocations in PyTorch, it’s important to\ndistinguish three different things. Releasing the tensor is refcounted and\ndeterministic. Making the block reusable is deferred, but only until the\nstream events retire, and that deferral is correctness, not laziness.\nReturning pages to the OS never happens on its own."
+  },
+  {
+    "id": 36,
+    "type": "text",
+    "content": "When you do want it back, and how"
+  },
+  {
+    "id": 37,
+    "type": "text",
+    "content": "“Allocate once and hold” is right for a training job that owns the box. There\nare two cases where it is not:"
+  },
+  {
+    "id": 38,
+    "type": "text",
+    "content": "For those cases, you can force returning pinned memory to the OS:"
+  },
+  {
+    "id": 39,
+    "type": "text",
+    "content": "torch.cuda.empty_cache() does not do this. It only calls\n_cuda_emptyCache for the device allocator, and there is deliberately no\ntorch.cuda.empty_host_cache()."
+  },
+  {
+    "id": 40,
+    "type": "text",
+    "content": "empty_cache only reclaims blocks sitting on a free list, so it is safe to call\nat any time; it just may free less than you hoped if there are still async\ntransfers going on."
+  },
+  {
+    "id": 41,
+    "type": "text",
+    "content": "If a full flush is too blunt (every subsequent allocation of that size pays a\nfresh multi-millisecond cudaHostAlloc), bound the cache instead:"
+  },
+  {
+    "id": 42,
+    "type": "text",
+    "content": "Blocks above this size are freed as soon as their copy events retire rather than\ncached. There is also pinned_max_round_threshold_mb, which disables the\npower-of-two rounding above a given size; it postdates vLLM’s cudaHostRegister\nworkaround above and would address the same 100 GB-becomes-128 GB problem."
+  },
+  {
+    "id": 43,
+    "type": "text",
+    "content": "One thing that is never released under any circumstances: if you enable\npinned_reserve_segment_size_mb, that slab is explicitly skipped by free_block\n(aten/src/ATen/cuda/CachingHostAllocator.cpp:95) and lives until the process\nexits, by design."
+  },
+  {
+    "id": 44,
+    "type": "text",
+    "content": "Unpinning memory"
+  },
+  {
+    "id": 45,
+    "type": "text",
+    "content": "If you want to think of pinned memory as something that happens to normal CPU memory,\nyou are welcome to directly use cudaHostRegister / cudaHostUnregister on an ordinary CPU tensor,\nreachable from Python via the public torch.cuda.cudart(). PyTorch ships a\nfour-line wrapper at\ntorch/cuda/_pin_memory_utils.py\n(private, but the underlying call is not), and distributed checkpointing uses\nit for staging buffers. You get fully explicit lifetime, no caching, no rounding; but you\nhave to make sure you get your events correct."
+  },
+  {
+    "id": 46,
+    "type": "text",
+    "content": "Can I use pinned memory without CUDA?"
+  },
+  {
+    "id": 47,
+    "type": "text",
+    "content": "_pin_memory is an accelerator-specific API and will error with no\naccelerator present (e.g., a CPU-only build). This can be somewhat\ninconvenient if you sometimes like to test with CPU device. I don’t really\nhave any advice besides irritating t.pin_memory() if torch.accelerator.is_available() else t tests."
+  },
+  {
+    "id": 48,
+    "type": "text",
+    "content": "Note that technically you can get page-locked host memory with no accelerator\ninvolved: e.g., mlock-ed buffers, or the page-aligned allocations that\nO_DIRECT / libaio NVMe offload wants. This has nothing to do with CUDA and\nPyTorch doesn’t provide APIs for it."
+  },
+  {
+    "id": 49,
+    "type": "text",
+    "content": "Conclusion"
+  },
+  {
+    "id": 50,
+    "type": "text",
+    "content": "Hopefully, this answers some questions you might have about pinned memory and\nhow to go about working with it. It is indeed quite easy to roll your own\npinned memory allocator directly from Python, and you should feel free to do\nso if appropriate (though I doubt you’d need this post if you do.) But the\nbuilt-in pinned memory allocator I think is also quite serviceable, and you\nshould mostly consider not using it if you want exact-size fit instead of\npower-of-two buckets, or if you promise to take care of deallocations\nyourself."
+  }
+]
