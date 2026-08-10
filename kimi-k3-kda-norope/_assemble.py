@@ -72,6 +72,11 @@ for i, x in enumerate(c):
     elif typ == 'p':
         txt = tr(i).strip()
         if not txt: continue
+        # 识别 "Introduction" 独立段 → 开启新节(引言)
+        if x['text'].strip() in ('Introduction',):
+            flush()
+            cur = "引言"
+            continue
         # 内嵌序号列表拆分
         subs = split_nested(txt)
         for st, s_txt in subs:
