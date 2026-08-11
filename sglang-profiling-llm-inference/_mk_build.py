@@ -188,30 +188,7 @@ DATA = {
     "reference_url": "https://x.com/jino_rohit/status/2085947942339563598",
 }
 
-# 清理占位符：fig_after 已精确定位，这里移除 paras 中的占位段落
-# （占位段落仅用于给 fig_after 提供"段索引"锚点，需从 paras 移除占位并重算索引）
-# 上面的 fig_after key 是按"含占位符的 paras 索引"写的，需重建：把占位段提出来作为图占位。
-import re
-new_sections = []
-for sec in DATA["sections"]:
-    fg = sec.get("fig_after", {}) or {}
-    paras_out = []
-    # 旧para中占位符 → 对应图，图位置即在"该占位符之前段落之后"
-    new_fig_after = {}
-    for pidx, para in enumerate(sec.get("paras", [])):
-        if "占位" in para:
-            # 该位置要插入其 fig_after 中的图（对应 key=pidx）
-            figs = fg.get(str(pidx), [])
-            if figs:
-                npk = len(paras_out)
-                new_fig_after[str(npk)] = figs
-            continue  # 占位段不输出
-        paras_out.append(para)
-    sec["paras"] = paras_out
-    sec["fig_after"] = new_fig_after
-    new_sections.append(sec)
-DATA["sections"] = new_sections
-
+# （占位符方案已弃用，fig_after 直接按最终 paras 索引精确指定）
 # 校验
 used = [f["src"] for s in DATA["sections"] for f in s.get("fig_after", {}).values() for f in f]
 print("引用图:", len(used))
