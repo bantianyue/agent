@@ -1,4 +1,9 @@
-{
+# -*- coding: utf-8 -*-
+"""nvfp4 组装(标准链, 25图, h3拆分)"""
+import json, os, sys
+
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
+DATA = {
   "summary": [
     {
       "key": "优化路径",
@@ -222,3 +227,7 @@
   "reference_url": "https://research.colfax-intl.com/optimizing-an-nvfp4-blockscaled-gemm-on-rtx-pro-6000-blackwell-gpu-sm120/",
   "title": "七轮迭代把 NVFP4 块缩放 GEMM 逼近 cuBLAS：RTX PRO 6000 (SM120) 调优实录"
 }
+
+with open(os.path.join(_article_dir, "article_data.json"), "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 article_data.json ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA['sections'])} sections)")

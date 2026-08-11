@@ -1,0 +1,138 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">优化路径</strong>：从基线内核出发，经线程块swizzling、尾声改进、warp专用化存储、消除SFA bank冲突、12路MMA warp、自动调优七轮迭代，在RTX PRO 6000 (SM120) 上逼近cuBLAS。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">关键收益</strong>：对比版本1，版本7在32k问题规模吞吐提升40%，2k提升29%；各规模平均与cuBLAS 13.6相当。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心难点</strong>：NVFP4块缩放GEMM的关键在缩放因子的SMEM布局与bank冲突、以及让Tensor Core持续忙碌的warp调度与流水线同步。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在Blackwell SM12x GPU上做NVFP4块缩放GEMM，难点不仅在MMA指令本身，更在缩放因子（SFA/SFB）的布局、bank冲突、以及如何让Tensor Core始终忙碌。这篇Colfax的文章用7个版本从基线一路优化，给出在RTX PRO 6000（SM120）上的完整调优路线。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">核心思路是迭代式的：每次针对一个瓶颈（扩展性差、epilogue阻塞、存储抢占计算、SMEM bank冲突）做一次针对性修改，并配Nsight Compute数据佐证。最终版本在32k规模较基线提升40%，整体逼近cuBLAS。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">背景与硬件规格</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本文是SM12x GPU上NVFP4块缩放系列文章的延续。第1部分覆盖了相关PTX指令、缩放因子布局细节及CuTe DSL实现（如何将CUTLASS稠密GEMM转换为NVFP4块缩放GEMM）。本文针对RTX Pro 6000 Blackwell Server Edition（SM120）做具体优化。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">版本1：基线内核</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">基线内核采用warp特化设计、生产者-消费者流水线：每个CTA含1个TMA加载warp和8个MMA warp。加载warp为A、B、SFA、SFB操作数发起TMA拷贝到SMEM；主循环结束后MMA warp执行尾声写入SMEM，warp 0再从SMEM发起TMA存储。内核用静态持久化分块调度器，每个SM驻留单个CTA。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于8k方形GEMM得到1476 TFLOP/s（约73% 利用率）。五种问题形状平均，版本1约为cuBLAS 13.6的93%，但32k处明显下降：较大的形状SM时钟降至2.15GHz，且扩展到32k时性能恶化，这是版本2要解决的扩展性问题。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2：版本1的计算吞吐（TFLOP/s）与cuBLAS 13.5/13.6对比，8k处约1476 TFLOP/s、73% 利用率，32k下降明显。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">版本2：线程块Swizzling</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">性能图显示大形状下性能下降，用Nsight Compute分析发现：2k–8k时DRAM吞吐仅10%–14%，16k/32k跃升至64%–86%；L2命中率从8k到16k下降、32k时到76.31%。对计算密集型GEMM，这是带宽/缓存扩展性问题。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">解法是线程块swizzling：通过改变CTA到tile的负载均衡，使单个wave内各CTA加载的不同A/B分块更少、驻留在L2中，提高数据复用。将swizzle_size设为16（每wave不同分块总数最少，28）。<strong>最大提升出现在32k，吞吐提升387 TFLOP/s。</strong></p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：Nsight内存工作负载分析：DRAM/L2吞吐与命中率随问题规模变化的指标（决定swizzle方向）。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4：不同swizzle_size选择下单个wave加载的A/B分块数量示意。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5：swizzle_size=16与默认方案下分块加载情况对比（每wave不同分块总数最少为28）。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图6：版本2性能（TFLOP/s）与cuBLAS对比，32k提升最显著（+387 TFLOP/s）。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图7：版本2的内存工作负载分析输出，展示L2/DRAM指标改善来源。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">版本3：改进Epilogue</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">目标是确保内存依赖逻辑不必要地阻塞内核。epilogue已用流水线化异步存储，但流水线同步可进一步改进：producer_acquire() 调用发生过早：即使存在多个epilogue阶段它也会阻塞；producer_tail() 位于错误的循环深度，应当在所有work tile处理后正确收尾。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">总体而言版本3的影响很小，在基准测试波动范围内（如版本3对比图所示）。这提醒我们：不是每个改动都有显著收益，需用数据判断。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图8：epilogue代码路径中producer_acquire/producer_tail的同步逻辑示意。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图9：版本3性能与cuBLAS对比：改进影响很小，处于波动范围。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">版本4：Warp专用化存储</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">计算密集型内核中希望Tensor Core始终忙碌，即始终有可调度的warp执行MMA。warp专用化已在加载路径上实现，但存储仍由计算warp完成，会与MMA争用。版本4把存储也dedicated给存储warp。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">实现依赖硬件命名屏障：SM120有16个硬件管理屏障，barrier_num指定用哪个、num_threads指定必须到达的线程总数（设为MMA warp与存储warp之和）。存储warp先对TMA存储流水线调producer_acquire，再到达epilog_free_barrier让MMA warp知道该阶段可写。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig09.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图13：warp专用化存储的流水线结构：存储warp与MMA warp通过命名屏障协调。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig10.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图12：版本4性能与cuBLAS对比，专用化存储对Tensor Core利用率的影响。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">版本5：消除SFA bank冲突</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SFA的SMEM布局为特定分块格式。分析表明，对应第0–15行的元素，每个bank index都是4的倍数，行r与行r+8的scale factor地址共享同一bank：十六个地址分布在八个bank上，导致严重的bank冲突，拖慢SFA加载。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">通过重新安排SMEM布局（pad/交错），使每个warp访问的scale factor落在不同bank，消除冲突。这是本系列中较难的一步，也是纯数学/布局层面的优化，性能提升随问题形状不同而显著。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig11.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图15：SFA的SMEM布局示意：行r与行r+8共享bank导致冲突的成因图。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig12.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图17：SFA布局的bank index分布可视化，展示冲突来源。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig13.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图18：消除冲突后的SFA布局示意图。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig14.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图20：bank冲突消除前后的访问模式对比。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig15.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图19：版本5性能与cuBLAS对比，bank冲突消除后的提升。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">版本6：12路MMA warp</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">由于输出tile尺寸更大，工作tile数量比版本1-5减少。图17展示版本1-5与版本6间跨波次的工作tile分配差异：除了针对2k改进的工作块分配之外，更大tile也提高了算术强度。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把MMA warp从8路提升到12路，配合更大的输出tile，提升Tensor Core利用率与算术强度。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig16.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图17：版本1-5与版本6之间跨波次工作tile分配差异。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig17.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图13：版本6性能与cuBLAS对比，更大tile + 更多MMA warp的提升。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">版本7：自动调优</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">内核暴露了许多可调参数（CTA tile、swizzle_size、流水线阶段数、MMA warp数等）。版本7引入自动调优（autotuning），在目标硬件上搜索最优配置组合，而非手工指定。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>最终概览</strong>：与版本1相比，版本7在2k提升29%、4k提升6%、8k提升4%、16k提升16%、32k提升40%。多轮优化使内核在各问题规模上都逼近cuBLAS。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig18.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图23：自动调优的参数空间与搜索过程示意。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig19.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：版本7性能与cuBLAS对比：全规模下的最优结果。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">性能概览与收尾</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">针对RTX Pro 6000 Blackwell Server Edition GPU优化教程NVFP4 blockscaled GEMM，具体改动包括：线程块swizzling使一个wave的操作数驻留在L2；改进epilogue同步；warp专用化存储；消除SFA bank冲突；更大tile与更多MMA warp；以及最终配置自动调优。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig20.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：最终结果概览（2k问题规模）：各版本性能对比。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig21.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：最终结果概览（4k问题规模）。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig22.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：最终结果概览（8k问题规模）。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig23.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：最终结果概览（16k问题规模）。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig24.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：最终结果概览（32k问题规模）：版本7较版本1提升40%。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">附录：Cluster Launch Control与其他缩放因子实验</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">CLC是Blackwell的硬件特性，用动态持久调度高效调度tile：每个CTA先取程序员设计的初始分配，再获取并处理任何可用的新tile。SM120使用warp级mma.sync（thr_id.shape=32），与SM100的tcgen05不同，需调整CLC流水线初始化的时放与消费者屏障计数。自动调优后CLC内核性能与版本7几乎相同。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">另有缩放因子加载实验：由于thread-id-a=0，MMA仅需每个quad线程0/1的SFA片段。两种方向：限制实际加载SFA的线程数以消除冗余、或用内联PTX改thread-id在单次加载中载入更多不同片段。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig25.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：CLC内核性能与cuBLAS对比（附录）：与版本7几乎相同。</figcaption></figure>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+优化一个块缩放GEMM不是单点突破，而是一条从负载均衡、缓存驻留、线程调度到SMEM布局的逐层扫描：每一步都用Nsight数据验证，收益从几TFLOP/s到几百TFLOP/s不等。<br  /><br  />最有价值的部分在版本5：bank冲突这类纯布局问题往往是隐形瓶颈，靠直觉难以发现，只有把它量化成指标才可能拆解。版本7的自动调优则把最后的手工意志也交给搜索，让内核在每种规模下都取到甜点位。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://research.colfax-intl.com/optimizing-an-nvfp4-blockscaled-gemm-on-rtx-pro-6000-blackwell-gpu-sm120/</span></p>
+</section>
