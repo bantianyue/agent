@@ -1,4 +1,9 @@
-{
+# -*- coding: utf-8 -*-
+"""gdn 组装(标准链, 含h3拆分+22图) — 手动组织"""
+import json, os, sys
+
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
+DATA = {
   "summary": [
     {
       "key": "核心发现",
@@ -233,3 +238,7 @@
   "reference_url": "https://yichuan-w.github.io/blog/GDN-train-inference-mismatch-asyncRL/",
   "title": "把训练推理做成逐位一致，异步RL能更稳吗？GDN的不变内核实验给出了诚实的答案"
 }
+
+with open(os.path.join(_article_dir, "article_data.json"), "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 article_data.json ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA['sections'])} sections)")

@@ -1,0 +1,142 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py 动态注入时引用此 class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心发现</strong>：逐位一致的训练/推理内核确实能消除 logprob 差距并防止其随窗口扩大爆炸，但在多数工作负载下并未转化为奖励或准确率增益，而代价是 2–5× 训练吞吐。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">方法创新</strong>：用统一模型定义 + 批不变内核（含线性注意力切到循环内核）实现训练器与生成器逐位一致，本质上是把它当作调试工具。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">适用场景</strong>：仅 math@offpolicy=12 与终端智能体上略有效益；搜索类与多数窗口下两者在噪声中难分高下。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">异步 RL 训练器的 rollout 始终滞后训练器几步，此时训练器重算的 logprob π 与生成器采样的 logprob μ 不应相等——但要确保这个差异只来自策略陈旧度，而非数值精度不匹配。本工作把训练器与生成器做成逐位一致（bitwise parity），检验这一消除数值噪声的做法是否真的让异步 RL 更稳。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">结论是双面的：逐位一致确能在所有场景把 step 0 的差距归零并抑制 logprob 差距爆炸，但除了少数配置外，它几乎没换来奖励或准确率提升，却要付出 2–5× 的训练吞吐。作者因此主张把它当作训练排障工具，而非生产默认。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">核心结果：逐位一致到底带来什么</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在 Qwen3.5-9B-Base 上以 DAPO-Math-17k 训练异步 RL，offpolicy = 12（rollout 最多滞后 12 步），用相同数据与配置比较三种设置：红色为 vLLM 原生双引擎，棕色为 TorchTitan 统一模型加标准内核，灰色为统一模型加批不变内核（BI）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两侧排序一致：灰色的 logprob 差距最小、训练奖励最高。<strong>最能说明问题的是 step 0：灰色曲线恰好在 0</strong>——此时还没有陈旧数据，因此这是一次干净测量：使用批不变内核后，训练器与生成器逐位一致，此后所有非零差距都来自 off-policy 陈旧性，而非精度噪声。这正是该方法的全部意义。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 1：训练/推理 logprob 绝对差（200 步）：vLLM 原生最高且最尖，TorchTitan 无 BI 居中，批不变模型全程最低，step 0 处 BI 曲线恰好为 0（圆圈标示）。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 2：rollout 平均训练奖励：带 BI 的 TorchTitan 模型最高（约 0.7），无 BI 略低，vLLM 原生最低（约 0.6）。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">背景：确定性、批次不变性与逐位一致性</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">整篇依赖三个层层递进的概念：<strong>确定性</strong>指同一输入批次每次运行结果相同；<strong>批次不变性</strong>指同一批次中，单样本结果不因其他样本变化，严格强于确定性（一个内核可以确定却批次可变）；<strong>训练器/生成器逐位一致性</strong>是指训练器重算的 logprob π 与生成器 rollout 的 logprob μ 逐位相等，是端到端目标。三者的关系是阶梯状的：一致性要求两侧都批次不变，批次不变又要求确定性。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">罪魁祸首是浮点数的非结合性：每个求和内核都必须选一个顺序合并部分和，而性能内核按形状选顺序以最大化占用率，因此归约顺序是形状的属性而非数学属性——改变批次，求和顺序就变。实现一致性配方因此自然成形：<strong>让每个算子批次不变（固定归约顺序）+ 确定性运行两个引擎，两条 logprob 流便完全重合</strong>。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">开源栈已覆盖到哪一步</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">开源界最先处理这些问题的是 Thinking Machines（其 batch_invariant_ops 内核）；跨 GPU 版本用基于树的分层二叉归约，即使训练端 TP=1 跑 FSDP、推理端多 GPU TP，也能做到零失配，但代价是大幅牺牲速度。推理 DP 与训练 DP/FSDP 不引入额外失配（它们不沿批次轴归约）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>但这些只覆盖 2023 年的架构</strong>，恰好是最新模型正在弃用的算子集：如何处理 MoE 和线性注意力等新架构仍是空白——这正是本文要填的部分。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">方法：统一模型定义 + 批不变内核</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">从两个层面回答：RL 引擎层面和算子层面。开源性做法（如 vLLM）把相同内核修补到两个引擎并审计每次内核调用，能达逐位一致，但要两侧反复修补，且仍有两份模型代码。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">引擎层：两侧共用一个模型定义</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">TorchTitan 的统一模型抽象免费提供了这一点：两个框架共享同一模型定义，推理侧只保留 vLLM 的 KV 缓存管理（分页注意力、前缀缓存），但每个逐层算子都是训练器的算子。于是前向传播就是前向传播——训练器和生成器以相同精度执行相同算子。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">算子层：把线性注意力切到循环内核</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对 GDN（Gated DeltaNet），多数开源实现训练与预填充用分块内核、解码才用循环内核。两者以不同顺序计算同一函数，因此不逐位一致。解法是<strong>预填充和解码都切换到循环内核，训练前向也用循环内核、只有反向才用分块内核</strong>——只有前向需要批次不变。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">复用 vLLM 的线性缓存管理（mamba_ssm_cache、conv 状态），并保留前缀缓存；在注意力路径设置 num_splits=1，引入 Thinking Machines 的批不变 GEMM。前向全部用循环内核是刻意取舍：正常 RL 步骤里训练器不是瓶颈，生成才是，把开销放在训练器一侧正合适。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 3：Qwen3.5 批不变模式数据流。左训练器：训练 token 经循环前向得到激活/logits 与损失，反向用分块内核产梯度；右推理/生成器：提示 token 经循环预填充进入循环状态，循环解码读取并更新该状态产出下一 token。虚线连接训练器循环前向与生成器预填充/解码，标示两侧逐位一致的算子。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">结果：零失配的异步 RL，性能还是幻觉</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">三个工作负载覆盖 RL 系统实际感的两个维度：回合数与每次生成的长度。对每个工作负载分别启用/禁用 BI，报告对训练奖励与效率的影响。这里先厘清一个影响全部实验的 KV 缓存策略：权重交换时我们在暂停期保留缓存而不重算，让每个 token 的 μ 属于生成它的权重版本。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">同步 RL 的屏障有双重代价：一方空闲另一方等待、且吞吐受最慢序列限制。异步 RL 用 off-policy 窗口消除屏障，但产生接 rollout 的权重不再是正在更新的权重（该滞后由重要性采样校正）。我们希望 exp(π−μ) 只反映权重版本陈旧度——而把它变成对陈旧度的清晰表达，正是消除数值不匹配要做的。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 4：异步 RL 时间线：rollout 持续解码，暂停时加载新权重并立即在现有 KV 缓存上恢复解码，无需重算。横跨暂停的序列（s5/s7/s6）早期 token 由旧权重生成、后期由新权重生成。</figcaption></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">4.2.1 MATH：单轮、长生成</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Qwen3.5-9B-Base 在 DAPO-Math-17k 训练，40 块 GPU，trainer 与 generator 完全分离，两侧 TP=1——因此下述失配均非跨 GPU 归约顺序导致，只能归咎于算子内核。先从 offpolicy=12 的案例研究看三个对齐级别：仅权重匹配（vLLM 加载训练权重）、统一模型定义（内核未对齐）、统一模型+批不变内核。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">三者构成严格程度阶梯，指标与之呼应：logprob 差距顺序明显（红>棕>灰，灰色 step 0 恰为 0）；训练奖励相反（灰最高）；验证奖励噪声大但灰色达最高峰。在此窗口下，对齐越严格各项越好。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 5：offpolicy=12 时三组运行的验证奖励总和：带 BI 在 step 170 达最高峰（约 17），多数时间持平或高于另两者，vLLM 原生早期落后。</figcaption></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">窗口扫描：BI 稳定 logprob 差但不提升准确率</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">将 off-policy 窗口从 12 扫到 4 与 32，比较带/不带 BI 两次统一运行。logprob 差距上 BI 在各窗口都更低：off4 差异真实但有限，off12 更稳定（BI 约 0.009 vs 无 BI 约 0.011），off32 时无 BI 失控（step 100 后跑到约 0.065，BI 约 0.035）。<strong>收益不是均匀的：BI 真正带来的是针对差距爆炸的防护，窗口越宽越需要。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">验证奖励（AIME2025）上两条曲线高度交织，off4 时标签互换都注意不到差别，off32 窗口两者都大幅震荡、无分离——<strong>零失配并没能换来验证准确率的明确提升</strong>，它可靠地清理了 logprob 差距，但它不转化为收益。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">吞吐代价清晰：off12 时 BI 约 8.4k tokens/s，无 BI 约 14.5k（约 1.7×）；off4 更差且更尖。<strong>统一模型本身零成本</strong>（vLLM 原生与无 BI 统一模型同区带），且更宽窗口提升吞吐、BI 获益最多。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 6：offpolicy=4 的 logprob 绝对差：无 BI（绿）全程略高于 BI（橙）且尖峰更高，两者从约 0.004 漂到 0.006。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 7：offpolicy=12 的 logprob 绝对差：无 BI（棕）升至约 0.011，BI（灰）维持约 0.009，step 100 后差距拉开。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 8：offpolicy=32 的 logprob 绝对差：step 100 后无 BI（紫）失控至约 0.065，BI（粉）仅约 0.035，差距爆炸。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig09.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 9：offpolicy=4 的验证奖励：BI（橙）与无 BI（绿）全程交织，都停在约 0.43–0.47，无分离。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig10.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 10：offpolicy=12 的验证奖励：BI（灰）在 step 70–170 多数时间在上方、峰值约 0.57，但反复交叉，最终无 BI 更高。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig11.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 11：offpolicy=32 的验证奖励：BI（粉）与无 BI（紫）在 0–0.4 间大幅震荡，全程无分离，天花板低于窄窗口。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig12.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 12：offpolicy=4 的训练器吞吐：无 BI 统一模型（绿）最高（约 11k–15k）且衰减，vLLM（蓝）居中，BI（橙）最低且剧烈尖峰。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig13.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 13：offpolicy=12 的训练器吞吐：无 BI（棕）最高且平（约 14.5k），vLLM 原生（红）约 12.2k，BI（灰）约 8.4k 带少量下凹。</figcaption></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">MoE：差距下降来自统一模型，而非 BI</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在 Qwen3.5-35B-A3B（MoE）上重复三组对比（同数据、offpolicy=12）。logprob 差距确实下降，但主要来自统一模型而非 BI（vLLM 原生绿线全程最高）；奖励无提升，三组从约 0.6 到 0.8 交织上升。MoE 多出的 router gate 是 matmul，两端调用不同算子；EP=1 是刻意设定，以隔离内核影响、排除 MoE all-to-all 的干扰。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig14.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 14：Qwen3.5-35B-A3B 的 logprob 绝对差：vLLM 原生（绿）全程最高（约 0.017–0.02），统一模型无 BI（蓝）与带 BI（紫）在约 0.014 处重叠。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig15.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 15：Qwen3.5-35B-A3B 的 rollout 平均训练奖励：三组全程交织，从约 0.6 共同升至约 0.8，</figcaption></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">4.2.2 Search-R1：多轮、短生成</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">与 MATH 形状相反：模型搜索 Wikipedia 作答，每 episode 多个 turn、每次生成很短，奖励是与标准答案的精确匹配。Qwen3.5-9B、off-policy=4、500 步，比较带/不带 BI 两条臂。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Logprob 差距：BI 在 step 0 恰好为 0，最后 100 步稳定约 0.002（无 BI 约 0.005），机制在起作用；训练奖励两臂在 step 100 都约 0.6 后保持交错；验证两臂无法区分、完全重合。<strong>切换工作负载形态不改变结论：无可衡量的精度提升，却要付吞吐代价。</strong></p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig16.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 16：Search-R1 的 logprob 绝对差：两臂从 0 开始、前几步尖峰超 0.03 后衰减，最后 100 步 BI（橙）稳于约 0.002、无 BI（紫）约 0.005。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig17.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 17：Search-R1 训练精确匹配奖励：BI（橙）与无 BI（紫）step 100 都升至约 0.6 后保持交织。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig18.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 18：Search-R1 验证精确匹配奖励：step 50 后两臂在约 0.49–0.56 间完全重合。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig19.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 19：Search-R1 训练器吞吐：无 BI（紫）全程远高于 BI（橙），两者都因多轮 step 代价变化而尖峰。</figcaption></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">4.2.3 TMax：多轮、长生成（终端智能体）</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最接近真实智能体训练的场景：模型放入全新 Daytona 沙箱、64K 上下文最多 64 轮用 bash 工具解决任务，奖励是二值（跑测试脚本通过）。数据 allenai/tmax-15k-open-instruct（约 14.5K 任务）。这是<strong>唯一 BI 未能明显降低运行 logprob 差距的工作负载</strong>——64K 上下文里 64 轮沙箱输出使陈旧项远超数值项。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">但这里 BI 在奖励上略占优势：step 55–80 平滑曲线略高，终值都在约 0.65，是首个对齐看起来可能有收益的工作负载，虽差异小到单一种子无法定论。<strong>而吞吐代价最重：BI 约 1.5–2k tokens/s，无 BI 约 7.5–10k，约 5 倍差距</strong>——长回合循环解码在 64K 上下文下累积的 token 数最多。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个容易踩坑的操作后果：agent 的墙钟预算必须随变慢缩放（作者把超时窗口同样加宽约 5 倍），否则本可完成的 rollout 会因超时被杀，而未提交的 rollout 得分为 0，变慢会表现为奖励回退而非吞吐下降。这就是权衡最尖锐之处：<strong>逐位一致终于有帮助的工作负载，恰恰也是它代价最大的。</strong></p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig20.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 20：TMax 的 logprob 绝对差：BI（绿）step 0 恰为 0 后与统一无 BI（黄）紧密交织，均约 0.004–0.006、无分离。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig21.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 21：TMax 二值任务奖励：BI（青）与无 BI（橙）前 50 步纠缠，BI 平滑曲线在 step 55–80 略高，终值约 0.65。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig22.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 22：TMax 训练器吞吐：无 BI（橙）约 7.5k–10k，BI（青）全程约 1.5k–2k，约 5 倍差距。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">结论：一个调试工具，而非生产默认</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">逐位一致有效，但只在特定地方有用：math@offpolicy=12（开篇配置）与终端智能体上略受益；search 与多数 math 窗口两者在噪声中难分高下。而代价是 math/search 2–3×、终端智能体约 5× 的训练吞吐。<strong>以这个代价，生产运行的成本/收益并不划算。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因此作者主张把它放在工作流另一处：当后训练运行行为异常时，开启 BI 跑 20 个 on-policy 步骤——若 logprob 差距仍为零却出错，就可排除基础设施，问题在数据或算法。这只需 20 步而非整次运行。未来方向包括：更多基准（各负载仍多单种子）、为陈旧度设计的优化器（与 BI 的交互）、让批量不变更廉价（快的基础算子——当前 num_splits=1 是笨拙取舍，尚无快速批不变注意力）。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+逐位一致的价值不在产线常态，而在排障瞬间：当差距归零仍出错，你第一次能把基础设施从嫌疑清单里划掉。用一种可证明的、开销明确的方式获得这种判别力，是这笔交易真正划算的地方。<br  /><br  />它也在提醒我们：RL 性能瓶颈很少只有一个源头。把训练/推理数值噪声消掉之后，剩下暴露的是算法陈旧度这个更难啃的骨头——这恰恰是下一阶段值得投入方向。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段 RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://yichuan-w.github.io/blog/GDN-train-inference-mismatch-asyncRL/</span></p>
+</section>
