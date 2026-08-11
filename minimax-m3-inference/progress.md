@@ -16,3 +16,4 @@
 
 创建时间: 2026-08-11
 来源: https://rocm.blogs.amd.com/software-tools-optimization/minimax-m3-mi355/README.html
+| Step 4d-i: 传送门 | completed |

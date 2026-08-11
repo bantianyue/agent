@@ -78,7 +78,8 @@ DATA = {
       "type": "h2",
       "title": "分布式推理与 ATOMesh",
       "paras": [
-        "ATOMesh 支持 prefill/decode 分离，在分布式 GPU 资源上做大模型推理。针对 MiniMax-M3，ATOMesh 新增专属缓存传输路径，使 P/D 分离同时传输标准 K/V 缓存与各稀疏注意力层维护的稀疏索引器键缓存——确保解码 worker 拿到正确选择 top-k 历史块所需的元数据。"
+        "ATOMesh 支持 prefill/decode 分离，在分布式 GPU 资源上做大模型推理。这对 MiniMax-M3 尤其有用：长上下文 prefill 与稀疏注意力 decode 有不同的扩展瓶颈，将两阶段分离后，部署可为各阶段独立分配资源。",
+        "针对 MiniMax-M3，ATOMesh 新增专属缓存传输路径，使 P/D 分离同时传输标准 K/V 缓存与稀疏注意力层维护的稀疏索引器键缓存——确保解码 worker 拿到正确选择 top-k 历史块所需的元数据。"
       ],
       "figs": [
         {
@@ -91,7 +92,8 @@ DATA = {
       "type": "h2",
       "title": "性能预览",
       "paras": [
-        "FP4 服务模式下，搭载 AMD Instinct MI355X 的 ATOM MiniMax-M3 服务吞吐与公开发布的 InferenceX 测量对比如下三张图。可通过 MiniMax-M3 MXFP4/MXFP8 使用指南复现（含启动命令、在线量化配置、EAGLE3 设置、精度测试、基准脚本与请求形状/并发参数）。"
+        "FP4 服务模式下，搭载 AMD Instinct MI355X 的 ATOM MiniMax-M3 服务吞吐与公开发布的 InferenceX 测量对比如下三张图，分别覆盖纯 ATOM、叠加 M3 EAGLE、以及 Mooncake ATOMesh 三种配置。",
+        "三张图的可复现流程已沉淀：MiniMax-M3 MXFP4/MXFP8 使用指南含启动命令、在线量化配置、EAGLE3 设置、精度测试、基准脚本与请求形状/并发参数，按图索骥即可复现每 GPU 服务吞吐。"
       ],
       "figs": [
         {
