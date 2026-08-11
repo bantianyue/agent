@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""minimax 重建：组织 DATA（删废话/致谢/免责/参考，7图全挂，h3拆分），写 article_data_build.py。"""
+import json, os
+
+base = r"D:/06_Hermes/articles/minimax-m3-inference"
+c = json.load(open(base + "/_content.json", encoding="utf-8"))
+t = json.load(open(base + "/_translations.json", encoding="utf-8"))
+tr = lambda i: t.get(str(i), '').strip() or c[i].get('text','').strip()
+
+DATA = {
+    "summary": [
+        {"key":"核心思路","body":"从完整的推理路径入手，四大优化叠加：在线量化加速注意力 GEMM、稀疏注意力+FP8 KV缓存降带宽、EAGLE3投机解码降目标前向、ATOMesh 支持 P/D 分离。"},
+        {"key":"关键收益","body":"EAGLE3 整体草稿接受率 73.45%、首个 token 85.8%；在 MI355X 上 FP4 模式每 GPU 吞吐对标/超越公开发布的 InferenceX 数据。"},
+        {"key":"目标瓶颈","body":"四大优化共同解决注意力 GEMM 开销、KV 缓存带宽、稀疏注意力调度与目标模型前向频率这四个服务瓶颈。"},
+    ],
+    "lead": [
+        "MiniMax-M3 是高密度推理模型：MoE、稀疏注意力、长上下文 KV 缓存、量化检查点全都有。**只优化一个内核远远不够**，要在 AMD Instinct MI355X 上稳住服务效率，得通盘考虑整条推理路径。AMD ATOM 团队的做法是把四大优化叠在一起。",
+        "这四件事分别咬住不同的瓶颈：在线量化让注意力 GEMM 更快；稀疏注意力加 FP8 KV 缓存压掉带宽与内存移动；EAGLE3 投机解码砍下目标模型的前向次数；ATOMesh 在分布式 GPU 上做 prefill/decode 分离并迁移缓存的正确性元数据。",
+    ],
+    "sections": [
+        {
+            "type":"h2","title":"为什么 MiniMax-M3 值得整体优化",
+            "paras":[
+                "MiniMax-M3 推理路径复杂：混合专家（MoE）、稀疏注意力、长上下文 KV 缓存管理和量化检查点并存，牵一发而动全身。近期工作聚焦于四大领域：**量化**（针对注意力线性层和 GEMM 的在线量化）、**注意力运行时**（AITER 稀疏注意力 + FP8 KV cache + page-16 SHUFFLE KV 布局）、**投机解码**（EAGLE3，优化草稿与目标执行）、**分离式推理**（ATOMesh P/D 分离 + 稀疏索引器-键缓存传输）。",
+                "这些改动共同改善服务端最痛的四个瓶颈：注意力 GEMM 开销、KV 缓存带宽、稀疏注意力调度、以及目标模型前向频率。",
+            ],
+        },
+        {
+            "type":"h2","title":"注意力 GEMM 的在线量化",
+            "paras":[
+                "ATOM 提供多种在线量化方法，能在不重新生成完整模型的前提下为高效 GEMM 执行准备检查点权重——包括 BF16→FP8/FP4 量化，以及同数据类型内的格式转换（如 FP8 块缩放 → FP8 PTPC）。对 MiniMax-M3，ATOM 只在能提升 GEMM 吞吐的位置应用：注意力线性层和部分稠密 MLP 层；lm_head、嵌入层、视觉组件、多模态投影器和 MoE 层被排除，MoE 权重保持原有量化格式。",
+                "以 MiniMaxAI/MiniMax-M3-MXFP8 为例：选定的注意力 GEMM 权重从 1x32 块缩放表示加载，在模型加载期转为 PTPC FP8。该转换走 GPU 逐元素内核，只增加少量一次性的权重加载开销。",
+            ],
+            "figs":[
+                {"src":"fig01.png","caption":"图 1：MiniMax-M3 在线量化路径——选中 GEMM 权重加载时由 1x32 块缩放转为 PTPC FP8。"},
+            ],
+        },
+        {
+            "type":"h2","title":"稀疏注意力与 FP8 KV 缓存",
+            "paras":[
+                "第二个方向针对注意力运行时——不是单一内核改动，而是 ATOM 框架与 AITER 算子库协同配合。MiniMax-M3 有模型特定的稀疏注意力：分组查询头（GQA）与按 KV 头选择的块。这些细节决定了稀疏索引器、块表和 page-16 KV 缓存布局的表观语义。",
+                "具体地，MiniMax-M3 有 q_head=64、kv_head=4，可视为 4 个 KV 头稀疏注意力组（各含 q_head=16、kv_head=1）。对每个查询 token 和 KV 头，索引器选 16 个逻辑块（每块覆盖 128 token）。",
+                "实现横跨两侧：ATOM 侧将注意力重构为标准 Attention + PagedAttentionImpl，引入 SparseMHAPagedAttentionImpl 与 page-16 SHUFFLE KV cache；AITER 侧为 fused_qknorm_idxrqknorm 增加 SHUFFLE 布局支持，用独立 K/V cache 张量，经 asm_layout 标志选择 page-16 SHUFFLE 寻址路径。",
+            ],
+            "figs":[
+                {"src":"fig02.png","caption":"图 2：MiniMax-M3 KV 缓存布局——q_head=64、kv_head=4 组织为 4 组 KV 头稀疏注意力（每组 16 query / 1 KV head）。"},
+            ],
+        },
+        {
+            "type":"h2","title":"EAGLE3 推测解码",
+            "paras":[
+                "MiniMax-M3 增加了 EAGLE3 推测解码支持。目标模型注意力解码路径扩展为支持 max_q_len > 1，从而做多 token 推测验证。草稿模型侧，token 先进非分片嵌入路径，再依次执行 4 卡张量并行注意力、all-reduce、融合 RMSNorm/Quant、4 卡张量并行 MLP 与分布式 argmax。",
+                "用 --num-speculative-tokens 3 跑 GSM8K 验证：每次前向平均接受 3.20 token，**整体草稿接受率 73.45%**，首个/第二/第三个草稿 token 接受率分别为 85.8%/73.7%/60.9%。该分布说明 EAGLE3 能在保持输出一致性的同时显著减少目标模型计算量。",
+            ],
+            "figs":[
+                {"src":"fig03.png","caption":"图 3：MiniMax-M3 EAGLE3 融合草稿模型执行与分布式 argmax——token 经本地嵌入、4 卡 TP 注意力/MLP、所有结果经分布式 argmax 输出，降低投机解码开销。"},
+            ],
+        },
+        {
+            "type":"h2","title":"分布式推理与 ATOMesh",
+            "paras":[
+                "ATOMesh 支持 prefill/decode 分离，在分布式 GPU 资源上做大模型推理。针对 MiniMax-M3，ATOMesh 新增专属缓存传输路径，使 P/D 分离同时传输标准 K/V 缓存与各稀疏注意力层维护的稀疏索引器键缓存——确保解码 worker 拿到正确选择 top-k 历史块所需的元数据。",
+            ],
+            "figs":[
+                {"src":"fig04.png","caption":"图 4：基于 Mooncake RDMA KV 与索引器-键缓存传输的 ATOMesh 上 MiniMax-M3 P/D 分离。"},
+            ],
+        },
+        {
+            "type":"h2","title":"性能预览",
+            "paras":[
+                "FP4 服务模式下，搭载 AMD Instinct MI355X 的 ATOM MiniMax-M3 服务吞吐与公开发布的 InferenceX 测量对比如下三张图。可通过 MiniMax-M3 MXFP4/MXFP8 使用指南复现（含启动命令、在线量化配置、EAGLE3 设置、精度测试、基准脚本与请求形状/并发参数）。",
+            ],
+            "figs":[
+                {"src":"fig05.png","caption":"图 5：搭载 ATOM 的 MI355X 上 MiniMax-M3 FP4 8K/1K 每 GPU 服务吞吐与已发布 InferenceX 结果对比。"},
+                {"src":"fig06.png","caption":"图 6：搭载 ATOM + M3 EAGLE 的 MI355X 上 FP4 8K/1K 每 GPU 吞吐与 InferenceX 结果对比。"},
+                {"src":"fig07.png","caption":"图 7：搭载 Mooncake ATOMesh 的 MI355X 上 FP4 8K/1K 每 GPU 吞吐与 InferenceX 结果对比。"},
+            ],
+        },
+        {
+            "type":"h2","title":"总结",
+            "paras":[
+                "在 AMD Instinct MI355X 上优化 MiniMax-M3，需要的是整条链路的协同而非单点突破：ATOM 在线量化加速注意力 GEMM；AITER 稀疏注意力和 FP8 KV 缓存压低注意力运行时的开销与内存移动；EAGLE3 推测解码降低解码期的有效目标模型工作负载；ATOMesh 支持 MiniMax-M3 缓存传输实现 P/D 分离。",
+                "这些优化叠加起来，把注意力 GEMM、KV 缓存带宽、稀疏调度和目标前向频率四个服务瓶颈一并压下去。",
+            ],
+        },
+    ],
+    "conclusion": [
+        "高密度推理模型的优化没有银弹——它是一套拧在整条路径上的杠杆，每个只解决一段：量化喂给算子、缓存喂给带宽、投机解码喂给前向、P/D 分离喂给分布式扩展。",
+        "MiniMax-M3 的可贵之处在于把每一步都落到了可工程化的实现（ATOM/AITER 侧代码 + 可复现的启动配置）上，而不是停在概念演示。对同一模型，这套组合拳才是拿得出手的服务方案。",
+    ],
+    "reference_url": "https://rocm.blogs.amd.com/software-tools-optimization/minimax-m3-mi355/README.html",
+    "title": "在 AMD Instinct MI355X 上扩展 MiniMax-M3 推理：分布式服务与算子协同设计",
+}
+
+# 校验图
+disk = sorted(f for f in os.listdir(base) if f.startswith('fig') and f.endswith('.png'))
+used = sorted(f['src'] for s in DATA['sections'] for f in s.get('figs',[]))
+print("磁盘fig:", len(disk), disk)
+print("引用fig:", len(used))
+print("缺失:", sorted(set(disk)-set(used)), "| 多余:", sorted(set(used)-set(disk)))
+
+out = os.path.join(base, "article_data_build.py")
+with open(out, "w", encoding="utf-8") as fh:
+    fh.write('# -*- coding: utf-8 -*-\n"""minimax 重建(标准链, 7图, h3, 删废话)"""\nimport json, os, sys\n\n')
+    fh.write("_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))\n")
+    fh.write("DATA = " + json.dumps(DATA, ensure_ascii=False, indent=2) + "\n\n")
+    fh.write('with open(os.path.join(_article_dir, "article_data.json"), "w", encoding="utf-8") as f:\n')
+    fh.write('    json.dump(DATA, f, ensure_ascii=False, indent=2)\n')
+    fh.write('print(f"✅ 写入 article_data.json ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA[\'sections\'])} sections)")')
+print("✅ 已写 article_data_build.py")
