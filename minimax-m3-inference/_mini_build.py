@@ -30,6 +30,7 @@ DATA = {
             "paras":[
                 "ATOM 提供多种在线量化方法，能在不重新生成完整模型的前提下为高效 GEMM 执行准备检查点权重——包括 BF16→FP8/FP4 量化，以及同数据类型内的格式转换（如 FP8 块缩放 → FP8 PTPC）。对 MiniMax-M3，ATOM 只在能提升 GEMM 吞吐的位置应用：注意力线性层和部分稠密 MLP 层；lm_head、嵌入层、视觉组件、多模态投影器和 MoE 层被排除，MoE 权重保持原有量化格式。",
                 "以 MiniMaxAI/MiniMax-M3-MXFP8 为例：选定的注意力 GEMM 权重从 1x32 块缩放表示加载，在模型加载期转为 PTPC FP8。该转换走 GPU 逐元素内核，只增加少量一次性的权重加载开销。",
+                "对 MiniMax-M3，ATOM 仅在能提升 GEMM 吞吐的位置应用在线量化：注意力线性层和部分稠密 MLP 层。lm_head、嵌入层、视觉组件、多模态投影器和 MoE 层被排除在外，MoE 权重保持现有量化格式——这一选择性策略同时覆盖 MiniMaxAI/MiniMax-M3 系列检查点。",
             ],
             "figs":[
                 {"src":"fig01.png","caption":"图 1：MiniMax-M3 在线量化路径——选中 GEMM 权重加载时由 1x32 块缩放转为 PTPC FP8。"},
