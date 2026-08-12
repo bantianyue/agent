@@ -1,4 +1,8 @@
-{
+# -*- coding: utf-8 -*-
+"""Agentic Code Quality build"""
+import json, os, sys
+
+DATA = {
   "title": "代码评审在 agent 时代失灵了：把质量检查转移到约束，而不是靠人读每一行",
   "lead": [
     "在人类历史上，我们一直靠代码评审来评估代码质量：某人读你写的东西，确保它干净、有想法、快、可理解、测得好。但对 agent 来说，这条路不可扩展——代码量大到没人读得完。于是越来越多的质量检查必须转移到 agent 周围的 harness、环境和操作系统里。",
@@ -157,3 +161,7 @@
   ],
   "reference_url": "https://x.com/addyosmani/status/2087427868343373919"
 }
+
+with open("article_data.json", "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 article_data.json")
