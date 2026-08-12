@@ -22,3 +22,4 @@
 
 创建时间: 2026-08-12
 来源: https://x.com/RedHat_AI/status/20868325859723596066
+| Step 4d-i: 传送门 | completed |

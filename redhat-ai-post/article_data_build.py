@@ -1,4 +1,8 @@
-{
+# -*- coding: utf-8 -*-
+"""Mooncake vLLM KV池 build"""
+import json, os, sys
+
+DATA = {
   "title": "给 vLLM 装上一张『集群级 KV 缓存』：Mooncake 把 agentic 前缀复用从 1.7% 拉到 92.2%",
   "lead": [
     "每个 vLLM 副本都有一份自己的 KV cache。横向扩展到一个负载均衡器后面时，跨实例的前缀复用就崩了——同一段共享提示词在不同副本上被反复重算。Mooncake 的做法是把 KV 缓存在整个集群里池化。",
@@ -126,3 +130,7 @@
   ],
   "reference_url": "https://vllm.ai/blog/2026-05-06-mooncake-store"
 }
+
+with open("article_data.json", "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 article_data.json")
