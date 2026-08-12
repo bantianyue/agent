@@ -138,6 +138,7 @@ DATA = {
             "paras": [
                 "Macaron-V1 在个人智能、智能体、编码与 GenUI 四条线评估，对比 Opus 4.8、GPT-5.5、Gemini 3.1 Pro、GLM-5.2、Qwen 3.7 Max 与 Minimax M3 六个模型。每条基线的评测遵循附录规定的各自协议。",
                 "在个人智能上，Venti 在 ChatBench 记录 58.3（比 GPT-5.5 高 2.8 分），在 LivingBench 记录 64.0（比 Opus 4.8 高 0.2 分）；两行的用例、评判栈、采样策略与聚合规则对所有模型一致。内部个人智能结果视为同分布证据，而非通用能力比较。",
+                "智能体组包含 VitaBench、VitaBench2、tau3-Bench、PinchBench 与 ClawGym；编码组包含 SWE-Verified、DeepSWE 与 SWE Atlas QnA；另含 TerminalBench 2.1 终端操作与 GenUI 轨迹评测。Tall 在多数同条带基准上与 Venti 拉开较小差距，并在多模态点估计上有自己的分数。",
             ],
             "fig_after": {
                 "0": [{"src": "fig01.png", "caption": "图 1：Venti 主要结果概览。"}],
