@@ -1,0 +1,179 @@
+# -*- coding: utf-8 -*-
+"""Macaron-V1 build：精简编译（论文60%保留）+ fig_after 逐段挂图。
+图挂载严格对应原文语义位置。"""
+import json, os, sys
+
+DIR = os.path.dirname(os.path.abspath(__file__))
+
+def code(t):
+    return '<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow-x:auto;font-family:Consolas,monospace;font-size:13px;line-height:1.5;white-space:pre-wrap;">' + t + '</pre>'
+
+DATA = {
+    "title": "Macaron-V1：把持续学习与自改进做成系统——冻结基座+Mixture-of-LoRA 的开放智能体",
+    "lead": [
+        "前沿模型的能力增长越来越来自后训练，但后训练的效果高度依赖模型所在的『环境』：训练、评测、部署的交互方式共同塑造了智能体需要的行为。当模型被训练在静态任务集合上、发布后就不再更新，这逼近的是『静态最优』，而非真正的智能。",
+        "Macaron-V1（Mind Lab）给出另一种组织方式：一个面向持续学习与集体智能的开放智能体模型家族，而不是单个单体 checkpoint。它用递归自改进实现适应（Adaptation），用 Mixture-of-LoRA 实现协作（Collaboration），把『学习』做成模型与运行环境共同演进的闭环。",
+    ],
+    "summary": [
+        {"key": "系统设计", "body": "冻结的大基座 + 一组可注册的 LoRA 专家，通过 MoL Proxy 按每个用户回合选一个专家；基座不参与再训练，新能力通过增训与注册新适配器获得。"},
+        {"key": "两大支柱", "body": "适应（Adaptation）靠版本化的模型—harness 对递归自改进；协作（Collaboration）靠 Mixture-of-LoRA 在冻结基座上组合各专家能力。"},
+        {"key": "路由代价", "body": "路由由 L0 在 24-token 预算内完成，Venti 路由准确率 99.12%，路由+摘要两跳占三跳总耗时的约 32%，且不损害任务质量。"},
+    ],
+    "sections": [
+        # ===== 节1: 引言 =====
+        {
+            "type": "h2", "title": "从静态最优到体验式智能",
+            "paras": [
+                "集中式后训练的典型做法是：在一组有界任务上优化模型、与当前 harness 对齐、固化成 checkpoint 发布。训练混合任务能提升整体表现，但异构目标通过共享参数竞争时会造成跨任务干扰；更根本的是，发布后新知识、新工具、新用户需求仍在不断到来，系统却停留在发布时的分布上。",
+                "Mind Lab 把真正的智能定义为『体验式智能』（experiential intelligence）：从真实环境中积累的经验里学习，并在部署后持续学习。他们用『个人智能』（Personal Intelligence）指代智能体为特定用户长期工作所需的能力——可靠用工具、跨会话记住约束、判断何时提问何时行动、对用户诚实。这些是产品目标，而体验式智能在此基础上加了一个时间维度：部署经验要反哺到下一次模型—harness 修订。",
+                "体验式智能有两条互补的维度，Macaron-V1 围绕二者构建：适应（Adaptation）通过对版本化的模型—harness 对做递归改进实现——一个配置产生的经验在外部契约下被评估，并用于构造它的后继版本；协作（Collaboration）通过组合实现——让专家保持可分离，避免共享参数里的跨任务干扰。",
+            ],
+            "fig_after": {
+                "2": [{"src": "fig02.png", "caption": "图 2：扩展模型能力的三种方式。MoE 扩展基座本身；skills 在固定模型外加脚手架；MoL 保持基座冻结，通过 Proxy 中介的路由循环组合专家 LoRA 适配器。这一分离是实现持续学习与集体智能目标的基底。"}],
+            },
+        },
+        # ===== 节2: 模型家族 =====
+        {
+            "type": "h2", "title": "模型家族：一个基座、四种专家",
+            "paras": [
+                "Macaron-V1 是开放模型家族而非单一 checkpoint。旗舰 Venti 由冻结的 744B GLM-5.2 基座加上四个 LoRA 专家组成，发布标签 748B；Tall 面向本地部署，基于 Qwen3.6-35B-A3B（约 50.1B），沿用同一四专家设计；Coding-Venti 则把编码专家直接合并进基座而不是作为适配器服务。",
+                "两个用 MoL 服务的变体共享同一模式：冻结基座、少量 LoRA 专家、L0 发出的路由标签、以及训练与服务都贴近生产的 harness。四个专家分别是：L0 Chat（对话主干、指令跟随，兼作路由入口）、L1 Agent（长程工具使用，吸收 Preview 版的 OpenClaw 专家）、L2 Coding（代码生成与终端使用）、L3 GenUI（UI4A 渲染与 UI 驱动操作，专精 TSX）。",
+            ],
+            "fig_after": {},
+        },
+        # ===== 节3: Mixture of LoRA =====
+        {
+            "type": "h2", "title": "Mixture-of-LoRA：把专业化显式化",
+            "paras": [
+                "智能体工作负载的思维链模式差异很大：对话、智能体工具使用、编码、GenUI 各自要模型以不同方式思考。联合后训练可能造成跨任务干扰，这促成一个让专业化显式化的架构。MoL 用一条单一规则把这一取舍摆到台面上：把共享技能与思维模式的聚类成一个 LoRA，把技能分歧明显的任务放在不同 LoRA。",
+                "从这条规则自然推出两个支撑持续学习与集体智能的性质：基座冻结——新能力通过增训和注册另一个适配器获得，而不是重训基座，基座权重不会被后续专业化覆盖；适配器可移植——因为基座共享，一方训练或个性化得到的专家，能与另一方在同一运行时上组合。",
+            ],
+            "fig_after": {},
+        },
+        {
+            "type": "h3", "title": "路由循环：L0 就是路由器",
+            "paras": [
+                "MoL 不训练独立的路由器模型——适配器选择由入口专家 L0 自身的推理决定，由 MoL Proxy 执行。普通用户请求走三阶段生命周期：路由（Route，L0 在 24-token 预算内把请求分类到恰好一个规范适配器标签）、回答（Answer，所选专家从自己的对话视图出发作答）、摘要（Summary，专家输出上限 192 token 的简短短暂，由 Proxy 服务端存储，成为任何适配器后续回合可继承的共享上下文，绝不回传给客户端）。",
+                "路由不是免费的：每个用户回合在专家自身生成之外，都要加一跳专门路由和一跳摘要。实测中 Venti 的路由决策成本 0.54s、摘要跳 0.97s，合计 1.51s、约占三跳总耗时的 32%；Tall（Qwen3.6-35B-A3B）对应 0.20s 与 0.32s。路由准确率在 6448 样本轨迹上：Venti 达 99.12%，Tall 达 99.04%，100% 规范标签合规、零解析错误，残差错误集中在 L0/L1 边界（通用对话 vs 个人智能体，语义最接近的两类）。",
+            ],
+            "fig_after": {},
+        },
+        {
+            "type": "h3", "title": "own-view 让路由变得廉价，KV 复用两级",
+            "paras": [
+                "核心的服务期构造是『own-view』：对每次引擎跳，Proxy 从仅追加的对话时间线确定性地重建目标 LoRA 看到的消息列表——每个专家保留自己过去回合的逐字轨迹（完整 assistant trace、工具调用与结果），而把其他专家的过去回合折叠成一条带 192-token 摘要的 assistant 消息。专家因此看到自己的原始推理历史 + 他人动作的压缩记录，永远看不到其他专家的完整轨迹。",
+                "own-view 是路由便宜的来源：时间线仅追加、每次重建确定，重入某 LoRA 时产生逐字节一致的前缀，命中引擎原生的 LoRA 感知前缀缓存，只需预填充新增的尾部。KV 复用因此是稳定每适配器提示的涌现属性，无需改引擎。KV 复用分两层：生产路径靠稳定的 own-view 涌现复用（vLLM/SGLang 零改动）；实验性的同请求 route-decode 覆盖层在 L0 预填充路由提示后沿用共享前缀继续解码。两者都只复用连续前缀，默认部署走涌现路径。",
+            ],
+            "fig_after": {},
+        },
+        # ===== 节4: Harness =====
+        {
+            "type": "h2", "title": "模型—Harness 协同与递归自改进",
+            "paras": [
+                "LLM 智能体输出文本，而 harness 把这些文本变成动作——用户看到的一切、存在什么工具、UI 如何渲染、工具结果如何喂回模型，都在这一层。Macaron 把 harness 当作一等训练对象：一个脆弱的、承载模型的 schema 是天花板，而能表达普通程序员编写的代码的 harness，能让通用模型完成大部分工作。",
+            ],
+            "fig_after": {
+                "0": [{"src": "fig03.png", "caption": "图 3：生成式 UI 的三种做法。HTML-native 最大化表达力但继承原始 web 开发的所有问题；Verifiable-schema 易于验证但限制表达；UI4A（component-native）让模型在运行时边界内编写普通前端代码，既恢复表达力又无 schema 天花板。"}],
+            },
+        },
+        {
+            "type": "h3", "title": "UI4A：组件原生的生成式 UI",
+            "paras": [
+                "生成式 UI 历来用两种有天花板的方式：最大表达力最小可控（继承原始 web 开发所有编译器/打包器/错误恢复问题）、可验证 schema 但限制表达。UI4A 走第三条路——组件原生（component-native）：让模型在运行时强制的边界内编写普通前端代码，恢复表达力而不受 schema 天花板限制。gallery 的每张卡片都是作为运行时边界约束下的普通前端代码生成，UI4A-Bench 按编译/渲染正确性、控制接线、屏幕适配来计分。",
+            ],
+            "fig_after": {
+                "0": [{"src": "fig04.png", "caption": "图 4：UI4A-Bench 的 gallery 切片。每张卡片作为运行时边界约束下的普通前端代码生成，按编译/渲染正确性、控制接线与屏幕适配计分。"}],
+            },
+        },
+        {
+            "type": "h3", "title": "REPL 智能体 harness 与 HCP",
+            "paras": [
+                "REPL 型智能体 harness 把『可执行组合』与『验证复用』当作模型与其工具之间的接口：模型可以组合可执行片段而非仅发文本，既保留表达力又可通过实际执行验证结果。Harness Context Protocol（HCP）则让运行期选择、工具、技能、提示、钩子、会话与工作区资源可移植、可审计，把一次运行期的『配方』标准化下来。",
+                "agentic RL 框架 MindForge 对 harness 跑三阶段循环：任务发现、轨迹扩展、关联的模型/配置更新。本报告固定的实验只隔离了扩展阶段——模型保持冻结、无优化器步骤——自适应搜索在 122 个基座失败任务上累计覆盖达到 122/122，而更强的一次全集合单配置扫描只到 11/122。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig05.png", "caption": "图 5：可执行组合（executable composition）。REPL harness 让模型把可执行构造与验证复用作为与工具交互的接口。"}],
+            },
+        },
+        {
+            "type": "h3", "title": "递归自改进循环",
+            "paras": [
+                "MindForge 的三阶段循环共享同一个 harness。递归自改进（RSI）在一个有界且可审计的意义上使用：一个版本化模型—harness 配置产生的经验，在外部契约下被评估，并用于构造后继修订。跨多个代际反复进行——同时改进专家、路由策略与 harness 配置而保留既有能力——是更长期的持续学习目标。",
+            ],
+            "fig_after": {
+                "0": [{"src": "fig06.png", "caption": "图 6：共享一个 harness 的三条循环。MindForge 的任务发现、轨迹扩展与模型/配置更新，连同版本化模型—harness 对的递归改进，构成 Macaron 的适应闭环。"}],
+            },
+        },
+        # ===== 节5: 基础设施 =====
+        {
+            "type": "h2", "title": "基础设施：MinT、LongStraw 与稀疏基座",
+            "paras": [
+                "持续学习的前沿要求模型状态侧也有配套。MinT 后训练平台管理冻结基座上的 LoRA-RL，关键区分在于不可变的 LoRA 快照（在某一训练步按服务张量布局导出）与版本化适配器修订之间的交接；它提供百万级可寻址目录与万亿级参数类的模型并行路径。",
+                "LongStraw 是架构感知、仅响应的长上下文执行栈，在固定 GPU 库存下给出数万亿 token 的操作点；稀疏基座（MoE / DSA）上用 R3 rollout 路由回放、DSA 集成修复与 IcePop 式 token 掩码应对 rollout—learner 失配。",
+            ],
+            "fig_after": {},
+        },
+        # ===== 节6: 基准 =====
+        {
+            "type": "h2", "title": "面向体验的个人智能基准",
+            "paras": [
+                "与标准正确性基准不同，个性化体验的质量判断依赖用户身份、交互场景与状态的联合上下文。这让评估出现两个挑战：对话内体验质量分散在细微差别里，同一行为对不同用户含义不同。Macaron 引入两个评估交互轨迹而非孤立答案的基准：ChatBench 评估上下文条件下的智能体对话，LivingBench 在演变条件下评估有状态的模拟个人生活助理。",
+            ],
+            "fig_after": {
+                "0": [{"src": "fig07.png", "caption": "图 7：LivingBench——在演变条件下评估有状态的模拟个人生活助理，衡量智能体长期服务同一用户的能力。"}],
+            },
+        },
+        {
+            "type": "h3", "title": "UI4A-Bench 评估循环",
+            "paras": [
+                "UI4A-Bench 的每个用例把请求与相关用户上下文组织成前后端共同的评估循环，衡量生成式 UI 在编译/渲染正确性、控制接线与屏幕适配上的表现。",
+            ],
+            "fig_after": {
+                "0": [{"src": "fig08.png", "caption": "图 8：UI4A-Bench 评估循环。每个用例将请求与相关用户上下文结合，在组件边界内评估生成的 UI。"}],
+            },
+        },
+        # ===== 节7: 结果 =====
+        {
+            "type": "h2", "title": "结果：对标前沿基线",
+            "paras": [
+                "Macaron-V1 在个人智能、智能体、编码与 GenUI 四条线评估，对比 Opus 4.8、GPT-5.5、Gemini 3.1 Pro、GLM-5.2、Qwen 3.7 Max 与 Minimax M3 六个模型。每条基线的评测遵循附录规定的各自协议。",
+                "在个人智能上，Venti 在 ChatBench 记录 58.3（比 GPT-5.5 高 2.8 分），在 LivingBench 记录 64.0（比 Opus 4.8 高 0.2 分）；两行的用例、评判栈、采样策略与聚合规则对所有模型一致。内部个人智能结果视为同分布证据，而非通用能力比较。",
+            ],
+            "fig_after": {
+                "0": [{"src": "fig01.png", "caption": "图 1：Venti 主要结果概览。"}],
+                "1": [{"src": "fig10.png", "caption": "图 10：Macaron-V1（Venti）与六个对比模型在十二条基准行上的点估计（0–100 归一）。跨行指标与协议不同，所以表格不标 '胜者'，只做同协议行内的公平比较。"}],
+                "2": [{"src": "fig09.png", "caption": "图 9：Tall 在七条同时评测的两系统基准上与 Venti 的逐行对比。"}],
+            },
+        },
+        {
+            "type": "h3", "title": "结论与局限",
+            "paras": [
+                "Macaron-V1 是围绕持续学习与集体智能而非单体 checkpoint 组织的智能体模型家族首次发布。架构主干是 Mixture-of-LoRA：冻结基座 + 一组专家，两个系统目标分别由递归改进（适应）与适配器组合（协作）承载。",
+                "它的诚实之处在于指出现实边界：适配与协作是持续演进的智能体系统的互补维度——协作决定不同能力如何被表示、选择与组合，适应决定这些能力与周围 harness 如何随经验改变。跨多代推广（专家、路由策略与 harness 配置共同改进而保留既有能力）以及独立训练专家带来真正集体智能增益，仍是开放研究方向。",
+            ],
+            "fig_after": {},
+        },
+    ],
+    "conclusion": [
+        "Macaron-V1 的贡献不在单一模型，而在把『持续学习』从一个算法命题变成一套可落地的系统工程：冻结基座+可注册专家的 MoL 让协作显式化，版本化的模型—harness 对让适应可控化，MinT/LongStraw 让模型状态与长上下文执行的迭代有据可依。",
+        "它的诚实在于划清了边界——本报告验证的是当前系统与路由/适配架构，而持续的跨代增益、集体智能的超加性还标注为开放问题。对做持续学习系统的人，这给出了一套『从失败轨迹里构造更困难任务、在外部契约下审计、用专家组合容纳未来源』的可复用模板。",
+    ],
+    "reference_url": "https://arxiv.org/pdf/2608.09819",
+}
+
+# 校验图引用
+used = [f["src"] for s in DATA["sections"] for figs in s.get("fig_after", {}).values() for f in figs]
+disk = [f for f in os.listdir(DIR) if f.startswith("fig") and f.endswith(".png")]
+print("引用图:", len(used), "磁盘图:", len(disk))
+print("缺失:", sorted(set(disk)-set(used)), "| 多余引用:", sorted(set(used)-set(disk)))
+
+out = os.path.join(DIR, "article_data_build.py")
+with open(out, "w", encoding="utf-8") as fh:
+    fh.write('# -*- coding: utf-8 -*-\n"""Macaron-V1 build(精简+fig_after)"""\nimport json, os, sys\n\n')
+    fh.write("_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))\n\n")
+    fh.write("def code(t):\n    return '<pre style=\"background:#f6f8fa;padding:12px;border-radius:6px;overflow-x:auto;font-family:Consolas,monospace;font-size:13px;line-height:1.5;white-space:pre-wrap;\">' + t + '</pre>'\n\n")
+    fh.write("DATA = " + json.dumps(DATA, ensure_ascii=False, indent=2) + "\n\n")
+    fh.write('with open(os.path.join(_article_dir, "article_data.json"), "w", encoding="utf-8") as f:\n')
+    fh.write('    json.dump(DATA, f, ensure_ascii=False, indent=2)\n')
+    fh.write('print(f"✅ 写入 article_data.json")')
+print("✅ 已写 article_data_build.py")
