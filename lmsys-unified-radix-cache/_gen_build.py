@@ -1,0 +1,145 @@
+# -*- coding: utf-8 -*-
+"""Unified Radix Cache build：技术博客编译（≥85%保留）+ fig_after 逐段挂图。"""
+import json, os, sys
+
+DIR = os.path.dirname(os.path.abspath(__file__))
+
+def code(t):
+    return '<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow-x:auto;font-family:Consolas,monospace;font-size:13px;line-height:1.5;white-space:pre-wrap;">' + t + '</pre>'
+
+DATA = {
+    "title": "一棵树装下混合模型的前缀缓存：SGLang Unified Radix Cache 用组件让 FULL/SWA/Mamba 各按其道",
+    "lead": [
+        "前缀缓存（prefix caching）在请求共享同一 token 前缀时复用已算好的 KV。但混合模型打破了单一复用规则：一条请求可能同时包含全注意力 KV、滑动窗口注意力 KV 和循环状态（recurrent state），每种都有不同的可复用边界——全注意力 KV 可覆盖整条匹配前缀，滑动窗口 KV 只覆盖尾部一截窗口，循环状态只在某个精确的前缀检查点上有效。",
+        "共享同一 token 前缀，却不一定共享同一个『可复用边界』。强行给它们划一条统一边界，要么丢掉有效的复用、要么允许了非法的复用。SGLang 的 Unified Radix Cache 用一个共享 token 拓扑 + 组件化语义来解决：一棵 radix 树提供规范的 prefix 坐标，FULL/SWA/MAMBA 三种组件各执其法。",
+    ],
+    "summary": [
+        {"key": "设计核心", "body": "把『共享前缀身份』与『组件特定复用有效性』解耦：一个 token 键控的 radix 拓扑作为每个前缀的规范坐标，全注意力 KV、滑动窗口 KV、Mamba 检查点作为组件挂载其上。"},
+        {"key": "组件语义", "body": "FULL 提供路径复用、SWA 提供窗口复用、MAMBA 提供检查点复用。组件通过 hooks 控制匹配/分裂/插入/加锁/驱逐，新混合组合无需新缓存树。"},
+        {"key": "实测收益", "body": "L3 外部 tier 让后期回合命中率保持在 DeepSeek-V4 98%、Inkling 96.8%；session-aware 驱逐在 SWE-bench 上降低 2.9%-16.6% TTFT；实验性 Rust 树核在滑动窗口负载上降低最多 42% TTFT。"},
+    ],
+    "sections": [
+        # ===== 1 引子 =====
+        {
+            "type": "h2", "title": "混合模型打破了单一复用规则",
+            "paras": [
+                "前缀缓存会在请求共享相同 token 前缀时复用 KV。在全注意力下，一旦共享前缀的 KV 算好，随着更多 token 追加它依然有效，后续带相同前缀的请求可以直接复用而不用在 prefill 里重算。SGLang 用一张由 token 序列键控的 radix 树来跟踪这个映射：prefill 前，树找出最长可复用前缀并把它的 KV 位置交给调度器。",
+                "混合模型打破了这条单一规则。一条请求可能组合全注意力 KV、滑动窗口注意力 KV 与循环状态，每种都有不同的复用语义：全注意力 KV 覆盖整条匹配前缀；滑动窗口 KV 只覆盖尾部窗口；循环状态只在精确的前缀检查点有效。它们共享同一 token 前缀，却不共享同一可复用边界。",
+                "为每种组合编码成专门的缓存类会形成一个组合爆炸的类矩阵，尤其再叠加上 HiCache 这类正交能力。Unified Radix Cache（SGLang PR #21206）从根上拆解：把『共享前缀身份』和『组件特定复用有效性』分开。一个 token 键控 radix 拓扑为每个前缀提供规范坐标，全注意力 KV、滑动窗口 KV、Mamba 检查点作为组件挂载其上，不再需要为每种组合再造一棵缓存树。",
+            ],
+            "fig_after": {
+                "2": [{"src": "fig01.png", "caption": "图 1：一个 radix 拓扑提供规范的前缀身份。FULL、SWA、MAMBA 组件分别强制路径、尾部窗口、检查点复用语义；HiCache 控制它们的载荷放在 GPU L1、Host L2 还是外部 L3；sidecar 跟随声明的源池而不改变树行为。"}],
+            },
+        },
+        # ===== 2 一棵树可组合组件 =====
+        {
+            "type": "h2", "title": "一棵树，可组合的组件",
+            "paras": [
+                "Unified Radix Cache 把共享前缀映射到一棵 radix 拓扑，把每种复用规则映射成一个 TreeComponent。UnifiedTreeCore 运行公共的匹配、分裂、插入、加锁与驱逐机制；UnifiedRadixCache 协调池操作；每个组件只定义变化的那部分语义。",
+                "FULL 组件始终存在。SGLang 为混合滑动窗口注意力加 SWA 组件、为混合循环层加 MAMBA 组件。例如 DeepSeek-V4 组合 FULL+SWA，Kimi-K3 在其 KDA 循环状态上组合 FULL+MAMBA，Inkling 则在同一棵树上组合全部三个组件。新模型家族可以直接复用既有组件组合；只有当引入现有集合表达不了的复用规则时，才需要新增一个 TreeComponent，而无需再实现一棵新树。",
+                "三者的复用语义：FULL 提供路径复用，保住匹配前缀里每个 token 的 KV 并保护对应祖先路径；SWA 提供窗口复用，要求一段连续尾部窗口，更老的 SWA 槽可以是 tombstone、其 radix 节点仍留在共享拓扑里；MAMBA 提供检查点复用，需在可复用边界放一个循环检查点，并在变更前把共享状态拷入私有请求槽。它们对同一候选边界施加不同的规则。",
+            ],
+            "fig_after": {},
+        },
+        # ===== 3 找安全复用边界 =====
+        {
+            "type": "h2", "title": "找安全复用边界：组件投票",
+            "paras": [
+                "前缀匹配时，UnifiedTreeCore 沿规范 FULL 路径走，把每个访问节点当作候选边界。仅 FULL 匹配不够——每个激活组件都创建一个验证器（validator），只有当所有验证器都接受该候选时，可复用边界才推进；一次拒绝不阻断遍历，因为组件可能接受更靠后的节点。",
+                "在 Figure 2 里，n1 与 n2 通过所有验证器，而 n3、n4 至少有一个组件检查失败；行走到达 n4，但保留 n2 作为最深的安全结果。遍历结束后，core 构建 MatchResult，组件 finalizer 再为复用准备选中的值——包括共享 MAMBA 检查点私有化到单条请求时需要的拷贝。",
+                "同一组件契约覆盖树生命周期其余部分：匹配（create_match_validator 判断候选是否可复用、finalize_match_result 准备选中结果）、分裂（redistribute_on_node_split 决定划分时组件数据如何移动）、插入（update_component_on_insert_overlap / commit_insert_component_data 决定组件拥有哪些池索引）、加锁（acquire/release_component_lock 保护一条路径、一段窗口或一个检查点）、驱逐（evict_* 选择设备候选、evict_component 移除组件数据、drive_host_eviction 回收主机资源）。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig02.png", "caption": "图 2：组件投票把遍历深度与可复用前缀深度分开。行走到达 n4，而 n2 才是 FULL、SWA、MAMBA 都接受的最深可复用边界。"}],
+            },
+        },
+        # ===== 4 HiCache =====
+        {
+            "type": "h2", "title": "原生 HiCache：组件身份跨内存分层",
+            "paras": [
+                "组件决定什么可复用，HiCache 决定可复用载荷放哪里。Unified Radix Cache 把同一组件身份贯穿 GPU L1、Host L2 与外部 L3，跨 tier 搬数据不改变其前缀身份或复用规则；组件描述所需的转移，HybridCacheController 执行物理 I/O。",
+                "并非每个物理池都需要自己的组件。锚点（anchor）决定复用语义或提供其他池跟随的页索引；sidecar 存储独立载荷但复用其声明源池的索引，随源池移动、不参与可复用边界投票、也不在 radix 拓扑里占额外槽位。DeepSeek-V4 把这一点讲得很清楚：FULL 覆盖逻辑前缀、SWA 只覆盖尾部窗口，两者都是组件且用独立设备索引空间；压缩 KV 池、索引缓冲、压缩状态等不定义新复用边界，作为 sidecar 注册（三个池跟随 FULL、两个跟随 SWA）。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig03.png", "caption": "图 3：组件可在独立索引空间间翻译，而每个 sidecar 精确复用其声明源池的索引。两种关系都跨 HiCache tier 保持同一共享前缀身份。"}],
+            },
+        },
+        {
+            "type": "h3", "title": "HiCache 多轮性能",
+            "paras": [
+                "多轮负载每轮都会增长一段可复用对话前缀。比较三种缓存配置（仅 GPU L1 / L1+Host L2 / L1+L2+500GiB Mooncake Store 外部 L3）在 DeepSeek-V4-Flash（FULL+SWA、4×H200 TP4、60轮）与 Inkling-Small（FULL+SWA+MAMBA、8×H200 TP8、30轮）上的表现。",
+                "结果：L1 首先丢可复用前缀，L2 推迟容量极限，L3 预热后保持高位并收在高过 96%。DeepSeek-V4-Flash 用 L3 把命中率维持近 98%、TTFT 均值低于 9 秒、有效输入吞吐 145.5K tokens/s（对比 L1 9.4K、L1+L2 14.3K）；Inkling-Small 收在 96.8% 命中率、1.23 秒 TTFT、67.1K 有效输入吞吐（对比 15.5K / 21.1K）。L3 的增益主要来自在小 tier 容量耗尽后仍保住可复用前缀。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig04.png", "caption": "图 4：HiCache 多轮基准。L1 和 L1+L2 在对话历史增长时撞上容量极限，命中率下滑、TTFT 上升；外部 L3 tier 保住可复用前缀更久，给出最高的有效输入 token 吞吐。两行用不同模型/GPU/请求规模，只可在同一行内比较 tier。"}],
+            },
+        },
+        # ===== 5 session-aware eviction =====
+        {
+            "type": "h2", "title": "session-aware 驱逐：让活跃会话不被误伤",
+            "paras": [
+                "普通的 LRU 只记录哪些缓存条目最近被访问，却不知道哪些前缀属于活跃会话、很可能在下回合被复用——于是内存压力下可能把活跃会话的 GPU KV 驱逐掉，却留下无关条目。Session-aware 驱逐（PR #29173）直接在 UnifiedRadixCache 里实现，给驱逐一个 LRU 没有的复用信号。",
+                "应用给每个请求附加稳定 session_id。请求成功后，Unified Radix Cache 为该会话注册可复用区域：FULL 跟踪前缀路径、SWA 跟踪尾部窗口、MAMBA 跟踪可复用边界。所有会话仍共享一棵 radix 拓扑，每回合仍提供完整 prompt。这些引用改变驱逐顺序而非钉住内存：FULL 按是否被引用、引用计数与基线驱逐优先级排序候选；SWA/MAMBA 先扫自己可复用区域里未引用的条目、空间不足再回落到引用条目。当前策略覆盖 GPU L1 与 Host L2，不含外部 L3。",
+                "调用 /close_session 时，系统移除该会话的引用但不立即删它的缓存条目；会话代际与有界关闭会话 tombstone 防止在关闭或重开后晚到的请求误恢复已释放的引用。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig05.png", "caption": "图 5：三个活跃会话共享一棵 radix 拓扑。FULL 跟踪引用前缀路径、SWA 跟踪尾部窗口、MAMBA 跟踪可复用边界；GPU 与主机驱逐优先扫未引用条目，引用条目作为后备仍可驱逐。关闭会话只移除保留信号而不立即删除可复用缓存。"}],
+            },
+        },
+        {
+            "type": "h3", "title": "SWE-bench 上的收益",
+            "paras": [
+                "用 DeepSeek-V4-Pro 与 Qwen3.5-397B-A17B 在 SWE-bench agent 轨迹上评估（TP8 + HiCache）。对比的基线是普通 HiRadixCache + LRU，测试档启用 Unified Radix Cache 与 --enable-session-radix-cache；由于同时改了缓存实现与驱逐策略，差异不应视为 session awareness 的隔离消融。",
+                "命中率大幅提升：batch 128 时 DeepSeek-V4-Pro 设备命中率从约 42% 升到 51%；batch 32 时 Qwen 从约 5% 升到 34%；batch 64 时 Qwen 的设备+主机命中率从约 58% 升到 67%。TTFT 也更低：相对基线，session-aware 配置让 DeepSeek-V4-Pro 在 batch 128/256 降 11.0%/2.9%，Qwen 在 batch 32/64 降 13.5%/16.6%。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig06.png", "caption": "图 6：SWE-bench 命中率与 TTFT。上方面板堆叠缓存驻留（基准与 Unified 配置的设备命中 + 主机命中）；下方面板是实测 TTFT，顶部标注相对基线的降幅。两模型用独立 TTFT 刻度。"}],
+            },
+        },
+        # ===== 6 Rust core =====
+        {
+            "type": "h2", "title": "实验性 Rust 树核",
+            "paras": [
+                "共享前缀越长，树遍历、锁簿记、LRU 更新与驱逐扫描都会给调度器关键路径加活。UnifiedRadixCache 把树状态机与缓存编排分开，让树核天然成为原生实现的目标。实验性 Rust Unified Radix Cache（可选的、L1-only 原型）让 Rust 拥有 radix 拓扑、每组件锁记账、侵入式 LRU 列表与驱逐遍历；Python 仍是请求到 token 映射与物理 KV 分配的单一拥有者，树变更后 Rust 返回延迟动作让 Python 应用到池。原型支持 FULL、SWA、MAMBA，暂不支持 HiCache。",
+                "在 200 回合合成对话（每回合 100 输入 + 100 输出 token）上与 Python 树对比，覆盖全注意力（Qwen3-32B TP2）、SWA（gpt-oss-20b TP2）、混合 SSM（Qwen3-Next-80B-A3B TP4）。Rust 原型在 SWA 负载上降幅最大：全 200 回合 TTFT 降 38%、后 176-200 回合降 42%；全注意力整体降 10%、最后 25 回合降 18%；混合 SSM 整体降 5%、最后 25 回合降 7%。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig07.png", "caption": "图 7：实验性 Rust 与 Python 树核在 FULL、SWA、混合 SSM 模型上的 TTFT。上排是总 TTFT 与 CUDA-event 计时的 GPU prefill 区间，下排是二者差值。三个模型用独立 y 刻度。"}],
+            },
+        },
+        # ===== 7 未来 =====
+        {
+            "type": "h2", "title": "未来：可复用缓存状态回归系统",
+            "paras": [
+                "Unified Radix Cache 确立了一个共享前缀身份，但还有三处需要围绕它收敛：一是完成可替换的 Rust 树核（roadmap #20415），把 Rust 核扩展到 SWA、MAMBA 与 HiCache，池分配与编排仍留在 Python；二是让 GPU L1 直连外部 L3 tier，使 Host L2 变成可选暂存层，把分布式内存暴露成更大的共享缓存（这需要协调准入、预取、转移与驱逐，而不只是又一个存储连接器）；三是跨 serving 栈协调 agentic KV 缓存（roadmap #21846），把同一缓存身份扩展到路由器、prefill/decode worker 与 HiCache，让这些层为会话、子智能体与工具调用协调预取、降级与保留。",
+                "结论：混合模型没有一个普适的可复用边界，但也不必为每种注意力与循环状态的组合造一棵独立 radix 树。Unified Radix Cache 保持一棵规范 token 拓扑，而 FULL、SWA、MAMBA 组件各执其复用、加锁与驱逐语义。这个共享身份的价值不止于前缀匹配——HiCache 让它跨内存 tier 留存，session 引用把它变成保留信号，实验性 Rust 核证明树的簿记可以演化而无需把池所有权移出 Python。",
+            ],
+            "fig_after": {},
+        },
+    ],
+    "conclusion": [
+        "这组设计的本质是给『缓存』定了两层抽象：前缀身份（一棵拓扑管到底）和复用语义（组件各管各的边界）。这样当新模型加一种新注意力或循环结构时，服务端不必再重写一棵树，只需增补一个组件。",
+        "对工程者的启示是：混合模型推理的性能瓶颈往往不在算力，而在『到底哪些 token 的 KV 能安全复用』。Unified Radix Cache 用一个共享拓扑把这个问题澄清，再靠 HiCache 分层、session 感知驱逐与 Rust 树核把失而复得的前缀利用到位。下一步把缓存身份横跨整条服务栈的 idea，正是要让『可复用缓存状态』对整个 serving 系统可见，而不只是对一个本地分配器可见。",
+    ],
+    "reference_url": "https://www.lmsys.org/blog/2026-08-11-unified-radix-cache",
+}
+
+# 校验图引用
+used = [f["src"] for s in DATA["sections"] for figs in s.get("fig_after", {}).values() for f in figs]
+disk = [f for f in os.listdir(DIR) if f.startswith("fig") and f.endswith(".png")]
+print("引用图:", len(used), sorted(used))
+print("磁盘图:", len(disk))
+print("缺失:", sorted(set(disk)-set(used)), "| 多余引用:", sorted(set(used)-set(disk)))
+for s in DATA["sections"]:
+    n=len(s['paras'])
+    for k in s.get('fig_after',{}):
+        if int(k)>=n: print(f"⚠️ 越界 {s['title'][:10]} key={k} paras={n}")
+
+out = os.path.join(DIR, "article_data_build.py")
+with open(out, "w", encoding="utf-8") as fh:
+    fh.write('# -*- coding: utf-8 -*-\n"""Unified Radix Cache build"""\nimport json, os, sys\n\n')
+    fh.write("DATA = " + json.dumps(DATA, ensure_ascii=False, indent=2) + "\n\n")
+    fh.write('with open("article_data.json", "w", encoding="utf-8") as f:\n')
+    fh.write('    json.dump(DATA, f, ensure_ascii=False, indent=2)\n')
+    fh.write('print(f"✅ 写入 article_data.json")')
+print("✅ 已写 article_data_build.py")

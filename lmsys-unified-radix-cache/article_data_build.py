@@ -1,4 +1,8 @@
-{
+# -*- coding: utf-8 -*-
+"""Unified Radix Cache build"""
+import json, os, sys
+
+DATA = {
   "title": "一棵树装下混合模型的前缀缓存：SGLang Unified Radix Cache 用组件让 FULL/SWA/Mamba 各按其道",
   "lead": [
     "前缀缓存（prefix caching）在请求共享同一 token 前缀时复用已算好的 KV。但混合模型打破了单一复用规则：一条请求可能同时包含全注意力 KV、滑动窗口注意力 KV 和循环状态（recurrent state），每种都有不同的可复用边界——全注意力 KV 可覆盖整条匹配前缀，滑动窗口 KV 只覆盖尾部一截窗口，循环状态只在某个精确的前缀检查点上有效。",
@@ -160,3 +164,7 @@
   ],
   "reference_url": "https://www.lmsys.org/blog/2026-08-11-unified-radix-cache"
 }
+
+with open("article_data.json", "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 article_data.json")
