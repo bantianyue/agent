@@ -1,0 +1,209 @@
+\section{Infrastructure}
+\label{sec:infrastructure}
+
+The RSI cycle in Section~\ref{sec:rsi} links a new LoRA adapter revision to the
+HCP configuration, selected data, and evaluation artifacts that produced it.
+This section concerns the model-state side of that lineage and the computation
+that produces the revision. \mint{} manages the model-state
+lifecycle over a resident, frozen base; \longstraw{} provides a response-only
+execution path when an update has a very long context; and model-dependent
+controls limit rollout--training mismatch on sparse bases. These components do
+not change the learned unit defined earlier: the deployable model update remains
+an exported LoRA revision, paired by \mindforge{} with the HCP and evaluation
+artifacts that produced it.
+
+Figure~\ref{fig:macaron-infra-loop} separates lifecycle management from the
+optional, architecture-specific execution mechanisms inside an update.
+\begin{figure}[h]
+\centering
+\resizebox{0.98\textwidth}{!}{\input{figures/infrastructure/macaron_infra_loop}}
+\caption{\textbf{Infrastructure inside the Macaron revision loop.} This is a
+conceptual artifact and control flow, not a claim that all components are
+co-located or invoked for every update. \mindforge{} supplies selected
+trajectories and identifies the current policy; \mint{} resolves its policy
+record, manages the update, and exports an immutable LoRA adapter revision for
+the \molshort{} runtime. \longstraw{} is
+selected for long-context response-only updates; sparse-base consistency
+controls are selected according to the model architecture. The dashed feedback
+arrow denotes experience collected after deployment, not an automatic online
+weight update~\citep{lu2026announcing,zhou2026longstrawlongcontextrl2m}.}
+\label{fig:macaron-infra-loop}
+\end{figure}
+\FloatBarrier
+
+\subsection{MinT: Model-State Lineage over a Resident Base}
+\label{sec:infra_mint}
+
+The MindLab Toolkit (\mint{})~\citep{lu2026announcing} manages LoRA RL over
+resident dense and Mixture-of-Experts (MoE) base deployments. Its key
+distinction is between an \emph{adapter revision}, an immutable LoRA snapshot
+exported at a particular training step in serving tensor layout, and a
+\emph{policy record}, the mutable service state used to resume and audit that
+policy. The policy record names the compatible base version and adapter shape,
+the latest trainer checkpoint and optimizer state, associated rollout records,
+and the available exported revisions. Training restores mutable state on a
+compatible worker, whereas rollout, evaluation, and serving select an exported
+revision; trainer checkpoints and optimizer state never cross the serving
+boundary directly.
+
+This abstraction provides model-state lineage, not complete experimental
+reproducibility by itself. Prompts, tools, hooks, workspace resources, task-bank
+versions, evaluators, and sampling settings remain in the HCP and \mindforge{}
+artifacts defined in Section~\ref{sec:rsi_mindforge}. A reported run is therefore
+reconstructable at the paper's configuration boundary only when its adapter
+revision and compatible base are joined with those artifacts. The narrower
+\mint{} guarantee is that a rollout or score can be attributed to a fixed
+adapter revision even if trainer placement and serving-cache residency change.
+
+Adapter revisions also make the training--serving handoff smaller than a merged
+checkpoint handoff. The companion \mint{} experiment compares a merge path that
+materializes and loads a full checkpoint before its rollout probe with an
+adapter path that loads the exported revision into a sampler whose base is
+already resident. Under those stated probes, adapter-only handoff reduces the
+measured handoff step by $18.3\times$ for Qwen3-4B with a rank-32 adapter and by
+$2.85\times$ for Qwen3-30B with a rank-16 adapter~\citep{lu2026announcing}.
+These are path-specific latency ratios, not general training-speed or inference-
+throughput improvements.
+
+The same separation supports a large addressable catalog without requiring a
+large resident set. The \mint{} evaluation builds all $10^6$ entries of a packed
+Qwen3-30B rank-1 adapter catalog with zero build errors, then reads a 256-entry
+audit sample spanning all 100 storage shards. Serving experiments select bounded
+working sets from that catalog while each actor maintains a smaller CPU cache
+and GPU-active window~\citep{lu2026announcing}. Thus, $10^6$ is a measured
+artifact-addressability result. It does not mean that one engine holds one
+million adapters in GPU memory, nor that the entries represent one million
+independently trained or behaviorally distinct policies. Cold loading remains
+scheduled service work, and a revision becomes user-visible only after
+compatibility checking and activation. This is the catalog boundary assumed by
+the registry in Section~\ref{sec:mol_collective}~\citep{punica2024,slora2023}.
+
+For bases that require distributed placement, \mint{} keeps model-parallel
+trainer groups and inference actors resident while adapter tensors, optimizer
+state, and exported revisions move between workers. The companion report
+includes a Kimi K2 countdown-task LoRA RL run on a 1.04T-total/32.6B-active
+parameter base using 64 H800 GPUs~\citep{lu2026announcing,kimi_k2_2025}. This is
+evidence that the adapter lifecycle executes on that model and workload; it is
+not evidence that \macaron{} was trained on Kimi K2, nor that the run is
+reproducible from this paper alone.
+
+\subsection{LongStraw: Response-Only Long-Context Execution}
+\label{sec:infra_longstraw}
+
+\paragraph{Response-only memory boundary.}
+Long contexts make a conventional full-sequence autograd implementation
+memory-bound because it retains differentiable state across the prompt and
+response. For a shared prompt of length $P$ and a GRPO group of $G$ responses
+with lengths $R_i$, \longstraw{}~\citep{zhou2026longstrawlongcontextrl2m}
+instead captures architecture-specific prompt state without autograd and
+replays one response at a time with autograd. Its live-memory boundary is
+approximately
+\begin{equation}
+  M_{\mathrm{live}} \approx M_{\mathrm{weights}} + M_{\mathrm{prefix}}(P)
+  + M_{\mathrm{grad}} + \max_i M_{\mathrm{graph}}(R_i)
+  + M_{\mathrm{score}}\!\left(\sum_i R_i\right),
+  \label{eq:longstraw-live-memory}
+\end{equation}
+The resulting graph is bounded by the longest response rather than by a
+prompt-and-response graph for all group members. The full prompt still incurs
+forward compute and retained model state; the method bounds graph lifetime
+rather than eliminating context-dependent memory or computation.
+
+\paragraph{Three-stage update.}
+One update has three stages. First, the current policy evaluates the shared
+prompt without autograd and retains only the state needed to condition response
+tokens. Second, old-policy and reference scores are computed without a graph,
+after which policy responses are replayed serially under autograd and each graph
+is released after backward. Third, rank-local gradients are finalized once and
+the optimizer steps after all $G$ members. The resulting objective is
+\emph{response-only}: response tokens condition on the complete prompt, but no
+gradient is propagated through prompt-token computation. ``Exact'' in the
+operating points below refers to the stated token positions and this
+response-only transaction, not parameter-wise equivalence to full-sequence
+backpropagation.
+
+\paragraph{Architecture-specific state.}
+The retained state and distributed operators follow the base architecture. On
+the hybrid recurrent/full-attention Qwen3.6-27B path, \longstraw{} retains
+recurrent boundary state and context-parallel (CP) KV pages. On GLM-5.2, it
+retains CP-sharded multi-head latent-attention pages and DSA indexer-key pages,
+combines sparse selection across CP ranks, and dispatches routed response tokens
+across expert-parallel ranks~\citep{qwen36_2026,qwen3_2025,glm52_2026,glm5_2026}.
+An exact repeated update must recapture the prefix after parameters change. The
+separate resident-prefix mode deliberately reuses the captured state across
+optimizer steps to measure capacity and prefill amortization, so it has a
+different parameter-consistency boundary.
+
+\paragraph{Execution receipts.}
+Table~\ref{tab:longstraw-support-points} condenses completed execution checks
+from the \longstraw{} companion report; this paper does not rerun them as
+\macaron{} experiments. They establish that the listed operations complete
+under fixed eight-H20 and 32-H20 inventories, respectively. The formal 2M
+receipts are Qwen at exactly $2{,}097{,}152$ total positions for $G=2$ and
+$G=8$, and GLM at exactly $2{,}097{,}152$ prompt tokens for one online $G=2$
+transaction. The separate Qwen $4{,}456{,}448$-position receipt is the 4.25M
+resident-prefix-reuse mode. Intermediate position-ladder probes are excluded
+from these reported results.
+
+\paragraph{Evidence boundary.}
+These receipts do not provide a cross-system throughput comparison, a
+task-quality learning curve, or evidence that \venti{} or \tall{} was trained at
+these context lengths. In particular, the Qwen rows use stored responses and
+deterministic rewards, and the GLM row is one $G=2$ online DAPO-MATH transaction
+with five generated tokens per response (four scored). Agent-policy quality is
+evaluated separately in Section~\ref{sec:results}.
+
+\input{tables/infrastructure/longstraw_support_points}
+\FloatBarrier
+
+\subsection{Controlling Rollout--Training Mismatch on Sparse Bases}
+\label{sec:infra_stability}
+
+Separate rollout and learner engines can assign different token probabilities
+even when they nominally use the same weights. Sparse MoE routing and DeepSeek
+Sparse Attention (DSA) add discrete execution choices: the rollout may select
+one expert set or sparse-attention index set while the learner selects another.
+The resulting likelihood ratio then compares different computations, violating
+the intended on-policy scoring contract~\citep{rollout_training_mismatch2025}.
+The stack uses path-dependent controls to reduce this mismatch; none of them is
+a general proof that rollout and learner logits are identical.
+
+\paragraph{R3: rollout routing replay.}
+For MoE paths whose rollout backend exposes expert provenance, the runtime
+records the selected expert ids for every token. The learner reuses those ids
+when they can be mapped to its current expert-parallel layout; if an id is
+missing or unmappable, that token is excluded from the replayed policy-gradient
+term rather than scored under a different expert path
+~\citep{r3_moe_router2025,chiang2026routerreplay}. As a diagnostic rather than a
+controlled quality ablation, the companion \mint{} report measures a mean
+out-of-route scoring ratio of $0.0013\%$ with R3 across 87 logged Qwen3-30B steps,
+versus $0.0097\%$ without R3 across 50 logged steps~\citep{lu2026announcing}.
+
+\paragraph{DSA implementation alignment.}
+DSA introduces a separate selection path that cannot be treated as an ordinary
+linear LoRA target. The GLM integration aligns the indexer's rotary-position
+layout, normalized query/key inputs, deterministic top-$k$ implementation, and
+frozen-indexer defaults. It also aligns the long-context sequence- and
+context-parallel layout and LoRA target-module loading before rollout
+~\citep{stevenchiang2026supportglm5inmint}. These contracts remove known
+implementation differences, but small numerical differences can still change a
+top-$k$ index set.
+
+\paragraph{IcePop-style residual filtering.}
+The cited GLM path does not replay every DSA indexer selection. It therefore
+computes the train-versus-rollout probability ratio for each token and assigns
+zero importance weight when that ratio falls outside the trusted interval
+recorded in the run configuration~\citep{ling_every_step2025}. This prevents a
+large observed discrepancy from entering the policy-gradient term; it does not
+reconstruct the rollout's sparse-attention selection or make the remaining
+tokens exactly on-policy.
+
+These controls are alternatives selected by model path, not three serial stages
+applied uniformly. R3 preserves available MoE route provenance; DSA alignment
+removes known implementation mismatches; and residual filtering drops detected
+probability outliers when exact DSA replay is unavailable. The cited companion
+studies support the mechanisms and systems diagnostics. This report does not
+include a controlled \venti{} ablation that attributes benchmark gains to these
+controls, so the claim here is limited to the specified execution mechanisms
+and mismatch mitigation, not exact rollout--learner equivalence or downstream
+quality improvement.

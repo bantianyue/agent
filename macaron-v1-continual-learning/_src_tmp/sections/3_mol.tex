@@ -1,0 +1,242 @@
+\section{Mixture of LoRA}
+\label{sec:mol}
+
+\mol{} (\molshort) is the architectural spine of \macaron{}. Instead of training a single monolithic model to cover every capability, we keep a large base model frozen and layer a small set of specialist LoRA adapters~\citep{lora2022,lora_without_regret_2025,zhou2025bslora} on top. Adapter composition is orchestrated by a serving layer, the \emph{MoL Proxy}, that treats adapter selection as a first-class, observable action per user turn rather than as a hidden mixer~\citep{mol_harness2026}. This section describes the design principle, the specialists shipped in \venti, the routing loop and its measured cost, the per-adapter conversation construction that makes routing cheap, the two-level KV-reuse design and its quality trade-off, and the architectural affordances intended to support separately versioned improvement and cross-owner composition. The reference implementation is open-sourced at \texttt{MindLab-Research/Mixture-of-LoRA-Harness}~\citep{mol_harness2026}.
+
+\subsection{Design Principle}
+\label{sec:mol_principle}
+
+Agent workloads combine tasks with very different chain-of-thought patterns: chat, agentic tool use, coding, and GenUI each ask the model to think in a different shape. Joint post-training can create cross-task interference, motivating an architecture that makes specialization explicit~\citep{macaron_v1_preview2026}. The present release does not include the budget-matched single-LoRA comparison needed to quantify that interference, so we treat it as a design motivation rather than an empirical finding of this report.
+
+\molshort{} exposes the trade-off explicitly through a single rule~\citep{macaron_v1_preview2026} (Figure~\ref{fig:mol_three_ways}):
+
+\begin{quote}
+Cluster tasks that share skills and thinking patterns into one LoRA, and keep tasks whose skills diverge sharply in separate LoRAs.
+\end{quote}
+
+Two properties fall out of this rule that support the longer-term continual-learning and collective-intelligence goals:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{The base is frozen.} New capabilities are added by training and registering another adapter rather than by re-training the base. Base weight does not get overwritten by later specialization.
+  \item \textbf{Adapters are portable.} Because the base is shared, a specialist trained by one team, or personalized for one user, can be composed with specialists from another team or user on the same runtime~\citep{macaron_v1_blog2026}.
+\end{itemize}
+Section~\ref{sec:mol_continual} returns to these properties.
+
+\subsection{Specialists in \venti}
+\label{sec:mol_specialists}
+
+\venti{} ships four release-labeled 1B LoRA specialists on top of a frozen 744B GLM-5.2~\citep{glm52_2026,glm5_2026} base. The specialists absorb work that was split across five adapters in the \macaron{}-Preview release; most notably, its OpenClaw specialist has been rolled into the Agent adapter L1~\citep{macaron_v1_preview2026,macaron_v1_blog2026}. The public Venti adapter configurations use rank $16$, LoRA alpha $32$, and the same attention/MLP target modules for L0--L3. Summing the tensor shapes in the released adapter headers gives 7,688,042,496 stored values per adapter; this is a logical stored-tensor count, not an active-per-token count or a device-memory measurement. We therefore keep the 748B figure as the release-facing label and use the stored count explicitly when discussing residency below. A smaller variant, \tall, ships the same four-adapter design on a Qwen3.6-35B-A3B~\citep{qwen36_2026,qwen3_2025} base for local deployment. Its public configurations use rank $64$, LoRA alpha $128$, and expert-specific target parameters; each adapter contains 3,775,651,840 stored values (L2 is stored in F32), giving approximately 50.1B when added to the nominal 35B base. The two adapter budgets are not directly comparable because the bases expose different target-module and expert structures.
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{L0, Chat.} Conversational backbone, instruction following, and model identity. L0 also serves as the routing entry point (Section~\ref{sec:mol_router}).
+  \item \textbf{L1, Agent.} Long-horizon, heavy tool-use tasks including personal-agent workflows and service integrations. Absorbs the Preview's OpenClaw adapter.
+  \item \textbf{L2, Coding.} Code generation, SWE-style tasks~\citep{jimenez2024swebench}, and terminal use.
+  \item \textbf{L3, GenUI.} \uifora{}~\citep{ui4a2026} rendering and UI-driven action; specialized on TSX (React and SolidJS) with the same output serving other targets through framework-specific renderers.
+\end{itemize}
+The four adapters are resident in the engine under exactly the names \texttt{L0}--\texttt{L3}; \texttt{L0} is also the routing entry.
+
+\subsection{Routing Loop}
+\label{sec:mol_router}
+
+\molshort{} does not train a separate router model. Adapter selection is decided per user turn by the entry adapter L0's own reasoning and executed by the MoL Proxy. A normal user-message request runs a three-stage lifecycle:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Route.} L0 classifies the incoming request into exactly one canonical adapter label from \texttt{L0}--\texttt{L3} under a tight decode budget (24 tokens). The router prompt frames the request as quoted, untrusted text, checks the wrapper families in priority order (generative UI, then code/terminal, then personal-agent/living), and returns a single canonical label under a constrained-decoding grammar that restricts the output to the four legal labels. If L0 selects itself the request stays on L0; otherwise the Proxy switches to the target adapter.
+  \item \textbf{Answer.} The chosen specialist responds from its own conversation view (Section~\ref{sec:mol_ownview}), seeded with cross-adapter summaries from prior turns.
+  \item \textbf{Summary.} The specialist emits a short summary of what it just did, capped at 192 output tokens. The Proxy stores this summary server-side and never returns it to the client; it becomes shared context that any adapter can inherit on subsequent turns.
+\end{enumerate}
+
+\paragraph{Model routing.}
+The route is decided entirely by L0's own reasoning: the entry adapter reads the request and emits a canonical adapter label under the constrained-decoding grammar, and that label is taken directly as the route. There is no separate router model and no keyword-based rule library overriding the decision; L0 is the router. This makes the routing decision a property of the chat specialist's understanding of the request, rather than a hand-tuned classifier, and lets routing accuracy improve with the base and the L0 adapter rather than with a separate artifact.
+The benchmark families named in the checked-in prompt are routing examples rather than an exhaustive allowlist; other requests are assigned through the prompt's semantic boundaries. We do not report a benchmark-specific routing audit for PinchBench or ClawGym.
+
+\paragraph{Short-circuits.}
+\emph{Tool-result stickiness:} when the answer stage ends in a tool call, the following tool-result turn is locked to the same adapter, skipping routing and summary entirely. \emph{Transactional rollback:} the Proxy checkpoints conversation state before each turn and restores it on engine failure or client disconnect, so an undelivered turn never enters conversation history.
+
+\paragraph{Runtime architecture.}
+The Proxy is engine-agnostic and may sit directly in front of a single engine or behind a gateway for multi-worker dispatch. Its only OpenAI-compatible model name is \texttt{Macaron-V1-Venti}; internal base and adapter names remain private. It offers three API surfaces (stateless Chat Completions, stateful Responses, and Anthropic Messages), all driven by the same three-stage core. The design builds on multi-tenant LoRA serving research~\citep{punica2024,slora2023,zhou2025dynamic} implemented natively in vLLM~\citep{vllm2023} and SGLang~\citep{sglang2024}.
+
+\paragraph{Routing cost.}
+Routing is not free: every user turn adds a dedicated routing hop and a summary hop on top of the specialist's own generation. We measure this cost directly on the \venti{} and \tall{} Proxies with per-hop timing instrumentation, over multi-turn mixed-domain conversations (48 requests, temperature~0). Table~\ref{tab:mol_cost_breakdown} reports the per-hop averages for both profiles. On \venti, the routing decision (L0 constrained-decoding a canonical label under a 24-token budget) costs $0.54$\,s; the summary hop, capped at 192 output tokens, costs $0.97$\,s. Together they are $1.51$\,s, about $32\%$ of the three-hop total; the rest is the specialist's answer generation. On \tall{} (Qwen3.6-35B-A3B), the same hops cost $0.20$\,s and $0.32$\,s ($30\%$ of the total). The overhead share is stable across base sizes. The own-view reconstruction described next is folded into the answer hop and is not a separate cost.
+
+\begin{table}[t]
+\centering
+\caption{Per-hop latency of the route--answer--summary loop on \venti{} (GLM-5.2) and \tall{} (Qwen3.6-35B-A3B), 48 multi-turn requests each, temperature~0. Share is the hop's share of the three-hop total (route + answer + summary).}
+\label{tab:mol_cost_breakdown}
+\begin{tabular}{lrrrr}
+\toprule
+Hop & \multicolumn{2}{c}{\venti} & \multicolumn{2}{c}{\tall} \\
+ & Avg (s) & Share & Avg (s) & Share \\
+\midrule
+Route (L0 constrained-decode, 24 tok)   & $0.54$ & $12\%$ & $0.20$ & $11\%$ \\
+Answer (specialist generation)          & $3.17$ & $68\%$ & $1.24$ & $70\%$ \\
+Summary (192-tok cap)                    & $0.97$ & $20\%$ & $0.32$ & $19\%$ \\
+\midrule
+Total (route + answer + summary)        & $4.68$ & $100\%$ & $1.76$ & $100\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Routing accuracy.}
+Routing accuracy is measured on a 6{,}448-sample trace drawn from LoRA training data: each sample is sent to L0, the model's output is parsed as a canonical label, and the label is compared to the dataset gold label. The trace is not an independent held-out split, so this measurement is an implementation diagnostic and does not estimate routing generalization. This is the model's own routing decision under the production constrained-decoding grammar, not a rule-library match. The deployed router prompt reaches $6391/6448 = 99.12\%$ accuracy with $100\%$ canonical-label compliance (every output is a legal \texttt{L0}--\texttt{L3} label) and zero request or parse errors. Per-class accuracy ranges from $97.1\%$ (L1) to $100\%$ (L2); the residual errors concentrate at the L0/L1 boundary (general chat versus personal-agent), which are the two semantically closest classes (Table~\ref{tab:mol_route_acc}). An integration run through the full Proxy stack, using an earlier GLM-5.2 prompt revision on a balanced 480-sample subset (120 per class), obtains $468/480 = 97.5\%$ with all requests and adapter selections valid. The same 6{,}448-sample trace evaluated on \tall{} (Qwen3.6-35B-A3B base) reaches $99.04\%$; every sample ID and input hash matches across the two runs, so routing accuracy is stable across base sizes. Multi-hop behavior is checked separately on the GLM-5.2 Proxy: an eight-turn L1/L2 alternating trace repeated in three independent conversations is correct on $24/24$ turns, including $21/21$ within-conversation domain switches and $18/18$ specialist re-entry turns.
+
+\begin{table}[t]
+\centering
+\caption{Routing confusion matrices for \venti{} (left) and \tall{} (right), each evaluated on the same 6{,}448-sample trace; trace identity is verified by matching every sample ID and input hash. L0, L1, L2, and L3 denote Chat, Agent, Coding, and GenUI, respectively. Rows are the gold label; columns are the model's canonical-label output. Both runs reach $\sim$99\% accuracy with $100\%$ canonical-label compliance and zero request/parse errors.}
+\label{tab:mol_route_acc}
+\begin{tabular}{l|cccc|r|cccc|r}
+\toprule
+ & \multicolumn{5}{c|}{\venti} & \multicolumn{5}{c}{\tall} \\
+Gold $\backslash$ Pred & L0 & L1 & L2 & L3 & Acc.\ & L0 & L1 & L2 & L3 & Acc.\ \\
+\midrule
+L0 (1000) & \textbf{977} & 19 & 4 & 0 & 97.70\% & \textbf{977} & 9 & 14 & 0 & 97.70\% \\
+L1 (796)  & 23 & \textbf{773} & 0 & 0 & 97.11\% & 38 & \textbf{757} & 1 & 0 & 95.10\% \\
+L2 (652)  & 0 & 0 & \textbf{652} & 0 & 100.0\% & 0 & 0 & \textbf{652} & 0 & 100.0\% \\
+L3 (4000) & 11 & 0 & 0 & \textbf{3989} & 99.73\% & 0 & 0 & 0 & \textbf{4000} & 100.0\% \\
+\midrule
+Total     & \multicolumn{4}{c|}{6391 / 6448} & 99.12\% & \multicolumn{4}{c}{6386 / 6448} & 99.04\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Post-routing quality.}
+Routing is only useful if it does not harm task quality. Table~\ref{tab:mol_bench} compares a direct single-adapter baseline against the routed loop (KV reuse off and on) on Vita delivery using five retained seed-level aggregates per arm. On \venti, direct scores $0.636 \pm 0.026$ and routed-with-reuse-off $0.650 \pm 0.030$; routed reuse-on scores $0.632 \pm 0.019$. On \tall{} (Qwen3.6-35B-A3B), direct scores $0.410 \pm 0.030$, routed KV-off $0.398 \pm 0.035$, and routed KV-on $0.386 \pm 0.054$. These small, unpaired five-seed sets show no detected degradation at the reported precision, but they do not establish equivalence.
+
+\begin{table}[t]
+\centering
+\caption{Three-arm benchmark quality on Vita delivery (temperature~0, 100 tasks per seed). Every row reports five seed-level aggregates per arm; reward is mean $\pm$ sample standard deviation. The arms are a direct single-adapter baseline, the full route--answer--summary loop with cross-turn KV reuse off, and the same loop with reuse on. Seed identifiers are not retained, so the comparison is unpaired.}
+\label{tab:mol_bench}
+\begin{tabular}{llrl}
+\toprule
+Model & Arm & $n$ & Reward \\
+\midrule
+\venti & Direct L1 (no routing)   & 5 & $0.636 \pm 0.026$ \\
+\venti & Routed, KV-reuse off     & 5 & $0.650 \pm 0.030$ \\
+\venti & Routed, KV-reuse on      & 5 & $0.632 \pm 0.019$ \\
+\midrule
+\tall & Direct L1 (no routing)   & 5 & $0.410 \pm 0.030$ \\
+\tall & Routed, KV-reuse off     & 5 & $0.398 \pm 0.035$ \\
+\tall & Routed, KV-reuse on      & 5 & $0.386 \pm 0.054$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Per-Adapter Conversation Views}
+\label{sec:mol_ownview}
+
+The central serving-time construction is the \emph{own-view}: for each engine hop, the Proxy rebuilds the message list the target LoRA sees, deterministically, from an append-only conversation timeline. Each specialist's own past turns are kept verbatim: the full assistant trace, tool calls, and tool results, while every other specialist's past turns are collapsed to a single assistant message carrying that turn's 192-token summary; the current user turn is appended verbatim. A specialist therefore sees its own raw reasoning history and a compressed record of what other specialists did, never another specialist's full trace. Continuity is preserved without leaking any specialist's private state.
+
+The own-view is what makes routing cheap. Because the timeline is append-only and every own-view is rendered deterministically, re-entering a LoRA on a later turn produces a byte-identical prefix to the previous visit. The engine's native, LoRA-aware prefix cache hits on that prefix and only the newly appended tail is prefilled. Per-adapter KV reuse is thus an emergent property of stable per-adapter prompts; it requires no engine modification on this path, and the Proxy surfaces the hit ratio back to the client as prompt-cache metadata for observability. The own-view is served from two state models behind one interface: a Proxy-authoritative timeline for the stateful Responses API (the agent sends only the current input and a response id), and a stateless side-context rebuilt from the agent-resent history for Chat Completions. Routing is query-only and identical on both; only the own-view reconstruction differs.
+
+\paragraph{Own-view correctness.}
+The own-view is load-bearing, so we test the paths that depend on it. The multi-hop switching diagnostic of Section~\ref{sec:mol_router} exercises specialist re-entry after another specialist has run; its aggregate labels verify route re-selection in that smoke test but do not directly measure the semantic fidelity of the reconstructed view. The five-seed Vita result (Table~\ref{tab:mol_bench}: $0.636$ direct, $0.650$ routed KV-off, $0.632$ routed KV-on) shows no detected quality loss from summary-based continuity at this scale. Without paired task-level equivalence analysis, it does not establish identical quality.
+
+\subsection{KV Cache Reuse}
+\label{sec:mol_serving}
+
+KV reuse in \molshort{} operates at two layers.
+
+\paragraph{Emergent reuse via stable own-views (production path, no patch).}
+As described in Section~\ref{sec:mol_ownview}, the Proxy rebuilds each specialist's own-view so that re-entry yields a byte-identical prefix, letting the engine's native prefix cache absorb the reused portion. Cross-adapter continuity is carried by the 192-token summaries stitched into the own-view; the summary scaffold is never fed into any own-view, so it cannot pollute a reusable prefix. This is the default production path and needs no modification to vLLM or SGLang.
+
+\paragraph{Same-request route-decode overlay (experimental).}
+When L0 prefills the router prompt and then hands the same request to the target specialist, a non-invasive overlay trims the router-only tokens and continues decoding under the selected LoRA, reusing the continuous prefix the two share. On vLLM this is realized through the streaming-input session path: the request is issued as two segments, a router segment under L0, then a decode segment under the selected LoRA carrying metadata that pins the shared prefix length, so the engine reuses the overlap and prefills only the divergence. On SGLang the same contract is realized by a runtime monkey-patch over the scheduler and serving classes. A cross-turn flag additionally lets the decode segment read and write the global prefix cache, so a later turn on the same adapter can hit this turn's prefix. The overlay is one instance of the broader family of low-rank inference shortcuts~\citep{zhou2026deputy} that trade a small quality margin for a decode-speed gain.
+
+\paragraph{Boundary.}
+Both layers reuse a \emph{continuous} prefix only. We do not implement arbitrary non-contiguous GPU KV splicing across adapters: a specialist switch still invalidates the adapter-specific portion of the KV cache, and the shared prefix is reused only where it is contiguous. The route-decode overlay is an opt-in experimental path; the default deployment runs on the emergent path with unmodified engines.
+
+\paragraph{KV-reuse quality trade-off.}
+KV reuse buys latency at a potential cost in quality, because a reused prefix carries forward a prior turn's state rather than re-deriving it from the current context. The three-arm Vita sweep of Table~\ref{tab:mol_bench} isolates this on the emergent path (Layer A): routed reuse-on ($0.632 \pm 0.019$) and routed reuse-off ($0.650 \pm 0.030$) show no detected difference at this scale. The route-decode overlay of Layer B is evaluated only in a legacy GLM-5.1 shim diagnostic (30 turns, both arms $100\%$ accurate), where per-turn wall time is slightly higher with reuse on because of prefix-trim overhead; this is a functionality check, not a current-model quality estimate.
+
+\subsection{MoL Deployment}
+\label{sec:mol_deployment}
+
+The deployment study asks a systems question distinct from the quality results
+above: what is the cost of representing several specialists as adapters on one
+shared model rather than as several independently deployed models? We compare
+the MoL representation with a replicated-base layout in which each of the four
+LoRA specialists is merged into a separate copy of the base. MoL instead keeps
+one base resident and exposes the specialists as runtime adapters. The two
+layouts therefore share the same capability partition at the interface level,
+while differing in parameter sharing and request scheduling. Detailed profiles
+and measurements are collected in Appendix~\ref{app:mol_deployment}.
+
+\paragraph{Weight residency and capacity.}
+For the \venti{} configuration, the public adapter headers contain
+7,688,042,496 stored values in each of the four LoRA updates. MoL therefore
+stores one nominal 744B base plus about 30.8B adapter values (approximately
+774.8B logical parameters), while the replicated-base layout stores four
+merged copies of the base (2.976T parameters). On this logical count, MoL is
+about 26.0\% of the replicated layout, a 74.0\% reduction in stored parameter
+values. The release-facing 748B label is not used for this
+residency calculation, because it does not equal the stored tensor count.
+This is a structural consequence of sharing the base and is independent of the
+attention backend or parallelism layout. In the measured MoL deployments, the
+remaining device memory supports KV cache and concurrency: H20 sustains sixteen
+concurrent 56K-token requests, eight 180K-token requests, or four 230K-token
+requests, while B300 DCP2, DCP4, and DCP8 with EAGLE enabled provide
+approximately 2.34M, 4.67M, and 9.34M logical KV tokens, respectively.
+
+\paragraph{Long-context execution.}
+The long-context path combines page-level context parallelism for prefill,
+decode context parallelism for KV capacity, and prefill--decode disaggregation.
+On eight B300 GPUs, CP8 LayerSplit reduces cold needle-test TTFT at 900K tokens
+from 107.1\,s to 49.2\,s while preserving the sparse attention indexer's
+address domain. With DCP8 and EAGLE, the deployment reaches
+8.6\,ms mean TPOT and 110 tokens/s output throughput at concurrency~1, and
+18.0\,ms mean TPOT and 757 tokens/s at concurrency~16, without output
+corruption in the reported stress tests. The EAGLE-enabled path reserves part
+of the available KV capacity for its draft model and cache. Supporting capacity
+and latency measurements are reported in Appendix~\ref{app:mol_deployment}.
+
+\paragraph{Correctness and evidence boundary.}
+Serving efficiency depends on the joint choice of engine, attention backend,
+parallelism layout, speculative decoding, and request load. We therefore report
+only measurements whose operating points are sufficiently specified, rather
+than ranking heterogeneous validation snapshots. In the backend study,
+FlashMLA sparse attention produced clean outputs for all 48 tested long-context
+configurations on each of GLM-5.1 and GLM-5.2, whereas the default DSA decode
+path produced clean outputs in only 6 of 48 GLM-5.1 configurations. Replicated
+DCP layouts also passed their reported correctness checks, while the sharded
+DCP path exhibited systematic corruption. These observations determine the
+validated deployment envelope; they are not a cross-engine throughput
+comparison. Prefill--decode disaggregation remains part of the production
+profile, but heterogeneous PD snapshots are excluded from the quantitative
+comparison because they differ in engine, load, LoRA residency, and speculative
+decoding configuration.
+
+These results establish the principal systems advantage of MoL over the
+replicated-base layout: it removes replicated base-weight residency and makes a
+multi-specialist, long-context service feasible. They do not establish lower
+TTFT or higher throughput than independently deployed merged specialists;
+accordingly, we make no comparative latency or throughput claim for that
+deployment alternative.
+
+\subsection{Continual Learning and Collective Intelligence}
+\label{sec:mol_continual}
+\label{sec:mol_collective}
+
+A frozen base plus a plug-in adapter registry provides an implementation substrate for separately versioned specialists and, in principle, cross-owner composition~\citep{macaron_v1_blog2026,lu2026announcing}. These are architectural properties, not evidence of improvement across generations or capability gains from a specialist population. Three properties follow directly:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Adapter registration.} A new LoRA can be trained and registered without retraining already deployed weights. Whether it improves the intended capability while preserving end-to-end behavior still requires evaluation.
+  \item \textbf{Base-weight immutability.} Because gradients only enter adapters, the base weights cannot drift as a side effect of specialization. This does not guarantee retained system behavior when adapters, routing, or the harness change.
+  \item \textbf{Live harness updates.} The harness layer (routing rules, tool exposure, HCP configs; see Section~\ref{sec:harness}) can be edited without redeploying weights. New tasks become tractable through a harness change first, and only get baked into an adapter once the trajectory data is worth training on.
+\end{itemize}
+This decouples the release cadence of the base, of specialists, and of the harness: each moves on its own clock.
+
+Because the base is shared and adapters are portable, the registry can admit specialists trained by different teams or personalized for different users, subject to compatibility and trust checks. The current release evaluates only the four shipped specialists and does not test a cross-owner population. Two intended directions follow:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Multi-team composition.} A team could ship a specialist targeting a domain we do not cover in-house, with the router registry deciding when to hand off. Such a release would require compatibility, provenance, and tool-visibility checks that are outside the present evaluation.
+  \item \textbf{Personalization at the adapter layer.} A user-specific adapter could be mounted alongside the shipping specialists. \mint's million-entry adapter catalog~\citep{lu2026announcing} supplies the addressing mechanism, but this release does not evaluate personalized-adapter quality, privacy, or cross-user composition.
+\end{itemize}
+We view \molshort{} less as a way to make one model bigger and more as an interoperability contract for composable agent capability.
+
+\subsection{Discussion}
+\label{sec:mol_discussion}
+
+\molshort{} is a bet on \emph{orchestration over merging}. We do not merge adapter weights into a single forward pass, and we do not stack them additively. Composition happens at the request level via the routing loop, and continuity happens via short summaries retained server-side plus the deterministic own-view that makes per-adapter prefix reuse emerge for free. In the 48-request timing profile, the routing and summary hops average $0.54$\,s and $0.97$\,s, together $\sim32\%$ of the three-hop total. The router reaches $99.12\%$ on its trace, while the small Vita comparison detects no reuse-related degradation (reuse-on $0.632 \pm 0.019$ versus reuse-off $0.650 \pm 0.030$). Three practical consequences follow: (i) logs attribute each answer to one selected specialist; (ii) adapter-specific updates leave other adapter weights unchanged, although routing and harness changes can still affect end-to-end behavior; and (iii) new composition patterns can be implemented in the harness without merging adapter weights (Section~\ref{sec:harness}).
+
+\paragraph{Further KV reuse.}
+The current reuse design reuses L0's KV for the routing portion of each turn, and otherwise lets each specialist reuse only its own prefix. A more ambitious design, which we have sketched but not yet shipped, would let every specialist reuse L0's full KV across the board. Because the own-view already reconstructs each specialist's context from the shared conversation timeline, L0's KV is a natural shared substrate: routing it to every specialist would remove the need for each specialist to carry its own copy of the other specialists' summaries, trading the per-adapter summary redundancy for a single shared prefix. We do not commit to this design here; it raises correctness questions about mixing a chat-adapter's KV with a specialist's own computation, but it is the direction in which the own-view architecture most naturally extends.
+
+\paragraph{Single-input multi-intent requests.}
+The routing loop assumes one intent per user turn: it routes the whole turn to one specialist. In practice a user often packs several intents into one message: discuss a life task, then request code, then ask for a UI to show it, and the production system handles this by routing to a single specialist and letting the conversation naturally segment over subsequent turns. This is a deliberate simplification, not the ceiling of the design. The general case calls for an orchestrator or planner that decomposes a multi-intent turn into a sequence of specialist sub-tasks and composes their outputs, and we have an exploratory branch that implements this style of decomposition. It is not yet in production: we are designing a more uniform and maintainable formulation before shipping it. We report the exploration here as evidence that the architecture admits this extension, and as the direction in which the per-turn routing loop generalizes.
