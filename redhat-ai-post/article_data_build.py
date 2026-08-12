@@ -77,7 +77,7 @@ DATA = {
         "2": [
           {
             "src": "fig05.gif",
-            "caption": "图 3：MultiConnector 把 PD 分离与分布式 KV 缓存池组合在一起。"
+            {"src": "fig05.png", "caption": "图 3：MultiConnector 把 PD 分离与分布式 KV 缓存池组合在一起。"}
           }
         ]
       }

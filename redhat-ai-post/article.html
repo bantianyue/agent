@@ -1,6 +1,6 @@
 <section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
 <style>
-/* 传送门统一样式（add-portal.py 动态注入时引用此 class） */
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
 .portal-title { font-size:12px; color:#888; }
 .portal-links { font-size:12px; color:#888; }
 .portal-links a { color:#888; text-decoration:none; }
@@ -10,47 +10,47 @@
 <strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">问题本质</strong>：vLLM 的 Automatic Prefix Caching 是单进程内的：KV 页集中在单个实例的 HBM。横向扩展 + 负载均衡随机路由后，跨副本同一前缀被重复 prefill，有效命中率掉到约 1/N。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心方案</strong>：用 Mooncake Store 把 KV 缓存池化到集群级：master 管元数据/服务发现，GPU 节点上的 client 通过 RDMA 在 HBM 与分布式 DRAM/SSD 池之间转移 KV 块。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">实测收益</strong>：Codex 真实 agentic trace 上吞吐提升 3.8x、P50 TTFT 降 46x、端到端延迟降 8.6x（命中率 1.7%→92.2%）；round-robin 下近似线性扩展到 60 张 GB200。</div>
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">问题本质</strong>：vLLM的Automatic Prefix Caching是单进程内的：KV页集中在单个实例的HBM。横向扩展 + 负载均衡随机路由后，跨副本同一前缀被重复prefill，有效命中率掉到约1/N。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心方案</strong>：用Mooncake Store把KV缓存池化到集群级：master管元数据/服务发现，GPU节点上的client通过RDMA在HBM与分布式DRAM/SSD池之间转移KV块。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">实测收益</strong>：Codex真实agentic trace上吞吐提升3.8x、P50 TTFT降46x、端到端延迟降8.6x（命中率1.7%→92.2%）；round-robin下近似线性扩展到60张GB200。</div>
 </div>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每个 vLLM 副本都有一份自己的 KV cache。横向扩展到一个负载均衡器后面时，跨实例的前缀复用就崩了——同一段共享提示词在不同副本上被反复重算。Mooncake 的做法是把 KV 缓存在整个集群里池化。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在真实 agentic trace 上，这套方案把缓存命中率从 1.7% 提升到 92.2%，TTFT 下降 46 倍，端到端延迟下降 8.6 倍。本文梳理 vLLM 官方与 Mooncake 的合作实现：为什么单节点 prefix caching 在 agent 负载下失效，Mooncake Store 如何做成分布式 KV 池，以及它的性能与后续规划。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每个vLLM副本都有一份自己的KV cache。横向扩展到一个负载均衡器后面时，跨实例的前缀复用就崩了：同一段共享提示词在不同副本上被反复重算。Mooncake的做法是把KV缓存在整个集群里池化。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在真实agentic trace上，这套方案把缓存命中率从1.7% 提升到92.2%，TTFT下降46倍，端到端延迟下降8.6倍。本文梳理vLLM官方与Mooncake的合作实现：为什么单节点prefix caching在agent负载下失效，Mooncake Store如何做成分布式KV池，以及它的性能与后续规划。</p>
 
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">agentic 负载正在重塑 LLM 服务</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">随着 Claude Code、OpenClaw 这类 LLM agent 兴起，推理负载正发生根本性变化——LLM 不再只是聊天机器人，而是能规划、推理、朝复杂目标行动的自主长时运行系统。agentic 工作负载的结构很独特：长视界、多回合的循环，在『推理步』（模型处理上下文产生中间思考）与『动作步』（模型发工具调用、接收外部输出）之间交替。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">vLLM 团队在 Codex 和 GPT-5.4 的 SWE-bench Pro 轨迹上做了量化：到第 30 回合上下文已长到约 80K token，最长可超 180K；但每回合通常只新增几百到几千个 token，其余全是模型已经见过的前缀。整个数据集平均输入输出 token 比为约 131:1。如果能缓存这些前缀，缓存部分的 prefill 几乎免费，每回合真实成本只剩新增的 delta。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">agentic负载正在重塑LLM服务</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">随着Claude Code、OpenClaw这类LLM agent兴起，推理负载正发生根本性变化：LLM不再只是聊天机器人，而是能规划、推理、朝复杂目标行动的自主长时运行系统。agentic工作负载的结构很独特：长视界、多回合的循环，在『推理步』（模型处理上下文产生中间思考）与『动作步』（模型发工具调用、接收外部输出）之间交替。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">vLLM团队在Codex和GPT-5.4的SWE-bench Pro轨迹上做了量化：到第30回合上下文已长到约80K token，最长可超180K；但每回合通常只新增几百到几千个token，其余全是模型已经见过的前缀。整个数据集平均输入输出token比为约131:1。如果能缓存这些前缀，缓存部分的prefill几乎免费，每回合真实成本只剩新增的delta。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
-<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 1：Codex/SWE-bench Pro 轨迹的解剖（610 条轨迹中位数）。每回合新 token 只有几 K，其余都是可复用的前缀（system prompt、技能/记忆、历史回合），上下文由 12K 一路长到 80K+。</figcaption></figure>
-<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">局部 KV 缓存的两大天花板</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">但把 KV 缓存放到本地（CPU DRAM 或磁盘）对 agentic 负载有两个硬伤。其一是容量与驱逐：100K token 上下文可占好几 GB（Kimi-2.5 FP8 KV 约 3.8 GB），一个服务很多长会话的实例很快把本地缓存塞满、触发驱逐。其二是跨实例 miss：为了均衡负载，路由器不一定把同一会话的下一回合调度到同一 vLLM 实例；一旦迁移到没看过该前缀的实例，就得从头重算。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">结论是：不能再把推理服务当成一堆隔离的 vLLM 副本。agentic 负载下，实例需要共享一个分布式 KV 缓存池，提供更大的聚合容量与跨实例缓存命中。</p>
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Mooncake Store：把 KV 缓存做成集群级池</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Mooncake 是开源的、面向 KV 缓存传输与分布式存储的高性能库。vLLM 此前已用 MooncakeConnector 做 prefill-decode（PD）分离，用其传输引擎在 GPU 间搬运 KV 缓存；现在进一步用 Mooncake Store 构建分布式 KV 缓存池。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Mooncake Store 提供一个 master 服务器 + 一组 client。master 集群级运行，管理 KV 块哈希、大小等元数据，监控 client 健康与可用性，提供服务发现与失效节点清理；client 跑在 GPU 节点上，管理本地 CPU/DRAM/SSD 资源，彼此通过 RDMA 连接传输 KV 缓存。它们共同构成分布式 KV 缓存池。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">vLLM 集成复用既有的 KVConnector 接口（PD 分离用的同一抽象）。调度侧：新请求到达时，vLLM 对提示词的 token 块做哈希、向 Mooncake master 查询匹配的 KV 块并用结果引导调度决策；worker 侧：每个 GPU worker 内嵌 Mooncake client，启动后台线程搬运数据，GPU KV 内存注册为 RDMA 缓冲，通过 GPUDirect RDMA 直接读写、不经 SM 也不经 CPU 内存中转。</p>
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1：Codex/SWE-bench Pro轨迹的解剖（610条轨迹中位数）。每回合新token只有几K，其余都是可复用的前缀（system prompt、技能/记忆、历史回合），上下文由12K一路长到80K+。</figcaption></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">局部KV缓存的两大天花板</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">但把KV缓存放到本地（CPU DRAM或磁盘）对agentic负载有两个硬伤。其一是容量与驱逐：100K token上下文可占好几GB（Kimi-2.5 FP8 KV约3.8 GB），一个服务很多长会话的实例很快把本地缓存塞满、触发驱逐。其二是跨实例miss：为了均衡负载，路由器不一定把同一会话的下一回合调度到同一vLLM实例；一旦迁移到没看过该前缀的实例，就得从头重算。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">结论是：不能再把推理服务当成一堆隔离的vLLM副本。agentic负载下，实例需要共享一个分布式KV缓存池，提供更大的聚合容量与跨实例缓存命中。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Mooncake Store：把KV缓存做成集群级池</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Mooncake是开源的、面向KV缓存传输与分布式存储的高性能库。vLLM此前已用MooncakeConnector做prefill-decode（PD）分离，用其传输引擎在GPU间搬运KV缓存；现在进一步用Mooncake Store构建分布式KV缓存池。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Mooncake Store提供一个master服务器 + 一组client。master集群级运行，管理KV块哈希、大小等元数据，监控client健康与可用性，提供服务发现与失效节点清理；client跑在GPU节点上，管理本地CPU/DRAM/SSD资源，彼此通过RDMA连接传输KV缓存。它们共同构成分布式KV缓存池。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">vLLM集成复用既有的KVConnector接口（PD分离用的同一抽象）。调度侧：新请求到达时，vLLM对提示词的token块做哈希、向Mooncake master查询匹配的KV块并用结果引导调度决策；worker侧：每个GPU worker内嵌Mooncake client，启动后台线程搬运数据，GPU KV内存注册为RDMA缓冲，通过GPUDirect RDMA直接读写、不经SM也不经CPU内存中转。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
-<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 2：vLLM 分布式 KV 缓存池的整体设计。多个 vLLM 实例内嵌 Mooncake client，共享一个集群级 Mooncake Store；master 管理 KV 块元数据、服务发现与 client 健康，worker 经 RDMA 在 GPU HBM 与分布式 DRAM/SSD 池间搬 KV 块。</figcaption></figure>
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2：vLLM分布式KV缓存池的整体设计。多个vLLM实例内嵌Mooncake client，共享一个集群级Mooncake Store；master管理KV块元数据、服务发现与client健康，worker经RDMA在GPU HBM与分布式DRAM/SSD池间搬KV块。</figcaption></figure>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">三个设计亮点</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SM-free + 零拷贝的 GPUDirect RDMA 转移。传统的 GPU-to-CPU 搬运要么用 cudaMemcpyAsync（适合大批量但对很多小转移吞吐欠佳），要么启 GPU kernel 用小步复制（SM 参与，可能干扰 GPU 上其他 kernel）。这里走第三条路：用 RDMA NIC + GPUDirect RDMA 直接在 GPU HBM 与 CPU 内存之间搬 KV 块，无中转缓冲、不占 SM，对大量小 KV 块也高效；Mooncake 传输引擎还支持多 RNIC 池化与拓扑感知选路。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">全异步转移。虽然 RDMA 本身异步，但准备描述符、发起读写仍有不可忽略的 CPU 开销，且随序列变长（KV 块更多）而增长。为避免阻塞延迟 GPU kernel 启动，所有 RDMA 操作跑在一个专用后台 I/O 线程上——从 vLLM 视角看，转移路径完全异步。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">MultiConnector：PD 分离 + 分布式 KV 池组合。集成还通过 MultiConnector 自然延伸到 PD 分离：它把多个子 connector 串起来，各自独立工作互不依赖。prefill 实例为 PD connector 准备 KV 块，同时经 store connector 也存一份进分布式池；decode 实例写池里的 KV 块立即对所有 prefill 实例可见。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SM-free + 零拷贝的GPUDirect RDMA转移。传统的GPU-to-CPU搬运要么用cudaMemcpyAsync（适合大批量但对很多小转移吞吐欠佳），要么启GPU kernel用小步复制（SM参与，可能干扰GPU上其他kernel）。这里走第三条路：用RDMA NIC + GPUDirect RDMA直接在GPU HBM与CPU内存之间搬KV块，无中转缓冲、不占SM，对大量小KV块也高效；Mooncake传输引擎还支持多RNIC池化与拓扑感知选路。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">全异步转移。虽然RDMA本身异步，但准备描述符、发起读写仍有不可忽略的CPU开销，且随序列变长（KV块更多）而增长。为避免阻塞延迟GPU kernel启动，所有RDMA操作跑在一个专用后台I/O线程上：从vLLM视角看，转移路径完全异步。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">MultiConnector：PD分离 + 分布式KV池组合。集成还通过MultiConnector自然延伸到PD分离：它把多个子connector串起来，各自独立工作互不依赖。prefill实例为PD connector准备KV块，同时经store connector也存一份进分布式池；decode实例写池里的KV块立即对所有prefill实例可见。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
-<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.gif"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 3：MultiConnector 把 PD 分离与分布式 KV 缓存池组合在一起。</figcaption></figure>
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">性能：真实轨迹 46 倍 TTFT、线性扩展</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">试验用 Kimi-2.5 NVFP4 模型跑在 GB200 节点上，PD 分离：prefill 实例 TP4、decode 实例 DP8+EP，这是延迟-吞吐权衡最好的组合。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">先看真实轨迹。用前面描述的 Codex agentic traces，1P1D 共 12 张 GPU 部署。分布式 KV 池把 vLLM 吞吐提升 3.8x，P50 TTFT 与端到端延迟分别降 46x 与 8.6x。增益来自命中率从 1.7%（只缓存 system prompt）暴涨到 92.2%（几乎整条前缀都被缓存）。</p>
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.gif"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：MultiConnector把PD分离与分布式KV缓存池组合在一起。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">性能：真实轨迹46倍TTFT、线性扩展</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">试验用Kimi-2.5 NVFP4模型跑在GB200节点上，PD分离：prefill实例TP4、decode实例DP8+EP，这是延迟-吞吐权衡最好的组合。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">先看真实轨迹。用前面描述的Codex agentic traces，1P1D共12张GPU部署。分布式KV池把vLLM吞吐提升3.8x，P50 TTFT与端到端延迟分别降46x与8.6x。增益来自命中率从1.7%（只缓存system prompt）暴涨到92.2%（几乎整条前缀都被缓存）。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
-<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 4：真实 Codex agentic trace（1P1D，12 GB200）上有/无 Mooncake 的对比。分布式 KV 池带来 3.8x 吞吐、46x 的 P50 TTFT 下降与 8.6x 的 E2E 延迟下降。</figcaption></figure>
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4：真实Codex agentic trace（1P1D，12 GB200）上有/无Mooncake的对比。分布式KV池带来3.8x吞吐、46x的P50 TTFT下降与8.6x的E2E延迟下降。</figcaption></figure>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">扩展到多节点</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">扩展性测试用 Codex 派生合成数据集做受控实验：20K 公共 token（system 指令）、首个输入 10K、每回合输入 2048、输出 900、共 30 回合，会话数随 GPU 数从 75 爬到 375。为了压测跨节点数据通路，用 round-robin 路由——请求跨回合被调度到不同节点，常要去上一节点取 KV。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">没有分布式 KV 池，这种路由会造成海量缓存 miss 和严重吞吐退化；而有 Mooncake Store，vLLM 在所有规模下都稳定维持 95% 以上的命中率，并几乎线性地扩展到 60 张 GPU。说明分布式 KV 池在集群变大的同时，既大幅提升命中率又保持了高效的数据通路。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">扩展性测试用Codex派生合成数据集做受控实验：20K公共token（system指令）、首个输入10K、每回合输入2048、输出900、共30回合，会话数随GPU数从75爬到375。为了压测跨节点数据通路，用round-robin路由：请求跨回合被调度到不同节点，常要去上一节点取KV。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">没有分布式KV池，这种路由会造成海量缓存miss和严重吞吐退化；而有Mooncake Store，vLLM在所有规模下都稳定维持95% 以上的命中率，并几乎线性地扩展到60张GPU。说明分布式KV池在集群变大的同时，既大幅提升命中率又保持了高效的数据通路。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
-<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图 5：12 到 60 张 GB200 下 Mooncake Store 的扩展吞吐（round-robin 路由）。系统在所有规模下保持 >95% 命中率并近似线性扩展。</figcaption></figure>
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5：12到60张GB200下Mooncake Store的扩展吞吐（round-robin路由）。系统在所有规模下保持 >95% 命中率并近似线性扩展。</figcaption></figure>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">下一步：缓存感知路由与多路径加载</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">vLLM 团队正在推进几项优化。一是把存储层级从 CPU DRAM 扩展到 NVMe SSD 与分布式文件系统，支撑更大的缓存容量（分布式磁盘卸载）。二是支持混合注意力机制的新兴模型架构，各层可能需要不同的缓存策略。三是缓存感知路由——把请求路由器与 KV 缓存池协同设计，让回合优先调度到已持有相关前缀的实例，最大化本地命中再回落到分布式池。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">四是进一步优化数据通路：除 RDMA 外引入 NVIDIA 多节点 NVLink 以支持更快、多路径的 KV 缓存转移，并探索类似 DualPath 的方式让 prefill 与 decode 实例同时加载 KV 以榨干聚合带宽。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">vLLM团队正在推进几项优化。一是把存储层级从CPU DRAM扩展到NVMe SSD与分布式文件系统，支撑更大的缓存容量（分布式磁盘卸载）。二是支持混合注意力机制的新兴模型架构，各层可能需要不同的缓存策略。三是缓存感知路由：把请求路由器与KV缓存池协同设计，让回合优先调度到已持有相关前缀的实例，最大化本地命中再回落到分布式池。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">四是进一步优化数据通路：除RDMA外引入NVIDIA多节点NVLink以支持更快、多路径的KV缓存转移，并探索类似DualPath的方式让prefill与decode实例同时加载KV以榨干聚合带宽。</p>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
@@ -59,7 +59,7 @@
 <strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-这则案例的核心是一句话：当 agent 把前缀复用的规模从『一个进程』推到『整个集群』，prefix caching 的收益才真正兑现。单实例 vLLM 的 APC 再强，也架不住负载均衡把共享前缀散到不同副本上重算。Mooncake Store 用 master+client+RDMA 把这层池化做成了集群级的一等公民。<br  /><br  />对团队的意义在于两件事：一是优化剂量的顺序——SDLC 上的 cache hit 从 1.7% 提到 92.2%，往往比换更大 GPU 更省钱；二是在设计路由时把它和缓存联合考虑，而不是把负载均衡当成无状态的随机游走。下一步的缓存感知路由，补上的正是这一环。</div>
+这则案例的核心是一句话：当agent把前缀复用的规模从『一个进程』推到『整个集群』，prefix caching的收益才真正兑现。单实例vLLM的APC再强，也架不住负载均衡把共享前缀散到不同副本上重算。Mooncake Store用master+client+RDMA把这层池化做成了集群级的一等公民。<br  /><br  />对团队的意义在于两件事：一是优化剂量的顺序：SDLC上的cache hit从1.7% 提到92.2%，往往比换更大GPU更省钱；二是在设计路由时把它和缓存联合考虑，而不是把负载均衡当成无状态的随机游走。下一步的缓存感知路由，补上的正是这一环。</div>
 </div>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
