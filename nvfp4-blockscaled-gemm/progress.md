@@ -12,3 +12,4 @@
 
 创建时间: 2026-08-11
 来源: https://research.colfax-intl.com/optimizing-an-nvfp4-blockscaled-gemm-on-rtx-pro-6000-blackwell-gpu-sm120/
+| Step 4d-i: 传送门 | completed |

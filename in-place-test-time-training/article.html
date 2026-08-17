@@ -1,0 +1,92 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心洞见</strong>：不复用注意力、不架新随机层，而是复用MLP块：把gated MLP的最终投影W_down当可调快权重，W_up/W_gate冻结为慢权重。只原地更新W_down，保持架构完整。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">LM对齐目标</strong>：用与Next-Token-Prediction对齐、有理论支撑的目标替换TTT的通用重构目标，让快权重在语言建模任务上学得更对。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">高效更新</strong>：因为只动MLP、不动注意力，无需per-token约束，可做chunk-wise（512-1024）大块更新，兼容context parallelism，高度可扩展。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">静态的“先训练后部署”范式，本质上限制了LLM无法根据持续涌入的新信息动态调整自己的权重：一旦部署，权重就冻结了。测试时训练（TTT）提供了另一种选择：在推理时更新一部分参数（快权重）来适应输入。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这篇ByteDance Seed + 北大的论文提出In-Place Test-Time Training（原地测试时训练）：不替代注意力、不添加随机新层，而是复用无处不在的MLP块：把它的最终投影矩阵当作可调的快权重，让LLM无需重训就获得TTT能力（“即插即用”增强），并在128k长上下文任务上让4B模型表现更优。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">背景：静态范式的局限与TTT的出现</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">LLM的成功很大程度建立在静态“先训练后部署”范式上：模型先从海量语料获取知识，推理时保持固定。但这带来一个根本限制：一旦部署，权重无法更新，无法动态适应输入token提供的特定上下文，也限制了在长视野、演化任务上推理、以及像人一样从无边界的经验流中持续学习的能力。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">上下文学习（In-context Learning）靠把所有历史token塞进上下文来缓解，但受限于上下文窗口（注意力二次复杂度）。测试时训练（TTT）则是另一条路：与其让静态模型更快，不如让模型在推理时动态更新参数来适应任意特定上下文。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">TTT机制：快权重作为动态记忆</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>TTT的核心是利用快权重W：一个小神经网络f_W: R^d到R^d，在测试时被快速更新。不同于训练后冻结的标准权重，快权重W像动态记忆，持续从序列存读上下文信息。处理输入时，每个token被投影出query(q_i)、key(k_i)、value(v_i)。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">TTT通过两个顺序操作工作：更新操作（Update）：把W更新成把key k_i关联到对应value v_i，这被构造成一次最小化损失（如均方误差）的优化步骤，直觉上这一步把新信息编码进快权重；应用操作（Apply）：用更新后的W对key生成输出（如通过注意力或线性操作），读取记忆。两个操作首尾相接形成循环。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>要把TTT成功应用到现代LLM，面临三个关键障碍：架构不兼容（先前研究总想替代注意力，而注意力对LLM能力至关重要，替代是高风险改动）；计算低效（per-token更新慢）；快权重目标与语言建模错配（通用重构目标教不对）。</strong></p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">核心洞见：复用MLP块做原地适应</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">之前的TTT研究主要把TTT定位成替代注意力的方案，且多在中等规模下做：这与现代数十亿参数的LLM相去甚远。替代注意力是高风险的架构改动；引入任何新的随机初始化层，又会和千百亿已训练参数冲突，需要昂贵且不现实的重训。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本文的核心洞见是彻底绕开这些挑战：不替换、不添加组件，而是复用无处不在的MLP块，让它兼任快权重。回忆TTT公式，对快权重的选择没有限制：MLP同样可以看作一种key-value记忆，充当预训练积累的海量通用知识的“慢权重”。很自然地，用这同一组件兼任自适应的“快权重”，在推理时动态内化瞬时、上下文内的信息。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1：In-Place TTT整体框架：只把MLP的最终投影W_down当快权重原地更新，W_up/W_gate保持冻结，应用与更新按chunk交替进行。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">形式上，采用广泛使用的gated MLP：O = [phi(H W_gate^T) 圆H W_up^T] W_down^T。本文把输入投影W_up和W_gate冻结为慢权重，只把最终投影矩阵W_down复用为可调快权重。通过只原地更新W_down，模型架构完整性得以保留：TTT从一次颠覆性重构，变成对LLM的轻量“即插即用”增强。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">LM对齐目标：为语言建模定制学习目标</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">建立高效原地适应框架后，In-Place TTT的性能就取决于学习目标的设计。先前的TTT方法通常用重构目标（reconstruction target）：比如让W关联key与线性投影的value。但对于自回归语言建模，真正该对齐的是Next-Token-Prediction（NTP）：下一个token的预测。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本文用Language Modeling-Aligned目标替换通用重构目标：它显式与NTP对齐，且经过理论分析论证（3.3节）为何这样的目标对LLM的快权重更新更合理。这个原则性的目标，是In-Place TTT能在语言建模任务上超越通用TTT方法的关键。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Chunk-Wise高效更新：绕开per-token约束</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">除了架构兼容，这种原地设计还带来显著的计算效率收益。传统TTT方法为替代注意力而设计，被迫做低效的per-token更新以强制严格因果性、做细粒度token混合。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4：In-Place TTT效率分析：prefill吞吐与峰值内存，chunk更新带来显著计算与显存节省。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本文选择同步绕开这种权衡：因为只适配MLP块、注意力层原样保留，就摆脱了per-token约束，可以采用远比之前更高效的chunk-wise更新策略，进一步绕过小chunk的限制：消融实验验证了这套框架天然适合大chunk更新（chunk 512-1024时达到最优）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">过程如下：给定中间激活Z与对应的value目标V、输出O，把它们切成k个不重叠的C大小chunks。对每个chunk i执行两个顺序操作：应用操作（用当前快权重状态W_down^(i) 处理chunk）；更新操作（用该chunk的LM-aligned目标更新快权重）。这种分块处理兼容context parallelism，适合超长上下文。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">实验：作为增强与从头预训练都有效</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两方面的实验验证了框架的有效性。作为“即插即用”增强：给预训练LLM套上In-Place TTT，能让一个4B参数模型在上下文长达128k的任务上达到更优性能：这是对无法扩展上下文窗口的静态基线的一次实打实的提升。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2：滑窗困惑度随上下文长度变化（500M/1.5B模型）：In-Place TTT始终取得更低的困惑度。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：关键设计消融：(a) state size增大持续提升；(b) chunk 512/1024最优；(c) LM-Aligned目标优于通用目标。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">从头预训练：In-Place TTT网络consistently优于之前有竞争力的TTT方法。消融研究进一步验证了设计选择：特别是LM-aligned目标相对重构目标的优势，以及大chunk更新的适配性，为每个关键决策提供了依据。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">结论：迈向LLM的持续学习范式</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">In-Place TTT是一个解决TTT之于LLM关键障碍的实用框架，三个有原则的设计选择：复用现有MLP块的原地机制、高效chunk-wise更新规则、与语言建模对齐的理论支撑目标。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">它不仅是预训练LLM的强力“即插即用”增强，从零训练也超过强基线。通过为边跑边适应提供可扩展方案，这项工作朝LLM更动态、持续学习的新范式迈出有希望的一步：正呼应开篇的追问：与其把模型冻结在部署那一刻，不如让它像人一样，从持续涌入的经验里一直学下去。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+这篇论文的聪明处在于“原地”二字：不跟注意力较劲，而是把每个Transformer都有的MLP块改造成可调的快权重存储。它把TTT从破坏性重构降级成即插即用增强，工程代价与风险都低得多。<br  /><br  />对读者的启示在于那条判断：想给LLM加“持续学习”能力，未必需要动模型架构，找出模型里已有的“存储型”组件（MLP即key-value记忆）复用即可。配合与NTP对齐的目标与chunk更新，就能让预训练模型在部署后继续演化了。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://arxiv.org/abs/2604.06169</span></p>
+</section>

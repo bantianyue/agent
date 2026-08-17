@@ -1,0 +1,139 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心不对称</strong>：做算术便宜、取数做算术贵（内存带宽是走廊）。而且算力比带宽增长更快，差距每代拉大，减少数据搬运的技巧越来越值钱。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">中央数字</strong>：算术强度（work per byte）决定一切。H100盈亏平衡比约295（989 TFLOPs / 3.35 TB/s）；低于则带宽受限、高于则算力受限。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">所有优化同一比值</strong>：batching增work、fusion/量化/共享内存减bytes。生成token是最坏情况（70B 16bit≈140GB → 约24 tok/s的硬下限），prefill则相反、算力受限。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">有个困惑几乎所有开始跑大模型服务的人。你租一块顶级数据中心GPU，spec单上说它每秒能做接近千万亿次算术运算。你把一个700亿参数的模型加载上去开始生成文本，看利用率监视器，读数很高，一切健康。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">然后你数token：每秒只有几十个，而这颗芯片的标称算力是每秒千万亿次。几乎全部算术能力都没在工作。文章一句话点破：做算术很便宜，把要做算术的数字取出来很贵。这份直觉一旦建立，量化、投机解码、连续批处理这些技巧就不再是需要死记的招式，而是显而易见的推论。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">核心不对称：做算术便宜，取数很贵</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">先讲整个设计立足的一个事实：做算术是便宜的，把要做算术的数取出来是贵的。这句话第一次读会觉得很怪：乘法听起来才是难的部分，搬一个数好像微不足道。但在现代硬件上恰好相反，而且差距不小。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：开篇之谜：芯片spec写着千万亿次每秒，实际生成文本每token只有几十个。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个有用的类比是车间：算术单元是工作台，几千个，挤在房间中央；数据住在仓库里，仓库与车间之间只有一条走廊。工作台消费材料的速度远快于走廊送货的速度。再添工作台也没用，因为走廊本来就是极限：走廊就是所谓的内存带宽。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：为什么算术便宜而取数贵：内存带宽是那条走廊。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">之后的每一个性能技巧，本质上都是让每次走廊送货能产出更多工作的方式。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么差距越拉越大</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这不是暂时的工程短缺，而是长期趋势：在近几代加速器上，算术能力的增长速度比内存带宽快好几倍。每颗新芯片能做多得多的数学，却只能取稍多一点的数来做。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">于是这种失衡每一代都在恶化，而不是变好。减少数据搬运的技巧随时间越来越值钱，裸算术能力则越来越不能说明一颗芯片实际跑起来的表现。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么GPU有几千个简单单元，而非几个聪明单元</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">CPU围绕「让一条指令序列尽快跑完」来设计：大缓存让数据就在附近、预测硬件猜测下一步、重排逻辑在等待时继续工作：这些都在服务单一工作流，且都很吃芯片面积。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GPU押相反的赌注，因为它服务的工作负载有个特别的性质：图形里每个像素跑同一个短程序、处理不同数据；神经网络里张量的每个元素享同样的待遇。当程序在数百万个数据元素间完全相同，就不再需要每元素一个控制器：一个控制器就能驱动几千个算术单元，让它们在同一指令下处理不同值。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：GPU删掉控制机器、用省下的面积堆算术单元：数万线程vs数百线程。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这就是全部诀窍：GPU删掉CPU的大部分控制机器，把省下的面积花在算术单元上。原始数量对比很悬殊：高端服务器CPU同一时刻推进几百个线程，数据中心GPU在相近功耗下每个时钟周期推进数万线程。代价是GPU线程是种弱得多的东西：它不能走自己的路、单看不快，它只是极宽极简单机器里的一条车道。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">warp与分支发散</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">有个值得学的词：硬件不是一次调度一个线程，而是按固定32个一组、锁步移动并共享同一条指令，这一组32个就叫warp：芯片实际工作用的就是它。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因为一个warp共享同一条指令，当它遇到分支发散（部分线程走一个分支）时，warp要串行跑两条分支，耗时等于两者之和。这只在分歧发生在warp内部时才花钱；不同warp之间分歧毫无代价。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">GPU不缩短等待，而让等待隐形</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">取数据慢，CPU和GPU都面对。CPU用缓存和预测技术试图让等待不发生；GPU接受等待、并安排总有别的事可做。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">机制是这样的：芯片上挂载的工作远比它能并行的多（上万个线程，对应几十个物理执行单元）。当正在跑的warp向主存取数时，它停顿；调度器立刻切到另一个早已就绪的warp。算术单元保持忙碌，每个单独的warp大部分时间都花在等待上，但整个芯片看起来永远满载。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：warp切换让等待隐形：算术单元靠海量并行保持忙碌。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">warp间切换几乎零成本：这解释了为什么GPU带着海量快速片上存储。也正因如此，监视器里的利用率数字会误导：它能显示100%，但那只是「总有warp在跑」的意思。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">实际含义：GPU需要一大摞独立工作</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如果只带走一条可操作的经验，就是这句：GPU需要大量独立的并行工作才能跑好。给它一个小任务，它会闲置；给它几百个独立任务，它会全力前进。这不是怪癖，而是设计在按预期工作。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">内存是一架梯子，每级都比上一级慢得多</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">数据并不简单地「活在内存里」，它住在几个不同距离的层级之一。值得认识四级：每线程存储（最近最快，每个线程抓一把寄存器）；片上暂存（每个SM自带的一小池极快内存）；共享缓存（整个芯片共享的几十MB）；主存（几十GB、存放模型权重的大池）。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：内存阶梯：每线程存储、片上暂存、共享缓存、主存，逐级更大更慢。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">越往下走，池子越大、速度越慢。两端差距可观：一个线程读寄存器内的值与读主存内的值，代价差两个数量级以上。你的权重住在最底层：最大也最慢的那级，这决定了推理的表现。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">两种代价，硬件只处理其中一种</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">取内存要付出两种独立的代价，并分开看待。第一种是等待：你请求数据、过一会儿才到。硬件用上面那套机制替你处理：总有些别的warp可切，等待被隐藏。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第二种是通道宽度：单位时间只能移动这么多字节。这个没有任何机制能隐藏，它是硬天花板：也是本章之后所有计算都围绕带宽展开的原因。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">这些层级实际坐落在哪</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GPU不是一个巨大的算术池，而是分成大量流式多处理器（SM）。每个SM自带前两级的副本：自己的寄存器文件（每线程存储）和自己的暂存器（共享内存）。工作以线程块为单位到达：一批切给某个SM的线程。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">你从不亲自选这种划分，你只选任务块的大小，SM再决定细节。这就是为什么批大小几乎总是32的倍数：要250个线程会被进位到256。最大线程块是1024，折合32个warp。也是共享内存为什么有用、名字从哪来的原因：同一SM里的线程共享它。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">所有SM之下是L2缓存，每个SM都能到达；再往下是主存。这张图解释了你会反复遇到的取舍：任何想让数据更近的努力都在用芯片面积换取带宽。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：SM架构与内存层级实际分布：每SM自带寄存器与共享内存，下面共享L2与主存。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">work per byte：决定一切的数字</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">现在可以把中央思想说精确了。对任一个在GPU上跑的操作，数两件事：要完成多少次算术运算，以及要从内存读多少字节。两数相除，就是这个操作的work per byte：正式名称是算术强度。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">值得对比两端：数组每元素乘二，每个值只用一次，算术强度极低；两个1024×1024矩阵相乘则相反，每个元素被读入后参与上千次运算：单次取数能回报上千次计算，这是千倍的差距。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">盈亏平衡比：每颗芯片的门槛</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每颗芯片都有一个阈值，来自一次除法：峰值算术速率 ÷ 峰值内存带宽。以H100 SXM5（大多数人租的主力）为例：989万亿次每秒 ÷ 3.35 TB/s ≈ 300。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：盈亏平衡比：H100约295，低于则内存受限、高于则算力受限（roofline模型）。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这颗数字在profiling之前就能告诉你很多：操作低于 ~300受内存限制，加算力毫无用处；高于 ~300受算力限制，加带宽没用。阈值属于硬件，你的工作负载落在哪边由你决定。低于300时，你是在带宽受限区；高于300时在算力受限区。这就是著名的roofline模型（屋顶线模型）。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么生成token是最坏情况</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把这套框架套到语言模型推理上，开篇的谜团迎刃而解。生成文本是一个token一个token来的，而每个新token都要过一遍所有权重。先看单个权重：它夹在两个数字之间，被一个输入乘一下、再加一次，就两个操作：两个FLOP。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">放大看：700亿参数的模型每次前向约1400亿次操作。数字节：16位精度每个权重2字节，要读约140 GB。合起来：1400亿次操作，由140 GB的流量供养：work per byte约等于1。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：生成一个token的work per byte≈1，远低于约300的盈亏平衡：彻底内存受限。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">盈亏平衡阈值是约300，而单请求生成把工作负载压在约1。这是为什么算术单元闲置：不是坏了，也不是代码或驱动的问题，更大GPU也没用：你看到的正是这块硬件最重要的事实。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">这个数字实际预测什么</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一旦接受生成受内存限制，你的token速率就能直接用带宽算出来：700亿参数、16位精度占约140 GB，H100带宽3.35 TB/s，所以140 GB ÷ 3.35 TB/s ≈ 42毫秒：这是产出一个token所需时间，因为每个token都要搬一遍全部权重。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig09.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：带宽直接给出token率：140GB ÷ 3.35TB/s ≈ 42ms/token ≈ 24 tok/s的硬下限。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">转成速率：每token 42毫秒，一秒约24个token。再多的软件巧思也救不了：下限由「每token必须读多少字节 ÷ 带宽」决定。这就是那块芯片上你可能得到的token吞吐。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Prefill正好相反</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">还有第二个阶段，落在分界线的另一侧。当你发送prompt，模型一次性处理所有token（并行），而不是一个接一个，work per byte立刻攀升：prefill通常是算力受限，而生成是内存受限。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">同一个模型的两个阶段瓶颈相反。明白这一点，很多关于「为什么有时候慢、有时候快」的困惑就解开了。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">每个你听过的优化，移动的都是同一个比值</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">框架在这是最值钱的：一旦你把性能看作work per byte，就只有两件可改的事：增加每次取数完成的工作，或减少要取出的字节。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig10.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：批处理让weight复用、抬升work per byte：每个优化都改变同一个比值。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">批处理（batching）增加工作：同时处理多个请求，每个权重只读一次。十个并发请求让work per byte提高十倍、不额外背带宽。在16位精度下你需要一批足够的请求把比值抬过盈亏平衡线。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">算子融合（fusion）减少字节：三个逐元素操作分开跑，每一步都从主存读；融合成一个，中间值从不离开芯片：编译器做融合能带来巨大加速。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">让数据就近（共享内存）也减少字节：把一块数据载入共享内存，做掉所有需要的计算。FlashAttention是最著名的例子：普通注意力要写出大的中间矩阵又读回来；共享内存版把这块流量压掉。算术基本不变，内存流量崩塌。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">量化（quantization）直接减字节：8位存权重，每个权重尺寸减半，每token要读的字节减半，work per byte翻倍。代价是精度下降、丢失信息。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">顺序读取与你现在的处境</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">访问模式有个细节值得知道：内存不是一次搬一个值，而是抓固定大小的块。当线程读分散地址时,每个线程拉进一整块、却只用其中一小部分，浪费带宽。实际后果是内存布局是一项性能决策：保持顺序读取能大幅提升有效带宽。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">另外，发送工作到GPU有固定开销：CPU要先准备再把它移过去。如果模型跑很多小操作，可能CPU忙而GPU闲：这也是overhead-bound（开销受限）的一种。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">要判断自己处于哪种情况，跑的时候测两件事：实际每秒读多少字节、实际每秒做多少运算。三种结果盖住几乎所有场景：带宽逼近上限、算术远低于 → 内存受限，加带宽或减字节；算术逼近上限、带宽远低于 → 算力受限，加算力或减运算；两者都远低于上限 → 开销受限或你的任务太小、调度器喂不饱它。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">硬件变了，但形状不变</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">规格跑得很快，但值得辨别其中哪些会变、哪些不变。变的是数字：内存容量、带宽、算术速率。不变的是形状：算术仍然比取数便宜得多，差距仍在拉大。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如果可以押方向，就押在减少数据搬运的技巧上：这是长赢的赌注。框架的价值只增不减。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+这篇文章从一个句子建立起整块GPU直觉：算数便宜、取数贵。由此推出了为什么GPU有几千个简单单元、为什么它能靠warp切换隐藏等待、为什么内存是四级阶梯、以及那个决定一切的数字：work per byte。<br  /><br  />把框架套到语言模型上，就解释了开篇谜团：生成是内存受限（约24 tok/s是硬下限），prefill是算力受限；而每个知名优化（batching/fusion/量化/共享内存）都只是这一个比值的一次重排。看懂这一条，绝大多数性能建议都不再是招式清单，而是必然。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://x.com/akshay_pachaar/status/2087928032904523980</span></p>
+</section>
