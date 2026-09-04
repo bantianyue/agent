@@ -45,17 +45,17 @@ DATA = {
     "推测解码训练想扩规模可以加 DP worker，也可以加大 batch。大 batch 行之有效，因为训练主要被 EAGLE TTT 那部分 HBM/memory 带宽喂饱。但直接加大 batch 并不会线性加速——浪费来自 padding：一个 batch 里、以及跨 worker 之间，不同长度的序列必须 pad 到同一形状，于是大量 token 只是在“陪跑”，不给训练贡献梯度。",
     "解法很朴素但高效：先把序列**按长度排好**，把长度接近的塞进同一个 batch（图中黄色 = 仍浪费的后补填充，白 = 可跳过的部分）。",
     "按长度分桶后，剩下的黄块更少了，训练每一步做的“有用功”因此变多——这就是那一路 2.5× 里的主要贡献之一。",
-  ], "fig_after":{"0":[{"src":"fig08.png","caption":"初始训练序列：黄块表示被浪费的 padding"},{"src":"fig09.png","caption":"按长度排序后的序列：黄=仍剩的填充，白=可跳过的 padding"}]}},
+  ], "fig_after":{"0":[{"src":"fig08.png","caption":"初始训练序列：黄块表示被浪费的 padding"}],"1":[{"src":"fig09.png","caption":"按长度排序后的序列：黄=仍剩的填充，白=可跳过的 padding"}],"2":[{"src":"fig10.png","caption":"按长度分桶后形成的训练 batch：剩余潜在填充已显著减少"}]}},
   {"type":"h2","title":"去掉主线程同步 & 换 fused 优化器","paras":[
     "把 .item() 从前端计数里挪走，是最容易见效的一处：主线程调用 .item() 会强制 CPU 等还没落地的 GPU 算子。训练指标这些值最终要到 CPU，但不该阻塞当前 step——所以把指标上报整体**延后一拍**。",
     "组合拳还包括：切到 **fused Adam**，用 `torch._foreach_` 批量替代 Python 循环。三者一起让 CPU 不再无缘无故截停 GPU。Torch Profiler 的 trace 在去除同步前——后也照了下来，供对照“等待的空洞”消失了多少。",
-  ], "fig_after":{"0":[{"src":"fig11.png","caption":"去同步前 Torch Profiler trace：主线程等待明显"},{"src":"fig12.png","caption":"去同步后 Torch Profiler trace：等待呈明显减少"}]}},
+  ], "fig_after":{"0":[{"src":"fig11.png","caption":"去除主线程同步前：Torch Profiler trace，等待明显"}],"1":[{"src":"fig12.png","caption":"去除主线程同步后：Torch Profiler trace 中等待明显减少"}]}},
   {"type":"h2","title":"4.5× 更快的预处理：文件描述符是这样被耗尽的","paras":[
     "训练前 TorchSpec 要把 raw dialog 转成 token id，结果会缓存；但对每份新数据集，预处理仍卡在 critical path。量级到百万条对话时，两个 multiprocessing 行为把阶段拖贵了：",
     "**① 传张量回父进程**——进程间传 torch 张量走 shared memory，而**每个张量要耗一个文件描述符**。少量大张量没问题，但一百万个“小结果”会把父进程的 fd 榨干。改成返回 **NumPy 数组的 bytes**、再由 `torch.from_numpy` 装配，结果收集从 498 秒→23 秒。",
     "**② 建池时机**——先建 worker pool 再加载数据集，让 worker 继承的空列表在队列里收固定分到的输入即可，避免重复搬运整份 dataset：百万行 tokenize 从 1436 秒→319 秒。两项合计即 4.5×。",
-    "收尾还有两条工程钩子：**Offline training**——把目标模型在离线先把 hidden states 落盘，draft 再对着文件训练，二者不再抢同一批 GPU、固定数据集反复实验也划算；以及 **Nightly CI + Docker**——把 vLLM patch 打包进 docker 镜像（starts从镜像起，免去每个人本地再打同样的 patch 与重做一致性检查），每日 CI 校验 TorchSpec 工作流收敛行为正常。最终在 4×GB200、bs=2 上训练吞吐合计提升约 2.5×（图 13 为训练容量包络）。",
-  ], "fig_after":{"2":[{"src":"fig10.png","caption":"按长度分桶后的训练 batch（剩余潜在填充已显著减少）"}],"3":[{"src":"fig13.png","caption":"4×GB200、bs=2 下最终训练提速：合计约 2.5×"}]}},
+    "收尾还有两条工程钩子：**Offline training**——把目标模型在离线先把 hidden states 落盘，draft 再对着文件训练，二者不再抢同一批 GPU、固定数据集反复实验也划算；以及 **Nightly CI + Docker**——把 vLLM patch 打包进 docker 镜像（starts从镜像起，免去每个人本地再打同样的 patch 与重做一致性检查），每日 CI 校验 TorchSpec 工作流收敛行为正常。最终在 4×GB200、bs=2 上训练吞吐合计提升约 2.5×。",
+  ], "fig_after":{"3":[{"src":"fig13.png","caption":"4×GB200、bs=2 下最终训练提速：合计约 2.5×"}]}},
  ],
  "conclusion": [
    "这篇是「怎么把 d·raft 训练本身做成工程产品」的示范。若只拿一条结论走：**接收率不是全部——在稀疏 MoE + 混合注意力的大模型上，“多验证几点”的边际成本会被结构放大，真正的胜负手是引擎级优化（pipeline+异步、anchored 采样、去同步、预分区）。**",

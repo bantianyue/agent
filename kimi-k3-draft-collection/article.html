@@ -1,6 +1,6 @@
 <section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
 <style>
-/* 传送门统一样式（add-portal.py 动态注入时引用此 class） */
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
 .portal-title { font-size:12px; color:#888; }
 .portal-links { font-size:12px; color:#888; }
 .portal-links a { color:#888; text-decoration:none; }
@@ -10,30 +10,70 @@
 <strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">要点关键词1</strong>：核心内容。替换本占位。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">要点关键词2</strong>：核心内容。替换本占位。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">要点关键词3</strong>：核心内容。替换本占位。</div>
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">发布了什么</strong>：TorchSpec新增支持Kimi K3的训练三大draft：EAGLE3-MLA、DFlash2、DSpark（均MLA骨干）；40×GB200、disaggregated训练。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">性能结论</strong>：DFlash2 @低并发优于EAGLE3（高并发拉平）：单块多draft token + 更长accept前缀斩掉串行目标步；但K3稀疏MoE + KDA状态回退使大后段验证更贵，accept长未必划算。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">训练提速</strong>：4×GB200、bs2下合计提速2.5×：pipeline-parallel→Mooncake异步、anchored EAGLE锯掉attention/HBM、length排序减padding、去 .item() 同步+fused Adam、预处理4.5×。</div>
 </div>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">给大模型配「draft模型」（推测解码的小草稿模型）是提升推理吞吐性价比的做法，但把draft训练本身做到又快又稳，门槛不低。Lightning（Lightseek）宣告发布Kimi K3的draft系列：kimi-k3-eagle3-mla、kimi-k3-dflash2、kimi-k3-dspark：全部用TorchSpec在40块GB200 + disaggregated训练模式下训出，并把2.5× 训练吞吐、4.5× 预处理提速这些工程成果拆开讲。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这是篇「release + benchmarking + systems细节」密度相当高的技术文：为什么低并发下DFlash2胜过EAGLE3、K3的稀疏MoE与KDA/gated-MLA会怎样抬高额外验证token的成本、anchored-EAGLE如何不再对每一个token都做TTT rollout……下面把关键方法和真实数字一条条还原给你。</p>
 
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">正文第一章标题</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第一段正文文字。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第二段正文文字。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">三只draft，一份共享的动机</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">draft（草稿）模型核心在「一次猜N个token，再让大模型瓶颈层一次性验证」。torch生态里TorchSpec已是把生成hidden states→丢给draft训练器做探索的框架层实现。这次的三个型号都属于同一套base：都走<strong>Multi-Latent Attention(MLA)</strong> 骨干：推理时省KV cache、也好接进PD disaggregation与统一KV布局；跑在40块GB200的异步/disaggregated训练里，配置recipe随文公开。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">个从DSpark的容量说明值得读一遍的注脚：受资源约束，DSpark的checkpoint比DFlash2训的epoch更少：下文凡涉DSpark的对比都要带上这个前提。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">评测口径：接受长度与端到端吞吐</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">先看「接受长度」。作者跨10个常见benchmark（math / code / retrieval-QA / 中文 / 对话）比较三只draft，采样统一temperature 1.0、top_p 0.95、max reasoning effort；档位不同：EAGLE3以draft/verify depth 3/4跑，DFlash2与DSpark用7/8。接受率越高，代表大模型越常收下草稿、越省再生成本。（源文此处的acceptance-length对比图未随文发布，结论以文字为准。）</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">但accept rate只是代理，真实收益要看和引擎接起来的端到端吞吐。他们用<strong>SPEED-Bench</strong>（混合low/mid/high熵负载、同上采样默认）当稳定引擎TPS，作者认为它贴近生产流量。结论一句话：<strong>低并发时DFlash2好于EAGLE3，并发越高差距越被磨平。</strong></p>
 <figure style="margin: 1.5em auto;text-align: center;">
-<img style="display: block;width: 100%;margin: 0 auto;" src="fig1.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图片说明文字</figcaption></figure>
-<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">子标题示例</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">子标题下的段落。</p>
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">含表格的章节</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下面是一张示例表格。</p>
-<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
-<thead style="font-weight: bold;color: #3f3f3f;">
-<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">列1</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">列2</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">列3</th></tr>
-</thead>
-<tbody>
-<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">A</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">B</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">C</td></tr>
-<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">D</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong style="color:#0F4C81;">E</strong></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">F</td></tr>
-</tbody>
-</table>
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">Kimi K3 SPEED-Bench吞吐扫描：DFlash2在低并发占优、高并发与EAGLE3靠拢</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么低并发DFlash2赢、高并发没那么赢</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">DFlash2的补法是一次出一条更长的draft block：单块里直接多吐几个候选token，于是更长的accepted前缀会一次砍掉一串串行的目标步（target steps）：batch小的时候这个收益很实在。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">但跨过batch≈32后，接受长度变长就不再能补偿「为验证者而多花的开销」了。原因在生产采样这一层：temperature 1.0会让目标分布熵偏高，靠后的位置越来越难被accept，于是多出来的那一段验证多半是白做的尾巴；EAGLE3更短的3/4窗口恰好少浪费这截尾。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>而K3更让「多验证几步」变贵的两条体质必须单独拎出来看：它们是这篇里最重要的insight：<strong>① K3是稀疏MoE</strong>：多一「验证token」，expert的FLOPs与dispatch是按 *验证宽度*(不是幸存token数) 同步放大；<strong>② K3是KDA与gated-MLA的3:1混合</strong>：KDA(延迟的循环/复核状态) 必须随每个推测token advance-rewind，draft宽度越宽replay的图越多；相比之下像K2.6这种纯MLA模型能在额外query token上复用压缩KV，多出的验证位从attention计算里捡回更多收益。</strong></p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Draft骨干：一份MLA + 一点SWA</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">三只全部MLA。作者在benchmark里发现DSpark的长上下文场景脑袋常常卡在attention，于是让前4层换<strong>Sliding Window Attention（SWA）</strong>。定稿骨架：<strong>DFlash2 = 4层SWA + 1层full-MLA</strong>；<strong>DSpark = 5层full-MLA</strong>（同为MLA/半窗改动，推理时KV/Kernel代价不同）。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">draft MLA / kernel耗时对比：SWA层数配比影响逐token开销</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">训练提速第一斧：pipeline parallel + Mooncake异步逃生</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Kimi K3塞不进8块GB200，得先用16块把权重shard开。他们选pipeline parallel而非其它sharding：因为把all-reduce压成只在pp边界传hidden states的p2p，能把通信降下来给吞吐让路：TorchSpec对vLLM推理引擎加了通用pipeline parallel。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为了不白等，每一级pp rank攒够hidden states就<strong>异步写进Mooncake</strong>，让计算别撞上I/O的bubble：prefill越深、生产队列越多，吞吐延展得越顺。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">pipeline-parallel prefill：吞吐随并发producer队列上升，Mooncake把推理与训练解耦</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">把EAGLE-3换成「锚点式」：别再对每个token做TTT</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">传统EAGLE-3训练是在<strong>每一个token</strong>上做TTT(起头-再rollout) rollout：序列一长，全部token都要额外预测与占内存，训练贵。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">KV-cache mask可视化：EAGLE的TTT（逐token）训练</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">DFlash给出另一条路：<strong>随机抽一些“anchor tokens”，从每个anchor去预测N个块的续写</strong>，实现方式是给每次块预测造一条双向attention mask；anchor数量不随序列长度膨胀，长序列下它们“等权贡献”而不是“主导整趟run”，训练更稳。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">KV-cache mask可视化：DFlash的anchor + 块式双向mask训练</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把两者一拍：EAGLE训练不再对每个token都rollout，而是<strong>抽取随机anchor</strong>。关键点在于：<strong>没被抽中的token反正会通过KV cache一路贡献给attention</strong>，所以不需要全覆盖也能拿到很接近的结果。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">由此实现了一个等式红利：不同输入长度的样本被<strong>等概率采样</strong>，同样的drafter尺寸下能吸进更多数据，同时attention侧的昂贵计算与HBM占用被大幅锯掉（对MLA版drafter，attention加速见原文Table 1）。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">KV-cache mask可视化：anchored EAGLE：随机anchor、未被抽中token经KV兜底</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">训练提速：先把padding赶出去（按长度分桶）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">推测解码训练想扩规模可以加DP worker，也可以加大batch。大batch行之有效，因为训练主要被EAGLE TTT那部分HBM/memory带宽喂饱。但直接加大batch并不会线性加速：浪费来自padding：一个batch里、以及跨worker之间，不同长度的序列必须pad到同一形状，于是大量token只是在“陪跑”，不给训练贡献梯度。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">初始训练序列：黄块表示被浪费的padding</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">解法很朴素但高效：先把序列<strong>按长度排好</strong>，把长度接近的塞进同一个batch（图中黄色 = 仍浪费的后补填充，白 = 可跳过的部分）。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig09.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">按长度排序后的序列：黄=仍剩的填充，白=可跳过的padding</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">按长度分桶后，剩下的黄块更少了，训练每一步做的“有用功”因此变多：这就是那一路2.5× 里的主要贡献之一。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig10.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">按长度分桶后形成的训练batch：剩余潜在填充已显著减少</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">去掉主线程同步 & 换fused优化器</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把 .item() 从前端计数里挪走，是最容易见效的一处：主线程调用 .item() 会强制CPU等还没落地的GPU算子。训练指标这些值最终要到CPU，但不该阻塞当前step：所以把指标上报整体<strong>延后一拍</strong>。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig11.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">去除主线程同步前：Torch Profiler trace，等待明显</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">组合拳还包括：切到<strong>fused Adam</strong>，用 `torch._foreach_` 批量替代Python循环。三者一起让CPU不再无缘无故截停GPU。Torch Profiler的trace在去除同步前：后也照了下来，供对照“等待的空洞”消失了多少。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig12.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">去除主线程同步后：Torch Profiler trace中等待明显减少</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">4.5× 更快的预处理：文件描述符是这样被耗尽的</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">训练前TorchSpec要把raw dialog转成token id，结果会缓存；但对每份新数据集，预处理仍卡在critical path。量级到百万条对话时，两个multiprocessing行为把阶段拖贵了：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>① 传张量回父进程</strong>：进程间传torch张量走shared memory，而<strong>每个张量要耗一个文件描述符</strong>。少量大张量没问题，但一百万个“小结果”会把父进程的fd榨干。改成返回<strong>NumPy数组的bytes</strong>、再由 `torch.from_numpy` 装配，结果收集从498秒→23秒。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>② 建池时机</strong>：先建worker pool再加载数据集，让worker继承的空列表在队列里收固定分到的输入即可，避免重复搬运整份dataset：百万行tokenize从1436秒→319秒。两项合计即4.5×。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">收尾还有两条工程钩子：<strong>Offline training</strong>：把目标模型在离线先把hidden states落盘，draft再对着文件训练，二者不再抢同一批GPU、固定数据集反复实验也划算；以及<strong>Nightly CI + Docker</strong>：把vLLM patch打包进docker镜像（starts从镜像起，免去每个人本地再打同样的patch与重做一致性检查），每日CI校验TorchSpec工作流收敛行为正常。最终在4×GB200、bs=2上训练吞吐合计提升约2.5×。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig13.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">4×GB200、bs=2下最终训练提速：合计约2.5×</figcaption></figure>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
@@ -42,12 +82,35 @@
 <strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-结语分析内容1。<br  /><br  />结语分析内容2。</div>
+这篇是「怎么把d·raft训练本身做成工程产品」的示范。若只拿一条结论走：<strong>接收率不是全部：在稀疏MoE + 混合注意力的大模型上，“多验证几点”的边际成本会被结构放大，真正的胜负手是引擎级优化（pipeline+异步、anchored采样、去同步、预分区）。</strong><br  /><br  />给你的可复用启发有三点：<strong>① “draft宽度vs目标验证成本”要在部署的并发档位上测</strong>（低并发DFlash式长块占优、高并发差点被摊平，别只看accept率）；<strong>② 能经KV兜底的训练可省掉“全覆盖”</strong>：锚点采样证明了“不预测的token仍参与损失”，这是不少半监督/长序列场景可借鉴的节约范式；<strong>③ 1e6小结果把父进程fd打爆这类“小现象”是真实超参</strong>，预处理以bytes-numpy往返而非tensor跨进程，往往是无痛的20×。TorchSpec这套recipes/镜像/nightly CI让复现成本显著下降，做speculative-decoding系统的人建议对照着自己栈里的draft推理侧补一遍。</div>
 </div>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+</div>
+</div>
+
+
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://arxiv.org/html/XXXX.XXXXX</span></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://lightseek.org/blog/kimi-k3-draft-collection.html</span></p>
 </section>
