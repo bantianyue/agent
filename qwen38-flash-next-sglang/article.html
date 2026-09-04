@@ -1,0 +1,119 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">架构升级</strong>：GDN+QSA混合注意力（Gated DeltaNet压缩历史；仅12/48层存增长的注意力K/V，其他36层用固定大小状态）、Gated Residual（残差流加宽到4分支 + 控制信息流）、N-gram Embedding（按局部上下文查找）。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心优化</strong>：① IndexShare MTP：draft步骤复用QSA选择、indexer调用从N降到1；② HyperConnection内核优化：Mix（M≤16 split-K，12.36→6.03µs 2.05×）、Combine（M≤32 split，4.17→2.13µs 1.96×）；③ PLE稀疏host offload（每个token只抓16行）。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">效果</strong>：PLE offload：H200 TP4下目标权重 -23.46GiB/GPU、KV容量 +78.54%、吞吐几乎不变（-0.07% 几何均值）。NVFP4 checkpoint（RadixArk/Qwen3.8-Flash-Next-NVFP4）、GR经FlashInfer由NVIDIA共同构建、MTP index-reuse削减spec decode开销。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">今天，Qwen团队开源了Qwen3.8-Flash-Next：一个多模态MoE模型，也是Qwen4架构的早期预览。它对Qwen4的角色，相当于Qwen3-Next之于Qwen3.5。Gated DeltaNet + Gated Attention混合设计从Qwen3.5一直用到Qwen3.8。SGLang与Qwen、NVIDIA、AMD团队合作，为模型提供day-0支持。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Qwen3.8-Flash-Next在多个方面升级了架构：GDN+QSA混合注意力（Gated DeltaNet高效压缩历史）、Gated Residual把残差流加宽到4分支、N-gram Embedding按局部上下文查找。本文按原文 ≥80% 编译LMSYS/SGLang这篇技术博客。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">引言与亮点</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">今天，Qwen团队开源了Qwen3.8-Flash-Next：一个多模态MoE模型，也是Qwen4架构的早期预览。它对Qwen4的角色，相当于Qwen3-Next之于Qwen3.5。Gated DeltaNet + Gated Attention混合设计从Qwen3.5一直用到Qwen3.8。与Qwen、NVIDIA、AMD团队合作，SGLang为模型提供day-0支持。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1：Qwen3.8-Flash-Next架构总览（Qwen4早期预览）。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Qwen3.8-Flash-Next在几个方面升级了架构：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>GDN + QSA混合注意力（GDN + QSA hybrid attention）</strong>：Gated DeltaNet（GDN）高效压缩历史，而Qwen Sparse Attention（QSA）用轻量indexer以微块粒度选择重要上下文，保持长序列注意力成本低。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Gated Residual（GR）</strong>：把残差流加宽到4分支，并用动态门控（dynamic gate）控制读写、强化跨层信息流。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>N-gram Embedding</strong>：按局部上下文做查找，为常见短语和局部模式提供额外表示，以极少的额外计算扩展现成模型容量。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>亮点（Highlights）</strong>：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>混合架构</strong>：125B参数主模型，外加额外的51B N-gram Embedding，每token激活6B参数。共48层：36个GDN线性注意力层 + 12个QSA稀疏注意力层。MoE层用512个expert、top-10路由。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>我们量化并发布的NVFP4 checkpoint</strong>：RadixArk/Qwen3.8-Flash-Next-NVFP4，day-0发布。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>N-Gram Embedding</strong>：把N-gram embedding offload到host内存大幅降低GPU内存占用，异步预取与模型计算重叠、几乎零额外成本。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Gated Residual，由NVIDIA构建、经FlashInfer发布</strong>：通过低延迟单GEMM路径提供高性能Mix/Combine HyperConnection算子（2.05× 内核级加速）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>GDN+QSA</strong>：为GDN+QSA混合架构做KV cache内存管理，兼容Radix Cache。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Speculative Decoding</strong>：为MTP draft模型做index-reuse特性，长上下文下削减draft模型的indexer时间。在B200上TP4时，NVFP4 checkpoint在batch size 1 + MTP下解码540 tok/s，accept length 3.3（含bonus token）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">启动命令和各工作负载配置指导见SGLang Cookbook。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">模型架构</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>GDN+QSA混合架构（GDN+QSA Hybrid architecture）</strong>：遵循Qwen3.5引入的架构设计，Qwen3.8-Flash-Next采用GDN + Attention混合架构：每4层里，3层GDN把历史压缩进固定大小状态，剩下那层对完整上下文做精确检索。对全局Attention层，Qwen3.8-Flash-Next进一步引入Qwen稀疏注意力（QSA）：因为子列表长度增长时，计算和KV cache内存访问成本都大幅上升。稀疏注意力只关注重要上下文来降低长序列计算。QSA更进一步：把序列聚成微块、在块级估重要性、再选最相关区域，同时降低索引开销和注意力成本。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Gated Residual（GR）</strong>：结合两个思想：① 沿Hyper-Connection把残差流加宽成多条分支；② 把GatedNorm风格的元素级动态门控带进残差读。原始单一残差流被扩成4条并行分支，让模型能基于当前内容、动态决定从每条分支读多少信息、写回多少。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>N-gram Embedding</strong>：用「当前token + 若干前序token」形成的局部上下文做查找，为常见短语和局部模式提供额外表示，同时几乎不加每token计算开销。N-gram Embedding可以完全驻留host内存以省GPU内存：查找位置提前算好、异步预取，因此永不永久占用GPU内存。最终模型在网络开头附近只用单个N-gram Embedding层，以相对低成本加入大规模「局部模式记忆」。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>IndexShare MTP</strong>：draft-extend pass对target刚接受token算出的QSA top-k选择，在整个MTP iteration内被持有，因此每个draft decode步都跳过indexer、改读那份冻结选择加上自那以来draft的位置。长上下文下这大幅加速MTP draft步。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Qwen稀疏注意力：粗检索、精准关注</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Qwen3.8-Flash-Next用压缩比4（c4）的compressed QSA。每个QSA层有两条路径：轻量indexer决定「往哪看」，稀疏GQA从原始注意力K/V cache读入选中的条目。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2：Qwen稀疏注意力（QSA）数据流：indexer粗检索 + 稀疏GQA精准关注。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">indexer投影四个128维查询头和一个共享key头。每四个原始index key在FP32里取平均、归一化、用首token的MRoPE位置旋转，合成一个压缩key。一个query对可见压缩块打分。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>QSA保留最佳512块、把它们扩回2048个逻辑token位置，并追加当前不完整块里的0到3个token。最终稀疏注意力最多看到2051个位置。重要的是：压缩key只是索引：最终softmax和值聚合用原始的、未压缩K/V。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>这意味着QSA用少量cache容量换取大幅更低的long-context计算和内存流量。indexer扫描约L/4个小key，然后稀疏注意力读约2K个完整K/V条目、而非全部L个。模型级KV节省来自混合布局（48层里只有12层存增长的注意力K/V，其余36层GDN层用固定大小状态），而非在QSA层内丢弃K/V。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SGLang只把indexer挂到全注意力层并复用它们的MRoPE实现。原始K/V留在正常的paged pool。QSA每四个token加一个BF16压缩index key；不完整块的原始key住在每请求四槽ring buffer。这避免为完整上下文保留原始index key，把QSA的index-cache开销降80%。页对齐的full_slot/4寻址让压缩cache跟随Radix Cache所有权、无需独立生命周期。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">prefill用自定义GPU核算index分数、快速top-k选块、Triton扩展索引并跑稀疏GQA。decode用同打分器的paged版本、压缩选中原始K/V、派发到Blackwell上的TRTLLM-Gen或否则packed FlashAttention。indexer可在第二条CUDA流上叠加主Q/K/V投影，元数据路径CUDA-graph兼容。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">IndexShare MTP：跨draft步复用QSA选择</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">QSA层跑indexer决定注意哪些token，再对正好那些token做稀疏注意力。第二阶段有固定token预算；第一阶段对全部 ⌈L/4⌉ 压缩块打分，所以超过几千token后，<strong>设定层成本的是indexer而非它喂的注意力</strong>。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Speculative decoding把它放大：--speculative-num-steps N时，一个MTP iteration花N次indexer调用（N-1个draft decode前向 + 1个draft-extend）来把draft最多推进N个位置。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">所以draft decode步骤干脆停止跑indexer。每个MTP iteration以对target刚接受token的draft-extend开场，而那趟本来就会跑indexer；每请求最后一个被接受行在那里被捕获、供整个draft loop复用，查找时再补N+1个自捕获以来已draft的位置的额外列：所以draft仍看得到它自己进行中的token。选择是一列逻辑token索引、请求只增不减，绝不会越界；又因query最多移动N/ L个位置，复用的排序基本就是indexer会重算的那个，接受长度不变。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">结果：每个MTP iteration的draft indexer工作量从N次调用降到1次。只用来喂它的那些小元数据核：包括压缩decode视图、pending-ring和group-ring布局：也一起从draft decode步骤里移除。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">HyperConnection内核优化</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">HyperConnection（HC）维护四条并行残差流，而Attention和MoE跑在单一隐藏状态上。因此每个块用Mix从四条流读取、用Combine把输出写回。这里M是一次调用处理的token数：decode和spec验证时小，prefill可到数千。按M派发到不同内核。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Mix</strong>：用低秩投影生成逐元素门控、把四条残差流减成单一隐藏状态。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">M≤16时用FlashInfer PR #4266的低延迟split-K CuGEMM。split-K把K维分区、让多个CTA并行处理同一输出区，弥补有限的M维并行度。SiLU、Sigmoid、gating和最终归约熔进两个GEMM epilogue，避免中间写global memory。up-projection权重离线重排，使每输出的四个门值可在tile内局部归约。更大M用cuBLAS（这些shape下更高效）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">NVIDIA B300、M=4下，熔合路径把Mix延迟从12.36降到6.03µs：2.05× 内核级加速。对先前Triton路径的端到端spec-decode基准，吞吐提升7.6%。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Combine</strong>：算四个注入系数并给四条流做残差更新。大M时一个熔合核单趟处理每个token行。小M时这个映射暴露的CTA太少，所以M≤32路径把每行沿隐藏维拆分，两核实现提供足够并行度、同时保留参考FP32累加顺序和逐位一致的输出。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">M=4时split路径把Combine延迟从4.17降到2.13µs：1.96× 内核级加速。对原先每行一CTA内核的独立端到端基准，吞吐提升5.49%。大M时熔合核比cuBLAS基线快达2.54×，达到6144 GB/s有效带宽。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Shape-aware派发让HC在低延迟decode和大规模prefill都用合适执行路径。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">逐层嵌入（PLE）架构</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">该模型把PLE：一个hash-addressed的可学习N-gram embedding内存：放在第二个decoder块（配置层ID 2，对应零基索引1）。它的512亿embedding参数（约95.4 GiB in BF16）是固定模型权重，而非KV cache或可变注意力内存。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：PLE稀疏pinned-host offload：每token只抓16行。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对token x_t，八个2-gram hash头用 (x_{t-1}, x_t)，八个3-gram hash头用 (x_{t-2}, x_{t-1}, x_t)，产出16个embedding行ID。每行贡献160个值，拼接成shape [2560] 的E_t。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">PLE在第二个decoder块：稀疏N-gram检索在HC Mix之前被门控进四条HC分支。SGLang把词表并行表分片移进pinned host内存、每token只gather那16个选中行。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第四行把门控值加上其短卷积（short-conv）输出来构成PLE delta；第五行把该delta注入HC状态。PLE保持两个请求局部状态：用于hash的两个最近token ID，和一个shape [10240, 9] 的短卷积历史。target模型在prefill、decode、target验证期间都保留PLE；只有单层MTP draft模型禁用它。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">稀疏pinned-host offload效果</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因为每个token只碰16行，SGLang把每个rank的word-vocab并行表分片放在pinned host内存，用一个Triton UVA核把选中行gather进小块BF16 GPU buffer。一条专用CUDA流把gather与第一个decoder块重叠。现有的TP归约和DP gather/scatter路径都保留：offload只改存储位置，不改表所有权或PLE数学。此CUDA路径在有效模型dtype为BF16时默认启用，且与KV-cache或通用层offload分开。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">H200、TP4、MTP-213（2个draft步、top-k 1、每次target验证3个draft token）下，offload把target模型权重从83.91降到60.45 GiB/GPU（-23.46 GiB），在相同内存分数下把已分配KV容量从1.84M提到3.28M token（+78.54%）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">1、2、4个并发请求下匹配吞吐几乎不变（-0.07% 几何均值）。四个固定提示 ×128生成token的输出ID逐位一致；首例记录的chosen-token logprob轨迹也逐位一致。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">致谢</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本工作是SGLang团队（RadixArk）、Qwen、NVIDIA、AMD之间的合作。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>SGLang Community</strong>：Qiaolin Yu, Yuhao Yang, Cheng Wan, Xinyuan Tong, Zijie Xia, Ke Bao, Mingyi Lu, Haoguang Cai, Banghua Zhu, Ying Sheng。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Qwen</strong>：Yi Zhang, Yizhong Cao, Guangda Liu。<strong>AMD</strong>：Andy Luo, Haichen Zhang。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>NVIDIA</strong>：NVIDIA与SGLang联合优化了Qwen3.8-Flash-Next在Blackwell和Hopper上的性能。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+LMSYS/SGLang这篇Qwen3.8-Flash-Next day-0支持博客，把Qwen4架构预览里的几个硬核系统优化讲透了：<strong>QSA稀疏注意力让「设定长期成本的是indexer而非注意力」</strong>（压缩比4、最多2051个位置、K/V节省靠12/48层混合布局而非层内丢弃）；<strong>IndexShare MTP把draft的indexer调用从N降到1</strong>；<strong>HC内核优化</strong>（Mix 2.05×、Combine 1.96× 内核级 + 端到端7.6%/5.49%）。<br  /><br  />最实用的是<strong>PLE稀疏pinned-host offload</strong>：因为每token只碰16行，把512亿参数的N-gram表放host内存、每token只gather 16行，换来H200 TP4下 -23.46GiB/GPU、KV容量 +78.54%、吞吐几乎不变：这对想塞进固定显存的多模态MoE部署是现成的内存节省范例。对做LLM serving/推理引擎优化的人，这是SGLang处理下一代混合注意力架构的权威实现笔记。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://www.lmsys.org/blog/2026-08-26-qwen-flash-next</span></p>
+</section>

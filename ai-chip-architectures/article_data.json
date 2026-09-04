@@ -1,0 +1,399 @@
+{
+  "title": "AI 芯片架构全景：从 NVIDIA 到 Groq 的六条设计路线",
+  "lead": [
+    "在 2018 年国际计算机体系结构研讨会（ISCA）上，John Hennessy 和 David Patterson 发表了图灵奖演讲：《计算机体系结构的新黄金时代》。",
+    "1980 年代 Hennessy 和 Patterson 做图灵奖研究时，单线程 CPU 性能每年增长 52%。到 2018 年，随着摩尔定律和 Dennard Scaling 终结，这个速率降到 3%。",
+    "需要**领域专用架构（DSAs）**。他们的工作示例是谷歌的 TPU v1，已投入生产：神经网络推理吞吐是 CPU 的 29 倍，能效好 80 倍。结尾预测：「未来十年将看到新颖计算机体系结构的寒武纪大爆发。」",
+    "这个预测成真了。今天有几十种架构在认真开发：**GPU、TPU、LPU、NPU、DPU、ASIC、wafer-scale engines、可重构 dataflow、神经形态、光子、模拟**。特别是，这些架构都聚焦 AI 计算。",
+    "真正赢得实际部署的架构：**GPU**（NVIDIA、AMD）、**systolic-array 加速器**（TPU、Trainium）、**Cerebras Wafer-Scale Engine**、**Groq LPU**。",
+    "**NVIDIA** 是明确领跑者；**AMD** 紧随其后，OpenAI 和 Meta 都给了 6 GW 的承诺。**TPU** 训练 Gemini 并将用最多一百万颗芯片服务 Anthropic；Anthropic 也在超过一百万个 **Trainium** 芯片上跑 Claude。**Cerebras** 现在服务 OpenAI 推理；**Groq LPU** 通过 200 亿美元的 acquihire 并入 NVIDIA。",
+    "这篇文章旨在调研这些不同路线——它们的*哲学*、*架构*、*扩展方法（scale-up 和 scale-out）*、*软件栈（如何编程这颗芯片）*。"
+  ],
+  "summary": [
+    {
+      "key": "问题本质",
+      "body": "AI 计算被矩阵乘法主导，瓶颈是「搬数字」——memory wall。理解一颗芯片归结为四个问题：数据住在哪、怎么搬到计算单元、计算单元长什么样、芯片在大规模下怎么互联。"
+    },
+    {
+      "key": "六条路线",
+      "body": "NVIDIA=可编程海量并行+硬件缓存（CUDA 护城河）；TPU=systolic array+编译器调度（XLA，无缓存无 warp）；AMD=保守 CU+激进封装（3D SoIC、Infinity Cache、开放标准）；Cerebras=整片晶圆 90 万核 dataflow+44GB SRAM；Trainium=借 TPU 的 XLA+专用 collectives 硅；Groq=确定性流式处理器（无缓存无仲裁，编译器排满每周期）。"
+    },
+    {
+      "key": "关键差异",
+      "body": "FP 精度逐代减半（FP32→FP16→FP8→FP4）+ block scaling 找回精度；NVIDIA 走 GPU 内部超算互连，TPU 走 torus+光交换，Cerebras/Groq 用 SRAM 无 HBM；软件上 kernel-driven（CUDA）vs compiler-driven（XLA）两极化正在收敛。"
+    }
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "问题：矩阵乘法与 Memory Wall",
+      "paras": [
+        "AI 计算被**矩阵乘法**主导。transformer 是一串 matmul：**Q/K/V projection**、**attention**、**output projection**、**FFN**——穿插 element-wise 操作：normalisation、activation、residual adds。训练前沿模型执行 10²⁵ 次乘加操作。",
+        "matmul 的*形状*取决于工作负载。**Training** 把一批序列推过每层，反向传播 loss 并更新权重，一次有数千 token 流过同一权重矩阵。**Prefill** 是推理的 prompt 摄入阶段：完整输入序列在首个输出 token 产生前单次投影过模型。两者都把许多 token 叠在同一权重矩阵上，所以每层的数学是大的**矩阵-矩阵**乘（GEMM），算术强度高（compute-bound）。",
+        "**Decode** 是自回归：模型一次一个 token 地输出，每个都依赖之前所有 token，token N+1 必须等 token N 产生。每步只投影一个 token，所以每个 matmul 变成**矩阵-向量**积（GEMV）。产生一个 token 需要完整扫过模型每个权重，加上完整读 KV Cache 做 attention。算术强度比 prefill 掉几个数量级。",
+        "推理系统通过 batching token 恢复部分强度，把 GEMV 升回 GEMM：**continuous batching** 堆叠许多用户的 decode 步，**speculative decoding** 每请求堆 K 个 drafted token 并一次验证，**multi-token prediction** 在模型内部折叠同样的技巧。对 continuous batching，每个用户请求仍读自己的 KV Cache，所以长上下文 decode 从 weight-bandwidth-bound 转为 KV-bandwidth-bound。",
+        "这里的架构问题是**把数字搬到 matmul 足够快发生的地方**。这被称为 **memory wall**：计算指数扩展，内存带宽没有。",
+        "每个架构提出不同的数据移动策略。理解一颗芯片归结为四个问题：*数据住在哪、如何搬到计算单元、计算单元长什么样、芯片在规模下如何互相通信*。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "NVIDIA GPU：可编程的海量并行",
+      "paras": [
+        "NVIDIA GPU 是**海量并行处理器**。哲学是：一个有数千线程、由 host CPU 编排、通过 CUDA 暴露的可编程芯片，是跑*可并行*负载的正确机器。每代在可编程的 Streaming Multiprocessors 上加加速原语而不改变编程模型。同一颗芯片训练 transformer、服务推理、渲染图形、跑科学模拟（加速计算）。",
+        "**架构**：NVIDIA GPU 是一组吞吐导向核心 + 深内存层级保持其喂饱 + 刚好够的调度硅让数千线程在途。核心是 Streaming Multiprocessors（SM），每封装复制 100+ 个：V100 80、A100 108、H100 132、B200 148、B300 160、Rubin 224。每个 SM 内是同样的配方：四个 SM Sub-Partitions，各有自己的 warp scheduler、dispatch unit、16k×32-bit 寄存器文件、标量 CUDA Core lane、做超越函数的 Special Function Unit、以及通往 SM Tensor Cores 的私有端口。四个 partition 共享 L1/shared-memory 块和 TMA。线程按 32 的 warp 分组以 SIMT lock-step 执行；每 partition 数十个驻留 warp 让 scheduler 通过切换隐藏内存/算术停顿。",
+        "**Compute——Tensor Core**：CUDA Cores 处理一切非 matmul 的东西（激活、残差加、归一化、地址算术）。但 transformer 块约 99% 是 matmul FLOPs，所以压倒性计算吞吐来自 **Tensor Cores**。",
+        "Tensor Cores 在小矩阵块上执行 fused matrix multiply-accumulate，D=A·B+C。完整 matmul 切成输出块：内核走共享内维 K，从左侧输入矩阵行条取 A、右侧列条取 B，把每个部分积折进运行累加器。块形状写为 M×N×K。累加器跨循环粘滞：每个 MMA 的输出 D 变成下一个的输入 C，即 C←A·B+C 原地进行。",
+        "V100 第一代单元（每 SM 8 个）跑 warp 级 16×16×16 FP16 MMA。A100 第三代加 TF32、BF16、FP64 matmul 和 2:4 结构化稀疏。H100 第四代加原生 FP8，把抽象从 warp 拉到 **warp group**：128 个协作线程在 64×256×16 形状发射异步 wgmma，在后台运行。B200 第五代更进一步：**two-SM MMA** 256×256×16，操作数跨一对 SM 拆分，原生 FP4，每 SM 有专用 256KB Tensor Memory（TMEM）scratchpad 装累加器块。Rubin 第六代扩展 FP4 吞吐、加原生 FP6、配合第三代 Transformer Engine 做硬件自适应 NVFP4 微块缩放。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig01.png",
+            "caption": "图 1：Blackwell B200 单 die floorplan——GigaThread Engine 居中把 die 分左右两半，各半有 L2 cache 带、GPC 簇、边缘 HBM3e 堆栈，底部 NV-HBI 桥是到镜像第二 die 的接缝。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig02.png",
+            "caption": "图 2：放大一个 Streaming Multiprocessor——四个 sub-partition，各有 warp scheduler、dispatch、寄存器文件和 Tensor Memory，共享下方 L1/SMEM 和 TMA。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "NVIDIA：warp 特化、内存与数值",
+      "paras": [
+        "**Warp Specialisation（Hopper 时代惯用法）**：一个块内，一些 warp 作 producer 发背靠背 TMA 加载；另一些作 consumer 对新到的块发 wgmma。同步不再是旧 SM 级 __syncthreads()，而是 mbarrier（共享内存中的内存屏障）和挂在 TMA 完成上的异步事务屏障。FlashAttention-3、CUTLASS ping-pong GEMM、Blackwell FA4 kernel 都是同一配方：TMA 驱动的 producer 流水线通过共享内存和 TMEM 喂 wgmma consumer 流水线。",
+        "**Memory**：片上级联是每级硬件管理缓存+软件提示层。片外是 HBM：V100 32GB HBM2、H100 80GB HBM3、B200 192GB HBM3e、B300 288GB、Rubin 288GB HBM4。芯片级 L2 在 HBM 和 SM 之间：V100 6MB、A100 40MB、H100 50MB、B200 60MB（跨双 die 拆成两个 30MB bank）。每 SM 内 256KB 统一 L1/SMEM 在 kernel launch 时在硬件管理 L1 和程序员控制 scratchpad 间划分。Blackwell 加第五层：TMEM，每 SM 256KB 专给 MMA 累加器。",
+        "层级间移动已逐步从 warp 解耦。Ampere 引入 cp.async：逐线程异步复制 HBM→SMEM 完全绕过寄存器。Hopper 用 TMA 替换：专用 DMA 引擎，一个线程提交多维 tile descriptor（基址、leading dimension、swizzle），引擎处理所有地址算术。TMA 支持 cluster 级 multicast：一次 HBM 读扇出到 thread-block cluster 每个 SM。Blackwell 扩展 TMA 直接加载进 TMEM。",
+        "**Numerics**：FP32 是历史默认；Volta 带 FP16+FP32 累加和 loss-scaling；Ampere 加 TF32、BF16 和 2:4 结构化稀疏（剪枝权重有效吞吐翻倍）。Hopper 引入原生 FP8（E4M3 和 E5M2）+ Transformer Engine 逐层自动缩放激活。Blackwell 用 FP4 精度再减半+microscaling MX 格式（块级共享指数找回精度）+第二代 Transformer Engine。Rubin 第三代加 NVFP4 和原生 FP6。芯片布局本身成为 numerics 故事：B100/B200/B300 是两个 reticle-limit die，由约 10 TB/s NV-HBI 缝合，对软件呈现为逻辑单 GPU，封装 8 个 HBM 堆栈；Rubin 扩展到双 die 约 336 B 晶体管 + 8 个 HBM4 堆栈。每代把 bit 减半并用更细粒度缩放找回精度，买约 2× 每瓦吞吐。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "NVIDIA：Scale-up 与 Scale-out",
+      "paras": [
+        "扩展有两个区域：**scale-up** 和 **scale-out**。带宽饥饿的 collectives（tensor parallelism、MoE expert routing）留在 scale-up 域内；数据并行和流水线并行跨 scale-out 织网。",
+        "**Scale-up** 是 NVLink + NVSwitch。NVLink 实现 GPU 间 cache-coherent fabric。NVSwitch 是每个 GPU 连的专用 crossbar 芯片，让每个 GPU 能以全 NVLink 带宽无阻塞 all-to-all 同时通信。它们定义了 HGX 8-GPU baseboard。GH200 Grace Hopper 用 NVLink-C2C 900 GB/s 把一颗 Grace ARM CPU 绑到一颗 H100。Blackwell 让配对成默认：GB200 融合一颗 Grace + 两颗 B200；NVL72 把 36 个缝进单一液冷 scale-up 域：72 GPU、36 Grace CPU、13.5TB HBM + 17TB LPDDR5X 作为单一平坦连贯地址空间。Rubin 两步走：NVL144 2026 出货，NVL576（Kyber 机箱）2027 把 144 个四 die Rubin Ultra 封装进 576 GPU die 单一连贯域。",
+        "这种密度由**无源铜**维系。NVL72 的 NVLink fabric 跑在 5,184 根 blind-mated 铜缆上（每机架约 2 英里布线、无 in-cable retimer），跨 72 GPU 带约 130 TB/s all-to-all。NVIDIA 估计铜方案相对光等价物每机架省约 20 kW。铜让「机架即一 GPU」经济上可行：sub-2 米跑程仍在功率、成本、每美元信号完整性上赢。",
+        "**Scale-out** 来自 Mellanox 收购。scale-out fabric **不连贯**：节点保持独立地址空间，数据只通过软件发起的显式 RDMA 跨过，通常包装在 NCCL collectives（all-reduce、all-to-all）里。参考集群是 DGX SuperPOD：八个 NVL72 机架经 Quantum-X800 InfiniBand 缝成 576 Blackwell GPU 单一 scheduler。Rubin Ultra 2027 把配方放大一个数量级：Kyber 机架各 576 GPU die，经 Quantum-X Photonics CPO 缝接，数千 GPU 单一 scheduler。",
+        "每个 GPU 有自己连进 fabric 的 ConnectX NIC。Blackwell 节点跑 ConnectX-8 800 Gbps per GPU，比 per-GPU NVLink 低一个数量级，延迟从纳秒升到微秒。Rubin 移向 ConnectX-9 1.6 Tbps。铜到光的切换发生在机架边界：跨机架 800 Gbps 是光学。被动铜 DAC 在 200 G/lane 约 1.5-2 米到头。Rubin 把光层折叠进 switch ASIC：Quantum-X Photonics 用 co-packaged optics 替换 pluggable，NVIDIA 声称约 4× 更少激光器、约 3.5× 更低链路功率。",
+        "NVLink Fusion 最近开放 scale-up fabric 本身：第三方 CPU 和 XPU 可加入 NVLink 域，让 hyperscaler 建半定制机架。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig03.png",
+            "caption": "图 3：NVL72——72 颗 Blackwell GPU 在 NVSwitch ASIC 行下，形成一个非阻塞 crossbar，任何 GPU 可以全 NVLink 带宽寻址任何其他 GPU 的 HBM。无源铜背板约 5,184 根缆、约 130 TB/s。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig04.png",
+            "caption": "图 4：DGX SuperPOD——八个 NVL72 机架（576 GPU）在 Quantum-X800 InfiniBand spine 下。Per-GPU scale-out 是 800 Gbps ConnectX-8；跨机架跳穿过 OSFP-RHS 可插拔光收发器。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "NVIDIA：软件与 CUDA 护城河",
+      "paras": [
+        "CUDA 是海量并行处理器的自然编程模型。你写一个 kernel（每线程执行一次的代码）并跨数千线程按 blocks 和 warps 组织发射。这就是抽象十八年几乎没变、2007 年以来写的每个 CUDA kernel 都能在 Blackwell 编译运行的原因。",
+        "这种连续性既是护城河也是约束。每代新硬件（Tensor Core、TMA、TMEM）以 PTX 和 SASS intrinsics 暴露在相同 kernel-and-warps 模型上：mma.sync、wgmma.mma_async 等。NVIDIA 不能激进重想 SM，因为太多代码依赖它；作为回报，每笔 CUDA 软件投资跨代复利。",
+        "PTX 之上是二十多年搭的栈：cuBLAS 和 cuDNN 做数学和 DNN 原语；CUTLASS 用模板 C++ 编码数十年 GEMM 专长；TensorRT-LLM 做 paged attention、in-flight batching 和 speculative decoding；通过 PyTorch、Triton 和 JAX 绑定框架。",
+        "FlashAttention 是现代 AI 最重要的算法重写之一，分块 attention 避免物化 O(N²) 矩阵。其四代（FA1-FA4）各为最新 NVIDIA 硅手调（FA3 为 Hopper 异步流水线、FA4 为 Blackwell），移植到其他硬件落后数月到数年。",
+        "这个栈大部分是 NVIDIA 不付钱的人写的。护城河不是 CUDA 本身；是二十年第三方 kernels、库、工具，和数百万学会 API 的开发者。NVIDIA 还把人类专长随硅片一起出货：在前沿实验室和 hyperscaler 团队内嵌数十名自家工程师，为每个新模型架构写 kernel。切换出 NVIDIA 不仅是重写 kernel 和库——是重训整个工程队伍的思维模型，并失去今天坐在楼里的 NVIDIA 工程师。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "Google TPU：矩阵乘法机器",
+      "paras": [
+        "TPU 是**矩阵乘法机器**。哲学是，与其做可编程芯片，不如聚焦单一原语（大型 systolic array 上的稠密矩阵乘法），让 XLA 编译器提前规划每周期和每个字节内存。没有硬件 scheduler、没有缓存、没有线程/warp。每代扩展 pod，数千芯片经 ICI 互连连成一台连贯机器。TPU 无渲染图形或科学模拟的野心；它存在的目的是比任何通用替代更高效每瓦地训练和服务 Google 的负载（搜索、翻译、推荐、Gemini）。",
+        "**架构**：TPU 芯片是**裹在刚好够喂饱它的硅里的 matmul 引擎**。计算单元是 TensorCore：旗舰芯片 v2 起每封装两个；效率调优芯片（v4i、v5e、v6e）一个。每个 TensorCore 内是同样的五组件配方：一个或多个 MXU 做矩阵数学、VPU 做 element-wise、Scalar Unit 掌控全场、XLU 做跨 lane 归约、外加 Transpose/Permute Unit 和喂排 MXU 的累加器队列。v4 起每芯片还有 TensorCore 外的专用 SparseCore dataflow 引擎。每块坐在单 VLIW issue plane 上，由 Core Sequencer 驱动，每周期填满 322-bit bundle 的八个功能槽。没有指令缓存未命中、没有 warp scheduler、没有乱序引擎、没有分支预测器：编译器是调度器，省下的硅面积花在更多 MAC 上。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig05.png",
+            "caption": "图 5：TPU Ironwood / v8t 单封装 floorplan——两个计算 chiplet 并排跨 die-to-die 桥；每个 chiplet 有一个 TensorCore 加两个 SparseCore，两侧 HBM3e 堆栈。ICI 端口上下跑 3D torus。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig06.png",
+            "caption": "图 6：放大一个 TensorCore——顶部 Scalar Unit 每周期把 322-bit VLIW bundle 射进八个功能槽；四个 256×256 MXU 做 systolic matmul；累加器队列把部分和排进 VMEM。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "TPU：TensorCore、内存与 SparseCore",
+      "paras": [
+        "**MXU** 是 systolic array。v1 发一个 256×256 INT8 推理阵列；v2 是首个可训练 TPU，引入 128×128 单元做 BF16 乘 FP32 累加。每 TensorCore 单元数增长：v2 1 个 → v3 2 → v4/v5e/v5p 4。Trillium 回到 256×256（每阵列每周期 65,536 乘加单元），Ironwood、8t、8i 都保持 256×256 形状。",
+        "算 C=A×B 时，矩阵 B 的值预加载进每个 cell（**weight-stationary** dataflow，TPU 区别于别处 output-stationary 阵列的选择）。激活从左边进入，每周期传播一列，在每个 cell 与驻留权重相乘，部分和向下流进底部累加器队列。数据进阵列后无内存访问：每个权重对每个经过的激活复用，每个激活跨行复用 128（或 256）次。数据复用焊进硅里，而非由缓存仲裁。权衡是**underfill**：256×256 阵列上 128×128 matmul 浪费 75% 硅，所以 XLA 把维度分块、填充、调度到 128（或 256）的倍数。",
+        "**VPU** 是第二计算引擎但微观架构上更有趣：每个 TPU 是 2D 向量机，不是 1D SIMD。VPU 寄存器文件持 2D VREGs。v4/v5p 形状是 (8,128)：128 lane 宽、8 sublane 深，每 core 32（v4）或 64（v5p）寄存器，每 (lane,sublane) 有 4 个独立 FP ALU。现代 TPU 程序大部分加速来自 VPU/MXU overlap：量化、layernorm、softmax、激活、bias-add 都在 MXU 背后跑 matmul 的同周期跑在 VPU。跨 lane 归约由 XLU 处理（慢、贵、已知编译器热点）。Transpose/Permute Unit 吸收布局变换。",
+        "**Scalar Unit** 最小但最举足轻重：单线程双发射整数 ALU，32 个 32-bit 寄存器 + 4 KiB SMEM 装控制状态，配 Imem 装程序。它是唯一做指令取指的块；每周期拉 322-bit VLIW bundle，本地执行两个标量槽（地址算术、循环计数、分支、sync-register 检查），把其余六槽分发到芯片其余部分：2 向量 ALU（VPU）、2 向量 load/store（HBM↔VMEM DMA）、2 矩阵（push/pop MXU 队列）。块间同步显式：sync flags 跟踪 MXU 和 VPU 流水线何时忙，编译器插入屏障检查而非硬件跟踪依赖。",
+        "**Memory**：片上内存层级与计算侧同想法：**没有缓存，每级软件管理**。片外 HBM（v2/v5e 16GB、v3/v4/v6e 32GB、v5p 95GB、Ironwood 192GB、v8 代 216-288GB）。片上最近计算的是 VMEM，向量 scratchpad 喂 VPU 和 MXU 输入队列，v4 32MiB、v5e 128MiB、v8i 拉到 384MiB 恰为装整个 KV cache。之上 CMEM（v4 引入 128MiB）：HBM 和 VMEM 之间较慢较大的 SRAM 暂存。Scalar Unit 有自己的 SMEM。程序里每个 tensor 在编译时钉到一个层级；XLA 的 buffer-assignment pass 跨层调度 DMA。硬件不做预取、逐出、一致性；编译器对了阵列永不停顿，错了没有回退路径。",
+        "**SparseCore** 是打破 systolic 模具的 TensorCore 外块（v4 引入）。推荐和排序模型活在 embedding 查询上（数十亿索引进巨大表），访问模式是稠密 matmul 的逆：不规则、间接、all-to-all。256×256 systolic array 恰好是错误形状。SparseCore 是有 16 个 compute tiles 和专用 SPMEM scratchpad 的 dataflow 处理器，吸收 scatter、gather、segmented-reduce 和碎片 embedding 表产生的数据依赖 all-to-all 流量。对 embedding 重模型 5-7× 加速，约 5% die 面积和功率。v8i（Zebrafish）推理芯片移除 SparseCore，在 I/O chiplet 上换 CAE（Collectives Acceleration Engine）：不同问题（自回归 decode 期间的 collective 归约），同想法（从主 core 切出小加速器吸收 systolic array 形状不对的负载）。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "TPU：Scale-up、Scale-out 与软件",
+      "paras": [
+        "**Numerics**：TPU v1 纯 INT8 推理；v2 换 BF16 作规范训练格式。v4 重引入原生 INT8。Ironwood 加原生 FP8（E4M3 和 E5M2）约 2× BF16 吞吐。v8 加原生 FP4 + MXU 内部 block-scale 乘法。**Stochastic rounding** 在每个现代 TensorCore 硬件支持：低位尾数位作为概率做舍入决策，跨长训练保留低精度累加的期望值，是让 BF16/FP8 逼近 FP32 精度的小细节之一。",
+        "**Scale-up**：TPU 的 scale-up 故事是 NVIDIA 的逆。Google 的 ICI 是 **message-passing**：无 remote-load 语义、无缓存一致性、无 crossbar。每多芯片操作都是 XLA 编译的显式 collective。scale-up 域不靠 switch fabric 而是 **torus**（芯片直接连邻居带边 wrap），机架边界由 **optical circuit switches** 缝接。per-chip ICI 带宽从 v2 ~250 GB/s 扩展到 Ironwood 双向 1.2 TB/s、v8t 2×。",
+        "无 NVIDIA 对等物的是 **Palomar OCS**：3D-MEMS 光电路交换机，小镜子物理旋转把任何输入光纤映射到任何输出。v4 superpod 用 48 个 Palomar 把 64 个 cube（4,096 芯片）连成一个 3D torus。重配置是毫秒级不是纳秒，但没关系，因为 OCS 是 circuit-switched：开工时选拓扑跑一周再重配。三个问题折叠进一个组件：每负载拓扑重配置、按需 sub-pod 切片、**容错**（芯片死时 OCS 光交换进备用 cube，运行继续不丢 ICI 域）。",
+        "superpod 是 scale-up 单位：相当于 NVIDIA 的 NVL72，大两个数量级。v4 4,096 芯片；v5p 8,960；Ironwood 9,216 芯片（144 个 64-chip cube），呈现 **1.77 PB HBM（~68 PB/s）和 42.5 ExaFLOPS FP8** 单一连贯 ICI 域。TPU 8t（Sunfish）到 **9,600 芯片、2 PB HBM、121 ExaFLOPS FP4**。TPU 8i（Zebrafish）1,024 芯片，用新 Boardfly 分层高 radix 拓扑（4-chip ring → 8-board group → OCS 连的 up-to-36 groups），all-to-all 延迟减半——专为 MoE 推理设计（3D torus 对 all-to-all 有 16-hop diameter，Boardfly 压到 7）。",
+        "**Scale-out**：TPU v7 前 scale-out 跑单一 fabric：Jupiter，2022 年起 spine 全光（Apollo OCS，与 Palomar 同 3D-MEMS 家族）。Jupiter 今天每 building 带 13 Pb/s bisection。TPU 8t 起 scale-out 拆成两个 fabric：东西向 TPU-to-TPU 流量移向 Virgo 专用加速器 fabric；Jupiter 保留南北向角色（存储访问、通用计算、跨站扩展）。Virgo 是平的双层非阻塞拓扑，高 radix switch：每个 TPU 到任何其他最多两个 switch。一个 Virgo cluster 连 134,000+ TPU 8t 47 Pb/s bisection。",
+        "**软件**：TPU 栈是 **compiler-driven**，CUDA 是 **kernel-driven**。开发者用 JAX 写数值程序，XLA 负责下面一切：哪些操作融合、每个 tensor 住哪、如何跨 2D 向量寄存器布局、HBM 到 VMEM 的 DMA 何时发、322-bit VLIW bundle 如何调度、程序如何跨数千芯片分片。无硬件回退：没有 warp scheduler、缓存、乱序引擎掩盖坏调度。编译路径 JAX → JAXpr → StableHLO → HLO → LLO → VLIW bundles。多芯片执行是 SPMD，由 GSPMD（正被 Shardy 替代）发射。Pallas 是逃生舱：JAX 的 kernel 写作语言，大致是 GPU 上 Triton 的 TPU 对等物。与 CUDA 相比 TPU 生态**集中而非蔓延**：框架以下几乎全由 Google 自己开源（XLA、JAX、Flax、Optax、Pallas、MaxText、Pathways、Shardy、Mosaic），与硅片同步演进。哲学两极仍然真实：**TPU 上编译器是唯一重要的接口；GPU 上编译器只是几个之一。**"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig07.png",
+            "caption": "图 7：TPU Ironwood superpod——左：64 芯片 cube（4×4×4）3D torus；右：144 cube 经 Palomar OCS（3D-MEMS 光电路交换机）缝成一个连贯 ICI 域。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig08.png",
+            "caption": "图 8：TPU 8t scale-out——东西向流量跨 Virgo（平双层非阻塞高 radix，任何 TPU 两跳内，134,000+ 芯片 47 Pb/s）；南北向留 Jupiter（2022 起 Apollo OCS 全光 spine）。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "AMD GPU：保守 CU + 激进封装",
+      "paras": [
+        "AMD Instinct GPU 建立在与 NVIDIA 不同的赌注上：NVIDIA 每代扩展每个 SM 能*做*什么，AMD 自 GCN（2012）以来保持 Compute Unit 保守，并把投资放进封装：自 2021 起每代 HBM 容量匹配或超越当代 NVIDIA 旗舰；首个 3D-stacked 数据中心 GPU（CDNA 3）；首个连贯 CPU+GPU APU（MI300A）；开放生态（ROCm、HIP、OCP MX、UALink）。",
+        "**架构**：AMD 架构野心活在 CU 之间（多少颗能绑进单一连贯封装），而非 SM 内部。CU 本身保守：四个 16-lane SIMD、一个共享标量单元、64KB Local Data Share、L1 向量缓存、per-SIMD VGPR 文件 + CU 共享 SGPR 池、以及（CDNA 1 起）跑 MFMA 的 Matrix Core。形状自 2012 年 GCN 没实质变过；扩展的是数量（MI100 120 CU、MI250X 220、MI300X 304、MI355X 256）和绑它们的封装。64 线程 wavefront 在 4 周期流经 16 SIMD lane，每 SIMD 多 wavefront 驻留让 scheduler 切换隐藏停顿。",
+        "**Compute——MFMA**：NVIDIA Tensor Core 爬线程层级（Volta 32 线程 warp、Hopper 128 线程 warp-group、Blackwell 单线程+可选双 SM cluster）。AMD Matrix Core 停在原地。每代 MFMA 都是 wavefront-scoped：一个 wave64 发单矩阵操作（V_MFMA_*），四个 SIMD 协作驱动它，操作数来自 wavefront 寄存器文件（A、B 从 VGPR，C、D 通常从专用 AGPR）。指令更快、格式集更宽，但发射器和范围没动。",
+        "两个成本：**Divergence**（半空 wave64 浪费 32 lane 对比半空 warp32 的 16）；**Overlap**（NVIDIA 异步 descriptor 驱动 matmul 解耦发射与执行，AMD wavefront-collective MFMA 无对等物——发 matmul 的 wave 不能同时做有意义的向量工作）。对纯稠密 GEMM（DGEMM）两者都饱和，async 收益小——这些正是 AMD 历史上在 exascale HPC 领先的负载（Frontier 上 MI250X、El Capitan 上 MI300A）。但 transformer attention（FlashAttention-3、FA4）把 matmul 与 softmax、mask、KV-cache 读交织，async overlap 是那些 kernel 的整个结构——AMD 必须手工重建流水线。",
+        "**Memory——Infinity Cache**：AMD 通用层级比 NVIDIA 少，有一个 NVIDIA 完全没有的巨缓存。从 CU 向外：64KB LDS scratchpad、向量 L1、per-XCD 几 MB L2。L2 不跨 XCD 连贯；一致性发生在 L2 上一级。那级是 Infinity Cache：MI300X 256MB 分布四个 IOD，16-way set-associative，实测约 12 TB/s（MI300X 5.3 TB/s HBM 的两倍多）。它起源于 RDNA 游戏 GPU 补偿窄 GDDR bus；AMD 在 CDNA 3 复用到 AI，其中 attention KV 复用和权重复用异常适合大 LLC。NVIDIA 赌更大 HBM 带宽，AMD 赌缓存。",
+        "片外 HBM 容量激进增长：MI100 32 → MI210 64 → MI250X 128 → MI300X 192 → MI325X 256 → MI355X 288 GB，自 2021 起每代匹配或超当代 NVIDIA 旗舰。赌的是推理负载越来越 capacity-bound，内存更多的芯片赢。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig09.png",
+            "caption": "图 9：AMD Instinct MI355X（CDNA 4）封装 floorplan——八个 XCD 经 TSMC SoIC 混合键合到两个 IOD 基 die；IOD 带 256MB Infinity Cache、HBM PHY、Infinity Fabric、PCIe Gen 5；8 个 12-Hi HBM3E 堆栈共 288GB。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig10.png",
+            "caption": "图 10：放大一个 Compute Unit——单 Scheduler 把 wave64 wavefront 分发到四个 SIMD16 向量引擎；每个 SIMD 有自己的 Matrix Core（MFMA）；共享 Scalar Unit、三个寄存器文件（VGPR/SGPR/AGPR）、160KB LDS、32KB L1——2012 GCN 以来的同形状。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "AMD：Chiplets、Scale-up 与软件",
+      "paras": [
+        "**Numerics**：格式轨迹跟踪大家共享的精度减半模式：FP32→FP16→FP8→FP4，每步更细粒度缩放找回精度。AMD 特有轴是开放性。CDNA 4 的 FP4 和 FP6 用 OCP MX block-scale 乘法：与 Blackwell 的 MXFP4 和 TPU v8 的 MXU 相同格式，但由开放联盟（AMD、NVIDIA、Intel、Meta、Microsoft、Qualcomm、ARM）指定，AMD 协助创立。MI355X 里出货的格式与 B200、TPU v8 相同。CDNA 4 转折：per-CU FP64 吞吐减半——MI355X 首先是 AI 芯片。",
+        "**Chiplets**：CDNA 1 的 MI100 是单片 7nm。CDNA 2 的 MI250X 是 AMD 首个多芯片 GPU。CDNA 3 是改变一切的移动：八个 XCD（TSMC N5，各约 115mm²）经 TSMC SoIC 混合键合 3D 堆叠到四个 I/O die（TSMC N6）。IOD 带 Infinity Cache、HBM3 PHY、Infinity Fabric 链接、PCIe Gen 5；每个 IOD 上方两个 XCD、旁边两个 HBM 堆栈。四个 IOD 由 Infinity Fabric AP 4.8 TB/s bisection 缝接，1530 亿晶体管封装对 kernel 看起来像一颗 GPU。NVIDIA 保持单片到 H100，B200 才经 2.5D CoWoS-L 到两个 reticle-limit die。AMD 早一代到 3D 堆叠，per-die 面积更小。",
+        "**MI300A APU** 进一步推进：八个 XCD 中两个换成三个 Zen 4 CCD，CPU 和 GPU 共享一个由 HBM3 支撑的物理地址空间带硬件一致性。无 host-device copy、无 pinned memory、无 PCIe 在路径上。Zen 4 核心和 CDNA 3 XCD 读同一页。NVIDIA 的 Grace-Hopper 经 NVLink-C2C 桥*两个*封装；MI300A 是*一个*。El Capitan（11,039 节点 4× MI300A）是证明它的部署。",
+        "**Scale-up**：到 MI355X，AMD 的 scale-up 是 8-GPU OAM 平台（Infinity Fabric 上）。每个 MI300X 有 7 个 IF 链接，双向 128 GB/s，全连接 all-to-all 中 per-GPU mesh 带宽 896 GB/s。MI350X 每链接 153.6 GB/s（per-GPU ~1,075 GB/s）。平台符合 OCP UBB 2.0：与 NVIDIA HGX baseboard 相同机械插座。AMD 到 MI355X 没有的：NVL72 的机架级对等物——**Helios** 就是来补这个洞的。",
+        "**Helios**（2026 下半年随 MI455X 出货）：72 GPU/机架、~31TB HBM4、1.4 PB/s 聚合 HBM 带宽、2.9 ExaFLOPS FP4 / 1.4 ExaFLOPS FP8、260 TB/s scale-up 带宽、43 TB/s scale-out。形态是 Open Rack Wide（ORW）（Meta 2025 OCP 提交，双宽液冷），不是 AMD 私有机箱。fabric 是 **UALink**：开放联盟标准 AMD 协助创立。UALink 200G 1.0 定义 200 GT/s lane、每方向 800 Gbps，switched 拓扑扩展到 pod 内 1,024 加速器。承诺是可比 NVLink 但无主的 cache-coherent 互连。",
+        "**软肋**：原生 UALink switch 硅 2027 年前不会量产。Astera Labs 的 Scorpio 及 Auradine、Enfabrica、Xconn 都在瞄准 2026 末/2027 部署。Helios 发布时用 **UALoE**（Infinity Fabric 隧道过标准 Ethernet）作临时方案。原生 UALink switch 随 MI500 2027 到来。发布时 Helios 更接近快速 Ethernet 隧道连贯 cluster，而非 NVL72 的真 cache-coherent NVLink 域。",
+        "**Scale-out**：AMD 不卖 InfiniBand。整个 scale-out 栈是 Ethernet，锚在另一个开放标准：**Ultra Ethernet Consortium（UEC）**。UEC 1.0 定义 Ultra Ethernet Transport（UET）：标准 Ethernet 上的新 RDMA 传输，带 packet spraying、SACK 选择性重传、现代拥塞控制。UET 不是 RoCEv2；是 RDMA 语义为 scale-out AI fabric 的干净重设计。NIC 是 Pensando（AMD 2022 收购）。Vulcano 800 2026 随 MI455X：UEC 1.0 合规、PCIe Gen 6、原生 UALink 接口。switch 硅不是 AMD 的：Helios 43 TB/s 跑 Broadcom Tomahawk 6（102.4 Tbps Ethernet switch ASIC + co-packaged optics）。AMD 拥有一个层（NIC+DPU），赌开放标准+最佳伙伴硅能超过垂直整合。行业已朝 AMD 移动：Dell'Oro 报 2025 Ethernet 处理了 AI scale-out fabric 量两倍于 InfiniBand。",
+        "**软件——ROCm**：ROCm 是 CUDA 的开源对应物。栈底是 **HIP**，AMD 的 CUDA 兼容 C++ runtime。hipify 自动把 CUDA 源码翻译成 HIP。批量 HPC 代码 80-95% 开箱移植（CORAL-2 数字）；现代 AI kernel 移植更差——任何够到 Hopper/Blackwell 特定原语（TMA descriptors、wgmma、tcgen05.mma）的没有干净 ROCm 对等物，得手写重写。库层一对一名镜像：rocBLAS 对 cuBLAS、hipBLASLt 对 cuBLASLt、MIOpen 对 cuDNN、RCCL 对 NCCL、Composable Kernel 对 CUTLASS。TensorRT-LLM 无一方对应物；AMD 押注 vLLM 开源服务引擎+AITER 专用算子。",
+        "PyTorch 路径是一等公民。torch.compile 经 Triton 降低，Triton 的 ROCm 后端已上游。随着 Triton 成为 PyTorch 默认 kernel 路径，大量移植成本蒸发：跑 torch.compile 的 kernel 在 CUDA 和 ROCm 都工作无需改源码。FlashAttention 是承重案例：FA2 经 Composable Kernel 在 MI300X 生产；FA3 部分支持；FA4（2026 年 3 月 Blackwell）完全无 ROCm 移植。诚实差距仍在：独立基准（Phoronix，2026 年 3 月）把 ROCm 7.2 放在标准 PyTorch/vLLM/SGLang 负载上比等价 CUDA **慢 10-25%**。ROCm 7 达到 feature parity 而非 perf parity。NVIDIA 在 frontier 实验室内嵌工程师；AMD 通过 GitHub 发 kernel。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig11.png",
+            "caption": "图 11：AMD Helios——72 颗 MI455X GPU 在 UALink switch 行下，连成一个连贯 UALink 内存域；发布时 fabric 跑 UALoE 作临时，直到 2027 原生 UALink switch 硅。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig12.png",
+            "caption": "图 12：AMD scale-out——Helios 机架经标准 Ethernet 通信，锚在开放 Ultra Ethernet（UEC）标准；UET 用干净 RDMA 重设计替换 RoCEv2；每 GPU 带 Pensando Vulcano 800 NIC，跨机架 switch 是 Broadcom Tomahawk 6 + co-packaged optics。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Cerebras WSE：整片晶圆",
+      "paras": [
+        "Cerebras 建造**史上最大芯片**。哲学：memory wall 是切晶圆的后果。fab 在 300mm 硅上印数十颗 die 再锯开；行业随后把最异想天开的工程（HBM、NVLink、CoWoS、每机架 5,184 根铜缆）花在把这些碎块以片上带宽的一小部分重新接回去。Cerebras 跳过锯。**Wafer-Scale Engine** 是一片硅：84 个 reticle fields、46,225mm²、900,000 个 dataflow cores，片上内存每个字节 SRAM 距计算单元一周期。",
+        "**The Wafer**：光刻机一次一个 reticle 曝光晶圆，每 shot 约 850mm²，这就是每个传统芯片都活在该天花板下的原因（B200 一碰到它就变两 die）。Cerebras 像 TSMC 任何其他客户一样印同样的 ~550mm² die 84 次（12×7 网格），然后与 TSMC 共同开发，在通常锯片会跑的 <1mm scribe lines 上铺额外高层金属。网格在每道缝上以 source-synchronous 并行接口跨越（WSE-3 每 die 2,880 GB/s），整个 die 间层约花 97W。对软件缝隙不存在：一个均匀网格、一颗芯片。",
+        "晶圆级以前试过，败在良率：单片晶圆计算机上单个缺陷杀死整片晶圆，这是 1980 年代埋葬该想法的原因。Cerebras 的答案是粒度。H100 上缺陷禁用整个 ~6mm² SM；WSE 上同一缺陷禁用一颗 0.05mm² core。WSE-3 制造约 970,000 core 出货 900,000：约 7% 备用池 + 冗余 fabric 链接让硬件围绕每个缺陷重映射、恢复完整逻辑网格。",
+        "**The Core**：core 不寻常的不是数据路径，是指令*是*什么。16 个通用寄存器旁有 44 个 data-structure registers（DSRs），各持一个 tensor descriptor：基址、extent、stride，最多四维。指令用 DSR 命名操作数，所以单 FMAC 指令说「把到达流乘这个驻留 tensor 并累加进那个」，硬件按 tensor 持续时间流元素。软件循环不存在；循环活在 descriptor 里。NVIDIA 花五代 Tensor Core 把 matmul 走向单 descriptor 驱动命令；WSE core 上 tensor 指令没有其他形式。",
+        "每个 core 很小，WSE-2 约 38,000µm²，约半 SRAM 半逻辑，峰值 30mW：48kB 本地 SRAM、16 个通用寄存器、六级流水线、4-wide FP16 FMAC SIMD（WSE-3 8-wide）、五端口 fabric 路由器。执行是 **dataflow**：core 空闲直到 wavelet 到达，wavelet 里控制 bit 选哪个 handler task 触发，八个硬件 microthread 随 tensor 操作数到达排空逐周期切换。无 warp、无 warp scheduler、无可错缓存、无重排缓冲：*数据到达即调度*。",
+        "**Compute**：wafer 上没有矩阵单元。NVIDIA、Google、AMD 都把 FLOPs 集中到专用 matmul 引擎（Tensor Core、MXU、Matrix Core）；Cerebras 用 fabric 组装 matmul。GEMM 跑成整晶圆编排：每个到达权重沿一行持激活的 core 广播，每个 core 对驻留切片发乘加（每权重一次 AXPY），部分和跨网格归约。数据复用来自几何：激活永不动，唯一在途操作数是被乘的那个。",
+        "FLOPs 账本需要小心。WSE-3 头条 **125 PFLOPS 是稀疏 FP16**：假设硬件约 8× zero-skipping 在理想稀疏 tensor 上的收益。Dense 约 **15.8 PFLOPS FP16**（900,000 core × 8-wide FMAC × 1.1 GHz 推导）。每瓦稠密 FLOPs wafer 输给每个当代 GPU。wafer 从来不是 FLOPs 机器；是**带宽机器**。Zero-skipping 是 dataflow 发光处：零在发送端过滤，接收 core 永不见它永花周期——无结构化、element-granular 稀疏，NVIDIA 2:4 结构化稀疏采样的通用情形。但至今是未行使选项：Cerebras 自己稀疏预训练结果（SPDF：75% 稀疏 1.3B 参数）是厂商署名、sub-7B，无旗舰客户模型披露为稀疏训练：Jais 2（平台上最大运行）是稠密。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig13.png",
+            "caption": "图 13：Cerebras WSE-3——左：晶圆，84 个 reticle fields 12×7 网格铺满 300mm 上的最大正方形，die 边 12×100 GbE 条是唯一出路；右：放大一个 reticle field，均匀 2D core 网格，链接在金属中跨 scribe-line 边界 2,880 GB/s。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig14.png",
+            "caption": "图 14：放大一个 Cerebras core——五端口 fabric 路由器带 24 color 静态路由，喂跑八个 microthread 的 dataflow 任务调度器；下为 GPR 和 44 个 tensor-descriptor 寄存器、48kB 本地 SRAM、FMAC SIMD 引擎、发送端 zero filter。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Cerebras：内存、Weight Streaming 与市场",
+      "paras": [
+        "**Memory**：层级是一层：**core 内 48kB 片里的 44GB SRAM，wafer 上别无他物**。无 HBM、无 L2、无逐出策略；每字节距 FMAC 一周期。引用的带宽 21 PB/s 是 900,000 个本地 SRAM 端口的总和，on-wafer aggregate，不是 point-to-point 链接。诚实对比是 bytes per FLOP：wafer 每稠密 FP16 FLOP 可喂约 1.3 bytes，B200 从 HBM 得约 0.002。在那条轴上每个 GPU 和 TPU 都饥饿；WSE 是唯一平衡的机器。decode——纯带宽问题的阶段（每 token 一次完整读权重）——正是 wafer 形状适合的阶段。",
+        "wafer 与外界连接是 12×100 GbE：**1.2 Tb/s**，几乎不超单颗 Blackwell GPU 的一个 ConnectX-8 NIC。on-wafer SRAM 与 off-wafer Ethernet 之间隔**五个数量级**。NVIDIA 的层级逐渐下降；WSE 两层之间是悬崖。wafer 是座岛，岛的超能力和牢笼是同一事实。",
+        "岛不生长。SRAM 密度在领先节点已有效停止缩放：WSE-3 相对 WSE-2 仅多 10% SRAM，尽管完整节点 shrink 和晶体管数跳 54%。逻辑持续缩小；六晶体管 SRAM 单元不。架构最稀缺的资源正是下一节点不再买的东西。",
+        "**Weight Streaming（训练）**：在 wafer 上训练倒置每个人想当然的流：GPU/TPU 上权重驻留、激活流过；WSE 上**激活驻留、权重流过**。主权重活在 MemoryX，集群旁的 DRAM-and-flash 设备。逐层，权重流经 wafer，对钉在 SRAM 的激活触发乘加，然后离开；梯度反向流回，优化器步在 MemoryX 里跑在 CPU 上。wafer 从不存权重，「连临时都不」（Cerebras 原话）。模型大小由 MemoryX 界定，不由 44GB；44GB 界定激活和 batch。",
+        "买来的是编程模型。一片 wafer 装整层激活，所以无 tensor parallelism、无 pipeline parallelism、无 FSDP 分片：70B 模型写成单设备程序，多系统扩展是经 SwarmX（广播/归约树）的**纯数据并行**，把一条权重流扇到 N 片 wafer 并返回求和梯度。GPU 训练主导的并行策略 spreadsheet 在 Cerebras 上没有页。",
+        "付的是规模，按市场自己的揭示偏好。规格表说 2,048 CS-3；最大披露集群是 64（Condor Galaxy 3）。平台上最大从零训练模型是 **Jais 2 70B 参数 2.6T token**（锚客户 G42 训练，Cerebras 工程师内嵌）。七年里没有任何人做过 70B 以上。MFU（GPU 实验室 35-45% 常发的数字）从未对任何 Cerebras 运行披露。",
+        "**Inference**：推理放弃 weight streaming（算术致命：从 MemoryX 流 70B 模型 140GB 过约 150 GB/s 管每 token 约花 1 秒）。推理把权重**停在 SRAM**，在 layer 边界跨 wafer 分片模型：Llama 70B 在「至少四片」CS-3，pipeline-parallel over Ethernet。速度真实且独立验证：Artificial Analysis 测 Llama 3.1 8B 1,850 tokens/s、70B 446、Llama 405B 969（240ms first token）、Llama 4 Maverick 2025 2,522（约 2.4× 当时最佳 Blackwell 数字）。没有 GPU 提供商在 per-user decode 速度上接近。",
+        "**经济**：44GB/wafer 意味前沿规模模型吃整个舰队。SemiAnalysis 估约 24 片 CS-3 跑 1.6T 参数级模型（GPU 机架里几架就能装），每系统分析师估约 $450k BOM、list price 约 $2-3M。decode 期间 wafer 的巨大 FLOPs 大多闲置；per-token API 定价约 3-5× GPU 提供商同开放模型。固定 SRAM 也给 context 定价：KV cache 与权重共享 44GB。MoE 被服务但格式最坏情形。市场诚实定价了：2026 年 1 月 OpenAI 签 **750 MW CS-3 容量到 2028**，签约报超 $10B 后涨超 $20B，wafer-scale 获过的最大背书。该容量上首个旗舰是 **GPT-5.6 Sol**（2026 年 7 月发布，报价 750 tokens/s）。",
+        "**软件**：栈 compiler-driven 像 TPU，但通过更窄的孔径：Cerebras 编译器是 **kernel matcher**，不是通用代码生成器。cerebras.pytorch 经 lazy tensors 把训练步 trace 进 Torch-MLIR 和图 IR，然后匹配子图对手写 kernel 库，无匹配的 op 回退较慢自动生成。约束按 GPU 标准很刺眼：仅静态图、无动态形状、无数据依赖控制流、步中无 eager tensor 访问、PyTorch 版本钉在 upstream 后面。无 kernel 逃生舱：CUDA 答新颖 attention 变体是*写 kernel*；TPU 是 Pallas；ROCm 是 Triton。Cerebras ML 栈根本没有用户 kernel 路径：matcher 严重失误时，修法是一位 Cerebras 工程师。CSL（独立 SDK 语言）暴露原始机器（tasks、wavelets、colors）产生过惊人 HPC 结果（TotalEnergies stencil 约 228× A100、48 CS-2 的 Gordon Bell finalist），但是独立世界，与 PyTorch 流无连接。",
+        "有个奇怪免疫：FlashAttention（GPU 时代定义性 kernel 谱系）是分块 attention 穿过内存层级的方案，WSE 没有可分块的层级——让 AMD 花数年移植滞后的优化类在此不适用。但免疫与贫困是同一事实。第三方 kernel 生态在 CUDA 上复利，这里无表面可附着；平台史上每个 kernel 改进只有一个作者。",
+        "留给 wafer 什么：一个真实赢得的利基——batch-one decode 速度，独立验证，由把延迟定价高于成本的客户买单。利基周围是硬墙：3-5× per-token 定价、七年 70B 训练上限、收入仍约 86% 集中两个 Abu Dhabi 关联客户（2025，S-1 文件）、最稀缺资源 SRAM 密度在模型继续生长时停止缩放。Hennessy 和 Patterson 承诺寒武纪爆发；WSE 是其最极端 body plan——决定 memory wall 是封装选择、花 46,225mm² 硅拒绝接受它的那一个。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "AWS Trainium：借来的核心 + 专用 Collectives",
+      "paras": [
+        "Annapurna Labs——Nitro 卡和 Graviton CPU 背后的团队——把 Trainium 建成 **fast-follower**。计算核心取 TPU 已验证的剧本（128×128 weight-stationary systolic array、软件管理 scratchpad、whole-program 编译）到共享 Google 的 XLA 编译器。scale-out fabric 是已承载 AWS 其余部分的 Nitro-offloaded 网络。真正 Amazon 的窄而有意：借来的核心上钉的专用 collective-communication 硅，以及只须在 AWS 内部打败 NVIDIA 就能定价芯片的垂直整合。",
+        "**架构**：Trainium 芯片带*少量* NeuronCore（Trn1 2、Trn2/Trn3 8），每个 NeuronCore 不是单一单片 matmul 引擎而是**解耦专用引擎的 cluster**：Tensor Engine（128×128 systolic array）、Vector Engine 做归约、Scalar Engine 做 pointwise、可编程 GPSIMD Engine（八个 512-bit 向量处理器）装其余。周围是数据搬运者：128 个 DMA 引擎、Sync Engine 序列化传输、（Trn2 起）专用 CC-Cores 做 collectives。无 warp 无 wavefront；引擎跑成静态调度 dataflow 流水线。",
+        "**Compute**：Tensor Engine 拥有 matmul FLOPs；128×128 PE 网格（16,384 MACs）weight-stationary：一个操作数块加载进阵列并保持（LoadStationary），另一个流过它（MultiplyMoving），部分和落进 PSUM 小累加器 SRAM。与每个 matmul 加速器核心的 D=A·B+C tile MMA 相同；但 NVIDIA 把它包进 warp 层级、Google 从 VLIW bundle 发射，Trainium 把它暴露为一对对着命名 scratchpad 的显式指令。",
+        "阵列物理固定 128×128 跨三代；变的是每 cell 装多少积。Trn1 v2 跑 BF16/FP16+FP32 累加，FP8 仅 BF16 速率（无加速）。Trn2 v3 双泵 FP8 呈现有效 256×128 阵列（首个真 2× 在 8-bit）。Trn3 v4 打包 microscaling 操作数呈现有效 512×128 4× BF16 速率。物理乘加单元数永不动；数据路径只是喂更窄数字。",
+        "其他三个引擎保持阵列忙碌：Vector 做跨元素归约（layernorm、softmax、pooling）；Scalar 做一对一 pointwise（激活、GELU）；GPSIMD 吸收映射不到任何一个的。编译良好的 step 重叠全部四个。设计在层干净分解到四引擎类型时兑现——transformer 大致如此。边缘交税：不适合任何专用引擎的算子落到可编程 GPSIMD 路径，更慢——Trainium 版的长尾成本。",
+        "**Memory**：三个层级全软件管理无硬件缓存。AWS 自己的文档强调 NeuronCore 无缓存，「所有内存移动在程序本身显式」。片外 HBM（Trn1 32GB、Trn2 96GB HBM3、Trn3 144GB HBM3e）。片上最近引擎的是 **State Buffer（SBUF）**：主 scratchpad，约 20× HBM 带宽，128 partition 组织，per NeuronCore 24MiB（v2）、28MiB（v3）、32MiB（v4）。阵列与 SBUF 之间 PSUM 2MiB 累加器。数据移动 HBM→SBUF→Tensor Engine→PSUM→SBUF，每跳编译器发出；硬件不预取不逐出。",
+        "**Numerics**：可配置 FP8：Tensor Engine 接受可调指数偏置，支持 E5M2、E4M3、E3M4，让编译器逐 tensor 换 range 换精度。Trn3 的 FP4 买不到额外吞吐：OCP MXFP4 操作数上转成 MXFP8 才到阵列，FP4 以 FP8 速率跑只省内存带宽不省计算。两个世代都靠行业精度恢复技巧：Trn3 起 microscaling 块指数、每代硬件 stochastic rounding。要怀疑的数字是稀疏峰值：AWS 头条 4× FP8，其架构页放 2× over 稠密 FP8（4× 相对稠密 BF16），营销加速和 datapath 不完全一致。",
+        "**Collectives in Silicon**：无 GPU 干净对等物的块是 **collective-communication core**。分布式训练和推理在 collectives 花大量 wall-clock：每梯度步 all-reduce、每 MoE 层 all-to-all。GPU 上那些 collectives 跑成同做数学的 SM 上的 NCCL kernel，通信和计算争同一硅。Trainium 把它切进专用硬件：每 Trn2 芯片 20 个 **CC-Cores**，直连 NeuronLink 端口，Tensor 和 Vector 引擎继续跑时执行 all-reduce、all-gather、reduce-scatter、all-to-all。与 Google 对 SparseCore 和 Cerebras 对 off-core zero filter 同一手：找主引擎形状不对的负载，花一点面积在旁建目的专用块。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig15.png",
+            "caption": "图 15：AWS Trainium2 封装 floorplan——两个计算 die 并排 CoWoS interposer，每 die 四个 NeuronCore-v3；中央 NeuronLink 块带 on-package die-to-die 和 chip-to-chip torus 端口。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig16.png",
+            "caption": "图 16：放大一个 NeuronCore-v3——128×128 weight-stationary Tensor Engine 居中，从 SBUF State Buffer 喂操作数、把部分和排进 PSUM 累加器；Vector/Scalar/GPSIMD 引擎同跑；128 DMA 引擎和 Sync Engine 从 HBM 暂存块，CC-Cores 与计算并发驱动 NeuronLink。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Trainium：扩展与软件",
+      "paras": [
+        "**Scale-up——NeuronLink**：Trn2 芯片连成 **torus**，正是 TPU 的选择：单 trn2 实例 16 芯片 4×4 2D torus 约 1.28 TB/s per chip；Trn2 UltraServer 四个实例 64 芯片 4×4×4 3D torus，呈现 83 dense FP8 PetaFLOPS 和约 6TB HBM 单一 scale-up 域。torus 的特征权衡：便宜布线、巨大最近邻带宽，代价是跨 diameter 多跳。AWS 把 64 芯片 UltraServer 对位 NVIDIA 72 GPU NVL72；聚合计算同级，但 torus 不是 crossbar。",
+        "**Trn3 放弃 torus**。NeuronSwitch-v1 是 switched all-to-all fabric，约翻倍 inter-chip 带宽并压平 diameter 让任何芯片一跳达任何其他。Trn3 UltraServer 到 144 芯片、362 dense FP8 PetaFLOPS、20.7TB HBM3e。动机是推动 Google 走向 MoE 推理高 radix 拓扑的那个：expert routing 是 all-to-all，torus 最坏情形。Trainium 的互连路线图是行业压缩重演：负载最近邻时用 torus，不是时换 crossbar。",
+        "**Scale-out**：不是定制；是 AWS 已在跑的同 fabric。每个 Trainium 实例带 Elastic Fabric Adapter（EFA）NIC 进数据中心网络（Trn2 实例 3.2 Tbps），传输是 **SRD（Scalable Reliable Datagram）**，卸载到 Nitro 卡而非跑在加速器。SRD 是 AWS 对 RDMA 的 clean-sheet 答案：代替 RoCE/InfiniBand 的单一有序流，它把每条消息喷到最多 64 条并行路径、可靠但乱序投递，把重组推到 collective 库，绕过单拥塞路径的 head-of-line blocking。顶部是 UltraCluster，由 10p10u 网络（约 10 Pb/s 带宽 <10 微秒延迟）缝接，扩展到数十万芯片。证明点是 **Project Rainier**：约五十万 Trainium2 芯片跨多个美国数据中心，2025 末为 Anthropic 上线；到 2026 初 Claude 跑在超一百万芯片——任何外部实验室对非 NVIDIA 训练平台的最大承诺。",
+        "**软件——Neuron SDK**：Trainium 软件让借用显式：Neuron SDK 是建在同 OpenXLA 基础的 **compiler-first 栈**。Neuron 编译器（neuronx-cc）摄入 XLA HLO 图降低成 NEFF 二进制，Neuron runtime 加载到 NeuronCores；前端 IR 是 Google 的。torch-neuronx 经 PyTorch/XLA 的 LazyTensor trace 跑 PyTorch；jax-neuronx 经 StableHLO 降低 JAX。spectrum 从一端 kernel-driven CUDA 到另一端 whole-program XLA，Trainium 几乎坐在 TPU 顶上：编译器是系统，且基本是同一编译器。",
+        "分叉处是逃生舱。Neuron 发 **NKI（Neuron Kernel Interface）**：Python tile 级 kernel 语言暴露四引擎和 SBUF/PSUM scratchpad。它是 Trainium 的 Pallas（或 Triton）：tile DSL 在 kernel 赢在调度而非代数时降到 whole-program 编译器之下。下方 collective-communication 库把 all-reduce/all-to-all 映射到 CC-Cores 和 NeuronLink 拓扑（NCCL 对等物）。",
+        "对 CUDA（甚至 TPU 栈）的差距是成熟度不是设计。NKI、JAX 路径、分布式库 2024 末前都还在 beta；移植模型只在 AWS 跑无跨厂商回退；vLLM 后端落后 upstream。最清楚的 tell 是锚租户怎么工作：**Anthropic** 不简单经 PyTorch 瞄准 Trainium——它内嵌进 Annapurna、写自己的低层 NKI kernel、把修复 upstream 进 Neuron 栈。Trainium 在前沿生产可行，但前沿是 co-engineered 不是 turnkey：编译器继承且优秀，周围生态年轻。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig17.png",
+            "caption": "图 17：Trn3 UltraServer scale-up——放弃 Trn2 torus 换 NeuronSwitch-v1 switched all-to-all（NeuronLink-v4 约 2 TB/s per chip）；服务器内 L1 NeuronSwitch 任何芯片一跳达任何其他，跨服务器两个 L2 NeuronSwitch 把 144 芯片连成一个 all-to-all 域。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig18.png",
+            "caption": "图 18：AWS Trainium scale-out——UltraServer 经 EFA NIC 卸载到 Nitro 卡，标准 Ethernet 而非 InfiniBand；SRD 传输把每流喷到最多 64 条路径可靠乱序投递；10p10u UltraCluster fabric 连数十万芯片；Project Rainier 约 50 万 Trainium2 给 Anthropic。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Groq LPU：确定性机器",
+      "paras": [
+        "Groq LPU 是**确定性**机器。每个其他芯片花硅容忍不确定性：缓存藏内存延迟、scheduler 填停顿、arbiter 解决无法预测的争用。LPU 删掉全部。剥掉每个**反应式**组件（无缓存、无分支预测器、无 arbiter、无重排缓冲、甚至无片上 crossbar），把整个调度问题交给编译器，它在精确周期上放置每条指令和每个字节。留下的是延迟在跑前已知的芯片。TPU 把调度移进编译器但保留 HBM 和动态网络；Groq 移除最后的不确定性源：内存全是 SRAM，网络也调度，数百芯片作为单一 clock-exact 程序运行。",
+        "**架构**：其余领域由**复制 core** 构建：在 die 上平铺 SM/TensorCore/CU/dataflow core 再把工作分给副本。LPU 反向构建。它拿单个常规 core **拆开**：指令控制、向量 ALU、矩阵单元、内存、网络各成为 **functional slice**——整高列相同硬件——列并排站过 die。每 slice 内同质、跨芯片异构。数据不坐在寄存器文件里等发射到单元；它**流**过 slices 像流水线上零件，East 和 West，每周期一跳寄存器，VLIW 指令从控制 slice 向北发出接它。数据路径中无反应：编译器知道每周期每个操作数在哪，硬件只是转时钟。这个设计以 Tensor Streaming Processor（TSP）出道，2024 年更名 Language Processing Unit。",
+        "**Compute**：MXM 矩阵路径：四个独立 320×320 乘加平面（每半球两个），共 409,600 乘法器，INT8 或 FP16 操作数进 INT32 或 FP32 累加器。权重跨平面安装（40 周期内全装），然后激活流过积累积。900 MHz 约 **750 INT8 TOPS 和 188 FP16 TFLOPS**，且异常地数字无稀疏星号：TSP 完全拒绝跳零，因为数据依赖跳过会让执行时间数据依赖，而确定性是它不肯交易的唯一属性。VXM 向量路径在 die 中央：每 lane 16 ALU 排 4×4 网格，5,120 个 32-bit ALU，跑激活、归一化、量化、残差加。因为计算是*空间*的而非发射到共享单元，操作数可在连续周期走过 VXM ALU 链直接进 MXM 平面不碰内存：GPU kernel 手工建的算子融合这里只是 slice 的物理顺序。第三 slice 类型 SXM 处理直线流表达不了的移动：lane 移位、320-lane permute、转置、chip-to-chip 链接。",
+        "**Memory**：无 HBM、无 DRAM、无缓存。片上 MEM slices：88 slice（每半球 44）230MB SRAM，每字节距计算 slice 一周期，约 80 TB/s 聚合。整层就这：一层、平、软件寻址。",
+        "后果是架构的定义性约束。230MB 装不下模型。Llama-2 70B FP16 是 140GB，必须**跨数百芯片分片**，权重摊到整机架或更多的聚合 SRAM：部署配置约 576 LPU。GPU 把模型停在 handful 封装的 HBM 里、token 流过它；LPU 把模型摊在 cluster 的 SRAM、token 流经 cluster。芯片数由容量而非计算设定：权重必须装下。与 Cerebras 同权衡（纯 SRAM 无 HBM），反向到达：Cerebras 保留一片巨大 die 放弃每 wafer 容量；Groq 保留常规尺寸 die 放弃把模型装在一颗上。",
+        "**Numerics——TruePoint**：TSP 停在 FP16 和 INT8 + FP32 累加，从不发 FP8/FP4。其一个数值想法是 TruePoint：320 元素点积融合成单舍入步 + FP32 累加，让 FP16 乘法阵列在归约上接近 FP32 精度（Groq 报相对 FP32 baseline 约 0.05% 最大误差）。是否 16-bit 是信念还是从未得到低精度刷新的 datapath，难与第二代芯片从未出货的事实分开。SRAM 容量是架构最稀缺资源，8-bit 权重会减半芯片数——这台容量饥渴机器每个理由想要 FP8 却没在硅上得到。",
+        "**Determinism**：每个其他加速器藏延迟；LPU **暴露**它。ISA 携带每条指令的执行延迟，数据路径按构造固定延迟，编译器提前算出每个结果出现的精确周期。硬件里无物能扰动调度：无缓存可错、无 arbiter 可停、无分支可误预测、无投机可回卷。Groq 自己的测量是证明：24,240 次 BERT-Large 运行落在约 75 µs 带内，编译器预测延迟在实测 2% 内。这是 TPU 直觉（把调度移进编译器、删掉第二猜它的硬件）更进一步。TPU 编译器调度一颗芯片；LPU 编译器调度一个*系统*，因为确定性跨网络也成立。且它恰是 Cerebras 的逆：Cerebras core 是 dataflow，操作数到达即触发；WSE 对数据反应，LPU 对时钟定时。两机都删 scheduler；一个用到达替代，一个用时钟。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig19.png",
+            "caption": "图 19：Groq LPU floorplan——die 绕中央 VXM 向量 slice 分成镜像 East/West 半球；MXM 矩阵平面在边缘、SXM switch slice、MEM SRAM slice 夹住 VXM；ICU 沿南边把 VLIW bundle 向北发进每个 slice；操作数流 East/West 每周期一跳。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig20.png",
+            "caption": "图 20：Groq scale-out——8 LPU 全连接成节点（Dragonfly group 呈现单高 radix 虚拟路由器）；9 节点成 72 芯片机架；芯片就是路由器无 NIC 无 switch；编译器逐周期调度每 chip-to-chip 传输（Scheduled, Not Routed）。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Groq：扩展、软件与结局",
+      "paras": [
+        "**Scale-up**：节点是 8 LPU 全连接：每芯片 7 个链接接其他七颗，节点内每芯片距任何其他一跳。剩余四链接（跨节点 32 个）捆成 ISCA 论文所称的 32-port 虚拟路由器，节点进更大 fabric 的上行链路。无 baseboard switch 无连贯地址空间；远程操作数不加载而是*被调度*到达。",
+        "**Scale-out**：节点外，节点连成 **Dragonfly**：9 节点成 72 芯片机架（第九个热备，所以 64 活跃），拓扑到规定 10,440 芯片任何两颗六跳内。fabric **软件调度**：路由和流控移到编译时，论文框架直白：*scheduled, not routed*。无 back-pressure 无动态仲裁，因为编译器已证明接收器就绪；链接带前向纠错替代重传，因为重试会扰动调度。让机架里独立时钟芯片保持 lockstep 是自己的问题：链接是 plesiochronous，fabric 用 Hardware-Aligned Counters 每 256 周期跨生成树交换维护全局共识时间，周期 deskew 指令把每颗芯片停回对齐。Groq 报 8-way all-reduce 在大 tensor 上匹配 A100/NVSwitch 节点、小 tensor 上打败——调度 fabric 不付动态 fabric 的握手延迟。",
+        "**成本**写在内存赌的物理里。模型副本不是盒子是机架（或八个）：Llama-2 70B 约 576 芯片，按一分析带 144 个 host CPU 和 144TB host RAM 旁 LPU，对比 8-GPU server 的两颗 CPU。每芯片 wafer 便宜（14nm GlobalFoundries，据报 <$6k，对比 H100 级部件约 $16k），但要数百颗，decode 期间巨大计算大多闲置。SemiAnalysis 直说：LPU 优化延迟时赢每 token BOM，batch 后吞吐 per dollar 输 GPU 约一个数量级。架构不拼成本，拼速度。",
+        "**软件**：编程模型是「编译器即机器」最纯粹表达。**无 kernel**。你把 PyTorch/TensorFlow/ONNX 模型交给 Groq 编译器；它降低成小 tensor 操作集并静态调度每条指令、每个流、每 chip-to-chip 传输。没人写 wgmma 或手调 tile，因为没有可手调的动态硬件。Groq 的展示是四天带十人内 bring up LLaMA，对比同模型在 GPU 上手调 kernel 的数月。栈（profiler、runtime、GroqFlow bring-up 路径）小而封闭；GroqFlow 2025 归档，公司停止卖卡开始卖 token。",
+        "那个转向是架构为谁服务的 tell。LPU 按构造**纯推理**（Ross 的框架：训练是本地游戏，推理是全局游戏），在单一事上无败：单用户 decode 延迟。独立测量背书，Artificial Analysis 把 Groq 放在开放模型最快 per-token 提供商之列。其余匹配很差：装不进机架 SRAM 的模型、要大批次求吞吐 per dollar 的负载、静态调度表达不了的动态控制流。",
+        "**结局**：买家是 NVIDIA。2025 年 12 月 NVIDIA 拿 LPU 技术**非排他许可**并雇 Ross 和大部分团队。不是收购：无产品、客户合同或股权易手（NVIDIA 10-K 自己说的），虽然约 $13B 结款让媒体称其为收购。GTC 2026 技术以 **NVIDIA Groq 3 LPU** 重现：256 颗 SRAM-only 推理芯片的机架，坐在 Rubin NVL72 旁把 transformer 在两者间拆分——GPU 跑 attention，LPU 跑 feed-forward 和 MoE 层，Dynamo 编排交接。AI 最确定的架构最终成了最可编程架构内部的延迟协处理器。GroqCloud 与此同时仍在原 14nm 硅上服务 token。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "比较：Per-chip 规格",
+      "paras": [
+        "所有算术数字是指定精度下的峰值；条目稠密除非厂商不发布基础。内存带宽是所示原生层级：GPU、TPU、Trainium 是 HBM；Cerebras 和 Groq 是片上 SRAM 聚合。那些数字不直接可比。Scale-up 带宽遵循各厂商惯例，可指 per-chip 聚合、机架聚合或真 bisection。",
+        "各厂商旗舰芯片一览（年份、芯片、加速器内存、内存带宽、旗舰稠密 FLOPs、TDP、scale-up 带宽）：NVIDIA H100 80GB HBM3 / 3.4 TB/s / 1.98 PetaFLOPS FP8 / 700W / 900 GB/s；H200 141GB HBM3e / 4.8 TB/s；B200 192GB HBM3e / 8 TB/s / 4.5 PetaFLOPS FP8 + 9 FP4 / 1,000W / 1.8 TB/s；B300 288GB / 8 TB/s / 7.5 FP8 + 15 FP4 / 1,400W；Rubin 288GB HBM4* / ~13 TB/s* / ~17 FP8 + ~50 FP4* / ~1,500W* / 3.6 TB/s；Rubin Ultra 1TB HBM4e* / ~32 TB/s* / ~33 FP8 + ~100 FP4* / ~1,800W*。",
+        "Google TPU v5p 95GB HBM2e / 2.8 TB/s / 0.46 PetaFLOPS BF16 / 1.2 TB/s；Ironwood 192GB HBM3e / 7.4 TB/s / 4.6 PetaFLOPS FP8；v8t Sunfish 216GB HBM3e / 6.5 TB/s / 12.6 PetaFLOPS FP4。AMD MI300X 192GB HBM3 / 5.3 TB/s / 2.6 PetaFLOPS FP8 / 750W / 896 GB/s；MI325X 256GB / 6.0 TB/s；MI355X 288GB HBM3e / 8 TB/s / 10 FP8 + 20 FP4 / 1,400W / 1,075 GB/s；MI455X 待定 / ~40 PetaFLOPS FP4*。",
+        "Cerebras WSE-2 40GB SRAM / 20 PB/s aggregate / 7.5 PetaFLOPS FP16 / 23kW；WSE-3 44GB / 21 PB/s / ~15.8 FP16*。AWS Trainium1 32GB HBM2e* / 820 GB/s / 0.19 PetaFLOPS BF16/FP8；Trainium2 96GB HBM3 / 2.9 TB/s / 1.3 PetaFLOPS FP8 / ~500W* / 1.28 TB/s；Trainium3 144GB HBM3e / 4.9 TB/s / 2.5 PetaFLOPS FP8。Groq GroqChip 230MB SRAM / 80 TB/s on-chip / 0.188 PetaFLOPS FP16 / 215W / 330 GB/s；NVIDIA Groq 3 LP30 500MB SRAM / 150 TB/s / ~1.2 PetaFLOPS FP8* / 2.5 TB/s。",
+        "*标记分析师推导、时代推断或厂商聚合推导数字；n/d 标记厂商未披露规格。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "比较：Per-rack / Pod",
+      "paras": [
+        "机架级系统一览（公司、年份、系统、芯片数、聚合稠密 FLOPs、加速器内存总量、scale-up fabric 带宽、per-chip NIC、功率、冷却）：NVIDIA HGX H100 8芯片 16 PetaFLOPS FP8 / 640GB / 7.2 TB/s / 400Gbps / ~10kW 空冷；GB200 NVL72 72芯片 360 FP8+720 FP4 / 13.4TB / 130 TB/s / 800Gbps / ~120kW 液冷；GB300 NVL72 540 FP8+1,100 FP4 / 20.7TB；NVL144 144芯片 ~1.2 ExaFLOPS FP8+~3.6 FP4 / ~21TB / ~260 TB/s* / 1.6Tbps / ~200kW*；NVL576 Kyber 576芯片 ~5 FP8+~15 FP4 / ~144TB / 1.6Tbps / ~600kW*。",
+        "Google TPU v5p pod 8,960芯片 4.1 ExaFLOPS BF16 / 852TB / 3D torus；Ironwood pod 9,216芯片 42.5 ExaFLOPS FP8 / 1.77PB / optical OCS / ~10MW*；v8t Sunfish pod 9,600芯片 121 ExaFLOPS FP4 / ~2PB / Boardfly / optical OCS。AMD MI300X 8-GPU OAM 21 PetaFLOPS FP8 / 1.5TB / 7.2 TB/s / 400Gbps / ~10kW 空冷；MI355X 80 FP8+160 FP4 / 2.3TB / 8.6 TB/s / ~16kW* 液冷；Helios MI455X 72芯片 1.4 ExaFLOPS FP8+2.9 FP4 / 31TB / 260 TB/s / 液冷。",
+        "Cerebras Condor Galaxy 3 64 wafers ~1 ExaFLOPS FP16* / 2.8TB SRAM+MemoryX / Ethernet tree / 1.2 Tb/s / ~1.5MW* 液冷。AWS Trn1 16芯片 3 PetaFLOPS BF16 / 512GB / 2D torus / ~50Gbps EFA / 空冷；Trn2 UltraServer 64芯片 83 FP8 / 6.1TB / 3D torus / 200Gbps EFAv3；Trn3 UltraServer 144芯片 362 FP8 / 20.7TB / NeuronSwitch / 液冷。Groq GroqRack 64活跃 12 PetaFLOPS FP16 / 14GB SRAM / 3.2 TB/s bisection / RealScale / 空冷；NVIDIA Groq 3 LPX 256芯片 315 FP8 / 128GB SRAM+12TB DDR5 / 640 TB/s aggregate C2C / 液冷。",
+        "两个表格合起来讲的故事：NVIDIA 靠 scale-up 域内封装的密度（NVL72/576 把 130-260 TB/s 的连贯域塞进液冷机架）；TPU 靠 pod 级 OCS 光交换（9,600 芯片 121 ExaFLOPS 单一域）；AMD 用开放标准追（UALink/UEC）；Cerebras 和 Groq 用 SRAM 换每 token 延迟；Trainium 靠 AWS 端到端价格。"
+      ],
+      "fig_after": {}
+    }
+  ],
+  "conclusion": [
+    "Jacob Peake 这篇 AI 芯片架构全景是当前最好的体系结构横评之一：同一框架（数据住哪→怎么搬→计算单元→怎么互联）横切六家，20 张统一风格的高清架构图 + 两张规格表。",
+    "最值得带走的三点：**① 精度减半是行业共识**——FP32→FP16→FP8→FP4，每代靠 block scaling（NVFP4、MX、OCP MX）找回精度，只有 Cerebras（16-bit 信念）和 Groq（TruePoint）拒绝跟进。**② 软件栈两极**——CUDA 的 kernel-driven（二十年第三方生态护城河）vs XLA 的 compiler-driven（无缓存无 warp，编译器即系统），Triton/torch.compile 正在收敛两者；而 Cerebras 最脆弱（无 kernel 逃生舱）、Trainium 借用 XLA、Groq 彻底编译器调度。**③ 数据移动是本质**——NVIDIA 在机架内堆 NVLink+铜缆，TPU 用 torus+光交换建 pod，Cerebras/Groq 用 SRAM 全删 HBM 换确定性/带宽，AMD/Trainium 押开放标准+Ethernet。",
+    "最有意思的结尾是 Groq：最确定的架构最终变成 NVIDIA 内部的延迟协处理器（GPU 跑 attention、LPU 跑 FFN/MoE），而 Cerebras 拿到 OpenAI 超 $20B 的 750MW 承诺——「寒武纪爆发」的赢家清单还在重排。"
+  ],
+  "reference_url": "https://www.jacobpeake.com/ai-chip-architectures"
+}

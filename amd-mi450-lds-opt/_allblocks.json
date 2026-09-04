@@ -1,0 +1,1219 @@
+{
+ "blocks": [
+  {
+   "idx": 0,
+   "tag": "h1",
+   "txt": "A Deep Dive into LDS Optimizations on AMD Instinct MI450 GPUs"
+  },
+  {
+   "idx": 1,
+   "tag": "p",
+   "txt": "The first two authors (Plavsic, Zaghen) contributed equally to this work."
+  },
+  {
+   "idx": 2,
+   "tag": "p",
+   "txt": "In GEMM kernels, operands travel from global memory through the Local Data Share (LDS) into registers, where the matrix cores consume them. How efficiently data moves through the LDS is frequently the primary determinant of overall performance."
+  },
+  {
+   "idx": 3,
+   "tag": "p",
+   "txt": "Two LDS characteristics can quietly cost a large fraction of the achievable throughput. The first arises when the in-memory layout doesn’t match the layout that the matrix cores expect for WMMA (Wave Matrix-Multiply-Accumulate), for example an N-contiguous B operand when the cores need a K-contiguous layout. A plain load from LDS cannot be vectorized in that case, but a transposed LDS load reorders the data on the fly and restores vectorized access. The second is contention on the physical LDS partitions, where warps"
+  },
+  {
+   "idx": 4,
+   "tag": "p",
+   "txt": "In this post you will learn:"
+  },
+  {
+   "idx": 5,
+   "tag": "li",
+   "txt": "Part I – Transposed LDS loads: how the ＠0＠ cooperative-transpose instruction works and how it’s used."
+  },
+  {
+   "idx": 7,
+   "tag": "li",
+   "txt": "Part II – Partition conflicts: what a partition conflict is, how to structure the WMMA ＠0＠ and ＠1＠ to avoid it, and how the compiler’s partition-aware allocator physically separates data across LDS partitions."
+  },
+  {
+   "idx": 9,
+   "tag": "p",
+   "txt": "This is a deep dive aimed at Gluon and Triton kernel writers who already know the basics of authoring GEMM kernels. If you are new to Gluon kernels, start with"
+  },
+  {
+   "idx": 10,
+   "tag": "h2",
+   "txt": "A Linear Layout Refresher"
+  },
+  {
+   "idx": 11,
+   "tag": "p",
+   "txt": "Both parts of this post lean heavily on Triton’s linear layouts, so we collect the essentials here before diving in. Linear layouts were introduced in"
+  },
+  {
+   "idx": 12,
+   "tag": "h3",
+   "txt": "The Basic Idea"
+  },
+  {
+   "idx": 13,
+   "tag": "p",
+   "txt": "A tensor layout is a mapping between logical tensor coordinates and the hardware resources that hold them, such as registers, lanes (the threads of a warp), warps, or shared-memory offsets. Historically each such mapping was a bespoke, hand-written attribute, and converting between any two of them needed case-by-case code – an approach whose complexity grows quadratically in the number of layouts."
+  },
+  {
+   "idx": 14,
+   "tag": "p",
+   "txt": "A linear layout replaces those bespoke layouts with one abstraction: a map that is linear over F₂"
+  },
+  {
+   "idx": 16,
+   "tag": "p",
+   "txt": "F₂"
+  },
+  {
+   "idx": 17,
+   "tag": "p",
+   "txt": "Throughout this post a layout is written as a list of output offsets, one per input basis. For instance ＠0＠ says the input basis ＠1＠ maps to ＠2＠ and ＠3＠ maps to ＠4＠, so ＠5＠ (= 1 XOR 2) maps to ＠6＠."
+  },
+  {
+   "idx": 18,
+   "tag": "h3",
+   "txt": "Dividing Layouts: How an Instruction Repeats Across a Tile"
+  },
+  {
+   "idx": 19,
+   "tag": "p",
+   "txt": "A single hardware instruction, be it a ＠0＠, a ＠1＠ or a vectorized load, has a small and fixed layout describing which lanes and registers of one instruction touch which elements of a small tile. A full operand tile is larger, so that instruction has to be repeated across it."
+  },
+  {
+   "idx": 20,
+   "tag": "p",
+   "txt": "Linear layouts express this cleanly with left division. Left division is a block-diagonal factorization of a layout’s matrix. Recall that a linear layout is just a binary matrix over F₂"
+  },
+  {
+   "idx": 22,
+   "tag": "p",
+   "txt": "F₂"
+  },
+  {
+   "idx": 23,
+   "tag": "p",
+   "txt": "L"
+  },
+  {
+   "idx": 24,
+   "tag": "p",
+   "txt": "T"
+  },
+  {
+   "idx": 25,
+   "tag": "p",
+   "txt": "L = T 0 ; 0 R ."
+  },
+  {
+   "idx": 26,
+   "tag": "p",
+   "txt": "If L is the layout of the whole tile and T is a layout factor, the quotient L {ℓ}} T is the layout that remains after factoring out T. When T models a complete instruction, the quotient enumerates copies of that instruction. In the ＠0＠ lowering below, however, T is only the contiguous base ＠1＠, so the quotient retains additional lane and register structure."
+  },
+  {
+   "idx": 27,
+   "tag": "p",
+   "txt": "L"
+  },
+  {
+   "idx": 28,
+   "tag": "p",
+   "txt": "T"
+  },
+  {
+   "idx": 29,
+   "tag": "p",
+   "txt": "L {ℓ}} T"
+  },
+  {
+   "idx": 30,
+   "tag": "p",
+   "txt": "T"
+  },
+  {
+   "idx": 31,
+   "tag": "p",
+   "txt": "T"
+  },
+  {
+   "idx": 32,
+   "tag": "p",
+   "txt": "T"
+  },
+  {
+   "idx": 33,
+   "tag": "p",
+   "txt": "In Triton these repetitions show up as the ＠0＠ (register) input bases of a distributed layout. That is exactly the ＠1＠ dimension we manipulate later: when a warp issues several instructions, its ＠2＠ bases stride across the tile, placing copy 0, copy 1, and so on."
+  },
+  {
+   "idx": 34,
+   "tag": "h2",
+   "txt": "Part I – Transposed LDS Loads"
+  },
+  {
+   "idx": 35,
+   "tag": "p",
+   "txt": "A ＠0＠ may lower to many narrow ＠1＠ instructions when the source LDS layout and destination register layout have different contiguity. This section explains how ＠2＠ handles this mismatch using wide per-lane reads and a fixed cross-lane data exchange."
+  },
+  {
+   "idx": 36,
+   "tag": "h3",
+   "txt": "Why Is It Important?"
+  },
+  {
+   "idx": 37,
+   "tag": "p",
+   "txt": "Without ＠0＠, a WMMA operand that has a different contiguity (say, an N-contiguous B operand) in HBM will be expensive in two ways:"
+  },
+  {
+   "idx": 38,
+   "tag": "li",
+   "txt": "If left with a different contiguity when written to LDS, a ＠0＠ that requires it to be K-contiguous cannot use the wide ＠1＠ vector load because the elements are strided in memory. The compiler will need to fall back to smaller loads, so each lane will issue multiple ＠2＠ instructions."
+  },
+  {
+   "idx": 39,
+   "tag": "p",
+   "txt": "If left with a different contiguity when written to LDS, a ＠0＠ that requires it to be K-contiguous cannot use the wide ＠1＠ vector load because the elements are strided in memory. The compiler will need to fall back to smaller loads, so each lane will issue multiple ＠2＠ instructions."
+  },
+  {
+   "idx": 40,
+   "tag": "li",
+   "txt": "If the shared layout has its contiguity set to K-contiguous instead so that the load vectorizes, neither ＠0＠ nor ＠1＠ can perform this reordering while copying from HBM to LDS. The operand must first be loaded into registers and then stored to LDS, shifting the overhead of changing contiguity to the store side. The compiler will need to fall back to smaller stores, so each lane will issue multiple ＠2＠ instructions in a strided K-contiguous pattern."
+  },
+  {
+   "idx": 41,
+   "tag": "p",
+   "txt": "If the shared layout has its contiguity set to K-contiguous instead so that the load vectorizes, neither ＠0＠ nor ＠1＠ can perform this reordering while copying from HBM to LDS. The operand must first be loaded into registers and then stored to LDS, shifting the overhead of changing contiguity to the store side. The compiler will need to fall back to smaller stores, so each lane will issue multiple ＠2＠ instructions in a strided K-contiguous pattern."
+  },
+  {
+   "idx": 42,
+   "tag": "p",
+   "txt": "Using ＠0＠ avoids both tradeoffs. Every lane can issue vectorized LDS reads (64 or 128 bits depending on the data type), then the hardware redistributes the data across the lane groups so that the loaded data matches the destination layout.\nThis gives a gain in terms of both instruction count and register pressure. A large number of small ＠1＠ instructions clustered together can also exhaust the ＠2＠ counter, forcing the hardware to wait before the ＠3＠ completes."
+  },
+  {
+   "idx": 43,
+   "tag": "p",
+   "txt": "For a concrete example, consider the fp16 forward attention kernel from Triton’s ＠0＠, compiled for gfx1250 without causal masking using ＠1＠, ＠2＠, ＠3＠, and eight warps. With transposed loads enabled, the generated assembly contains 128 ＠4＠ instructions. Disabling transposed loads replaces them with 1024 ＠5＠ instructions, increases VGPR usage from 308 to 512, and causes 233 VGPRs to spill."
+  },
+  {
+   "idx": 44,
+   "tag": "h3",
+   "txt": "What Does ＠0＠ Do?"
+  },
+  {
+   "idx": 45,
+   "tag": "p",
+   "txt": "MI450 provides several ＠0＠ variants. We focus on ＠1＠ and ＠2＠ as representative examples because they appear most often in practice; both perform a cooperative transposed load across a full 32-lane warp as 4 independent groups of 8 lanes.\nThe ＠3＠/＠4＠ suffix gives the number of bits read per lane, while ＠5＠/＠6＠ gives the element width. Figures 1a and 1b give the per-lane ownership of a 32x8 tensor before and after the redistribution for the two variants."
+  },
+  {
+   "idx": 46,
+   "tag": "figcaption",
+   "txt": "Figure 1a: Ownership diagram of a 32x8 tensor for ＠0＠. The left side shows the eight elements read by every source lane S; the right side shows the eight values held by every destination lane D after four independent 8x8 transposes."
+  },
+  {
+   "idx": 47,
+   "tag": "p",
+   "txt": "Figure 1a: Ownership diagram of a 32x8 tensor for ＠0＠. The left side shows the eight elements read by every source lane S; the right side shows the eight values held by every destination lane D after four independent 8x8 transposes."
+  },
+  {
+   "idx": 48,
+   "tag": "figcaption",
+   "txt": "Figure 1b: Ownership diagram of a 32x8 tensor for ＠0＠. Unlike the contiguous groups used by ＠1＠, each source group combines two runs of four lanes. In each map, color groups its ＠2＠ or ＠3＠ lane labels into blocks of eight."
+  },
+  {
+   "idx": 49,
+   "tag": "p",
+   "txt": "Figure 1b: Ownership diagram of a 32x8 tensor for ＠0＠. Unlike the contiguous groups used by ＠1＠, each source group combines two runs of four lanes. In each map, color groups its ＠2＠ or ＠3＠ lane labels into blocks of eight."
+  },
+  {
+   "idx": 50,
+   "tag": "p",
+   "txt": "The data loaded by this instruction is transposed in tiles of size ＠0＠, where ＠1＠ is the number of contiguous elements read by each lane and ＠2＠ is the number of lanes in a group. For both ＠3＠ and ＠4＠, this forms an 8x8 tile of 8/16-bit elements that the hardware transposes so destination lane ＠5＠ receives column ＠6＠."
+  },
+  {
+   "idx": 51,
+   "tag": "p",
+   "txt": "For example, within one 8-lane group (＠0＠…＠1＠ refer to source lanes 0…7):"
+  },
+  {
+   "idx": 52,
+   "tag": "li",
+   "txt": "Destination lane ＠0＠ receives column ＠1＠: ＠2＠, the first b16 element loaded by each source lane."
+  },
+  {
+   "idx": 53,
+   "tag": "p",
+   "txt": "Destination lane ＠0＠ receives column ＠1＠: ＠2＠, the first b16 element loaded by each source lane."
+  },
+  {
+   "idx": 54,
+   "tag": "li",
+   "txt": "Destination lane ＠0＠ receives column ＠1＠: ＠2＠, the second b16 element loaded by each source lane."
+  },
+  {
+   "idx": 55,
+   "tag": "p",
+   "txt": "Destination lane ＠0＠ receives column ＠1＠: ＠2＠, the second b16 element loaded by each source lane."
+  },
+  {
+   "idx": 56,
+   "tag": "li",
+   "txt": "Destination lane ＠0＠ receives column ＠1＠ of the next independent group: ＠2＠.\nBecause N equals the group size, every lane in a group draws from all 8 lanes of that group."
+  },
+  {
+   "idx": 57,
+   "tag": "p",
+   "txt": "Destination lane ＠0＠ receives column ＠1＠ of the next independent group: ＠2＠.\nBecause N equals the group size, every lane in a group draws from all 8 lanes of that group."
+  },
+  {
+   "idx": 58,
+   "tag": "p",
+   "txt": "The ＠0＠ variant uses a different lane distribution than the b16 version: each source group combines two runs of 4 lanes. For example, destination lanes ＠1＠ through ＠2＠ draw from source lanes ＠3＠ through ＠4＠ and ＠5＠ through ＠6＠. Figures 2a and 2b assemble these per-group 8x8 tiles into the full 16-bit and 8-bit WMMA B-operand tiles."
+  },
+  {
+   "idx": 59,
+   "tag": "figcaption",
+   "txt": "Figure 2a: gfx1250 lane ownership for a complete 16-bit WMMA B-operand tile. Each 16x16 panel corresponds to one ＠0＠ instruction."
+  },
+  {
+   "idx": 60,
+   "tag": "p",
+   "txt": "Figure 2a: gfx1250 lane ownership for a complete 16-bit WMMA B-operand tile. Each 16x16 panel corresponds to one ＠0＠ instruction."
+  },
+  {
+   "idx": 61,
+   "tag": "figcaption",
+   "txt": "Figure 2b: gfx1250 lane ownership for a complete 8-bit WMMA B-operand tile. Each 16x16 panel corresponds to one ＠0＠ instruction, with each source group split into two runs of four lanes."
+  },
+  {
+   "idx": 62,
+   "tag": "p",
+   "txt": "Figure 2b: gfx1250 lane ownership for a complete 8-bit WMMA B-operand tile. Each 16x16 panel corresponds to one ＠0＠ instruction, with each source group split into two runs of four lanes."
+  },
+  {
+   "idx": 63,
+   "tag": "p",
+   "txt": "The example above shows how the instruction behaves when the per-lane LDS addresses form an 8x8 slice of a WMMA operand. This is not a hardware restriction: each lane can read from an independent LDS address as long as its own 64/128-bit read is contiguous, and the hardware applies the same fixed redistribution regardless of the addresses or what the bits represent."
+  },
+  {
+   "idx": 64,
+   "tag": "p",
+   "txt": "Because the redistribution does not depend on the relationship between the addresses, “transpose” is only the mental model for one particular address pattern; the instruction can support more general data movement. Eligibility depends only on whether the requested ＠0＠ mapping fits the instruction’s fixed data-movement pattern. Representing both as linear layouts lets the compiler test that match directly instead of detecting a high-level transpose operation. Figure 3 illustrates this flexibility: each lane supplies an independent LDS address, and ＠1＠ applies the same fixed cross-lane redistribution to whatever vectors those addresses select."
+  },
+  {
+   "idx": 65,
+   "tag": "figcaption",
+   "txt": "Figure 3: ＠0＠ does not require the source addresses to describe rows of a geometric tile. Each lane supplies an independent LDS address, while the instruction applies the same fixed cross-lane redistribution to the selected vectors."
+  },
+  {
+   "idx": 66,
+   "tag": "p",
+   "txt": "Figure 3: ＠0＠ does not require the source addresses to describe rows of a geometric tile. Each lane supplies an independent LDS address, while the instruction applies the same fixed cross-lane redistribution to the selected vectors."
+  },
+  {
+   "idx": 67,
+   "tag": "p",
+   "txt": "From the perspective of LDS bank conflicts, ＠0＠ behaves like a regular ＠1＠. The hardware selects banks from the LDS addresses issued by the lanes; the cross-lane redistribution happens afterward. Bank conflicts should therefore be analyzed using the source LDS layout, not the destination register layout."
+  },
+  {
+   "idx": 68,
+   "tag": "h3",
+   "txt": "Lowering ＠0＠ to ＠1＠ in Triton"
+  },
+  {
+   "idx": 69,
+   "tag": "p",
+   "txt": "Triton implements this lowering in ＠0＠ as part of the conversion from TTGIR to LLVM IR. The lowering converts the shared and destination encodings into linear layouts, then computes ＠1＠, which maps each destination hardware position ＠2＠ to its source LDS offset."
+  },
+  {
+   "idx": 70,
+   "tag": "p",
+   "txt": "Consider a toy ＠0＠ example with a single warp, ＠1＠, ＠2＠, and 8 elements per lane:"
+  },
+  {
+   "idx": 71,
+   "tag": "p",
+   "txt": "We have that ＠0＠’s ＠1＠ makes dim 0 (＠2＠) the LDS-contiguous dimension, while ＠3＠ is already expressed as a linear layout (this is the “Identity” case a few paragraphs down). Composing them:"
+  },
+  {
+   "idx": 72,
+   "tag": "p",
+   "txt": "＠0＠ builds ＠1＠ by taking each ＠2＠ target ＠3＠ and matching it to each target of ＠4＠, then reading that basis’s offset – e.g. ＠5＠ has ＠6＠ which matches ＠7＠’s ＠8＠, so ＠9＠ will have ＠10＠. ＠11＠ has to be surjective onto ＠12＠ for this lookup to always succeed."
+  },
+  {
+   "idx": 73,
+   "tag": "p",
+   "txt": "The instruction is modeled in terms of the smallest layout factor it operates on, so we can avoid writing bespoke code that pattern-matches specific shapes like “this destination layout looks like a transpose of shared memory”. This is because an instruction is defined by how it moves data on the hardware and not by a map from ＠0＠ to tensor coordinates.\nA ＠1＠ is the contiguous factor required by the instruction, and a destination layout ＠2＠ can use that instruction only if ＠3＠ has a result. The quotient describes the remaining structure after ＠4＠ is factored out; ＠5＠ supplies the remaining lane and register mapping for one complete instruction."
+  },
+  {
+   "idx": 74,
+   "tag": "p",
+   "txt": "The lowering models ＠0＠ with two related layouts:"
+  },
+  {
+   "idx": 75,
+   "tag": "li",
+   "txt": "＠0＠ describes the contiguous part required for instruction selection. For a fixed destination register, destination lanes 0 through 7 request 8 consecutive LDS offsets."
+  },
+  {
+   "idx": 76,
+   "tag": "p",
+   "txt": "＠0＠ describes the contiguous part required for instruction selection. For a fixed destination register, destination lanes 0 through 7 request 8 consecutive LDS offsets."
+  },
+  {
+   "idx": 77,
+   "tag": "li",
+   "txt": "＠0＠ extends ＠1＠ across all the lanes and registers that participate in one instruction. Its ＠2＠ dimension identifies an element within the contiguous base ＠3＠, while its ＠4＠ dimension identifies which lane’s LDS read supplies that element. The order in which the remaining lane and register bases are assigned to ＠5＠ encodes the instruction’s data exchange pattern. The two instructions use the same base ＠6＠ but distribute it differently across the full instruction. Figures 4a and 4b sample one ownership panel of each variant, showing how those bases map from ＠7＠ to ＠8＠."
+  },
+  {
+   "idx": 78,
+   "tag": "p",
+   "txt": "＠0＠ extends ＠1＠ across all the lanes and registers that participate in one instruction. Its ＠2＠ dimension identifies an element within the contiguous base ＠3＠, while its ＠4＠ dimension identifies which lane’s LDS read supplies that element. The order in which the remaining lane and register bases are assigned to ＠5＠ encodes the instruction’s data exchange pattern. The two instructions use the same base ＠6＠ but distribute it differently across the full instruction. Figures 4a and 4b sample one ownership panel of each variant, showing how those bases map from ＠7＠ to ＠8＠."
+  },
+  {
+   "idx": 79,
+   "tag": "figcaption",
+   "txt": "Figure 4a: Reading the b16 ＠0＠ from one ＠1＠ ownership panel in Figure 2a. Each logical element pairs a destination ＠2＠ with its source ＠3＠, corresponding to the compiler dimensions ＠4＠ and ＠5＠. Sampling the five lane bases and three register bases is enough to define the layout, because every other position is an XOR of those bases."
+  },
+  {
+   "idx": 80,
+   "tag": "p",
+   "txt": "Figure 4a: Reading the b16 ＠0＠ from one ＠1＠ ownership panel in Figure 2a. Each logical element pairs a destination ＠2＠ with its source ＠3＠, corresponding to the compiler dimensions ＠4＠ and ＠5＠. Sampling the five lane bases and three register bases is enough to define the layout, because every other position is an XOR of those bases."
+  },
+  {
+   "idx": 81,
+   "tag": "figcaption",
+   "txt": "Figure 4b: The same sampling for one ＠0＠ ownership panel in Figure 2b. The lane and register bases are assigned to ＠1＠ in a different order, so only two of the eight images change: ＠2＠ now selects source lane S4 instead of S8, and ＠3＠ selects source lane S8 instead of S4. That is what splits each group into two runs of four source lanes, visible in the source panel as the color changing halfway across each eight-register region."
+  },
+  {
+   "idx": 82,
+   "tag": "p",
+   "txt": "Figure 4b: The same sampling for one ＠0＠ ownership panel in Figure 2b. The lane and register bases are assigned to ＠1＠ in a different order, so only two of the eight images change: ＠2＠ now selects source lane S4 instead of S8, and ＠3＠ selects source lane S8 instead of S4. That is what splits each group into two runs of four source lanes, visible in the source panel as the color changing halfway across each eight-register region."
+  },
+  {
+   "idx": 83,
+   "tag": "p",
+   "txt": "The two main lowering steps that follow are:"
+  },
+  {
+   "idx": 84,
+   "tag": "li",
+   "txt": "Eligibility check: Build the access mapping from destination hardware positions to LDS offsets, then check whether it contains the data movement pattern required by the instruction."
+  },
+  {
+   "idx": 85,
+   "tag": "p",
+   "txt": "Eligibility check: Build the access mapping from destination hardware positions to LDS offsets, then check whether it contains the data movement pattern required by the instruction."
+  },
+  {
+   "idx": 86,
+   "tag": "li",
+   "txt": "Instruction emission: Factor that pattern out of the access mapping, derive the LDS address read by each runtime lane and warp, and emit one instruction for each remaining repetition."
+  },
+  {
+   "idx": 87,
+   "tag": "p",
+   "txt": "Instruction emission: Factor that pattern out of the access mapping, derive the LDS address read by each runtime lane and warp, and emit one instruction for each remaining repetition."
+  },
+  {
+   "idx": 88,
+   "tag": "p",
+   "txt": "These are operations on layout mappings rather than on linear layouts specifically. Triton represents those mappings with linear layouts and performs the operations using composition, inversion, and division. Figure 5 visualizes the eligibility check on the ＠0＠ basis mappings, while Figure 6 follows the sequence of mappings used to derive the runtime LDS addresses."
+  },
+  {
+   "idx": 89,
+   "tag": "p",
+   "txt": "The compiler first checks ＠0＠. The ＠1＠ layout must be divisible by ＠2＠ in order for the lowering to work. The figure below applies this check to a minimal one-warp ＠3＠ example. It mirrors the valid, scrambled-valid, and invalid cases in Triton’s ＠4＠ regression tests in ＠5＠."
+  },
+  {
+   "idx": 90,
+   "tag": "figcaption",
+   "txt": "Figure 5: ＠0＠ eligibility constrains the first 3 lane bases of ＠1＠ – the ＠2＠ map obtained by composing the destination layout with the inverse of the shared layout. Those bases must match the base ＠3＠ (＠4＠), while every remaining basis must map to a multiple of 8. The repetition bases can be rearranged (middle); swapping two of the required lane bases (right) leaves ＠5＠ with no result and the load falls back to scalar."
+  },
+  {
+   "idx": 91,
+   "tag": "p",
+   "txt": "Figure 5: ＠0＠ eligibility constrains the first 3 lane bases of ＠1＠ – the ＠2＠ map obtained by composing the destination layout with the inverse of the shared layout. Those bases must match the base ＠3＠ (＠4＠), while every remaining basis must map to a multiple of 8. The repetition bases can be rearranged (middle); swapping two of the required lane bases (right) leaves ＠5＠ with no result and the load falls back to scalar."
+  },
+  {
+   "idx": 92,
+   "tag": "p",
+   "txt": "If ＠0＠ succeeds, its quotient describes how repetitions of ＠1＠ are laid out in ＠2＠, but in a reduced coordinate space where the tile itself has been factored out. The lowering computes ＠3＠ to lift it back into ＠4＠’s full offset space. This restores the tile’s lane bases as zero, so ＠5＠ maps each destination register/lane/warp position to the base LDS offset of its tile rather than to a position within that tile."
+  },
+  {
+   "idx": 93,
+   "tag": "p",
+   "txt": "The lowering then computes ＠0＠. ＠1＠ maps a position within one instruction, ＠2＠, to the destination register and lane that receive it; composing with ＠3＠ maps that destination position to its LDS tile base. Here ＠4＠ enumerates the independent source reads issued by the lanes of one instruction. The compiler therefore renames the ＠5＠ bases of ＠6＠ to the ＠7＠ bases of ＠8＠ and adds the warp bases from ＠9＠. Evaluating ＠10＠ with the runtime lane and warp IDs gives the LDS address that each lane must read."
+  },
+  {
+   "idx": 94,
+   "tag": "figcaption",
+   "txt": "Figure 6: The layout pipeline used after ＠0＠ succeeds. The quotient removes the base ＠1＠, ＠2＠ lifts its placement back into the original offset space, and ＠3＠ translates the instruction’s ＠4＠ coordinates through ＠5＠. The final ＠6＠ maps runtime lane and warp IDs directly to the LDS address issued by each lane."
+  },
+  {
+   "idx": 95,
+   "tag": "p",
+   "txt": "Figure 6: The layout pipeline used after ＠0＠ succeeds. The quotient removes the base ＠1＠, ＠2＠ lifts its placement back into the original offset space, and ＠3＠ translates the instruction’s ＠4＠ coordinates through ＠5＠. The final ＠6＠ maps runtime lane and warp IDs directly to the LDS address issued by each lane."
+  },
+  {
+   "idx": 96,
+   "tag": "h3",
+   "txt": "Key Takeaways"
+  },
+  {
+   "idx": 97,
+   "tag": "li",
+   "txt": "Transposed LDS loads remove the cost of a contiguity mismatch. When a WMMA operand sits in LDS with a contiguity that differs from what the register layout needs, an ordinary ＠0＠ degrades into many narrow ＠1＠ instructions. ＠2＠ instead lets every lane issue one wide read and has the hardware redistribute the data into the destination layout, cutting instruction count and register pressure."
+  },
+  {
+   "idx": 98,
+   "tag": "p",
+   "txt": "Transposed LDS loads remove the cost of a contiguity mismatch. When a WMMA operand sits in LDS with a contiguity that differs from what the register layout needs, an ordinary ＠0＠ degrades into many narrow ＠1＠ instructions. ＠2＠ instead lets every lane issue one wide read and has the hardware redistribute the data into the destination layout, cutting instruction count and register pressure."
+  },
+  {
+   "idx": 99,
+   "tag": "li",
+   "txt": "＠0＠ eligibility is a layout-matching problem, not transpose detection. Because the instruction applies a fixed cross-lane pattern, the compiler expresses both layouts as linear layouts and uses left division (＠1＠) to test whether the required ＠2＠ map factors into the instruction’s fixed tile. If it does, the load is eligible."
+  },
+  {
+   "idx": 100,
+   "tag": "p",
+   "txt": "＠0＠ eligibility is a layout-matching problem, not transpose detection. Because the instruction applies a fixed cross-lane pattern, the compiler expresses both layouts as linear layouts and uses left division (＠1＠) to test whether the required ＠2＠ map factors into the instruction’s fixed tile. If it does, the load is eligible."
+  },
+  {
+   "idx": 101,
+   "tag": "h2",
+   "txt": "Part II – Partition Conflicts"
+  },
+  {
+   "idx": 102,
+   "tag": "p",
+   "txt": "Transposed loads optimize a single warp’s read out of LDS. Partition conflicts are about what happens when multiple warps read LDS at the same time.\nEach Workgroup Processor (WGP)"
+  },
+  {
+   "idx": 103,
+   "tag": "p",
+   "txt": "The WGP also holds six 64 KiB hardware memory partitions. The split is fixed in hardware: five belong to LDS, giving its 320 KiB capacity, and the sixth backs the L0 vector cache. These partitions are the unit of contention for the rest of this post."
+  },
+  {
+   "idx": 104,
+   "tag": "p",
+   "txt": "Each SIMD pair sends its LDS request to a shared LDS/L0 arbiter, which owns two ports, L and C, each running at 256 B/cycle and each able to reach every partition. When the arbiter can grant the two incoming requests separate ports, they access LDS in the same cycle for a combined 512 B/cycle; otherwise they serialize and effective bandwidth halves to 256 B/cycle. Figure 7 shows this datapath: both SIMD pairs feed the shared arbiter, whose two ports reach all six hardware partitions."
+  },
+  {
+   "idx": 105,
+   "tag": "figcaption",
+   "txt": "Figure 7: The LDS datapath of a single MI450 Workgroup Processor: both SIMD pairs feed a shared LDS/L0 arbiter whose two ports reach all six hardware partitions."
+  },
+  {
+   "idx": 106,
+   "tag": "p",
+   "txt": "Figure 7: The LDS datapath of a single MI450 Workgroup Processor: both SIMD pairs feed a shared LDS/L0 arbiter whose two ports reach all six hardware partitions."
+  },
+  {
+   "idx": 107,
+   "tag": "h3",
+   "txt": "The Partition-Conflict Rule"
+  },
+  {
+   "idx": 108,
+   "tag": "p",
+   "txt": "A partition conflict occurs when warps from different SIMD pairs issue LDS accesses to the same physical LDS partition in the same cycle."
+  },
+  {
+   "idx": 109,
+   "tag": "p",
+   "txt": "Two conditions must hold at once:"
+  },
+  {
+   "idx": 110,
+   "tag": "li",
+   "txt": "Location – both accesses target the same partition."
+  },
+  {
+   "idx": 111,
+   "tag": "p",
+   "txt": "Location – both accesses target the same partition."
+  },
+  {
+   "idx": 112,
+   "tag": "li",
+   "txt": "Time – both are issued in the same cycle."
+  },
+  {
+   "idx": 113,
+   "tag": "p",
+   "txt": "Time – both are issued in the same cycle."
+  },
+  {
+   "idx": 114,
+   "tag": "p",
+   "txt": "Only cross-pair accesses can satisfy both conditions, since a pair presents at most one LDS request to the arbiter per cycle. When two such accesses do coincide in partition and cycle, the arbiter serializes them and LDS bandwidth halves.\nBreaking either condition therefore avoids the conflict. Triton and Gluon have no control over the cycle on which a warp issues its access, so location is the condition we can act on."
+  },
+  {
+   "idx": 115,
+   "tag": "p",
+   "txt": "Separating locations is what the rest of this part builds, step by step:"
+  },
+  {
+   "idx": 116,
+   "tag": "li",
+   "txt": "Why the standard WMMA layout conflicts on operand A."
+  },
+  {
+   "idx": 118,
+   "tag": "li",
+   "txt": "How writing the CTA layout as a linear layout lets us swizzle the two pairs apart."
+  },
+  {
+   "idx": 119,
+   "tag": "p",
+   "txt": "How writing the"
+  },
+  {
+   "idx": 120,
+   "tag": "li",
+   "txt": "Why that swizzle is not enough on its own, and what a ＠0＠ adds."
+  },
+  {
+   "idx": 121,
+   "tag": "p",
+   "txt": "Why that swizzle is"
+  },
+  {
+   "idx": 122,
+   "tag": "li",
+   "txt": "How the choice of ctaLayout also sets the TDM cost of storing the operands in LDS."
+  },
+  {
+   "idx": 123,
+   "tag": "p",
+   "txt": "How the"
+  },
+  {
+   "idx": 124,
+   "tag": "li",
+   "txt": "How the partition-aware allocator makes the separation physical."
+  },
+  {
+   "idx": 125,
+   "tag": "p",
+   "txt": "How the"
+  },
+  {
+   "idx": 126,
+   "tag": "li",
+   "txt": "How the resulting local loads are lowered with almost no run-time cost."
+  },
+  {
+   "idx": 127,
+   "tag": "p",
+   "txt": "How the resulting"
+  },
+  {
+   "idx": 128,
+   "tag": "li",
+   "txt": "How much the separation actually buys, measured with a kernel that does nothing but read LDS."
+  },
+  {
+   "idx": 130,
+   "tag": "p",
+   "txt": "Note"
+  },
+  {
+   "idx": 131,
+   "tag": "p",
+   "txt": "Because time is one of the conditions, a partition conflict is not a deterministic quantity the way a bank conflict is. Threads within a warp run in lockstep, so bank conflicts are countable. Separate warps, however, drift relative to one another, so we model the four warps as if they issued the same instruction on the same cycle. Under that assumption separating locations removes the conflict outright; in practice it drives its probability down rather than strictly to zero."
+  },
+  {
+   "idx": 132,
+   "tag": "h3",
+   "txt": "Why the Standard WMMA Layout Conflicts"
+  },
+  {
+   "idx": 133,
+   "tag": "p",
+   "txt": "Consider a 4-warp GEMM with the standard WMMA CTA layout, initially represented in Gluon by ＠0＠. ＠1＠ is a bespoke shorthand for how warps are laid out across the output tile – the same mapping Gluon now also expresses generically as the WMMA ＠2＠, which we come to shortly. It arranges the four warps in a 2x2 grid over the tile, as shown in Figure 8:"
+  },
+  {
+   "idx": 134,
+   "tag": "figcaption",
+   "txt": "Figure 8: With the default ＠0＠ layout, each M-row is shared by one Pair A warp and one Pair B warp."
+  },
+  {
+   "idx": 135,
+   "tag": "p",
+   "txt": "Figure 8: With the default ＠0＠ layout, each M-row is shared by one Pair A warp and one Pair B warp."
+  },
+  {
+   "idx": 136,
+   "tag": "p",
+   "txt": "Each warp at tile ＠0＠ reads the A rows for its M-position and the B columns for its N-position. An “M-row” here is not a single matrix row, but the band of M rows one warp covers with a single WMMA instruction. Warps in the same M-row read the same A data. In this layout, ＠1＠ (Pair A) and ＠2＠ (Pair B) share M-row 0, and ＠3＠ (Pair A) and ＠4＠ (Pair B) share M-row 1."
+  },
+  {
+   "idx": 137,
+   "tag": "p",
+   "txt": "Since both pairs read the same bytes, those bytes live in one partition, and identical data cannot be spread across partitions. This layout therefore locks in the location condition on A: the two pairs are guaranteed to be co-located, and only their relative timing decides whether a given access pair actually collides. That is exactly the situation to avoid, since it leaves nothing under our control. Operand B is fine here: the warps sharing an N-column (＠0＠+＠1＠, ＠2＠+＠3＠) belong to the same pair."
+  },
+  {
+   "idx": 138,
+   "tag": "h3",
+   "txt": "CTA Layout as a Linear Layout"
+  },
+  {
+   "idx": 139,
+   "tag": "p",
+   "txt": "Recall from the"
+  },
+  {
+   "idx": 140,
+   "tag": "p",
+   "txt": "The bespoke ＠0＠ becomes the following ＠1＠:"
+  },
+  {
+   "idx": 141,
+   "tag": "p",
+   "txt": "We specify only the ＠0＠ bases: they already cover the output tile (the layout is surjective), so Triton fills in the ＠1＠ repetitions automatically later in the pipeline. Reading it, ＠2＠ maps to ＠3＠ and ＠4＠ to ＠5＠, so ＠6＠ (which decomposes into ＠7＠ XOR ＠8＠) lands on ＠9＠."
+  },
+  {
+   "idx": 142,
+   "tag": "p",
+   "txt": "The swizzled layout keeps the same four warps but changes ＠0＠ to move along M:"
+  },
+  {
+   "idx": 143,
+   "tag": "p",
+   "txt": "＠0＠ now maps to ＠1＠ instead of ＠2＠. With this change the ＠3＠ bases alone no longer cover the tile, so we add an explicit ＠4＠ basis to restore surjectivity. That ＠5＠ basis is the repetition: ＠6＠ on its second iteration combines ＠7＠ and ＠8＠, landing on ＠9＠."
+  },
+  {
+   "idx": 144,
+   "tag": "p",
+   "txt": "The two ＠0＠s above differ in exactly one place: the input basis ＠1＠, which determines whether warps from different pairs read the same M-rows. In the standard layout it maps to ＠2＠ – a pure N move – which is precisely why cross-pair warps landed on the same M-row and read the same A bytes. The swizzle changes it to ＠3＠, whose nonzero M component pushes those cross-pair warps onto different M-rows, so they read different A data. Figure 9 shows the resulting layout, with the two pairs on disjoint M-rows."
+  },
+  {
+   "idx": 145,
+   "tag": "figcaption",
+   "txt": "Figure 9: With the swizzled layout, all Pair A warps occupy one set of M-rows and all Pair B warps a disjoint set. The cross-pair sharing on A is gone."
+  },
+  {
+   "idx": 146,
+   "tag": "p",
+   "txt": "Figure 9: With the swizzled layout, all Pair A warps occupy one set of M-rows and all Pair B warps a disjoint set. The cross-pair sharing on A is gone."
+  },
+  {
+   "idx": 147,
+   "tag": "h3",
+   "txt": "When the ＠0＠ Is Not Enough: ＠1＠"
+  },
+  {
+   "idx": 148,
+   "tag": "p",
+   "txt": "Swizzling the ＠0＠ guarantees that cross-pair warps address different tiles. But it says nothing about which physical partition those tiles land in. If the entire operand fits inside a single 64 KiB partition – for example A ＠1＠ in fp16 is exactly 32 KiB – then every warp reads from that one partition regardless of its tile, and Pair A and Pair B collide again."
+  },
+  {
+   "idx": 149,
+   "tag": "p",
+   "txt": "＠0＠ is the Gluon mechanism that does this splitting. It takes four parameters – ＠1＠, ＠2＠, ＠3＠, and ＠4＠ – which together serve two purposes. First, they tell the allocator which logical pieces must live in separate physical partitions, so it can place them in different 64 KiB regions. Second, they give the compiler enough information to build a unique mapping between shared-memory addresses and logical tensor coordinates, which is what lets it lower every load and store to the right address."
+  },
+  {
+   "idx": 150,
+   "tag": "p",
+   "txt": "The parameters are easiest to understand by deriving them from a concrete kernel. Consider the following GEMM: ＠0＠, four warps, fp16, using the swizzled ＠1＠ from the previous section. That layout’s tile is 64x32 – a 4x2 block of 16x16 warp tiles – and it repeats across the 128x128 output."
+  },
+  {
+   "idx": 151,
+   "tag": "p",
+   "txt": "Figure 10 draws the whole picture, and every parameter can be read straight off it. In the center is the ＠0＠ output as an 8x8 grid of 16x16 warp tiles. The swizzled ＠1＠ tile is the 64x32 block outlined by the dividers (a 4x2 group of warp tiles); it repeats ＠2＠ times to cover C. Down the left edge is operand A sliced along M; along the top is operand B sliced along N. Each such slice is a piece – a contiguous band of the operand along the slice dimension – and the figure labels them ＠3＠, ＠4＠, and so on."
+  },
+  {
+   "idx": 152,
+   "tag": "figcaption",
+   "txt": "Figure 10: The swizzled ＠0＠ tile repeated across C, where each color marks the tiles one instruction computes across all four warps. A is sliced along M into ＠1＠ pieces (groups G0-G1); B along N into ＠2＠ pieces (groups G0-G3). The lower panels show the round-robin distribution: even pieces to Partition 0, odd pieces to Partition 1."
+  },
+  {
+   "idx": 153,
+   "tag": "p",
+   "txt": "Figure 10: The swizzled ＠0＠ tile repeated across C, where each color marks the tiles one instruction computes across all four warps. A is sliced along M into ＠1＠ pieces (groups G0-G1); B along N into ＠2＠ pieces (groups G0-G3). The lower panels show the round-robin distribution: even pieces to Partition 0, odd pieces to Partition 1."
+  },
+  {
+   "idx": 154,
+   "tag": "p",
+   "txt": "＠0＠ is the axis we slice along. The swizzled ＠1＠ already spreads the two SIMD pairs along the non-K dimension, so that is where we cut: ＠2＠ (M) for A, ＠3＠ (N) for B."
+  },
+  {
+   "idx": 155,
+   "tag": "p",
+   "txt": "＠0＠ follows from the conflict rule. The swizzle splits the warps by pair – ＠1＠, ＠2＠ are Pair A; ＠3＠, ＠4＠ are Pair B – and in every instruction each pair reads a different band of ＠5＠. Give each pair its own buffer (Pair A -> partition 0, Pair B -> partition 1) and the conflict is gone: two pairs -> ＠6＠. Note this logical count is not the five physical partitions of the WGP: the conflict is strictly between the two SIMD pairs, so two buffers in two distinct physical partitions are all that is needed; the five physical partitions simply give the allocator room to place those two buffers apart."
+  },
+  {
+   "idx": 156,
+   "tag": "p",
+   "txt": "＠0＠ exists because the data for each partition can be interleaved along ＠1＠: walking down operand A the pieces alternate ＠2＠. One full ＠3＠ cycle is a group, and ＠4＠ counts how many times it repeats – the ＠5＠ brackets in the figure. Equivalently, it is how many times the ＠6＠ tile repeats along ＠7＠: A ＠8＠; B ＠9＠."
+  },
+  {
+   "idx": 157,
+   "tag": "p",
+   "txt": "＠0＠ is the last parameter: it describes how a single piece is laid out within its partition. This is an ordinary ＠1＠, whose ＠2＠ and ＠3＠ are chosen to keep the intra-piece accesses free of bank conflicts. Putting it together, the two operands are:"
+  },
+  {
+   "idx": 158,
+   "tag": "h3",
+   "txt": "Choosing the ＠0＠ to Reduce TDM Traffic"
+  },
+  {
+   "idx": 159,
+   "tag": "p",
+   "txt": "The number of pieces is not just bookkeeping – it determines how the operand is loaded from global memory. On MI450 the Tensor Data Movement engine (TDM) copies a tensor into LDS, and each TDM instruction moves at most one piece per warp – a hardware constraint tied to the striding patterns a warp can write. The instruction count therefore follows directly from the piece count:"
+  },
+  {
+   "idx": 160,
+   "tag": "p",
+   "txt": "TDM instructions = ⌈ number of pieces/number of warps ⌉"
+  },
+  {
+   "idx": 161,
+   "tag": "p",
+   "txt": "With four warps:"
+  },
+  {
+   "idx": 162,
+   "tag": "li",
+   "txt": "Operand A: 4 pieces, 4 warps -> a single TDM instruction covers all pieces."
+  },
+  {
+   "idx": 163,
+   "tag": "p",
+   "txt": "Operand A: 4 pieces, 4 warps -> a single TDM instruction covers all pieces."
+  },
+  {
+   "idx": 164,
+   "tag": "li",
+   "txt": "Operand B: 8 pieces, 4 warps -> two TDM instructions are needed."
+  },
+  {
+   "idx": 165,
+   "tag": "p",
+   "txt": "Operand B: 8 pieces, 4 warps -> two TDM instructions are needed."
+  },
+  {
+   "idx": 166,
+   "tag": "p",
+   "txt": "The piece count – and therefore the TDM cost – is a consequence of the WMMA ＠0＠ you pick. The layout above assigns each warp a single ＠1＠ tile, which makes the pieces small: operand B ends up as eight ＠2＠ strips. If instead we choose a coarser ＠3＠ where each warp covers a four-tile strip of ＠4＠, the pieces grow and their count drops. Figure 11 shows this alternative: ＠5＠ gives a ＠6＠ tile that tiles C in ＠7＠ blocks (stacked along M)."
+  },
+  {
+   "idx": 167,
+   "tag": "figcaption",
+   "txt": "Figure 11: Making each warp span a four-tile strip yields bigger, fewer pieces. Colors again mark the tiles computed by each instruction. Operand A is unchanged (four ＠0＠ pieces, ＠1＠), but operand B collapses from eight ＠2＠ pieces to two ＠3＠ pieces (＠4＠)."
+  },
+  {
+   "idx": 168,
+   "tag": "p",
+   "txt": "Figure 11: Making each warp span a four-tile strip yields bigger, fewer pieces. Colors again mark the tiles computed by each instruction. Operand A is unchanged (four ＠0＠ pieces, ＠1＠), but operand B collapses from eight ＠2＠ pieces to two ＠3＠ pieces (＠4＠)."
+  },
+  {
+   "idx": 169,
+   "tag": "p",
+   "txt": "Two things fall out of this choice. First, TDM cost drops: with four warps, operand B’s two pieces now fit in a single TDM instruction instead of two. Second, the larger pieces use the memory system better – B is N-contiguous, and in fp16 a 128-byte cacheline holds 64 N-elements, so a ＠0＠ piece is exactly one cacheline while the old ＠1＠ piece filled only a quarter of one. The separation between the pairs is untouched; we have only traded piece granularity for fewer, better-utilized transfers, so the WMMA ＠2＠ and the ＠3＠ parameters must be chosen together."
+  },
+  {
+   "idx": 170,
+   "tag": "p",
+   "txt": "Reading the new parameters off the coarser tile, operand A is unchanged, but operand B now has a single group (its two pieces are one ＠0＠ cycle):"
+  },
+  {
+   "idx": 171,
+   "tag": "h3",
+   "txt": "How the Partition Guarantee Is Enforced: Partition-Aware Allocation"
+  },
+  {
+   "idx": 172,
+   "tag": "p",
+   "txt": "The linear layout says which partition a piece belongs to; the allocator is what makes those partitions land in different physical 64 KiB regions of LDS. Triton’s shared-memory allocator is a greedy interval-placement algorithm from the classic paper"
+  },
+  {
+   "idx": 173,
+   "tag": "p",
+   "txt": "The base algorithm treats each buffer as a rectangle in (time x offset) space – its liveness range along time and its size along offset – and greedily places each buffer at the lowest offset that does not overlap any other buffer live at the same time. The extension for partitioned tensors adds two ingredients."
+  },
+  {
+   "idx": 174,
+   "tag": "p",
+   "txt": "First, when a ＠0＠ uses a ＠1＠, the allocator creates ＠2＠ buffers (each holding all of that partition’s groups concatenated, so its size is ＠3＠) and marks them all as mutual neighbors. Neighbors are required to occupy different physical partitions."
+  },
+  {
+   "idx": 175,
+   "tag": "p",
+   "txt": "Second, placement is made partition-aware in two stages:"
+  },
+  {
+   "idx": 176,
+   "tag": "li",
+   "txt": "Stage 1 (initial placement). In the base algorithm this step scans the open free slots from the lowest offset up and, at each slot, picks the first candidate whose liveness fits, gives it that offset, and splits the leftover space into new slots.\nPartition awareness adds one gate to that choice: a candidate is only accepted if it lands in a different physical partition than its already-placed neighbors. This can leave the current slot blocked – every candidate that fits here would collide with a neighbor’s partition. When that happens the allocator reopens the slot at a higher offset, past the neighbors’ partitions, so a candidate becomes acceptable there. Because the offset only ever moves up, the algorithm keeps making progress. Figure 12 traces four iterations of this stage-1 placement, growing the search height until each partition buffer finds a partition free of its neighbors."
+  },
+  {
+   "idx": 177,
+   "tag": "p",
+   "txt": "Stage 1 (initial placement). In the base algorithm this step scans the open free slots from the lowest offset up and, at each slot, picks the first candidate whose liveness fits, gives it that offset, and splits the leftover space into new slots."
+  },
+  {
+   "idx": 178,
+   "tag": "p",
+   "txt": "Partition awareness adds one gate to that choice: a candidate is only accepted if it lands in a different physical partition than its already-placed neighbors. This can leave the current slot blocked – every candidate that fits here would collide with a neighbor’s partition. When that happens the allocator reopens the slot at a higher offset, past the neighbors’ partitions, so a candidate becomes acceptable there. Because the offset only ever moves up, the algorithm keeps making progress. Figure 12 traces four iterations of this stage-1 placement, growing the search height until each partition buffer finds a partition free of its neighbors."
+  },
+  {
+   "idx": 179,
+   "tag": "figcaption",
+   "txt": "Figure 12: Stage-1 placement grows the search height until each partition buffer finds a partition free of its already-placed neighbors."
+  },
+  {
+   "idx": 180,
+   "tag": "p",
+   "txt": "Figure 12: Stage-1 placement grows the search height until each partition buffer finds a partition free of its already-placed neighbors."
+  },
+  {
+   "idx": 181,
+   "tag": "li",
+   "txt": "Stage 2 (interference refinement). In the base algorithm the initial offsets can still leave some buffers overlapping, so this step builds an interference graph – an edge between any two buffers that are live at the same time and whose byte ranges overlap – colors it, and pushes each buffer above the ones it interferes with, repeating until nothing overlaps.\nPartitions need this step too, because the offset bumping this stage performs can itself slide a buffer into the same physical partition as one of its neighbors, undoing what stage 1 established. So partition awareness adds one more kind of interference edge: two neighbors that share a physical partition. When that edge is resolved, the buffer is bumped past the neighbor’s partition rather than just past its bytes, restoring the guarantee."
+  },
+  {
+   "idx": 182,
+   "tag": "p",
+   "txt": "Stage 2 (interference refinement). In the base algorithm the initial offsets can still leave some buffers overlapping, so this step builds an interference graph – an edge between any two buffers that are live at the same time and whose byte ranges overlap – colors it, and pushes each buffer above the ones it interferes with, repeating until nothing overlaps."
+  },
+  {
+   "idx": 183,
+   "tag": "p",
+   "txt": "Partitions need this step too, because the offset bumping this stage performs can itself slide a buffer into the same physical partition as one of its neighbors, undoing what stage 1 established. So partition awareness adds one more kind of interference edge: two neighbors that share a physical partition. When that edge is resolved, the buffer is bumped past the neighbor’s partition rather than just past its bytes, restoring the guarantee."
+  },
+  {
+   "idx": 184,
+   "tag": "h3",
+   "txt": "How Partitioned Local Loads Are Lowered"
+  },
+  {
+   "idx": 185,
+   "tag": "p",
+   "txt": "The ＠0＠ and the allocator settle everything at compile time; the last question is what the load itself has to compute at run time. Each operand carries a distributed layout, mapping a thread’s ＠1＠ to tensor coordinates, and a shared layout, mapping an LDS location to the same coordinates. The backend emits their composition, ＠2＠. A partitioned shared layout simply adds a second output dimension, so the conversion yields an ＠3＠ pair – which physical buffer to read from, alongside where in it. Figure 13 shows this composition for a 64x64 partitioned operand A, highlighting the bases that feed the new ＠4＠ coordinate."
+  },
+  {
+   "idx": 186,
+   "tag": "figcaption",
+   "txt": "Figure 13: A partitioned shared layout adds a ＠0＠ output dimension. Composing it with the distributed layout yields ＠1＠; the highlighted bases are the ones that feed the new ＠2＠ coordinate."
+  },
+  {
+   "idx": 187,
+   "tag": "p",
+   "txt": "Figure 13: A partitioned shared layout adds a ＠0＠ output dimension. Composing it with the distributed layout yields ＠1＠; the highlighted bases are the ones that feed the new ＠2＠ coordinate."
+  },
+  {
+   "idx": 188,
+   "tag": "p",
+   "txt": "Like every linear-layout output, the partition index is an XOR of basis contributions, and each one resolves cheaply: the ＠0＠ term is a compile-time constant, the ＠1＠ term is a runtime value but loop-invariant, and ＠2＠ usually does not feed ＠3＠ at all. Base-pointer selection therefore lifts out of the loop entirely. The backend resolves the warp-dependent part once and pre-computes a small array of reordered base pointers, one per partition, which each load indexes with a constant that folds to a literal."
+  },
+  {
+   "idx": 189,
+   "tag": "p",
+   "txt": "This mirrors what the backend already does without partitioning, where a single dynamic address computation is hoisted ahead of the loop and the body left fully static. Partitioning only adds the base-pointer array alongside it, so the run-time price is a one-time setup proportional to the number of partitions rather than to the number of loads, and the address math inside the K loop stays the same pure-XOR expression as the baseline."
+  },
+  {
+   "idx": 190,
+   "tag": "h3",
+   "txt": "Measuring It: An LDS Bandwidth Microbenchmark"
+  },
+  {
+   "idx": 191,
+   "tag": "p",
+   "txt": "Everything above is a compile-time construction. To measure what it buys, we isolate the\neffect in a microbenchmark that changes only the shared layout – same shape, same\ninstruction count, same vector width, same bank behavior."
+  },
+  {
+   "idx": 192,
+   "tag": "p",
+   "txt": "What is loaded. The kernel reads a ＠0＠ fp16 tensor out of LDS and does\nnothing else. Scaled down to ＠1＠ so that the bases fit on the page, its layouts are:"
+  },
+  {
+   "idx": 193,
+   "tag": "p",
+   "txt": "Four properties of the kernel follow directly from those bases:"
+  },
+  {
+   "idx": 194,
+   "tag": "li",
+   "txt": "One row per warp. The warp bases of the distributed layout carry dim 0 and nothing\nelse, so warp ＠0＠ owns row ＠1＠ in its entirety and touches no other row."
+  },
+  {
+   "idx": 195,
+   "tag": "p",
+   "txt": "One row per warp. The warp bases of the distributed layout carry dim 0 and nothing\nelse, so warp ＠0＠ owns row ＠1＠ in its entirety and touches no other row."
+  },
+  {
+   "idx": 196,
+   "tag": "li",
+   "txt": "One 512-byte window per load. The register and lane bases cover dim 1 contiguously at\n8 fp16 apiece, which is 128 bits per lane, so a warp spans 512 bytes with a single\n＠0＠. The measured runs use a much longer row, which only adds register bases\nstriding along dim 1, and with them the back-to-back loads that are timed."
+  },
+  {
+   "idx": 197,
+   "tag": "p",
+   "txt": "One 512-byte window per load. The register and lane bases cover dim 1 contiguously at\n8 fp16 apiece, which is 128 bits per lane, so a warp spans 512 bytes with a single\n＠0＠. The measured runs use a much longer row, which only adds register bases\nstriding along dim 1, and with them the back-to-back loads that are timed."
+  },
+  {
+   "idx": 198,
+   "tag": "li",
+   "txt": "No bank conflicts either way. That same contiguity means the lanes read consecutive\n16-byte chunks, and ＠0＠ services the warp in groups of 16 lanes, so each group\ncovers all 64 banks exactly once."
+  },
+  {
+   "idx": 199,
+   "tag": "p",
+   "txt": "No bank conflicts either way. That same contiguity means the lanes read consecutive\n16-byte chunks, and ＠0＠ services the warp in groups of 16 lanes, so each group\ncovers all 64 banks exactly once."
+  },
+  {
+   "idx": 200,
+   "tag": "li",
+   "txt": "The two shared layouts differ in one place only: which partition a row ends up in. In\nthe plain layout the four rows sit in one contiguous buffer, so they all share a single\npartition. In the partitioned layout the rows alternate between two. Warp ＠0＠ owns row ＠1＠,\nso this is what puts it on partition ＠2＠."
+  },
+  {
+   "idx": 201,
+   "tag": "p",
+   "txt": "The two shared layouts differ in one place only: which partition a row ends up in. In\nthe plain layout the four rows sit in one contiguous buffer, so they all share a single\npartition. In the partitioned layout the rows alternate between two. Warp ＠0＠ owns row ＠1＠,\nso this is what puts it on partition ＠2＠."
+  },
+  {
+   "idx": 202,
+   "tag": "p",
+   "txt": "The tensor is sized so the unpartitioned baseline fits inside a single 64 KiB partition,\nwhich is the regime where it is guaranteed there is a conflict to resolve.\nThe compiled LDS size is the evidence that the placement actually happened. For a 64 KiB\ntensor the baseline allocates one 64 KiB buffer at offset 0, while the partitioned version\nallocates two 32 KiB buffers and is forced to push the second to the 64 KiB boundary, for\n96 KiB total."
+  },
+  {
+   "idx": 203,
+   "tag": "p",
+   "txt": "How bandwidth is computed. Each warp issues a run of back-to-back ＠0＠,\nbracketed by two reads of ＠1＠, the shader-clock cycle counter. A\nbarrier before the opening clock read lines the warps up so their runs overlap, and a second\nbarrier after the last load makes sure every load has retired before the closing clock read.\nThe warps together read the tensor exactly once, so bandwidth is its size in bytes divided\nby the recorded cycles."
+  },
+  {
+   "idx": 204,
+   "tag": "p",
+   "txt": "Steady-state bandwidth. That number divides by everything the clock counted, including a\nfixed startup and drain cost – the two clock reads and the barrier, plus one un-overlapped\nLDS round trip for the first access. That cost does not grow with the burst, so it\nunderstates bandwidth, and understates it worse the faster the kernel streams, since a\nfixed cost is a larger share of a shorter run. Modeling a burst as"
+  },
+  {
+   "idx": 205,
+   "tag": "p",
+   "txt": "cycles = fixed + bytes/rate"
+  },
+  {
+   "idx": 206,
+   "tag": "p",
+   "txt": "and fitting cycles against bytes over a range of burst lengths recovers the rate as the\nreciprocal slope, with the fixed cost falling out as the intercept."
+  },
+  {
+   "idx": 207,
+   "tag": "p",
+   "txt": "Results. At four warps over a 64 KiB working set, 32 loads per warp:"
+  },
+  {
+   "idx": 208,
+   "tag": "th",
+   "txt": "layout"
+  },
+  {
+   "idx": 209,
+   "tag": "p",
+   "txt": "layout"
+  },
+  {
+   "idx": 210,
+   "tag": "th",
+   "txt": "measured cycles"
+  },
+  {
+   "idx": 211,
+   "tag": "p",
+   "txt": "measured cycles"
+  },
+  {
+   "idx": 212,
+   "tag": "th",
+   "txt": "LDS"
+  },
+  {
+   "idx": 213,
+   "tag": "p",
+   "txt": "LDS"
+  },
+  {
+   "idx": 214,
+   "tag": "th",
+   "txt": "raw B/cycle"
+  },
+  {
+   "idx": 215,
+   "tag": "p",
+   "txt": "raw B/cycle"
+  },
+  {
+   "idx": 216,
+   "tag": "th",
+   "txt": "steady B/cycle"
+  },
+  {
+   "idx": 217,
+   "tag": "p",
+   "txt": "steady B/cycle"
+  },
+  {
+   "idx": 218,
+   "tag": "th",
+   "txt": "peak B/cycle"
+  },
+  {
+   "idx": 219,
+   "tag": "p",
+   "txt": "peak B/cycle"
+  },
+  {
+   "idx": 220,
+   "tag": "td",
+   "txt": "plain"
+  },
+  {
+   "idx": 221,
+   "tag": "p",
+   "txt": "plain"
+  },
+  {
+   "idx": 224,
+   "tag": "td",
+   "txt": "64 KiB"
+  },
+  {
+   "idx": 225,
+   "tag": "p",
+   "txt": "64 KiB"
+  },
+  {
+   "idx": 232,
+   "tag": "td",
+   "txt": "partitioned"
+  },
+  {
+   "idx": 233,
+   "tag": "p",
+   "txt": "partitioned"
+  },
+  {
+   "idx": 236,
+   "tag": "td",
+   "txt": "96 KiB"
+  },
+  {
+   "idx": 237,
+   "tag": "p",
+   "txt": "96 KiB"
+  },
+  {
+   "idx": 244,
+   "tag": "p",
+   "txt": "Resolving the partition conflict is a 1.65x speedup for 32 KiB of extra LDS, and both\nlayouts stream at essentially 100% of their ceiling – the baseline confined to a single\nport by the conflict, the partitioned layout reaching both."
+  },
+  {
+   "idx": 245,
+   "tag": "p",
+   "txt": "What this pins down is the mechanism and its ceiling: a partition conflict costs the second\nLDS port, and separating the pieces recovers it in full for the price of an alignment gap.\nA kernel that does nothing but read LDS is the best case, of course. A real GEMM overlaps\nthese loads with WMMA math and global traffic, so part of the serialization hides behind\nother work, and the extra LDS competes with occupancy."
+  },
+  {
+   "idx": 246,
+   "tag": "h3",
+   "txt": "Key Takeaways"
+  },
+  {
+   "idx": 247,
+   "tag": "li",
+   "txt": "A partition conflict needs both a shared location and a shared cycle. Unlike bank conflicts, which serialize threads within a single access, a partition conflict requires cross-pair accesses to hit the same physical 64 KiB LDS partition and to be issued together. Breaking either condition is enough, and since Triton and Gluon cannot schedule issue cycles, they attack the location half."
+  },
+  {
+   "idx": 248,
+   "tag": "p",
+   "txt": "A partition conflict needs both a shared location and a shared cycle. Unlike bank conflicts, which serialize threads within a single access, a partition conflict requires cross-pair accesses to hit the same physical 64 KiB LDS partition and to be issued together. Breaking either condition is enough, and since Triton and Gluon cannot schedule issue cycles, they attack the location half."
+  },
+  {
+   "idx": 249,
+   "tag": "li",
+   "txt": "The fix is to swizzle the ＠0＠ and pin pieces with a ＠1＠. The distributed layout sets the piece shape and ＠2＠ / ＠3＠, while the ＠4＠ output dimension lets the partition-aware allocator place conflicting pieces in different physical regions – so separation is something the compiler reasons about rather than something hand-tuned."
+  },
+  {
+   "idx": 250,
+   "tag": "p",
+   "txt": "The fix is to swizzle the ＠0＠ and pin pieces with a ＠1＠. The distributed layout sets the piece shape and ＠2＠ / ＠3＠, while the ＠4＠ output dimension lets the partition-aware allocator place conflicting pieces in different physical regions – so separation is something the compiler reasons about rather than something hand-tuned."
+  },
+  {
+   "idx": 251,
+   "tag": "li",
+   "txt": "Partition separation is essentially free at run time. Because the partition index is a pure GF(2)-linear XOR of compile-time-constant registers and a loop-invariant warp term, base-pointer selection lifts entirely out of the loop."
+  },
+  {
+   "idx": 252,
+   "tag": "p",
+   "txt": "Partition separation is essentially free at run time. Because the partition index is a pure GF(2)-linear XOR of compile-time-constant registers and a loop-invariant warp term, base-pointer selection lifts entirely out of the loop."
+  },
+  {
+   "idx": 253,
+   "tag": "h2",
+   "txt": "Summary"
+  },
+  {
+   "idx": 254,
+   "tag": "p",
+   "txt": "In this blog you took a deep dive into two LDS effects that quietly cap kernel throughput on AMD Instinct™ MI450 GPUs, and you saw how Triton and Gluon neutralize each one. In Part I you explored transposed LDS loads, where the ＠0＠ cooperative-transpose instruction lets every lane issue one wide read while the hardware redistributes the data into the layout the matrix cores expect; rather than pattern-matching a transpose, the compiler decides eligibility by expressing both sides as linear layouts and testing left division. In Part II you worked through partition conflicts: why cross-pair warps that reach the same physical LDS partition serialize, how swizzling the WMMA ＠1＠ and pinning pieces with a ＠2＠ pull the two SIMD pairs apart, and how a partition-aware allocator together with a loop-invariant base-pointer selection make that separation physical at almost no run-time cost. A microbenchmark that does nothing but read LDS put a number on the payoff: a 1.65x LDS bandwidth gain once the conflict is resolved."
+  },
+  {
+   "idx": 255,
+   "tag": "p",
+   "txt": "LDS is only one stop on the path from global memory to the matrix cores, and layout-driven optimization is an active area in the Triton and Gluon compilers for AMD GPUs. We plan to follow up with more gfx1250 kernel-optimization deep dives."
+  },
+  {
+   "idx": 256,
+   "tag": "h2",
+   "txt": "Additional Resources"
+  },
+  {
+   "idx": 257,
+   "tag": "li",
+   "txt": "Linear Layouts: Robust Code Generation of Efficient Tensor Computation Using GF(2) (arXiv:2505.23819) – the theory behind Triton’s linear layouts."
+  },
+  {
+   "idx": 259,
+   "tag": "li",
+   "txt": "Triton Linear Layout: Concept by Lei Zhang – an intuitive introduction to linear layouts."
+  },
+  {
+   "idx": 261,
+   "tag": "li",
+   "txt": "Triton Linear Layout: Examples by Lei Zhang – worked examples of linear-layout internals and operations (product, composition, inversion, ＠0＠, left division)."
+  },
+  {
+   "idx": 263,
+   "tag": "li",
+   "txt": "Algorithms for Compile-Time Memory Optimization – the base shared-memory allocation algorithm Triton implements."
+  },
+  {
+   "idx": 265,
+   "tag": "li",
+   "txt": "Triton language repository – the AMD backend lowering (MemoryOpToLLVM.cpp), the shared local load and store lowering (Utility.cpp), the allocator (Allocation.cpp), and linear-layout conversions (LinearLayoutConversions.cpp)."
+  },
+  {
+   "idx": 267,
+   "tag": "li",
+   "txt": "From Naive to Near-Peak: Building High-Performance GEMM Kernels with Gluon – a prerequisite on authoring Gluon GEMM kernels for AMD GPUs."
+  },
+  {
+   "idx": 269,
+   "tag": "h2",
+   "txt": "Disclaimers"
+  },
+  {
+   "idx": 270,
+   "tag": "p",
+   "txt": "The information presented in this document is for informational purposes only and may contain technical inaccuracies, omissions, and typographical errors. The information contained herein is subject to change and may be rendered inaccurate for many reasons, including but not limited to product and roadmap changes, component and motherboard version changes, new model and/or product releases, product differences between differing manufacturers, software changes, BIOS flashes, firmware upgrades, or the like. Any computer system has risks of security vulnerabilities that cannot be completely prevented or mitigated. AMD assumes no obligation to update or otherwise correct or revise this information. However, AMD reserves the right to revise this information and to make changes from time to time to the content hereof without obligation of AMD to notify any person of such revisions or changes. THIS INFORMATION IS PROVIDED ‘AS IS.” AMD MAKES NO REPRESENTATIONS OR WARRANTIES WITH RESPECT TO THE CONTENTS HEREOF AND ASSUMES NO RESPONSIBILITY FOR ANY INACCURACIES, ERRORS, OR OMISSIONS THAT MAY APPEAR IN THIS INFORMATION. AMD SPECIFICALLY DISCLAIMS ANY IMPLIED WARRANTIES OF NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR ANY PARTICULAR PURPOSE. IN NO EVENT WILL AMD BE LIABLE TO ANY PERSON FOR ANY RELIANCE, DIRECT, INDIRECT, SPECIAL, OR OTHER CONSEQUENTIAL DAMAGES ARISING FROM THE USE OF ANY INFORMATION CONTAINED HEREIN, EVEN IF AMD IS EXPRESSLY ADVISED OF THE POSSIBILITY OF SUCH DAMAGES. AMD, the AMD Arrow logo, and combinations thereof are trademarks of Advanced Micro Devices, Inc. Other product names used in this publication are for identification purposes only and may be trademarks of their respective companies. © 2026 Advanced Micro Devices, Inc. All rights reserved"
+  }
+ ]
+}

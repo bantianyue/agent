@@ -1,0 +1,211 @@
+{
+ "title": "从零编码 KV Cache：理解并实现 LLM 推理缓存",
+ "lead": [
+  "KV cache 是生产环境 LLM 高效推理最关键的技巧之一。本文用带完整注释的从零实现，讲清它是什么、为什么能加速、怎么在代码里实现。一个 124M 参数小模型、200 token 序列，在 CPU 上就能拿到约 5 倍加速。"
+ ],
+ "summary": [
+  {
+   "key": "是什么",
+   "body": "KV cache 存中间 key/value 向量供推理复用，避免自回归解码每步重算整个序列的 K/V——随序列增长从 O(n²) 降到 O(n)。代价是增加代码复杂度、内存线性增长、训练时不能用，但推理加速常很值。"
+  },
+  {
+   "key": "实现",
+   "body": "5 步：register cache buffer → forward 加 use_cache 存/取 K/V → reset_cache 清缓存 → 全模型传播 current_pos 位置追踪 → 生成时只喂新 token。核心=缓存已算 K/V、只算新 token 的 K/V。"
+  },
+  {
+   "key": "性能与优化",
+   "body": "124M 模型 200 token CPU 约 5× 提速；优缺点随序列长加剧（算效 O(n²)→O(n)、内存线性涨）；优化=预分配内存防碎片、滑动窗口截断控内存。Bonus：Qwen3/Llama3 上 CPU 提速最大、编译更强、GPU 小模型提速不明显。"
+  }
+ ],
+ "sections": [
+  {
+   "type": "h2",
+   "title": "KV cache 是什么：生成过程的冗余",
+   "paras": [
+    "KV cache 存中间的 key(K) 和 value(V) 计算供推理（训练后）时复用，显著加速文本生成。代价是代码更复杂、内存需求增加（我在书里最初没包含的主要原因）、训练时不能用。但生产环境下推理加速常常值得这些权衡。",
+    "想象 LLM 生成文本：给定 prompt「Time」，LLM 一次生成一个 token。下一步「Time flies」整序列被重处理、生成「fast」。LLM 只用一个 token 生成，但它每步都重新编码整个前缀序列——key/value 向量需要重算，造成冗余。",
+    "放大到注意力机制内部：输入 token 编码为向量，权重矩阵 W 把它们投影成 key、query、value 向量。对「Time」「flies」，LLM 在第 3 步生成「fast」时，重算之前已见过的 k(1)/v(1) 和 k(2)/v(2)，而非复用。",
+    "对比前两图，前两个 token 的 key/value 完全相同——自回归解码时每轮重算很浪费。KV cache 就是想存已生成的 key/value 向量供复用，避免这些不必要重算。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig01.png",
+      "caption": "图 1：LLM 逐 token 生成文本——Time→flies→fast。"
+     }
+    ],
+    "1": [
+     {
+      "src": "fig02.png",
+      "caption": "图 2：每步需重处理的重复上下文（Time flies）。"
+     }
+    ],
+    "2": [
+     {
+      "src": "fig03.png",
+      "caption": "图 3：注意力里从 token 投影出 key/value 向量。"
+     }
+    ],
+    "3": [
+     {
+      "src": "fig04.png",
+      "caption": "图 4：生成第 3 个 token 时重算已见过的 key/value。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "有无 KV cache 的文本生成",
+   "paras": [
+    "无 cache 时，「Time flies fast」每步都重算「Time」「flies」的 K/V。KV cache 把已算 K/V 存起来复用，彻底解决这冗余：① 初始算并缓存输入 token 的 K/V；② 每生成新 token 只算该 token 的 K/V；③ 从缓存取出先前已算向量避免重算。文本越长、复用得越多、生成越快。",
+    "生成第 3 步的并排对比：上方无 cache——每步重算 K/V、冗余操作；下方有 cache——从 KV cache 取先前算好的 keys/values、生成更快。",
+    "代码里实现 KV cache 很简单：正常算 keys 和 values、但存起来供下一轮取用。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig05.png",
+      "caption": "图 5：无 cache 的生成流程——每个新步重算 Time/flies。"
+     }
+    ],
+    "1": [
+     {
+      "src": "fig06.png",
+      "caption": "图 6：KV cache 计算缓存步骤表。"
+     }
+    ],
+    "2": [
+     {
+      "src": "fig07.png",
+      "caption": "图 7：生成第 3 步无/有 cache 并排对比。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "从零实现：5 步代码改动",
+   "paras": [
+    "实现 KV cache 有多种方式，核心就是在每个生成步只算新 token 的 key/value 张量。作者选了强调可读性的简单版，两个自包含 Python 脚本（`gpt_ch04.py` 无 cache、`gpt_with_kv_cache.py` 有 cache），用 diff 看改动。",
+    "**Step 1 注册缓存 buffer**：在 MultiHeadAttention 构造器加两个 buffer cache_k 和 cache_v，跨步存拼接 keys/values。",
+    "**Step 2 forward 加 use_cache 标志**：扩展 forward 接受 use_cache，计算新 K/V 后，若 use_cache 则初始化缓存或把新 K/V cat 进缓存，取 cache 的 key/value 用。存储和取回就实现了 KV cache 核心思想。",
+    "**Step 3 清缓存**：生成文本时两个生成调用间必须重置 keys/values buffer，否则新 prompt 的 query 会 attend 到上一序列残留的旧 key——模型依赖无关上下文、输出不连贯。加 reset_cache 方法（cache_k/cache_v=None）。",
+    "**Step 4 全模型传播 use_cache**：改 GPTModel，加 current_pos 位置计数器（记住已缓存多少 token），把单行 block 调用换成显式循环传 use_cache。use_cache=True 时 pos_ids 从 current_pos 开始、走完 seq_len 后 bump 计数器——因为新 query 必须紧贴在已存 key/value 后面，否则每步回到 0 就好似新 token 覆盖旧位置。TransformerBlock 也要接 use_cache。",
+    "**Step 5 生成函数**：`generate_text_simple_cached` 先 reset + 用 cache 处理完整 prompt，然后每步只把**新 token**喂模型（use_cache=True）——无 cache 时得喂整个输入（无存 K/V 可复用）。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig08.png",
+      "caption": "图 8：KV cache 实现改变总览（store/retrieve）。"
+     }
+    ],
+    "1": [
+     {
+      "src": "fig09.png",
+      "caption": "图 9：有无 cache 两脚本 diff 对比。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "核心代码：register 与 use_cache 存取",
+   "paras": [
+    "Step 1 注册缓存 buffer：",
+    "__CODE__python::self.register_buffer(\"cache_k\", None)\nself.register_buffer(\"cache_v\", None)",
+    "Step 2 前向传播中存储和取回 key/value：",
+    "__CODE__python::def forward(self, x, use_cache=False):\n    b, num_tokens, d_in = x.shape\n​\n    keys_new = self.W_key(x)  # Shape: (b, num_tokens, d_out)\n    values_new = self.W_value(x)\n    queries = self.W_query(x)\n    #...\n​\n    if use_cache:\n        if self.cache_k is None:\n            self.cache_k, self.cache_v = keys_new, values_new\n        else:\n            self.cache_k = torch.cat([self.cache_k, keys_new], dim=1)\n            self.cache_v = torch.cat([self.cache_v, values_new], dim=1)\n        keys, values = self.cache_k, self.cache_v\n    else:\n        keys, values = keys_new, values_new",
+    "Step 3 清空缓存：",
+    "__CODE__python::def reset_cache(self):\n    self.cache_k, self.cache_v = None, None"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "核心代码：模型级传播与生成",
+   "paras": [
+    "Step 4 GPTModel 前向传播（位置追踪 + 传 use_cache）：",
+    "__CODE__python::def forward(self, in_idx, use_cache=False):\n    # ...\n \n    if use_cache:\n        pos_ids = torch.arange(\n            self.current_pos, self.current_pos + seq_len,            \n            device=in_idx.device, dtype=torch.long\n        )\n        self.current_pos += seq_len\n    else:\n        pos_ids = torch.arange(\n            0, seq_len, device=in_idx.device, dtype=torch.long\n        )\n    \n    pos_embeds = self.pos_emb(pos_ids).unsqueeze(0)\n    x = tok_embeds + pos_embeds\n    # ...\n    for blk in self.trf_blocks:\n        x = blk(x, use_cache=use_cache)",
+    "TransformerBlock 传 use_cache：",
+    "__CODE__python::def forward(self, x, use_cache=False):\n    # ...\n    self.att(x, use_cache=use_cache)",
+    "Step 5 带 cache 的生成函数（只喂新 token）：",
+    "__CODE__python::def generate_text_simple_cached(\n        model, idx, max_new_tokens, use_cache=True\n    ):\n    model.eval()\n​\n    ctx_len = model.pos_emb.num_embeddings  # max sup. len., e.g. 1024\n    if use_cache:\n        # Init cache with full prompt\n        model.reset_kv_cache()\n        with torch.no_grad():\n            logits = model(idx[:, -ctx_len:], use_cache=True)\n​\n        for _ in range(max_new_tokens):\n            # a) pick the token with the highest log-probability \n            next_idx = logits[:, -1].argmax(dim=-1, keepdim=True)\n            # b) append it to the running sequence\n            idx = torch.cat([idx, next_idx], dim=1)\n            # c) feed model only the new token\n            with torch.no_grad():\n                logits = model(next_idx, use_cache=True)\n    else:\n        for _ in range(max_new_tokens):\n            with torch.no_grad():\n                logits = model(idx[:, -ctx_len:], use_cache=False)\n            next_idx = logits[:, -1].argmax(dim=-1, keepdim=True)\n            idx = torch.cat([idx, next_idx], dim=1)\n​\n    return idx"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "性能对比",
+   "paras": [
+    "跑两个脚本（124M 参数模型、200 新 token、prompt「Hello, I am」）在 Mac Mini M4（CPU）上：已拿到约 **5 倍加速**（小模型 + 短序列）。注意此实现为可读性优化、非 CUDA/MPS 最优（那需预分配张量而非反复拼接）。",
+    "两种实现生成**完全相同的文本**——证明 KV cache 实现正确（容易出索引错误导致结果分歧）。模型未训练所以输出乱码，但 cache 正确性已被两脚本一致验证。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig10.png",
+      "caption": "图 10：124M 模型 200 token 有无 cache 性能（约 5×）。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "KV cache 的优缺点",
+   "paras": [
+    "序列越长，KV cache 的收益和代价越明显：",
+    "**[Good] 计算效率上升**：无 cache 时步 t 的注意力须把新 query 和 t 个旧 key 比，累积工作 O(n²)；有 cache 每个 key/value 算一次复用，每步复杂度降到线性 O(n)。",
+    "**[Bad] 内存线性上升**：每个新 token 追加进 KV cache。长序列 + 大 LLM 时累积 KV cache 会吃掉显著甚至海量 GPU 内存。绕行=截断 KV cache，但更复杂。",
+    "**优化**：真实部署（尤其大模型长序列）需更仔细优化。常见坑：① 内存碎片和重复分配——torch.cat 连续拼接导致频繁内存分配/释放的瓶颈；② 内存线性增长——长序列不处理就不实用。",
+    "**Tip 1 预分配**：按期望最大序列长预分配足够大的张量，写进切片而非反复 cat，一致内存、降开销。**Tip 2 滑动窗口截断**：维护最后 window_size 个 token 的缓存，防 GPU 内存爆炸。优化代码在 gpt_with_kv_cache_optimized.py。",
+    "Mac Mini M4 CPU 200 token、窗口=上下文长时，优化版更快；但 CUDA 上小模型提速消失——设备传输和通信盖过 KV cache 的收益。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig11.png",
+      "caption": "图 11：优化后性能对比。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "Bonus：Qwen3 与 Llama 3 的 KV cache",
+   "paras": [
+    "作者给从零实现的 Qwen3(0.6B)、Llama3(1B) 加 KV cache 后跑额外实验。用 torch.cat 而非预分配（因 Llama3/Qwen3 上下文极大——131k/41k——预分配约多耗 8GB 内存很贵），为省内存把 KV cache 移到模型外、配 torch.compile 提效。",
+    "性能：**CPU 上 KV cache 提速最大、编译再增强**；**GPU 上常规编译模型最佳**——大概因为不预分配 GPU 张量、且模型相对小。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig12.png",
+      "caption": "图 12：Qwen3 KV cache 性能对比。"
+     }
+    ],
+    "1": [
+     {
+      "src": "fig13.png",
+      "caption": "图 13：Llama3 KV cache 性能对比。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "结论",
+   "paras": [
+    "虽然缓存引入额外复杂度和内存考量，效率上显著的增益通常盖过这些权衡，尤其在生产环境。",
+    "作者优先代码清晰和可读性而非效率，但要点是：实践实现常需深思熟虑的优化——预分配内存或滑动窗口管理内存增长。轻松实验这些技巧，happy coding！"
+   ],
+   "fig_after": {}
+  }
+ ],
+ "conclusion": [
+  "Raschka 这篇把 KV cache 讲得极清楚：**核心无非「已算过的 key/value 别重算」**——自回归解码每步都整段重处理前缀，有 cache 后每步只算新 token 的 K/V、旧的全从缓存取，注意力累积从 O(n²) 降到 O(n)。124M 模型 CPU 上就约 5× 提速。",
+  "实现路径（5 步）值得记：register buffer → forward 加 use_cache 存/取 → reset 防跨序列污染 → current_pos 位置追踪（新 query 必须紧跟已存 K/V）→ 生成时只喂新 token。部署注意：内存线性涨靠预分配+滑动窗口解决；小模型 GPU 上提速不明显、CPU 尤其大上下文模型最赚。"
+ ],
+ "reference_url": "https://magazine.sebastianraschka.com/p/coding-the-kv-cache-in-llms"
+}

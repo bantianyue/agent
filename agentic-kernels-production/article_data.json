@@ -1,0 +1,332 @@
+{
+  "title": "生产环境中的 Agentic Kernels：Baseten 的模型级 kernel 自动优化框架",
+  "lead": [
+    "**TL;DR**：我们构建了一个 agentic kernel 开发框架——识别模型级优化机会、生成改进的 kernel、并在我们的 serving 栈中验证。在我们当前的扩散模型初始化实验里，端到端延迟改善最高达 15.8%（Qwen-Image，FP8）。",
+    "（原文含代码/配置片段与 kernel 表格，命令与标识符摘录作说明用途。）"
+  ],
+  "summary": [
+    {
+      "key": "问题",
+      "body": "agent 在 kernel 开发已很在行（从构思到生成），但「赢 benchmark ≠ 上线生产」。原因：① 最佳 kernel 配置依赖生产工作负载；② 更快 microbenchmark 不必然 = 更快模型；③ 单独优化 kernel 错过更高层机会（端到端 trace 常显示瓶颈在 kernel 之间的交互）；④ 集成新 kernel 进生产引擎非平凡。"
+    },
+    {
+      "key": "方案",
+      "body": "双层优化栈：Model-Level（理解完整模型工作负载、profile 时间花哪、提出如 kernel 融合/跨层改动）+ Per-Kernel（对生成的和性能关键 kernel 探索变体）。加自改进机制：通过正确性+端到端性能检查的 kernel 进经验库 → 每次迭代从积累经验开始。"
+    },
+    {
+      "key": "结果",
+      "body": "目标 Qwen-Image 与 FLUX.2（SGLang on B300）。共用：Prepacked FP8 Scales（-7.3%/-6.1%）、Fused QKV projection+epilogue、Norm+quant kernel fusion。Qwen-Image 追加 Bias absorption、CFG modulation cache（-2.1% FP8/-3.1% NVFP4）、per-kernel（-7.6%/-13.4%）；总 FP8 -15.8%、NVFP4 -1.3%。FLUX.2 追加 qknorm+RoPE（2×）、fused SwiGLU+quant、gated residual norm、per-kernel（-1.9% FP8/-2.8% NVFP4）。"
+    }
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "问题：从 benchmark 到生产的鸿沟",
+      "paras": [
+        "近些年 agent 在 kernel 开发上变得惊人地强，从构思到生成。",
+        "然而「赢得 kernel benchmark」和「把优化上线生产」之间有鸿沟。几个原因：",
+        "**① 最佳 kernel 配置依赖生产工作负载**。在通用 benchmark 上赢的 kernel，在负载上可能输（通用基准的优胜者未必适合你的负载）。",
+        "**② 更快的 microbenchmark 不必然产生更快的模型**。改动集成后，与其它 kernel/内存/调度的交互会让孤立 kernel 的快慢失真。",
+        "**③ 单独优化 kernel 会错过更高层的机会**。端到端 trace 常显示只有一小部分 kernel 花最多时间；这些时间常被未优化路径或跨 kernel 交互消耗。",
+        "**④ 把新 kernel 集成进生产 serving 引擎非平凡**。不同于改独立 torch 模型，serving 栈有形状/精度/内存约束。",
+        "带着这些，我们创建了一个桥接 benchmark 与生产的方案：给定一个模型和 serving 栈，它系统性地识别机会、生成 kernel、并在生产集成层验证。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig01.png",
+            "caption": "图 1：Baseten agentic kernel 优化框架的优化流程。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "The Stack：双层优化",
+      "paras": [
+        "**双层优化栈**：",
+        "**Model-Level Optimization**：理解完整模型工作负载、profile 时间花在哪、提出改动（如 kernel 融合、跨层算子合并、重排计算）。",
+        "**Per-Kernel Optimization**：对生成的性能关键 kernel 和 trace 里识别出的 kernel，探索多种变体、选择并验证。",
+        "第一层帮助把搜索空间扩到「一对一 kernel 改进」之外——不只优化单个 kernel，它在更高抽象层识别机会；第二层则对剩余热点做微优化。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "跨优化运行的持续学习",
+      "paras": [
+        "框架有自改进机制：通过正确性和端到端性能检查的 kernel 被记录进经验库，代表生产已验证的模式。",
+        "这创造自改进循环——每次优化迭代从积累的经验开始，使框架随处理更多模型越来越强。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig02.png",
+            "caption": "图 2：持久化知识架构——经验库驱动的自改进循环。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "结果与案例研究",
+      "paras": [
+        "初始实验锁定扩散模型：**Qwen-Image 与 FLUX.2**，用 SGLang 服务在 B300 GPU 上。优化流程对两模型都识别并发起多个优化。",
+        "Qwen-Image 与 FLUX.2 的总体改善见图 3。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig03.png",
+            "caption": "图 3：baseline、model-level 与 kernel-level 优化之间的提升。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "共同优化 #1：Prepacked FP8 Scales",
+      "paras": [
+        "Qwen-Image 和 FLUX.2 的 FP8 路径在把 scale 元数据转成 DeepGEMM 要求的格式时浪费了 launches。",
+        "我们消除此开销：把主要 FP8 激活生产者改成直接发射 packed scales，同时把 scale 转换下推到各 kernel。",
+        "例如 FLUX.2 的注意力投影（baseline 对比 optimized，见 fig04/05）：",
+        "Qwen-Image 的前馈层亦同（fig06/07）：",
+        "此优化把端到端延迟降低 **7.3%（Qwen-Image）** 和 **6.1%（FLUX.2）**，这些收益在正确性和端到端检查后持续。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig04.png",
+            "caption": "图 4：FLUX.2 注意力投影 baseline。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig05.png",
+            "caption": "图 5：FLUX.2 注意力投影 optimized（packed scales）。"
+          }
+        ],
+        "2": [
+          {
+            "src": "fig06.png",
+            "caption": "图 6：Qwen-Image 前馈层 baseline。"
+          }
+        ],
+        "3": [
+          {
+            "src": "fig07.png",
+            "caption": "图 7：Qwen-Image 前馈层 optimized。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "共同优化 #2：Fused QKV projection + epilogue",
+      "paras": [
+        "两模型原始注意力路径独立计算图像 query、key、value 投影——尽管它们共享同输入、同 FP8 格式。",
+        "优化把三个 FP8 投影合并成一个 GEMM，然后融合 bias addition、QK normalization、RoPE、以及后置 epilogue 算子。",
+        "baseline（fig08）对比 optimized（fig09）："
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig08.png",
+            "caption": "图 8：QKV 三投影独立（baseline）。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig09.png",
+            "caption": "图 9：合并单 GEMM + 融合 epilogue（optimized）。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "共同优化 #3：Normalization + quantization kernel fusion",
+      "paras": [
+        "两模型里，normalization 之前产生大的 BF16 张量，由随后的 quantization kernel 立即消费。",
+        "融合后：**Qwen-Image** 融合 kernel 同时发射原始 BF16 结果和 QKV/前馈的预量化 FP8 激活；**FLUX.2 残差路径** 融合 kernel 发射归一化输出、更新的残差、packed E2M1 值与 swizzled E4M3 scales。",
+        "两模型的模型级 + kernel 级累加改善（FP8 / NVFP4 latency 降低）见下表："
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig10.png",
+            "caption": "图 10：归一化+量化融合 baseline。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig11.png",
+            "caption": "图 11：归一化+量化融合 optimized。"
+          }
+        ]
+      },
+      "table": {
+        "head": [
+          "Model",
+          "FP8 latency",
+          "NVFP4 latency"
+        ],
+        "rows": [
+          [
+            "Qwen-Image",
+            "15.8% lower",
+            "1.3% lower"
+          ],
+          [
+            "FLUX.2",
+            "1.3% lower",
+            "1.1% lower"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Qwen-Image 专属优化",
+      "paras": [
+        "**优化 #1 - Bias absorption**：上轮优化后，注意力与前馈之后还有两个独立 bias addition，把它们吸收进融合 kernel 的 epilogue。",
+        "**优化 #2 - CFG modulation cache**：Classifier-free guidance 在同一 timestep 跑两次去噪 pass，两次 pass 用不同 condition（一个收文本、一个空），但共享同一 noisy latent 和 timestep。公式化：",
+        "ε_cond = F(x_t,t,c),   ε_uncond = F(x_t,t,∅)",
+        "ε_CFG = ε_uncond + w( ε_cond − ε_uncond )",
+        "noisy latent 和 timestep 被两 pass 共享。图像和文本 modulation 分支是",
+        "e_t = embed(t)",
+        "于是",
+        "m_image = W_image·e_t + b_image,   m_text = W_text·e_t + b_text",
+        "因为这些 modulation 分支只依赖 e_t 和固定权重，它们的输出在两次 pass 间是相同的（无关 pass 的 condition）。所以可在第一次 pass 缓存、第二次复用，消除整块重复 GEMM。",
+        "在 DiT 入口创建 cache key（同一 timestep 对象传给两个 CFG branches）：",
+        "__CODE__python::def _cfg_cache_optimization_enabled(active) -> bool:\n    return active\n\n\n# QwenImageTransformer2DModel.forward\nif _cfg_cache_optimization_enabled() and isinstance(timestep, torch.Tensor):\n    # Both CFG branches receive the same timestep tensor.\n    # Keep a reference to it so tensor identity can be used safely.\n    cache_key = {\n        \"timestep\": timestep,\n        \"version\": version_if_available(timestep),\n    }",
+        "在每个 block 缓存 image 和 text modulation 输出：",
+        "__CODE__python::# QwenImageTransformerBlock.forward\ncached = getattr(self, \"modulation_cache\", None)\n\ncache_hit = (\n    cache_key is not None\n    and cached is not None\n    and cached[\"timestep\"] is cache_key[\"timestep\"]\n    and cached[\"version\"] == cache_key[\"version\"]\n)\n\nif cache_hit:\n    # Second CFG pass: reuse the cached outputs.\n    image_modulation = cached[\"image_modulation\"]\n    text_modulation = cached[\"text_modulation\"]\n\nelse:\n    # First CFG pass: compute the modulation outputs.\n    image_modulation = image_modulation_GEMM(timestep_embedding)\n    text_modulation = text_modulation_GEMM(timestep_embedding)\n\n    # Cache them for the second CFG pass.\n    if cache_key is not None:\n        self.modulation_cache = {\n            \"timestep\": cache_key[\"timestep\"],\n            \"version\": cache_key[\"version\"],\n            \"image_modulation\": image_modulation,\n            \"text_modulation\": text_modulation,\n        }",
+        "此优化对 FP8 延迟降低 2.1%、对 NVFP4 降低 3.1%。",
+        "**优化 #3 - Per-kernel optimization**：对性能关键的和此前融合的 kernel 再运行优化 pass，产出改进（见 fig12）。这些 per-kernel 优化对 FP8 改善 7.6%、对 NVFP4 改善 13.4%。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig12.png",
+            "caption": "图 12：Qwen-Image per-kernel 优化总结。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "FLUX.2 专属优化",
+      "paras": [
+        "**优化 #1 - Single-Block QK normalization + RoPE**：FLUX.2 的单流 transformer block 没用生产融合的 QK-norm+RoPE kernel。新替代是 per-token-CTA kernel：载入每个连续 12KB Q/K head tile、做归一化、应用 RoPE。融合 kernel 给 2× 加速，端到端延迟改善 FP8 2.3%。",
+        "**优化 #2 - Fused SwiGLU + FP8/NVFP4 quantization**：每次 SwiGLU 调用之前产生大的 BF16 中间量、由独立 FP8/NVFP4 kernel 量化。此优化以单个 fused kernel 替代多阶段路径（GEMM + 门控 + 激活 + 直接量化为训练格式）。对 FP8 需保留原始操作顺序保证数值等价；对 NVFP4 直接发射 packed E2M1 值和 swizzled E4M3 scales。融合 kernel 把延迟降低 2.3%（FP8）和 3.8%（NVFP4）。",
+        "**优化 #3 - Gated Residual Normalization**：FLUX.2 残差路径之前把 gated residual update 和 layer normalization 作为两个独立 kernel。新 kernel 把 gate 乘、残差更新、归一化、scale/shift 融进一个。",
+        "**优化 #4 - Per-Kernel Optimization**：同 Qwen-Image，再跑 per-kernel 优化循环，识别以下改进：",
+        "这些 kernel 合计降低 NVFP4 延迟 2.8%、FP8 延迟 1.9%。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig13.png",
+            "caption": "图 13：qknorm+RoPE baseline。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig14.png",
+            "caption": "图 14：qknorm+RoPE fused（2× speedup）。"
+          }
+        ],
+        "2": [
+          {
+            "src": "fig15.png",
+            "caption": "图 15：fused SwiGLU+quant baseline。"
+          }
+        ],
+        "3": [
+          {
+            "src": "fig16.png",
+            "caption": "图 16：fused SwiGLU+quant optimized。"
+          }
+        ],
+        "4": [
+          {
+            "src": "fig17.png",
+            "caption": "图 17：gated residual norm baseline。"
+          }
+        ],
+        "5": [
+          {
+            "src": "fig18.png",
+            "caption": "图 18：gated residual norm fused。"
+          }
+        ],
+        "6": [
+          {
+            "src": "fig19.png",
+            "caption": "图 19：FLUX.2 per-kernel 优化总结。"
+          }
+        ]
+      },
+      "table": {
+        "head": [
+          "Original Kernel",
+          "What it does",
+          "New Kernel"
+        ],
+        "rows": [
+          [
+            "swiglu_fp4_quant",
+            "Fuses SwiGLU with NVFP4 quantization (opt #2)",
+            "1.43× / 1.41×"
+          ],
+          [
+            "resnorm_quant",
+            "Fuses residual normalization + quantization (opt #3)",
+            "1.65×"
+          ],
+          [
+            "qknorm_rope",
+            "Fuses double-block QK norm + RoPE (opt #1)",
+            "2.0×"
+          ],
+          [
+            "token_cat",
+            "Accelerates image-text concatenations (opt #2)",
+            "4.6×"
+          ],
+          [
+            "norm_out",
+            "Fuses boundary norm, scale mult, residual add (opt #3)",
+            "3.35×"
+          ],
+          [
+            "swiglu",
+            "Optimizes remaining unquantized SwiGLU sites (opt #2)",
+            "1.24×"
+          ],
+          [
+            "gate_res_norm",
+            "Optimizes remaining gated residual-norm path (opt #3)",
+            "1.27×"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "未来方向",
+      "paras": [
+        "框架设计成 model-agnostic 和 engine-agnostic，允许同样的优化循环应用到一个模型家族、再迁移到另一个。",
+        "随着 harness 和生产集成继续改进，我们看到一条路径：自动为新的生成模型生成生产级 kernel、无缝扩到更广模型/引擎组合。"
+      ],
+      "fig_after": {}
+    }
+  ],
+  "conclusion": [
+    "Baseten 团队这篇《Agentic Kernels in Production》展示了把「agent 写 kernel」从 benchmark 领进真实生产的完整闭环：双层优化栈（model-level 机会识别 + per-kernel 变体探索）+ 经验库自改进，桥接 benchmark 与生产工作负载、microbenchmark 与端到端、单 kernel 与跨层交互、以及生产引擎的集成约束。",
+    "对 Qwen-Image 与 FLUX.2（SGLang on B300），结果有说服力：共用 Prepacked FP8 Scales（-7.3%/-6.1%）、Fused QKV+epilogue、Norm+quant fusion；Qwen-Image 还靠 Bias absorption、CFG modulation cache（公式：两 pass 共享 e_t + 固定权重 → modulation 输出相同可缓存）+ per-kernel，总 FP8 -15.8%、NVFP4 -1.3%；FLUX.2 靠 qknorm+RoPE（2×）、fused SwiGLU+quant、gated residual norm + per-kernel，FP8 -1.9%、NVFP4 -2.8%。",
+    "对做推理引擎/GPU kernel 优化的人，这篇的启发性在于：真正的提速来自模型级跨 kernel 联动（融合/缓存/吸收）而非只扫单个热点，且一个「agent 循环 + 经验库 + 生产验证」的框架能让这类优化自动化、跨模型复用。"
+  ],
+  "reference_url": "https://x.com/BrianLi23/status/2093487934448214351"
+}

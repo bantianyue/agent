@@ -1,0 +1,226 @@
+# -*- coding: utf-8 -*-
+"""Speculative Decoding 编译 build"""
+import json, os, sys
+
+DATA = {
+ "title": "Speculative Decoding：从理论到实现",
+ "lead": [
+  "让我们谈谈 speculative decoding——现代 LLM 推理中最优雅的优化技术之一。如果你曾想过如何在不牺牲输出质量的情况下从语言模型中多挤出 2-3× 吞吐，你来对地方了。",
+  "读完这篇，你会理解到足以从零实现的深度。我们会覆盖动机、数学、实现细节，以及决定真实世界部署成败的微妙边界情况。"
+ ],
+ "summary": [
+  {
+   "key": "核心洞察",
+   "body": "自回归解码是 memory-bandwidth-bound：每生成一个 token 要加载全部权重（70B BF16 约 140GB/token）。而**验证 K 个 token 大约和生成 1 个 token 同耗时**——因为权重加载成本不变，多出的注意力只是 compute-bound 的免费计算。用小模型猜、大模型一次验证，把顺序问题变成部分并行。"
+  },
+  {
+   "key": "算法",
+   "body": "Draft（小模型自回归生成 K 个候选 token + 概率）→ Verify（大模型一次前向验证全部）→ Accept（拒绝采样：acceptance_ratio = min(1, p_target/p_draft)，拒绝时从调整分布 p'(t)=max(0,p_target-p_draft)/Z 采样保持分布正确性）。全接受时拿 bonus token，K 个 token 一次大模型前向 = K+1 token。"
+  },
+  {
+   "key": "性能",
+   "body": "T_effective = (K×T_draft + T_target) / E[tokens]，E[tokens]≈1/(1-α)（α 为接受率）。示例 100ms 目标 + 8ms 草稿 + K=4 + α=0.6：约 1.67×；加 KV cache 可达 2-3×。GPT-2 12× 更小作草稿，同一 tokenizer 必须。K=3-5 最优。"
+  }
+ ],
+ "sections": [
+  {
+   "type": "h2",
+   "title": "问题：自回归解码是内存受限的",
+   "paras": [
+    "大语言模型生成文本时自回归进行：**一次一个 token**。每一步：",
+    "1. 从内存加载模型权重（数十亿参数）\n2. 对所有先前 token 计算 attention\n3. 为下一个 token 生成 logits\n4. 采样或 argmax 选下一个 token\n5. 重复",
+    "问题？现代 GPU 计算极强但内存访问相对慢。生成单个 token 时，你把数 GB 权重从 HBM（高带宽内存）搬到计算单元，执行数万亿操作，然后产生……一个 token。",
+    "这叫 **memory-bandwidth bound**。计算单元大部分时间闲置等数据到达。对 70B 参数 BF16 模型，每 token 加载约 140GB 权重。若 GPU 有 2TB/s 内存带宽，每 token 理论最小 70ms，无论计算多快。",
+    "那么如何更高效？"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "Speculative Decoding 的关键思想",
+   "paras": [
+    "答案是 Speculative Decoding，其关键思想是：**验证 K 个 token 大约和生成 1 个 token 同耗时。**",
+    "让这具体化。假设你在用 GPT-2-XL，已生成序列：",
+    "**标准方法：一次一个 token。**通常生成下 4 个 token 需要 4 次 GPT-2-XL 前向：每次加载全部 15 亿参数并在整个序列上跑 attention。若每次 100ms，总计 **400ms**。",
+    "**推测方法：一次验证多个 token。**现在假设有个小 GPT-2 模型能提前猜这 4 个 token。你构造序列并做**一次** GPT-2-XL 前向。这次单前向给出：位置 is（France is 后）的 logits 验证 Paris；位置 Paris 验证逗号；位置逗号验证 which；位置 which 验证 is；位置 is 的 bonus token 免费。**总计 1 次 GPT-2-XL 前向。**",
+    "**为什么耗时相同？**验证 K 个 token 时：",
+    "1. **加载模型权重一次（同成本）**——处理 5 token 或 9 token 都加载同样 15 亿参数。这是贵部分且不变。\n2. **对 K 个更长序列跑 attention（小 K 下可忽略）**——9 token 而非 5 token 的注意力稍多工作，但这是 compute-bound 非 memory-bound。GPU 数千核在内存加载时闲置；额外计算基本免费，反正发生在等内存时。小 K（3-5 token）给 100ms 前向加约 5-10ms，可忽略。\n3. **得到 K 个 logit 输出而非 1 个（免费）**——transformer 不只最后位置输出 logits，而是*每个*位置都输出。通常丢到只剩最后一个。Speculative decoding 里真用它验证猜测。9 位置 vs 5 位置计算 logits？只是几个额外矩阵乘，并行发生，基本免费。",
+    "**魔法时刻：便宜猜测 + 快速验证。**完整图景：4 次 GPT-2-XL 前向成本 400ms；4 个 GPT-2 猜测 4×8ms=32ms；1 次 GPT-2-XL 验证 105ms（4 个额外 token 略长）；**总计 137ms。加速 400/137 ≈ 2.9×。**且这假设全对！即使只有 50% 对，仍大幅领先。",
+    "关键洞察：若能便宜猜 token（用小模型），一次全验证几乎免费。你刚把顺序问题变成部分并行问题。",
+    "__CODE__\"The capital of France is\"",
+    "__CODE__\"The capital of France is Paris, which is\""
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig01.png",
+      "caption": "图 1：标准方法（4 次前向）vs 推测方法（1 次验证前向）。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "算法：Draft、Verify、Accept",
+   "paras": [
+    "深入 speculative decoding 算法，试着从零构建：",
+    "**Phase 1：Drafting。**用小、快「draft model」自回归生成 K 个 token。这个模型应该：比目标模型小得多（10-100× 少参数）；快得让生成 K 个 token 比一次目标前向便宜；与目标模型足够相似能蒙对一些 token。",
+    "drafting 阶段实现如下：",
+    "关键细节：我们存 token **和**它们在 draft model 下的概率。acceptance 步骤需要 draft_probs。",
+    "__CODE__def generate_draft_tokens(self, input_ids: torch.Tensor, num_tokens: int) -> Tuple[List[int], List[float]]:\n    \"\"\"\n    Use the draft model to generate candidate tokens.\n\n    Args:\n        input_ids: Current token sequence\n        num_tokens: Number of tokens to draft\n\n    Returns:\n        Tuple of (draft_tokens, draft_probabilities)\n    \"\"\"\n    draft_tokens = []\n    draft_probs = []\n\n    current_ids = input_ids.clone()\n\n    for _ in range(num_tokens):\n        with torch.no_grad():\n            outputs = self.draft_model(current_ids)\n            logits = outputs.logits[0, -1, :]  # Last position\n            probs = torch.softmax(logits, dim=0)\n\n            # Sample next token\n            next_token = torch.multinomial(probs, num_samples=1)\n            token_id = next_token.item()\n\n            draft_tokens.append(token_id)\n            draft_probs.append(probs[token_id].item())\n\n            # Append token for next iteration\n            current_ids = torch.cat([current_ids, next_token.unsqueeze(0)], dim=1)\n\n    return draft_tokens, draft_probs"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "Phase 2：Verification",
+   "paras": [
+    "这是魔法发生处。拿全部 K 个 draft token 一次前向穿过 target model。",
+    "注意我们在做什么：把整个序列（原始输入 + 全部 K 个 draft token）一次喂进 target model。输出在每位置给出 logits，意味着得到验证每个 draft token 的概率分布。",
+    "这是关键效率增益。代替 K 次独立前向（每 token 一次），做一次略长的前向。",
+    "__CODE__# Create sequence with all draft tokens\ndraft_sequence = torch.cat([\n    input_ids,\n    torch.tensor([draft_tokens], device=self.device)\n], dim=1)\n\n# Single forward pass through target model\nwith torch.no_grad():\n    outputs = self.target_model(draft_sequence)\n    all_logits = outputs.logits[0]  # Shape: [seq_len, vocab_size]"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "Phase 3：用拒绝采样接受",
+   "paras": [
+    "现在到微妙部分：需要以保持 target model 精确概率分布的方式接受或拒绝每个 draft token。",
+    "acceptance 循环里发生的事：",
+    "在每个位置 i，有：p_target——target model 对该 draft token 的概率；p_draft——draft model 对该 token 的概率（之前存的）。",
+    "__CODE__def verify_draft_tokens(self, input_ids: torch.Tensor, \n                       draft_tokens: List[int], \n                       draft_probs: List[float]) -> List[int]:\n    \"\"\"\n    Verify draft tokens using the target model in a single forward pass.\n\n    This is where the magic happens! We process all draft tokens at once\n    and get probability distributions at each position.\n    \"\"\"\n    # Create sequence with all draft tokens\n    draft_sequence = torch.cat([\n        input_ids,\n        torch.tensor([draft_tokens], device=self.device)\n    ], dim=1)\n\n    # Single forward pass through target model\n    with torch.no_grad():\n        outputs = self.target_model(draft_sequence)\n        all_logits = outputs.logits[0]  # Shape: [seq_len, vocab_size]\n\n    # Verify each draft token\n    accepted_tokens = []\n    seq_len = input_ids.size(1)\n\n    for i in range(len(draft_tokens)):\n        # Get target model's probability distribution at this position\n        position = seq_len - 1 + i\n        target_probs = torch.softmax(all_logits[position], dim=0)\n        target_prob = target_probs[draft_tokens[i]].item()\n        draft_prob = draft_probs[i]\n\n        # Acceptance criterion: p_target(token) / p_draft(token)\n        acceptance_ratio = min(1.0, target_prob / draft_prob)\n\n        if torch.rand(1).item() < acceptance_ratio:\n            # Accept the draft token\n            accepted_tokens.append(draft_tokens[i])\n        else:\n            # Reject and sample from adjusted distribution\n            # Adjusted distribution: max(0, p_target - p_draft)\n            adjusted_probs = torch.clamp(\n                target_probs - torch.softmax(all_logits[position], dim=0), \n                min=0.0\n            )\n\n            if adjusted_probs.sum() > 0:\n                adjusted_probs = adjusted_probs / adjusted_probs.sum()\n                new_token = torch.multinomial(adjusted_probs, num_samples=1).item()\n            else:\n                # Fallback: sample from target distribution\n                new_token = torch.multinomial(target_probs, num_samples=1).item()\n\n            accepted_tokens.append(new_token)\n            # Stop verifying remaining tokens\n            break\n\n    # Bonus token: if all drafts accepted, get one more from target model\n    if len(accepted_tokens) == len(draft_tokens):\n        position = seq_len - 1 + len(draft_tokens)\n        bonus_probs = torch.softmax(all_logits[position], dim=0)\n        bonus_token = torch.multinomial(bonus_probs, num_samples=1).item()\n        accepted_tokens.append(bonus_token)\n\n    return accepted_tokens"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "数学：理解拒绝采样",
+   "paras": [
+    "接受概率是：",
+    "**为什么这个公式？**\n**情形 1：p_target ≥ p_draft。**target model 认为该 token *更可能*。以概率 1.0 接受。draft model 保守了，没问题。\n**情形 2：p_target < p_draft。**draft model 过度自信。以概率 p_target/p_draft 接受，按 draft 多过度自信下加权。",
+    "例如：p_draft=0.8 且 p_target=0.4，以 0.4/0.8=0.5 接受；p_draft=0.9 且 p_target=0.1，以 0.1/0.9≈0.11 接受。",
+    "**调整分布。**拒绝 token 时不能直接从中采样 target model 分布，那会引入偏差。改为从**调整分布**采样：p'(t) = max(0, p_target(t) - p_draft(t)) / Z，其中 Z 是归一化常数。这个调整移除 draft model 的「贡献」，只留 target model 加的。",
+    "直觉：draft model 已在其采样的 token 上「用完」一些概率质量。我们要从剩下的采样。",
+    "这个拒绝采样过程被数学证明产生与标准自回归解码**完全相同的分布**。所以你不是近似，而是（期望上）逐 bit 相同结果。",
+    "**Bonus Token。**还有一个巧妙优化：若全部 K 个 draft token 被接受，我们得到了 K+1 个位置的 logits（原 K 个位置加一个额外）。那额外位置基本免费，因为我们已付前向成本。所以从中多采样一个 token。",
+    "这意味着完美 draft 让 K+1 个 token 花一次 target model pass 的价格！",
+    "__CODE__acceptance_ratio = min(1.0, p_target / p_draft)",
+    "__CODE__p'(t) = max(0, p_target(t) - p_draft(t)) / Z",
+    "__CODE__adjusted_probs = torch.clamp(\n    target_probs - torch.softmax(all_logits[position], dim=0), \n    min=0.0\n)\n\nif adjusted_probs.sum() > 0:\n    adjusted_probs = adjusted_probs / adjusted_probs.sum()\n    new_token = torch.multinomial(adjusted_probs, num_samples=1).item()",
+    "__CODE__# Bonus token: if all drafts accepted, get one more from target model\nif len(accepted_tokens) == len(draft_tokens):\n    position = seq_len - 1 + len(draft_tokens)\n    bonus_probs = torch.softmax(all_logits[position], dim=0)\n    bonus_token = torch.multinomial(bonus_probs, num_samples=1).item()\n    accepted_tokens.append(bonus_token)"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "把一切组装起来",
+   "paras": [
+    "完整生成循环：",
+    "每次迭代：1. 用小模型 draft K 个 token；2. 一次大模型前向验证全部 K 个；3. 接受 1 到 K+1 个 token；4. 重复直到生成足够 token。",
+    "__CODE__def generate(self, prompt: str, max_new_tokens: int = 50, \n             num_draft_tokens: int = 4, verbose: bool = True) -> str:\n    \"\"\"\n    Generate text using speculative decoding.\n    \"\"\"\n    input_ids = self.tokenizer.encode(prompt, return_tensors='pt').to(self.device)\n    generated_tokens = 0\n    iterations = 0\n    total_accepted = 0\n\n    while generated_tokens < max_new_tokens:\n        iterations += 1\n\n        # Step 1: Draft tokens\n        draft_tokens, draft_probs = self.generate_draft_tokens(input_ids, num_draft_tokens)\n\n        # Step 2: Verify drafts\n        accepted_tokens = self.verify_draft_tokens(input_ids, draft_tokens, draft_probs)\n\n        # Update statistics\n        num_accepted = len(accepted_tokens)\n        total_accepted += num_accepted\n        generated_tokens += num_accepted\n\n        if verbose:\n            draft_text = self.tokenizer.decode(draft_tokens)\n            accepted_text = self.tokenizer.decode(accepted_tokens)\n            print(f\"Iteration {iterations}:\")\n            print(f\"  Drafted: {draft_text!r}\")\n            print(f\"  Accepted: {accepted_text!r} ({num_accepted}/{len(draft_tokens)} tokens)\")\n\n        # Add accepted tokens to sequence\n        input_ids = torch.cat([\n            input_ids,\n            torch.tensor([accepted_tokens], device=self.device)\n        ], dim=1)\n\n        if generated_tokens >= max_new_tokens:\n            break\n\n    result = self.tokenizer.decode(input_ids[0], skip_special_tokens=True)\n    return result"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "设置模型",
+   "paras": [
+    "要用 speculative decoding，需要同族的两个模型：",
+    "本例用 GPT-2（124M 参数）作 draft，GPT-2-XL（1.5B 参数）作 target。draft 模型约 12× 更小，即约 12× 更快推理。",
+    "重要：两模型必须用相同 tokenizer 和词表。否则需要 token 映射逻辑，增加复杂度。",
+    "__CODE__class SpeculativeDecoder:\n    def __init__(self, draft_model_name: str, target_model_name: str):\n        \"\"\"\n        Initialize the speculative decoder with two models.\n\n        Args:\n            draft_model_name: Name of the small, fast model (e.g., \"gpt2\")\n            target_model_name: Name of the large, accurate model (e.g., \"gpt2-xl\")\n        \"\"\"\n        print(f\"Loading draft model: {draft_model_name}\")\n        self.draft_model = AutoModelForCausalLM.from_pretrained(draft_model_name)\n        self.draft_model.eval()\n\n        print(f\"Loading target model: {target_model_name}\")\n        self.target_model = AutoModelForCausalLM.from_pretrained(target_model_name)\n        self.target_model.eval()\n\n        self.tokenizer = AutoTokenizer.from_pretrained(draft_model_name)\n        self.tokenizer.pad_token = self.tokenizer.eos_token\n\n        # Move to GPU if available\n        self.device = \"cuda\" if torch.cuda.is_available() else \"cpu\"\n        self.draft_model.to(self.device)\n        self.target_model.to(self.device)"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "性能分析",
+   "paras": [
+    "分析理论加速。定义：T_target——一次 target 前向时间；T_draft——一次 draft 前向时间；α——平均接受率 aka **block efficiency**（draft token 被接受概率）；K——每迭代 draft token 数。",
+    "**每迭代时间：**",
+    "**每迭代期望 token 数：**若每个 token 有独立接受概率 α，期望接受数为：",
+    "对大 K 和合理 α，约等于：",
+    "**每 token 有效时间：**",
+    "**示例计算。**用现实数字：T_target=100ms、T_draft=8ms、K=4、α=0.6：",
+    "**加速：100ms/60ms ≈ 1.67×。**而且这还没算 KV cache！有正确 KV cache 管理，加速可达 2-3×。",
+    "**最优 K 值。**K（draft token 数）的选择是权衡：**太小**——没充分利用验证 pass；**太大**——浪费时间 draft 会被拒的 token。最优 K 取决于：模型间速度比（T_target/T_draft）、接受率 α、内存约束。实践中 K=3 到 K=5 对大多数场景效果好。",
+    "__CODE__T_iteration = K × T_draft + T_target",
+    "__CODE__E[tokens] = 1 + α + α² + α³ + ... + α^(K-1) + α^K\n          = (1 - α^(K+1)) / (1 - α)",
+    "__CODE__E[tokens] ≈ 1 / (1 - α)",
+    "__CODE__T_effective = (K × T_draft + T_target) / E[tokens]",
+    "__CODE__T_iteration = 4 × 8ms + 100ms = 132ms\nE[tokens] = (1 - 0.6^5) / (1 - 0.6) ≈ 2.2 tokens\nT_effective = 132ms / 2.2 ≈ 60ms per token"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "实践中的接受率",
+   "paras": [
+    "什么决定接受率？几个因素：",
+    "**模型相似性**：同族（GPT-2 → GPT-2-XL）的 draft 和 target 比不匹配模型接受率高。",
+    "**任务难度**：可预测文本（新闻、文档）α≈0.7；创意写作 α≈0.4-0.5；代码生成 α≈0.5-0.6。",
+    "**上下文长度**：更长上下文通常提升接受率，因为更多信息让 token 更可预测。",
+    "**温度**：更低温度（更贪婪）通常给更高接受率，因为两模型都收敛向明显选择。",
+    "跑代码时你会看到：",
+    "这种变化正常！有些迭代全接受，有些只接受一个 token。",
+    "__CODE__Iteration 1:\n  Drafted: ' a topic that'\n  Accepted: ' a topic' (2/4 tokens)\n\nIteration 2:\n  Drafted: ' that has been'\n  Accepted: ' that has been' (4/4 tokens)\n\nIteration 3:\n  Drafted: ' discussed extensively'\n  Accepted: ' discussed' (1/4 tokens)"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "实现考虑",
+   "paras": [
+    "**内存需求。**你需要同时保持两模型在内存。GPT-2/GPT-2-XL：GPT-2 约 500MB、GPT-2-XL 约 6GB、总计约 6.5GB。更大模型如 LLaMA-7B（draft）和 LLaMA-70B（target），约 14GB + 140GB ≈ 150GB+。这常需多 GPU。",
+    "**KV Cache 支持。**上面实现没用 KV caching，意味着每步对所有先前 token 重算 attention。加 KV cache 显著提升：1. **Draft model cache**——为 drafting 维护独立 KV cache；2. **Target model cache**——只缓存验证过的前缀；3. **Cache invalidation**——拒绝 token 时把 cache 截断到拒绝点。有 KV caching 可达 2-3× 而非约 1.5-2×。",
+    "**批大小考虑。**带批推理的 speculative decoding 棘手。批里不同序列可能接受不同数量 token，制造 ragged tensors。方案：**独立处理**（每序列单独，简单但低效）、**Padding**（pad 到最大接受长度，浪费 padding 计算）、**动态批**（用高效处理变长序列的框架）。多数生产系统为简单用独立处理。",
+    "**贪婪 vs 采样。**上面实现用采样（torch.multinomial）。贪婪解码可简化：",
+    "贪婪解码通常接受率更高，因为两模型收敛到相同明显选择。",
+    "__CODE__# Greedy acceptance: just check if draft token matches argmax\ntarget_token = torch.argmax(target_probs)\nif draft_tokens[i] == target_token:\n    accepted_tokens.append(draft_tokens[i])\nelse:\n    accepted_tokens.append(target_token)\n    break"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "何时擅长 / 何时挣扎",
+   "paras": [
+    "不是所有场景同等受益。这里它发光：",
+    "**✅ 大模型 + 小 draft 模型（>10× 大小差）**——速度差越大越赚。**✅ 中高接受率（>40%）**——draft 太差则开销主导。**✅ 单用户或小批推理**——比大批易管理。**✅ 中等上下文（<8K token）**——极长上下文让验证更贵。**✅ 可预测任务**——问答、摘要、翻译比创意写作好。",
+    "**它挣扎时：**\n**❌ 小 target 模型**——已快（<20ms/token）则绝对增益最小。**❌ 低接受率（<30%）**——draft 开销超增益。**❌ 极长上下文（>32K token）**——验证 pass 变贵。**❌ 高创意任务**——低可预测性、更低接受率。**❌ 内存受限环境**——保持两模型是奢侈。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "总结",
+   "paras": [
+    "Speculative decoding 是把顺序问题变部分并行的漂亮例子。关键洞察：**1. 内存带宽而非计算是 LLM 推理瓶颈；2. 验证几乎免费**（无论 K 都是一次前向）；**3. 拒绝采样保持分布正确性**所以得到精确结果；**4. 大多 token 可预测**让 draft 模型惊人有效。",
+    "实现需要小心处理：拒绝采样数学保持正确性；draft 和 target 两模型概率跟踪；拒绝 token 时早停；bonus token 提取提效。",
+    "结果？真实负载 1.5-3× 加速、零质量退化。对概念上就是「猜和查」的技术不赖。",
+    "若你在规模部署 LLM，speculative decoding 该在你的优化工具箱里。数学微妙，但回报真实。",
+    "**完整工作代码见：**github.com/jaygala223/scratch。试试：",
+    "看你的 LLM 生成更快且不牺牲一点质量。",
+    "__CODE__python3 speculative_decoding.py"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig02.png",
+      "caption": "图 2：Speculative Decoding 示意。"
+     }
+    ]
+   }
+  }
+ ],
+ "conclusion": [
+  "Jay Gala（Intel 的 AI 软件工程师）这篇是 speculative decoding 从理论到实现的完整教学，代码全部可跑（GPT-2 作 draft、GPT-2-XL 作 target）。最值得带走的四件事：",
+  "**① 瓶颈是带宽不是算力**：每 token 加载 140GB 权重（70B BF16），2TB/s 下理论 70ms/token——算力再多也快不了。**② 验证几乎免费**：K 个 draft token 一次大模型前向全验证，因为权重加载成本是主项、多算几个位置是 compute-bound 的免费工作。**③ 拒绝采样保分布**：acceptance_ratio = min(1, p_target/p_draft)，拒绝时从 p'(t)=max(0, p_target-p_draft)/Z 采样，数学上保证与自回归解码逐 bit 相同（期望上）。**④ 数字现实**：K=4、α=0.6 时约 1.67×，加 KV cache 到 2-3×。",
+  "评论区还有一个真 bug 值得留意（Deekshith Reddy 指出）：adjusted_probs 里应减去 **draft_probs** 而非 target 自己的 softmax——原文若写成 target_probs - softmax(all_logits) 就是 target - target 恒零，等于直接采 target 分布（重叠空间没扣掉）。实现时这行最容易错，值得对照修。"
+ ],
+ "reference_url": "https://galacodes.hashnode.dev/speculative-decoding"
+}
+
+with open("article_data.json", "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=1)
+print(f"✅ 写入 article_data.json")

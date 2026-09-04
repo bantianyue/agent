@@ -1,0 +1,416 @@
+{
+  "title": "SGLang 亚秒级引擎重启：用权重缓存守护进程干掉冷启动",
+  "lead": [
+    "如今 SOTA 模型越来越大，崩溃后重载模型服务非常昂贵。因此我们引入 **Weight Cache Daemon**——一个持久的 GPU 进程，把后量化模型权重留在 GPU 内存，通过 CUDA IPC zero-copy 映射服务给新的 SGLang 引擎实例。这把权重加载从分钟级降到秒级。",
+    "Weight Cache Daemon 是我们 **Fast Engine Recovery Framework** 的第一阶段，目标是生产 LLM serving 的 **< 10 秒冷重启**和 **< 1 秒热备切换**。",
+    "关键结果：**权重加载 ~495s → ~0.63s（约 785× 加速）**，基于 Ling-2.6-1T FP8 模型；**总启动 8.8min → 0.528min（端到端引擎启动时间降 93.9%）**；**多实例权重共享**（同 GPU 上多引擎实例映射同一 IPC handle，消除冗余磁盘 I/O 和后量化变换）；**active-standby 故障切换 < 1 秒**；**多节点实例权重共享**支持大模型。"
+  ],
+  "summary": [
+    {
+      "key": "瓶颈",
+      "body": "Ling-2.6-1T FP8 在 8×H20-3e 上冷启动约 8.52 分钟，其中**权重从磁盘加载占 93.9%**（每 TP rank 读约 120GB safetensors、反序列化、TP 分片、FP8 量化重打包）。这些工作在每次重启都完全相同地重复，即使结果 GPU tensor 是确定性的、常已在 GPU 内存中。"
+    },
+    {
+      "key": "方案",
+      "body": "每 GPU 一个守护进程持有后量化 TP 分片权重；引擎重启时经 CUDA IPC zero-copy 映射，无磁盘 I/O、无反序列化、无量化。引擎在 meta device 初始化模型，把每个参数 data 指针直接指向 IPC 映射 tensor。CacheConfig 指纹（model_path/tp_size/quant/dtype/环境戳）不匹配则回退磁盘全载。"
+    },
+    {
+      "key": "生产模式",
+      "body": "多实例共享（每 GPU 权重只从磁盘加载量化一次）；优先级协同服务（低优先级实例可亚秒级逐出重建）；active-standby 故障切换 <1 秒且不浪费整组 GPU 给空闲副本。Qwen3-235B FP8 约 500×、Ling-2.6-1T 约 780× 加速。"
+    }
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "背景：冷启动时间去哪了",
+      "paras": [
+        "随着 LLM 模型越来越大——Qwen3-235B、Ling-2.6-1T、新发布的 2.8T Kimi K3——服务引擎的冷启动时间成为生产效率的关键瓶颈。一个 8×H20-3e GPU 上的 Ling-2.6-1T FP8 实例要约 **8.52 分钟**才能就绪服务，权重存在 3.5T NVME SSD。生产中这意味着：",
+        "重启期间 **P99 尾延迟尖峰**——所有在途请求失败或无限排队；**可用性降低**——多分钟恢复窗口违反 SLA 目标；**运营摩擦**——滚动更新、配置变更、故障恢复都被重启周期瓶颈；**GPU 资源浪费**——传统 active-standby 部署把整组 GPU 给空闲副本，故障切换硬件成本翻倍。",
+        "时间去哪了？我们剖析了 Ling-2.6-1T FP8 的完整 SGLang 引擎启动：",
+        "瓶颈清楚：**从磁盘加载权重占启动时间的 93.2%**。对 Ling-2.6-1T FP8，每个 TP rank 从磁盘读约 120GB safetensors、反序列化、应用 TP 分片、跑后量化变换（FP8 量化、权重重打包）。这个工作**每次重启都完全相同地重复**，即使生成的 GPU tensor 是确定性的、常已在 GPU 内存中。",
+        "我们能否避免每次从磁盘重载？答案**能**——通过让权重跨引擎重启留在 GPU 内存。"
+      ],
+      "fig_after": {},
+      "table": {
+        "head": [
+          "阶段",
+          "时间(s)",
+          "百分比",
+          "说明"
+        ],
+        "rows": [
+          [
+            "Pre-init & ServerArgs",
+            "~1",
+            "0.2%",
+            "Pre-init 和 ServerArgs 解析"
+          ],
+          [
+            "Tokenizer init",
+            "~13",
+            "2.4%",
+            "加载初始化 tokenizer"
+          ],
+          [
+            "Init torch distributed",
+            "~5",
+            "0.9%",
+            "NCCL 2.28.9、8 卡 H20、NVLink mesh 370.8 GB/s、P2P/IPC"
+          ],
+          [
+            "Load weight (disk)",
+            "~495",
+            "93.9%",
+            "161 shard、W8A8 FP8、最慢 rank 495.3s、每卡 120GB、Disk I/O bound"
+          ],
+          [
+            "Cache allocation (KV+Mamba)",
+            "~1",
+            "0.2%",
+            "KV 553,599 tokens/5.94GB bf16、Mamba SSM state 5.33GB"
+          ],
+          [
+            "Capture CUDA graph",
+            "~7.7",
+            "1.5%",
+            "仅 3 个 decode BS [1,2,4]"
+          ],
+          [
+            "Server ready",
+            "~4",
+            "0.8%",
+            "RadixTree init、HTTP/uvicorn、warmup 请求"
+          ],
+          [
+            "<strong>Total</strong>",
+            "<strong>~527</strong>",
+            "<strong>~8.8 分钟</strong>",
+            ""
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "设计：核心思想——经 CUDA IPC 的持久权重缓存",
+      "paras": [
+        "Weight Cache Daemon 是持久的 GPU 进程，在 GPU 内存持有后量化、TP 分片权重。引擎重启时，新引擎进程通过 **CUDA IPC zero-copy** 从 daemon 映射权重——无磁盘 I/O、无反序列化、无量化。",
+        "每个 GPU 为其 TP rank 跑**一个 daemon 进程**。daemon 做：",
+        "1. 从磁盘加载模型权重（完整流水线：disk → TP shard → quantize → repack）。\n2. 把 model.state_dict() 里每个参数和 buffer 导出为 CUDA IPC handle。\n3. 记录 CacheConfig 指纹（model path、TP/DP size、quant config hash、dtype）。\n4. 通过 Unix socket 把 IPC handle 服务给请求的引擎进程。",
+        "引擎连接 daemon、验证配置兼容性、把权重直接映射进其地址空间——引擎和 daemon 经 CUDA IPC **共享同一物理 GPU 内存**。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig01.png",
+            "caption": "图 1：架构——Weight Cache Daemon 每 GPU 一个进程，从磁盘加载+TP 分片+量化+重打包，导出 CUDA IPC handle，经 Unix socket 服务给引擎进程。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "设计：经 Meta Device 的 Zero-Copy 加载",
+      "paras": [
+        "亚秒级加载的关键是 **zero-copy**：引擎的 param.data 指针直接设为 IPC 映射的 GPU tensor。无数据拷贝。",
+        "为实现这点，引擎在 **meta device** 上初始化模型（无 GPU/CPU 内存分配），然后把每个参数的 data 指针替换为 IPC 映射 tensor。",
+        "由 process_weights_after_loading() 创建的后量化参数（如 FP8 量化的 weight_scale）也被 daemon 缓存并直接映射——无需重新量化。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "设计：配置校验——安全第一",
+      "paras": [
+        "引擎配置与 daemon 缓存配置任何不匹配都触发**完整磁盘重载**，确保正确性：",
+        "最后两个字段构成**环境戳**：跑了不同后处理分支（不同计算能力或 torch/kernel 版本）的 daemon 和 client 能产出映射干净却服务垃圾的权重——把环境戳进 CacheConfig 把它变成干净的不匹配。",
+        "这对生产安全至关重要：若操作员改模型或量化配置，引擎会检测不匹配、回退磁盘加载而非映射不兼容权重。",
+        "配置校验之上，量化方法由 **IPC allowlist** 门控。CUDA IPC zero-copy 只导出原始 tensor 数据，所以只有当 process_weights_after_loading() 的全部效果被那数据捕获时才正确。在 Python 侧盖章元数据或重打包/转置权重的（per-tensor FP8、Marlin、AWQ/GPTQ）会静默服务错误数值——它们会抛硬错误。当前已验证：**unquantized** 和 **block-wise FP8**（设置 weight_block_size）；端到端验证后会加更多方法。"
+      ],
+      "fig_after": {},
+      "table": {
+        "head": [
+          "字段",
+          "不匹配示例",
+          "后果"
+        ],
+        "rows": [
+          [
+            "model_path + model_arch + revision",
+            "不同模型或版本",
+            "权重完全错误"
+          ],
+          [
+            "tp_size + tp_rank",
+            "不同 TP 分片",
+            "该 rank 分片错误"
+          ],
+          [
+            "pp_size + pp_rank",
+            "不同 PP 划分",
+            "该流水线阶段层错误"
+          ],
+          [
+            "dp_size + ep_size",
+            "不同 DP/EP 策略",
+            "权重分布错误"
+          ],
+          [
+            "quant_method + quant_config_hash",
+            "不同量化",
+            "未量化 vs FP8 不匹配"
+          ],
+          [
+            "dtype",
+            "float16 vs bfloat16",
+            "类型不匹配"
+          ],
+          [
+            "device_capability + torch_version",
+            "不同 GPU 架构或 torch 版本",
+            "权重映射干净但服务错误数值"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "设计：三种模式 daemon / client / off",
+      "paras": [
+        "**daemon 模式**：引擎启动时 spawn daemon 进程并等它们从磁盘加载权重。首次启动仍慢（daemon 必须从磁盘加载），但后续重启即瞬。",
+        "**client 模式**：引擎连接已跑 daemon。这是快重启路径——daemon 更早启动、已持有 GPU 内存中的权重。"
+      ],
+      "fig_after": {},
+      "table": {
+        "head": [
+          "模式",
+          "流程",
+          "权重加载时间",
+          "GPU 内存",
+          "用例"
+        ],
+        "rows": [
+          [
+            "daemon",
+            "引擎启动 daemon → daemon 从磁盘加载 → 引擎映射 IPC",
+            "< 1s（daemon 就绪后）",
+            "1×（共享）",
+            "首次启动；引擎管理 daemon 生命周期"
+          ],
+          [
+            "client",
+            "连接预跑 daemon → 映射 IPC",
+            "< 1s",
+            "1×（共享）",
+            "引擎重启；daemon 预跑"
+          ],
+          [
+            "off",
+            "正常磁盘加载",
+            "405-411s（Ling-2.6-1T FP8）",
+            "1×",
+            "默认；无缓存"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "设计：安全与鲁棒性",
+      "paras": [
+        "Weight Cache Daemon 设计为**非侵入和安全**：",
+        "**最小侵入**：特性自包含在 python/sglang/srt/weight_cache/，核心引擎改动最小（只有 load_model() 分发和一个 CLI flag）。",
+        "**崩溃安全**：若 daemon 崩溃，现有引擎实例继续运行——它们已通过 CUDA 引用计数持有 IPC 映射 tensor 的引用。GPU 内存只在 daemon 和引擎**都**退出时释放。",
+        "**daemon 恢复**：daemon 重启时从磁盘重载权重、重新导出 IPC handle。新引擎实例可连接重启的 daemon。",
+        "**不匹配回退**：配置不匹配自动回退磁盘加载（client 模式）或抛错误（daemon 模式，回退会 OOM 因为两进程共享同 GPU）。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "超越重启：生产场景",
+      "paras": [
+        "Weight Cache Daemon 解锁了传统磁盘加载不现实的生产模式：",
+        "**多实例权重共享**：每 GPU 一个 daemon 持有内存权重；多个引擎实例（如独立服务）经 zero-copy 映射同一 IPC handle。无论多少实例消费，权重每 GPU 只从磁盘加载和量化**恰好一次**。",
+        "**优先级协同服务**：在同一 GPU 上跑高优先级在线服务和低优先级批处理任务，由同一权重缓存 daemon 支撑。低优先级实例可在**亚秒级被逐出和重新 spawn**，无需从磁盘重载权重——实现灵活 GPU 时间共享而无常规启动惩罚。",
+        "**Active-Standby 故障切换**：在主实例旁部署待机引擎，都由同一 weight cache daemon 支撑。待机经 zero-copy 映射权重保持热。主实例失败时待机在 **< 1 秒**内接管——无权重加载、无磁盘 I/O。",
+        "这实现近零停机故障切换**而不把整组 GPU 专给空闲副本**，避免传统热备部署昂贵的 GPU 资源浪费。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig02.png",
+            "caption": "图 2：多实例权重共享——多个引擎实例映射同一 IPC handle，每 GPU 权重只加载量化一次。"
+          },
+          {
+            "src": "fig03.png",
+            "caption": "图 3：Active-Standby 故障切换——待机引擎零拷贝映射权重保持热，主实例失败 <1 秒接管。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "性能：磁盘 vs IPC Zero-Copy",
+      "paras": [
+        "**单节点**："
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig04.png",
+            "caption": "图 4：性能对比——磁盘加载 vs IPC zero-copy，Qwen3-235B 约 500×、Ling-2.6-1T 约 780×。"
+          }
+        ]
+      },
+      "table": {
+        "head": [
+          "模型",
+          "权重大小",
+          "磁盘加载(s)",
+          "IPC Zero-copy(s)",
+          "加速"
+        ],
+        "rows": [
+          [
+            "Qwen3-235B FP8",
+            "~235 GB",
+            "~306-327",
+            "<1",
+            "~500×"
+          ],
+          [
+            "Ling-2.6-1T",
+            "~1 TB",
+            "~405-411",
+            "<1",
+            "~780×"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "如何使用：启动权重缓存 Daemon",
+      "paras": [
+        "**单节点启动**：一条命令启动所有 TP rank daemon。",
+        "等待 daemon 就绪（每 rank 写一个 .ready 文件）：",
+        "__CODE__# Standalone daemon launch (one command for all TP ranks):\npython -m sglang.srt.weight_cache.daemon \\\n    --model-path /path/to/model --tp-size 4 \\\n    --load-format auto --dtype auto --quantization fp8",
+        "__CODE__# Check readiness:\nls /tmp/sglang_weight_cache_rank*.ready",
+        "__CODE__# Engine Client — connect to pre-running daemons (restart)\npython -m sglang.launch_server \\\n    --model-path /path/to/model --tp-size 4 \\\n    --weight-cache-mode client",
+        "**启动带权重缓存的引擎**：连接预跑 daemon（重启路径）。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "如何使用：多节点启动",
+      "paras": [
+        "多节点部署中每个节点为本地 TP rank 跑自己的 daemon。所有 daemon 加入同一分布式组，所以 --nnodes、--node-rank、--dist-init-method 必须跨节点一致，$MASTER_ADDR 指向 node 0。",
+        "__CODE__# Daemon on node 0:\npython -m sglang.srt.weight_cache.daemon \\\n    --model-path /path/to/model --tp-size 2 \\\n    --load-format auto --dtype auto --quantization fp8 \\\n    --nnodes 2 --node-rank 0 \\\n    --dist-init-method tcp://$MASTER_ADDR:29500\n\n# Daemon on node 1:\npython -m sglang.srt.weight_cache.daemon \\\n    --model-path /path/to/model --tp-size 2 \\\n    --load-format auto --dtype auto --quantization fp8 \\\n    --nnodes 2 --node-rank 1 \\\n    --dist-init-method tcp://$MASTER_ADDR:29500",
+        "__CODE__# Engine client on node 0:\npython -m sglang.launch_server \\\n    --model-path /path/to/model --tp-size 2 \\\n    --weight-cache-mode client \\\n    --nnodes 2 --node-rank 0 \\\n    --dist-init-addr $MASTER_ADDR:29600 --port 34000\n\n# Engine client on node 1:\npython -m sglang.launch_server \\\n    --model-path /path/to/model --tp-size 2 \\\n    --weight-cache-mode client \\\n    --nnodes 2 --node-rank 1 \\\n    --dist-init-addr $MASTER_ADDR:29600",
+        "每个节点报告 daemon 就绪后启动引擎 client。它们用独立 rendezvous port（29600），与 daemon 的 29500 分开。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "Fast Engine Recovery Framework：路线图",
+      "paras": [
+        "Weight Cache Daemon 是更广 **Fast Recovery Framework** 的第一阶段，目标 **< 10s 冷重启**和 **< 1s 热备切换**：",
+        "更多模型支持也在路上。"
+      ],
+      "fig_after": {},
+      "table": {
+        "head": [
+          "阶段",
+          "当前(s)",
+          "目标(s)",
+          "方法",
+          "状态"
+        ],
+        "rows": [
+          [
+            "Load weight",
+            "~306-327",
+            "< 1",
+            "Weight Cache Daemon（CUDA IPC）",
+            "完成（本 PR）"
+          ],
+          [
+            "Capture CUDA graph",
+            "~34.9",
+            "< 3",
+            "CUDA graph 序列化+回放",
+            "计划"
+          ],
+          [
+            "DeepGEMM JIT warmup",
+            "~23.1",
+            "< 2",
+            "Kernel 缓存持久化、并行 warmup",
+            "计划"
+          ],
+          [
+            "Server init & Tokenizer",
+            "~17.3",
+            "< 3",
+            "懒 tokenizer init、配置缓存",
+            "计划"
+          ],
+          [
+            "Init torch distributed",
+            "~4.7",
+            "< 2",
+            "NCCL session 复用、持久进程组",
+            "计划"
+          ],
+          [
+            "KV Cache allocation",
+            "~0.5",
+            "< 0.5",
+            "kvcache 复用",
+            "计划"
+          ],
+          [
+            "Server ready",
+            "~3.4",
+            "< 1",
+            "重启时跳过 warmup 请求",
+            "计划"
+          ],
+          [
+            "<strong>Total（单节点）</strong>",
+            "<strong>~390</strong>",
+            "<strong>< 10</strong>",
+            "",
+            ""
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "公开路线图",
+      "paras": [
+        "Weight Cache Daemon 只是**第一步**——还有很多要建。Phase 1 今天覆盖 TP + PP、单/多节点启动、per-GPU zero-copy CUDA IPC、unquantized 加 block-wise FP8。此外许多高影响方向仍开放：",
+        "**更多模型与量化**：把 IPC allowlist 扩展到 block-wise FP8 之外（per-tensor FP8、INT8、MXFP8、NVFP4、AWQ/GPTQ……），覆盖更多架构含多模态和 LoRA base weights。",
+        "**DP/EP 与多节点**：DP/EP shard keying、跨节点 daemon 协调、生命周期管理、故障切换。",
+        "**不重载的权重更新**：为 RL/在线更新做原位权重刷新，daemon 作交付代理。",
+        "**跨 GPU 与 fleet 共享**：peer-copy 和 fleet-fill 让集群冷启动每个 shard group 只付约一次磁盘读。",
+        "**KV cache 恢复**：跨重启/故障切换保留和重映射 KV cache（KV 复用、交接给待机）让在途上下文幸存恢复而非从头重算。",
+        "**启动路径其余部分**：CUDA graph 序列化、kernel-warmup 持久化、更快 server/分布式 init 达成 **< 10s** 冷重启目标。",
+        "**其他硬件后端**：把该特性扩展到暴露类似功能的其它加速器（AMD 和 Intel 都有可比 IPC 机制）。",
+        "**Ops 与可靠性**：指标、状态工具、安全加固、CI 覆盖。",
+        "这是非常社区化的工作。完整计划在 sgl-project/sglang#33522 公开跟踪——**非常欢迎贡献和反馈**，有很多有影响力的工作可接。"
+      ],
+      "fig_after": {}
+    }
+  ],
+  "conclusion": [
+    "蚂蚁（Ant Ling Infra）+ 阿里 + SGLang 团队这篇把「模型太大、冷启动太贵」的痛点解决得很干脆：**权重根本不该每次重启都从磁盘读**。Ling-2.6-1T FP8 的启动剖析显示 93.9% 时间花在权重加载（每 TP rank 读 120GB、反序列化、TP 分片、FP8 量化重打包），而这些工作在每次重启完全相同地重复。",
+    "方案是 Weight Cache Daemon：每 GPU 一个持久进程持有后量化权重，新引擎经 CUDA IPC zero-copy 映射（meta device 初始化后直接换 data 指针），权重加载 495s → 0.63s（785×）、总启动 8.8min → 0.5min。三个值得抄的工程点：**CacheConfig 指纹校验**（model/tp/pp/quant/dtype/环境戳任一不匹配就回退磁盘，杜绝映射错权重）、**IPC allowlist**（只允许数据能完全捕获后量化效果的量化方法，per-tensor FP8/Marlin/AWQ 直接硬错误）、**崩溃安全**（daemon 死引擎照跑，CUDA 引用计数双释放）。",
+    "生产模式的想象力也在扩展：多实例共享（每 GPU 权重只载一次）、优先级协同服务（低优先级实例亚秒级逐出重建）、active-standby <1s 切换不浪费 GPU。路线图剩余部分（CUDA graph 序列化、NCCL session 复用、KV cache 恢复）把目标钉在 <10s 冷重启；对万亿参数 serving 来说这是把「分钟级灾难恢复」变成「秒级」。"
+  ],
+  "reference_url": "https://www.lmsys.org/blog/2026-08-21-sglang-fast-recovery"
+}

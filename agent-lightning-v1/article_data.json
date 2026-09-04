@@ -1,0 +1,222 @@
+{
+  "title": "Agent Lightning v1.0：迈向 Harnessed Agentic RL",
+  "lead": [
+    "现代 agent 不是独立 LLM。它们在 *agent harness* 里运行——harness 管理工具、上下文和控制流，使其成为关键组件。我们最初的 Agent Lightning 工作引入一种分离架构，经 LLM endpoint proxy 把任意 agent 连到强化学习（RL）训练。最近的框架如 verl Uni-Agent、AReaL 2.0、slime v0.3.0、Polar 都跟进了这种 proxy-based 方法。",
+    "我们称这个范式为 *harnessed agentic RL*：部署时用的 harness 直接参与模型后训练，从而缩小训练与实际使用之间的差距。",
+    "我们系统性刻画 harnessed agentic RL 的挑战（retokenization、sample merging、advantage calculation、loss normalization、training backend scheduling），并提出 Agent Lightning v1.0——约 3,500 行代码的轻量框架。",
+    "只用一个完整数据清洗流水线 + 6K 训练样本 + 适度算力，RL 把 Qwen3.5-9B 在 SWE-bench Verified 从 41.8% 提到 56.4%（绝对 +14.6%）。"
+  ],
+  "summary": [
+    {
+      "key": "范式区别",
+      "body": "传统 agentic RL 里训练引擎拥有环境交互循环（连续 token 历史、一个 rollout = 一个线性训练样本）。harnessed agentic RL 里 harness 拥有该循环，训练引擎只观察一串 LLM request-response 对（(p1,a1),(p2,a2),...），中间 harness/环境状态转换潜在不可见；一个 rollout 可产出动态数量的训练样本。"
+    },
+    {
+      "key": "四大挑战",
+      "body": "① Retokenization：harness 经文本通信而 RL 操作 token，重 token 化后文本相同但 token ID 可能不同（chat template 非组合性、decode-retokenize drift、inference 输出变换）——打断 token-prefix 连续性无法安全合并。② Advantage：样本数动态 → 应在 rollout 级算 baseline（verl Uni-Agent/Polar rollout 级，slime/AReaL sample 级）。③ Loss：seq-mean 会给多样本 rollout 过多权重 → rollout 级 token-mean 最优。④ Backend：样本数执行后才知，要在固定 GPU 上平衡且保住 rollout 统计与更新边界。"
+    },
+    {
+      "key": "结果",
+      "body": "Search（Llama-3.2-3B, GRPO）：验证 reward 25.1%→41.7%。Instruction（Qwen3-4B, RLOO）：51.9%→70.2%。Coding（Qwen3.5-9B, GRPO, SWE-smith 6K 样本）：SWE-bench Verified 41.8%→56.4%；rollout 级 advantage+norm 最高（step 128 验证 reward 38.2% vs 35.0/33.1）。collocated async RL 比同步 RL 约 2× 端到端加速且用更少 GPU。约 3,500 行代码。"
+    }
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "引言：Harnessed Agentic RL",
+      "paras": [
+        "现代 agent 不独立运行。它们在管理工具、执行环境、上下文和控制流的 *agent harness* 里跑。harness 决定 agent 如何观察环境、长地平线行动、从失败恢复，是 agent 能力的核心部分。著名例子包括 coding-agent harness（mini-SWE-agent、OpenHands、OpenCode、Claude Code、Codex）和通用 harness（OpenClaw、Hermes）。",
+        "早期 RL 框架（verl、AReaL、slime）一般要求用户直接在训练框架内实现 agent loop。集成现有 harness 因此困难，因为它们实现复杂、有自己的依赖。我们最初的 Agent Lightning 工作引入训练与 agent 执行的分离架构：经 LLM endpoint 把任意 agent 连到 RL 训练，几乎不改 agent。最近 proxy-based 方法在 verl Uni-Agent、AReaL 2.0、slime v0.3.0、Polar 中变得更常见，天然启用带 harness 的 RL 训练。",
+        "我们用 *harnessed agentic RL* 指经部署时用的同一 agent harness 进行的 RL 训练。harness 而非 trainer 拥有上下文构造、工具执行、agent-环境交互循环；训练系统跨服务边界观察并优化产生的模型调用。这个公式保留 harness 的部署时上下文策略、工具协议、执行语义，无需在 RL 框架内重实现 agent loop。",
+        "传统 agentic RL 和 harnessed agentic RL 都可用部分可观测 MDP 建模，但潜在状态和给 policy 模型的观测不同。传统里潜在状态主要是环境状态，policy 模型几乎直接经透明层与环境交互；policy 观察到持续扩展的 token 历史，一个 rollout 自然形成一条线性 token 轨迹。",
+        "Harnessed 里 policy 不再直接交互环境。潜在状态含 harness 状态和环境状态；harness 拥有上下文构造、控制流、工具执行、agent 编排，为每个模型调用独立构造请求 prompt。Policy 只观察经 LLM API 送达的精确 prompt。一个 rollout 在模型边界暴露为 request-response 对序列 (p1,a1),(p2,a2),...，中间的 harness 和环境状态转换保持潜在。",
+        "关键区别表：传统——State=Environment、Model input=连续 token 历史、Agents=单 ReAct agent；Harnessed——State=Harness+environment、Model input=per-call prompts、Agents=多 agent/subagent/handoffs。",
+        "这引出下面实现挑战：retokenization 与 sample merging（重 token 化后 token ID 可能不同，打断连续性无法安全合并）；advantage calculation（一个 rollout 可能产生动态数量训练样本）；loss normalization（样本数动态，sample 级归一化会给多样本 rollout 过多权重）；training backend scheduling（样本数执行后才知，要在固定 GPU worker 上平衡）。",
+        "我们提供这些挑战的首次系统刻画，并提出 Agent Lightning v1.0——原 Agent Lightning 的完整重构，一个约 3,500 行代码的轻量 harnessed agentic RL 框架。训练流水线内嵌我们对上述挑战的设计选择，提供研究它们的实用 testbed。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig01.png",
+            "caption": "图 1：Agent Lightning v1.0 整体框架——API Gateway（rollouts/models/events 状态源）、Rollout Controller（K8s/local 上调度 agent）、Customized Trainer（VERL 基础上组装训练样本）桥接训练集群与 agent 执行集群。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "挑战：Retokenization 与 Sample Merging",
+      "paras": [
+        "Harness 通常经文本消息与模型 API 通信。从 harness 视角，rollout 由 turn-level 调用组成（(p1text,a1text),(p2text,a2text),...）。典型 ReAct 风格多 turn agent 中，前一次调用形成下一次 prompt 的完整文本级前缀。但当 harness spawn subagent 或总结上下文时，训练引擎可能收到不满足该关系的后续调用。",
+        "RL 训练操作精确 token ID 和 rollout log 概率。RL 系统用 token 序列 pitok 和 aitok 表示每个调用，aitok∼πθ(·|pitok)。响应解码回文本给 harness。token-prefix 连续性要求 (pitok,aitok) 是 pi+1tok 的精确 token 级前缀。",
+        "实践中文本级前缀成立不保证 token 级成立。下一请求通过对更新消息历史应用 chat template 和 tokenizer 获得。重 token 化后，pi+1tok 里对应 aitext 的 token ID 可能不同于 aitok 里原始采样的 ID。",
+        "这个不匹配至少经三种机制出现：",
+        "**Chat-template 非组合性**：渲染完整消息历史不一定等于拼接各部分的渲染——模板可能在消息边界插入分隔符/连接换行，或省略原始生成里出现的 marker。例如 Qwen 的 chat template 会移除早期 thinking marker，破坏 token-prefix 连续性。",
+        "**Decode-retokenize drift**：token 解码非单射，把采样 token 转文本再 tokenize 不必恢复原 token ID。具体例：having 被采样为 h 和 aving 两个 token，但同一文本在后续 prompt 里重 token 化可能产生 hav 和 ing——解码文本不变，token 边界不同，破坏两调用间连续性。",
+        "**Inference-time output transformation**：tool-call 和结构化输出 handler 可能在返回 harness 前解析、归一化、修复、重序列化采样响应，改变空白、分隔符、JSON 结构或无效语法，使后续 prompt 里的响应即使文本级也不同于采样 token ID 代表的响应。",
+        "**缓解策略。**最直接：独立训练每个模型调用（保证 token 级正确，但长 prompt 前缀反复计算低效）。AReaL 和 verl Uni-Agent 在 LLM proxy 维护 request buffer 存每调用历史文本和 token；新请求文本精确匹配缓冲历史时，把对应前响应文本的 token 段替换为缓冲的响应 token，保证 token-prefix 条件恒成立。slime 和 Polar 不做替换。",
+        "**替换有更深问题**：当缓冲 token ID 与实际下一请求不同，它改变下一响应被评估的 prompt——产生 off-policy 差异（stitched prompt ≠ 实际消费的 prompt）。第二种方法是 prefix-shared/tree-structured 训练（精确公共前缀表示一次，branch-aware causal attention mask 保证 token 只 attend 祖先和同分支早 token），但需大量后端支持。",
+        "**第三种实用方法：best-effort sequence merging**。只有观察到 token ID 满足精确 token-prefix 时才合并两调用；条件成立只 append 未匹配后缀和下一 action；失败则关闭当前序列开新序列。这保留 rollout 消费的 prompt，配标准稠密 causal kernel 工作，重 token 化 drift 只降低合并率。Agent Lightning v1.0 采用它作独立调用重算与后端密集 tree 训练之间的中间地带。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "挑战：Advantage Calculation 与 Loss Normalization",
+      "paras": [
+        "**Advantage Calculation。**LLM 调用合并后，一个 rollout ρ 可产生不同数量的训练样本 Nρ，只在执行和样本构造后已知。Retokenization 是一个来源；harness 也可 spawn subagents 创建不共享单一线性历史的分支，或总结上下文替换前 token 前缀。这些操作可把一个 task-level rollout 拆成多个训练样本。这不是边角情况：我们的 coding-agent 训练中平均只有 36% 的 rollout 保持为单一训练样本，每个 rollout 平均产出 2.4 个训练样本。",
+        "实践中 reward 仍是 outcome-based，分配给产出它的 rollout 内每个样本。自然问题：算 advantage 时 group 统计应在 rollout 级还是 sample 级？现有框架选择不同——verl Uni-Agent 和 Polar 在 rollout 级算，slime 和 AReaL 在 sample 级。",
+        "具体例：Rollout 1 和 Rollout 2 从同一 prompt 的同一 GRPO group 生成，Rollout 1 得 reward 1、Rollout 2 得 0。传统 RL 每 rollout 映射恰好一个训练样本，baseline r̄=(1+0)/2=1/2 无争议。Harnessed 里 Rollout 1 有三个样本而 Rollout 2 一个：rollout 级仍是 1/2，sample 级变成 (1+1+1+0)/4=3/4。",
+        "我们相信 rollout 级 advantage 更 principled：retokenization 是偶然现象，advantage 不应因 retokenization 恰好把 rollout 拆更多样本而变；subagent spawn 和 context summarization 是 harness 内部操作，不应允许改变整组 baseline。",
+        "**Loss Normalization。**动态样本数也让 loss 归一化非平凡。考虑 R 个 rollouts 的训练 batch，rollout ρ 产 Nρ 样本。三种常见归一化：",
+        "**Token-mean**（DAPO）：对 batch 内每 token 求和 loss，除以总响应 token 数。**Seq-mean-token-mean**（GRPO）：先样本内平均再对 batch 内所有样本均匀平均。**Rollout-level token-mean**（slime）：先把 rollout 所有响应 token 汇在一起，再对 rollouts 均匀平均。",
+        "我们与 advantage 同样立场：样本数不应影响梯度归一化，因为它常由 retokenization 等偶然因素驱动。Seq-mean-token-mean 有问题——它随单 rollout 恰好产多少样本变，一般给多样本 rollout 不成比例更多权重。实践中 token-mean 对长序列敏感：batch 出现很多长负样本时后期训练可能不稳定。因此偏好 rollout 级 token-mean。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "挑战：Training Backend 调度",
+      "paras": [
+        "动态样本数也让与训练后端交互复杂化。rollout batch 的样本数和长度只在 harness 执行和样本构造后已知；训练 GPU 数和 data/tensor/pipeline-parallel 配置通常全程固定。后端必须在每次迭代把可变工作负载映射到固定 worker 集。",
+        "样本构造后后端可把结果序列展平成物理 tensor batch，但必须保留统计来源：每序列应保留 rollout id 和 prompt-group id。展平只改变物理表示，不得改变 rollout 成员关系，也不得让 rollout 因产出更多序列而获额外统计权重。",
+        "Rollout 边界也约束 batch 调度。Row-based tensor batch、data-parallel 分区、micro-batch 调度不能单从 prompt 或 rollout 数规划，因为 Nρ 执行后才知道。且一个 rollout 的序列应保持在同一 optimizer update——拆分会让一个 rollout 的不同部分在不同 policy 版本下评估，引入 within-rollout policy skew。后端必须在保留 rollout 级统计和更新边界的同时跨固定 worker 平衡 token 工作负载。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "系统设计：三组件架构",
+      "paras": [
+        "trainer 与 agent harness 分离时，没有单进程拥有完整 rollout 生命周期。trainer 拥有模型推理和优化，harness 拥有上下文构造、控制流、工具使用、环境交互。Agent 执行可远程运行、持久超越任何单 API 请求或 worker 进程、独立于训练进程失败。",
+        "Agent Lightning v1.0 围绕声明式 rollout 抽象和 reconciliation loop 构建控制平面。Trainer 经 API Gateway 声明 rollouts——它是生命周期状态和 append-only events 的 source of truth。Rollout Controller 持续用跑作 Kubernetes Jobs 或本地进程的 agent 执行 reconcile 该状态。这个分离让 Kubernetes 成为可互换执行后端而非 rollout 抽象的一部分。",
+        "同一控制平面提供跨服务边界的显式可靠性和可观测性语义。控制平面操作幂等、generation attempts 显式记录和解析、rollout id 把 model requests、rewards、custom events、execution logs 链成一个诊断记录。API Gateway 还在 collocated async RL 期间协调 inference admission，让 rollout 和 weight update 时间共享一个 GPU pool，不向外部 harness 暴露阶段切换。",
+        "三组件：**API Gateway**——存储 rollouts、models、events 的 API 服务，把 harness 的 LLM 调用转发到 trainer 注册的模型 endpoint。**Rollout Controller**——在 Kubernetes cluster（或本地进程池）上管理 agent 执行，轮询 API Gateway 的 rollouts 并启动对应 agent 任务。**Customized Trainer**——VERL 基础上，向 API Gateway 注册 rollouts、等 Rollout Controller 驱动完成、取回记录事件组装训练样本。",
+        "全系统约 3,500 行代码，每组件责任清晰。内嵌我们对挑战的设计选择：rollout 级 reward/advantage 计算和 rollout 级 loss 归一化。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig02.png",
+            "caption": "图 2：Rollout Controller——API Gateway 的 rollout 状态为 ground truth，K8s Reconciler 周期拉取活跃 rollouts、启动 agent Jobs、监控、经 Gateway API 回报状态；另有 Local Reconciler 面向本地进程池。"
+          }
+        ]
+      },
+      "table": {
+        "head": [
+          "Method",
+          "Endpoint",
+          "Comment"
+        ],
+        "rows": [
+          [
+            "POST",
+            "/api/rollouts",
+            "Create a batch of rollouts."
+          ],
+          [
+            "GET",
+            "/api/rollouts",
+            "List rollouts, optionally filtered by state."
+          ],
+          [
+            "GET",
+            "/api/rollouts/{rollout_id}",
+            "Get one rollout."
+          ],
+          [
+            "PATCH",
+            "/api/rollouts/{rollout_id}",
+            "Update rollout status."
+          ],
+          [
+            "POST",
+            "/api/rollouts/{rollout_id}/attempt/{attempt_id}/events",
+            "Append an event to a rollout attempt."
+          ],
+          [
+            "GET",
+            "/api/rollouts/{rollout_id}/events",
+            "Read rollout events."
+          ],
+          [
+            "POST",
+            "/api/models",
+            "Register model endpoints."
+          ],
+          [
+            "DELETE",
+            "/api/models",
+            "Remove all registered model endpoints."
+          ],
+          [
+            "POST",
+            "/proxy/rollout/{rollout_id}/attempt/{attempt_id}/mode/{mode}/openai/v1/chat/completions",
+            "Forward an OpenAI-compatible model call."
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Collocated Async RL 与网络问题",
+      "paras": [
+        "**Collocated Async RL。**Agentic RL 里同步设置慢：batch 里所有 rollout 必须完成训练步才能更新模型，所以训练步等最慢 rollout，大量 GPU 闲置。AReaL 提出的异步 RL 把 rollout 和 update 拆到两池机器解决 GPU 闲置，但要更多 GPU 总量，且要分别管理 rollout 队列和 update 队列，两队列实际推进速度不同更复杂。",
+        "我们提出 *collocated async*：rollout 和 weight update 共享同一 GPU pool。收集足够 rollout 数据后 update 步开始。API Gateway 同时停止接受新请求等当前完成；之后新请求被暂停直到系统重入 rollout 阶段。切换对 agent harness 不可见。",
+        "Collocated async 让同 GPUs 在 rollout 和训练间时间共享，比异步 RL 用更少 GPU，同时避免等最慢 rollout。实验里比同步 RL 约 2× 端到端加速且用更少 GPU。",
+        "**网络问题。**Harnessed agentic RL 里 agent 与训练引擎分离导致网络问题：两侧调用跨网络、不总可靠。两类受影响调用：Trainer/Rollout Controller 到 API Gateway 的调用；agent harness 经 proxy 到 LLM inference endpoint 的调用。我们用两措施：**幂等 API Gateway endpoints**（每个 rollout endpoint 幂等，重复调用效果同一次，调用方可自由重试）；**重复 LLM API 调用去重**（重试的 LLM 调用无法同样幂等，Customized Trainer 组装样本时去重共享同 prompt 的 model_request events——同 prompt 多次调用只留最后一次）。",
+        "**Kubernetes 集成。**现有框架常转向商业 sandbox 服务（verl Uni-Agent 用 Modal Sandbox/Volcano veFaas、slime 用 E2B）。Agent Lightning v1.0 经 Rollout Controller 直接在 Kubernetes cluster 跑 agent，每 agent 执行为标准 K8s Job，完全自托管/本地算力，避免商业 sandbox 的经常性成本，保持训练栈开源。",
+        "**监控。**训练中 agent 本身会遇问题（reward hacking、坏 agent 行为、网络连通）。Customized Trainer 含监控系统记录训练和验证 rollouts 加 Kubernetes pod 级日志，可用 AI agents 自动识别问题——我们确实用这方式发现几个 reward-hacking 例子。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "实验：Search Agent",
+      "paras": [
+        "我们评估三个设置：search、general instruction following、coding。Search 遵循 Search-R1 设置训练搜索 agent，interleave 推理与搜索引擎查询，用检索段落回答知识密集问题。Policy 用 Llama-3.2-3B-Instruct、GRPO 优化。HotpotQA 训练 split 训练。评估从 HotpotQA、2WikiMultiHopQA、MuSiQue、Bamboogle、TriviaQA、Natural Questions 各采 50 例。训练 batch 512、每 prompt 4 rollouts、每 10 步评估。EM 作 reward 指标。",
+        "训练动态：平均训练 reward 稳步升。验证集 reward 从 25.1% 到 41.7%，绝对 +16.6%。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "实验：General Instruction-Following Agent",
+      "paras": [
+        "遵循 LLM-in-Sandbox 设置训练通用指令跟随 agent。agent 用 computer sandbox 访问外部资源、管理文件、执行代码解决多样非编码任务。用原作者提供的 agent harness。Policy 用 Qwen3-4B-Instruct-2507、RLOO 优化。Instruction Pre-Training 数据集 80% 训练 20% 评估。训练 batch 8、每 prompt 8 rollouts、每 20 步评估。",
+        "batch 级训练 reward 噪声大，验证 reward 清晰上升：从 51.9% 到 70.2%，绝对 +18.3%。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "实验：Coding Agent——数据清洗与 Reward Hacking 防护",
+      "paras": [
+        "用 Qwen3.5-9B 基于 SWE-smith 数据集任务训练 coding agent，mini-SWE-agent 作 harness 交互仓库环境、执行命令、产生代码改动。",
+        "**数据集预处理与过滤。**SWE-smith 是把 bug 引入真实 Python 仓库构造的可执行软件工程任务大规模数据集：128 个仓库 59,136 任务，含问题陈述、代码 patch、验证测试。Docker 镜像只占 295 GB，远小于 R2E-Gym 的 4 TB 和 SWE-Gym 的 6 TB。",
+        "我们在发布数据中发现问题：59,136 记录里 18,033 有空问题陈述；1,265 记录对应问题分支在 Docker 镜像缺失；一些任务测试套件巨大（python-jsonschema 要执行 7,000+ 测试）。",
+        "我们移除空问题陈述、缺问题分支、或超 200 测试的任务。剩余任务难度分布高度偏斜、训练信号有限，加 model-based 难度过滤：Qwen3.5-9B 对每候选跑四次——四次全解的任务移除、有成功有失败的保留（约 5,000 例）；另外采 1,000 个四次全失败的任务防结果集过易。最终 split 约 6,000 训练 + 400 测试。",
+        "**防 Reward Hacking。**训练中观察到 agent 绕过预期解题过程直接拿参考源码：用 Git 历史定位 gold commit；用 wget/curl 从 GitHub 取上游源码；用 pip 下载包源码；用 urllib 等 Python 网络库下载源码。两措施：禁用 Git 命令并隐藏 .git 目录；强制 Kubernetes 网络策略阻断一般出站网络、只许白名单服务。要求 agent 只用给定问题陈述和本地信息解任务。",
+        "**训练动态。**因 rollout 样本数常由 retokenization 等偶然因素驱动，advantage 和 loss 归一化都应在 rollout 级。用 coding 训练验证三设置（同 GRPO 目标）：Sample-level Advantage（sample 级 advantage + token-mean loss）；Rollout-level Advantage（只换 advantage 到 rollout 级）；Rollout-level Advantage + Rollout-level Norm（另加 rollout 级 token-mean loss）。",
+        "最后变体最高验证 reward：step 128 达 38.2%，对比 baseline 35.0% 和只修 advantage 的 33.1%。其 policy entropy 增长更慢、更稳定。在 SWE-bench Verified 上该 checkpoint 从 41.8% 提到 56.4%（step 208）。因轨迹长度差异大，rollout 级 advantage 变体尽可能合并轨迹减 padding 浪费，产生动态样本数：平均仅 36% rollout 保持单完全合并行，每 rollout 平均 2.41 训练样本。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "结论",
+      "paras": [
+        "我们刻画 *harnessed agentic RL*——部署时 agent harness 而非训练引擎拥有环境交互循环的范式——并识别 retokenization、advantage calculation、loss normalization、training backend scheduling 带来的挑战。提出 Agent Lightning v1.0，约 3,500 行支持任意 agent harness 并内嵌 rollout 级设计选择的框架。",
+        "在 search、instruction-following、coding agents 上验证，发布完整数据流水线和 reward-hacking 防护，让 RL 单独把 Qwen3.5-9B 在 SWE-bench Verified 从 41.8% 提到 56.4%（+14.6 个百分点），只用约 6K 训练样本。发布完整代码库和脚本促进可复现 harnessed agentic RL 研究。"
+      ],
+      "fig_after": {}
+    }
+  ],
+  "conclusion": [
+    "微软这篇把「proxy-based agentic RL」系统化成 **harnessed agentic RL** 范式，并给出完整实现（Agent Lightning v1.0，约 3,500 行）。最有价值的是它**首次系统刻画四个只有训练与 harness 分离才浮现的工程坑**：",
+    "**① Retokenization 断链**——harness 传文本、RL 吃 token，同一段文本重 token 化后 token ID 可以不同（Qwen chat template 会删 thinking marker；having 被 tokenize 成 hav+ing vs h+aving）。这直接导致 sample merging 策略分叉：AReaL/verl 用 proxy 端 token 替换（恢复复用但引入 off-policy stitching），Agent Lightning 用 best-effort merging（只合并 token 级精确前缀）。**② Advantage 应在 rollout 级**——样本数动态（平均 36% rollout 保持单样本、每 rollout 2.4 样本），sample 级 baseline 会被偶然的 retokenization 扭曲。**③ Loss 归一化也应在 rollout 级**——seq-mean 给多样本 rollout 过多权重，token-mean 对长负样本敏感，rollout 级 token-mean 最优。**④ Backend 调度要保 rollout 边界**——同一 rollout 的序列不能跨 optimizer update 拆开（会引入 policy skew）。",
+    "工程上三个亮点：**collocated async RL**（rollout 和 update 共享 GPU pool、经 API Gateway 门控，比同步约 2× 加速且用更少 GPU）；**防 reward hacking 的实操**（禁 Git + K8s 网络策略封出站）；**自托管 K8s 而非商业 sandbox**。结果干净：SWE-smith 数据清洗（去空陈述/缺分支/超 200 测试 + 模型难度过滤到 6K）后，RL 单独把 Qwen3.5-9B 在 SWE-bench Verified 从 41.8% 提到 56.4%。",
+    "对做 agentic RL 训练的人来说，这篇是「怎么让真实部署的 harness 直接参与 RL 训练」的完整参考答案——尤其四个挑战和 rollout 级统计的设计论证，值得细读。"
+  ],
+  "reference_url": "https://arxiv.org/html/2608.17528v1"
+}

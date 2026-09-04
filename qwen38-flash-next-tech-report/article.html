@@ -1,0 +1,94 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">模型与效率</strong>：稀疏MoE 125B/激活6B + 51B n-gram表（host外放）。14基准8个超397B-A17B、其余差≤2.6分，用1/3激活参数、1/3 token、约1/9 FLOPs。上下文1M时QSA比密集注意力prefill快7.6×、decode快4.9×（内核级）。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">四大架构组件</strong>：① GDN+全局注意力混合（每4层1全注意力，线性压缩状态+直接token检索）；② QSA稀疏注意力（微块粒度 + 压缩轻量indexer，索引成本随长度下降）；③ Gated Residual（残差流4分支 + 逐元素gate）；④ N-gram embedding层（host预取、近零额外FLOPs/延迟）。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">优化与稳定性</strong>：Muon优化二维权重（8步Newton-Schulz）；新架构+优化器把最优lr和batch size拉高、取消batch warmup。4× 最优lr压力下旧结构频繁尖峰、新配方全程稳定。全规模训练零loss尖峰、无需qk-clip/SwiGLU-clip。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这份Qwen官方技术报告描述Qwen3.8-Flash-Next的架构与消融：一个稀疏MoE模型，125B参数、每token激活6B，另有510亿参数的n-gram embedding表放在加速器之外。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在十四个预训练基准上，模型在八个上领先397B-A17B前任、其余至多差2.6分，却只用1/3激活参数、1/3训练token、约1/9训练FLOPs。token mixing用Gated DeltaNet（GDN）与global attention的逐层混合，每四层一个全注意力层；继续预训练时换为Qwen稀疏注意力（QSA）。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">引言：用更少算力保住旗舰质量</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Qwen3.8-Flash-Next是一个稀疏MoE模型：125B总参数、每token激活6B，另有510亿参数的n-gram embedding表放在加速器之外。设计目标：在远低于上一代397B-A17B旗舰的算力预算下保住质量。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在十四个横跨知识、STEM、推理、编码、多语言的预训练基准上，base模型在八个上领先前任、其余六个最多差2.6分（Tab 11），而每token激活约1/3、训练约1/3 token、训练FLOPs约1/9。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个架构改动同时碰三件事：下游任务能力、训练和服务的花销、以及训练运行在规模化下是否最优且稳定。因此评估每个候选改动都沿三轴：loss+下游基准；训练/prefill/decode的成本；对最优超参和训练稳定的影响。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">四个架构组件各解决一个不同瓶颈。token mixing用GDN（线性成本把前缀压缩成固定大小状态）与global attention（每四层一个、保留任何有限状态记忆无法精确复现的直接token级检索）的逐层混合。继续预训练时全注意力层换成QSA：继承稀疏注意力路线的思路，但按微块粒度用压缩轻量indexer打分，让索引成本本身随序列长度下降。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">残差流加宽到四分支、并经过逐元素gate读取：称为Gated Residual（GR）：加宽给残差路径加容量，gate决定容量花在哪、同时提供训练稳定的rescaling。容量进一步由单个n-gram embedding层在骨干外增加（表从host内存预取），以可忽略的额外每token FLOPs和延迟扩参数量。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">评估、效率与优化的总览</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>评估（Evaluation）</strong>：loss与下游精度并非总同向。扩大n-gram词表单调降loss、但下游精度饱和（Tab 8/9，固定参数预算下loss最优偏离精度最优）。预测残差读写权重只带来边际loss降、却有明显基准增益（§2.2）。有些分歧后期才浮现：每块只留门控最高的两分支几乎不伤预训练loss却随进一步训练退化；去掉全注意力层位置编码在预训练期不可分、却影响后期生成质量（§2.1.1）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>效率（Efficiency）</strong>：训练里FlashQLA在GPU上相对Triton基线有2–3× 前向、约2× 反向加速（§2.1.1）。Muon有自己的工程成本（§3.1）。推理里prefill由整上下文注意力主导，QSA把key序列压缩r倍、把indexer成本从O(n²) 降到O(n²/r)；decode由内存流量主导，GDN层用固定大小循环状态、GR去掉branch-mixing算子、残差状态支持FP8。上下文1M时QSA内核级比密集注意力prefill快7.6×、decode快4.9×。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>优化（Optimization）</strong>：Muon作用于充当线性映射的二维权重；输入/n-gram embedding、输出头、MoE router和GR低秩投影留在AdamW（正交化对其不实际或无益）。融合参数在正交化前先拆分（正交化拼接矩阵会把不相关子块混合奇异方向）。新架构+优化器也移动最优超参，重新拟合Qwen3.5系列用的缩放律（§3.2）：预测更大的batch size和学习率，两者都单独验证确认：更大batch提升规模并行吞吐、更大lr提升收敛。早期ramp batch size不比直接到目标好、还多花18.8% 优化器步，所以不用它。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>训练稳定（Training Stability）</strong>：对复现规模化不稳定做压力测试：提高lr（Wortsman et al. 2023）并保持恒定lr。判据：新配方在同等压力下至少和它替代的世代一样稳。4× 最优lr时旧结构频繁尖峰、新配方全程稳定（§3.3）。隔离GR的gate证实它是相对Qwen3.5稳定裕度的关键贡献者。直接结果：全规模训练Qwen3.8-Flash-Next平滑进行、零loss尖峰或梯度范数异常波动，不靠qk-clip或SwiGLU-clip这类显式裁剪。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">架构：注意力混合（2.1）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>GDN混合架构（2.1.1）</strong>：完整自注意力给每个前序token直接基于内容的访问，但token混合成本随序列长度二次方增长、KV cache在自回归生成时线性增长。滑窗注意（SWA）用有界局部感受野替代全局访问、降计算和cache，但窗外信息只能经深度间接传播：造成高效局部处理与持久内容相关记忆之间的张力。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GDN把前缀压缩成固定大小循环状态、并依当前内容更新状态，而交错的全局注意力层保留任何有限状态循环记忆都难以精确复现的直接token级检索。相对全注意力Transformer基线，GDN混合在9个选定基准里改进8个；相对SWA混合在九个里强于七个：支持混合设计。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Gated Delta Recurrence：线性注意力可理解为存key-value关联的快速权重记忆。GDN依门控delta规则维护状态S_t：decay gate α_t（数据相关、控制遗忘）、write gate β_t（控制delta更新）。投影的query/key/value流经短因果卷积，query/key在门控delta循环前L2归一化，sigmoid输出门调制零心RMSNorm输出。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">相对全注意力基线，GDN混合改进了所选基准；混合设计让信息在高效局部处理与直接token检索间取得平衡（详见 §2.1.2继续预训练到QSA）。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">架构：QSA稀疏注意力（继续预训练）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">当模型扩展到更长上下文，全注意力的索引成本成为瓶颈。Qwen3.8-Flash-Next在继续预训练时把全注意力层替换为Qwen稀疏注意力（QSA）：按微块粒度、用压缩轻量indexer对上下文打分，使索引成本本身随序列长度下降。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">QSA压缩key序列：每个位置产生少量索引key，indexer先粗选微块、再对选中块做精确稀疏注意力。这把小段的cache容量换大幅更低的long-context计算和内存流量。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>QSA评估</strong>：对比Qwen3.8-Flash-Next带QSA vs其全注意力基线（Tab 2，跨知识/STEM/推理/多语言/编码）。QSA全面小幅甚至优于全注意力：MMLU-Pro 73.7 vs 72.9、SuperGPQA 52.1 vs 51.7、MATH 71.6 vs 69.8、GSM8K 92.2 vs 91.0、BBH 91.6 vs 90.4、EvalPlus 72.3 vs 70.8、MultiPL-E 79.8 vs 78.4。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>效率</strong>：QSA内索引成本由压缩key序列决定，而非完整长度。上下文1M时QSA内核级prefill比密集注意力快7.6×、decode快4.9×。MTP模块跨spec decode步复用QSA索引（见架构图注），进一步降低draft模型推理成本。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">架构：Gated Residual与N-gram嵌入</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Gated Residual（GR，2.2）</strong>：残差流加宽到四分支、并逐元素gate读取。加宽加容量，gate决定容量花在哪并供应训练稳定所需的rescaling。消融：相对参考no-GR模型，加GR在某些配置降loss（Tab 5/10的残差读写消融）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">限制每块只留门控最高的两残差分支在预训练loss上几乎免费、却随继续训练退化：说明GR的分支容量在后期训练有用。对固定参数预算，损失最优和精度最优不一致（Tab 8/9）；而预测残差读写权重（两分支同时、如Layer 0 MLP到layer 1）带来边际loss降但明显基准增益。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>N-gram嵌入（2.3）</strong>：在骨干外加一个hash-addressed可学习n-gram embedding层（表从host内存预取），扩参数量而每token FLOPs和延迟近乎为零。消融放置/数量：单层变体横跨浅层到深层（Layer 2是选定位置），扩大n-gram词表单调降loss、下游精度饱和。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这些embedding表共510亿参数、放在加速器之外：是模型容量很大的一块、却不进骨干，只按局部上下文做稀疏查找。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">优化与训练稳定性（3）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>优化器（3.1）</strong>：Muon应用到充当线性映射的二维权重；输入/n-gram embedding、输出头、MoE router、GR低秩投影留在AdamW。其每参数FLOPs依矩阵形状而非参数个数，所以数据并行梯度缓冲按估算正交化成本重分区；融合参数拆分后step碎成许多小核，step被捕获进CUDA graph。Newton-Schulz迭代设8步，偏好在压力下额外稳定。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>超参缩放（3.2）</strong>：新架构+优化器移动最优超参，重拟合缩放律。预测更大batch size和更大lr，都验证确认。批大小ramp不比直接到目标好（还 +18.8% 步数），故不用。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>稳定压力测试（3.3）</strong>：4× 最优lr的恒定lr压力下，旧结构频繁尖峰、新配方全程稳定。隔离GR gate证实它是相对Qwen3.5稳定裕度的关键贡献者。全规模训练零loss尖峰、无梯度范数异常波动、不依赖显式裁剪。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">模型对比与结语</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Tab 11把Qwen3.8-Flash-Next-Base与两个强base对比（含397B-A17B前任），跨广泛能力范围。核心叙事：更小激活规模+更少训练token/FLOPs下在多数基准持平或领先、其余差距不超过2.6点。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">结语要点：loss/基准/效率/稳定构成一个设计问题，联合求解得到同时更高效、更能、更稳的配方。文中反复强调三轴分歧处的落点：loss与下游不同向、容量与FLOPs权衡、稳定性与最优超参。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">（技术报告另有完整架构图、Formula消融表、多语言及后训练评测和参考文献，可在原文PDF查看。）</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+Qwen这份官方技术报告把Qwen3.8-Flash-Next的设计哲学讲透：<strong>在397B前任约1/9的训练FLOPs下保住旗舰质量</strong>：125B/激活6B的稀疏MoE + 51B外部n-gram表，十四个预训练基准八个领先、其余只差2.6点。四个组件各解一个瓶颈：GDN压缩循环状态（线性）、每四层一个全注意力层（直接检索）、QSA稀疏注意力（索引成本随长度下降，1M时长上下文prefill 7.6×/decode 4.9×）、GR四分支残差 + gate（容量+稳定）、N-gram层host预取（近零FLOPs扩容量）。<br  /><br  />方法论上最值得学的是它的三轴评估框架：每个改动都沿「loss+下游」「训练/prefill/decode成本」「最优超参+稳定性」三轴检验，并诚实标记三轴分歧处（n-gram词表loss单调降但精度饱和；分支裁剪预训练免费却后期退化）。优化侧Muon配大batch/lr、取消warmup、8步Newton-Schulz换稳定：4× lr压力下新配方全程无尖峰、全规模训练零loss spike、不靠qk-clip。对做LLM架构/训练/效率的人，这是「高效、更能、更稳三件事联合设计」的教科书案例。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://github.com/QwenLM/Qwen3.8-Flash-Next/blob/main/tech_report.pdf</span></p>
+</section>

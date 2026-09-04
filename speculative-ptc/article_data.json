@@ -1,0 +1,127 @@
+{
+ "title": "推测式程序化工具调用（sPTC）：把 REPL 里的工具调用提前跑起来",
+ "lead": [
+  "受 CPU 推测执行和 LLM 推测解码启发，Alex Zhang 提出一个简洁但好用的 harness 设计技巧：sPTC（speculative programmatic tool calling）。在模型还在流式生成时，就从部分生成的 REPL 调用里推测并预启动工具调用（尤其是 sub-LLM/sub-agent 这类高延迟工具），不用等整个生成完成。",
+  "主要收益两块：① 把「已生成的工具调用」和 token 流式生成重叠（省掉原本等整段生成的时间，对爱思考很久的模型尤其明显）；② 当 REPL 的 JIT 编译器，把代码里没写成异步的两个独立 sub-agent 调用并行跑。"
+ ],
+ "summary": [
+  {
+   "key": "核心思想",
+   "body": "sPTC 在模型流式生成时就从部分 REPL 调用推测、预启动工具调用（主要对 sub-LLM/sub-agent 这类高延迟工具），等完整 REPL 真调用到时立即用缓存输出。类比 CPU 推测执行 + LLM 推测解码。"
+  },
+  {
+   "key": "两块收益",
+   "body": "① 把已生成的工具调用与 token 流重叠（省等模型整段生成）；② 当 REPL 的 JIT 编译器——代码里没写成 async 的独立 sub-agent 调用也能并行跑。"
+  },
+  {
+   "key": "实现与结果",
+   "body": "用 shadow REPL（deepcopy 分叉）安全执行部分 REPL、spec.tool 装饰器钩子定义哪些可推测；工具调用按输入（字面量/安全依赖）索引。OOLONG/RLM 实测加速约 1-1.2×，依赖工具延迟/负载。"
+  }
+ ],
+ "sections": [
+  {
+   "type": "h2",
+   "title": "动机：代码是唯一工具 + 推测执行",
+   "paras": [
+    "从作者此前工作（harness、Recursive Language Models）延续的信念：代码在 REPL 里是系统唯一的「工具」，所有其他工具都应是那个代码工具里的函数。当代码成为系统的主要动作空间，就需要考虑把这些专门的工具调用和「正在生成、被执行的代码」重叠起来。",
+    "受 CPU 推测执行和 LLM 推测解码启发，作者提出 harness 设计里相对简单且好用的技巧：**sPTC**——推测并预启动从部分生成的 REPL 调用中来的工具调用，而不是等 harness 生成完整个代码。这在工具是 sub-LLM/sub-agent 调用（如 RLM 里）时最有用；完整 REPL 若真会调用这些工具，它们立即带着推测调用的缓存输出返回。",
+    "关键观察：LLM 工具（sub-agents、搜索 API）常高延迟、是依赖代码执行作为动作的 harness 的瓶颈；而主上下文实际生成也常是显著延迟瓶颈、阻塞中间调用发生。",
+    "针对 RLM 讨论推理时间节省，但普遍适用于生成代码的 harness（CodeAct-like/code mode）。两块明显省时：① 流式生成中重叠已生成的工具调用（多数 harness 设计等模型生成完才执行工具，这可能是 JSON 式 tool-calling 的遗留，因为那原本不是瓶颈；主上下文每轮生成慢，尤其爱思考的模型，是可砍的大段时间）；② 当 REPL 的 JIT 编译器——很多 REPL 程序含非真阻塞的阻塞工具调用（如两个独立 sub-agent 调用代码没写成异步，仍可并行），sPTC 当非常粗糙的 JIT 编译器避免这类情况，还可能跨语言/REPL 设计做得更好。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig01.png",
+      "caption": "图 1：sPTC 示例——推测式程序化工具调用把工具调用计算与 harness 生成的代码重叠。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "实测数字",
+   "paras": [
+    "跑在 OOLONG（trec-coarse）和 OOOLONG-Pairs 上，用 8xH100 80G node 跑 vLLM server，测了 Qwen3-30B-A3B，temperature=0.7 和 0.0 各一次控方差（RLM 速度高度依赖轨迹）。每实验跑 5 次，同时在 4 并发和 8 并发设置下。",
+    "RLM 的加速约 1-1.2×。速度提升很难精确估计（高度依赖工具延迟、生成 token 数、serving 引擎负载、harness 的实际选择）。本地跑一个或几个 chat 实例、引擎高度受主上下文解码内存约束时，推测可提升算力密度（arithmetic intensity）；高吞吐 serving 系统（跑 frontier lab 或 model router API）时，批量请求被抽象到各自可能不同的 serving 引擎，收益纯粹来自与主上下文重叠、或与慢 REPL 调用重叠执行时间。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "设计：spec.tool 契约 + shadow REPL",
+   "paras": [
+    "高层设计：REPL 里导入的工具调用带一个钩子，可被提前调用、需要时替换为缓存输出。想要的库/前端契约能定义：① 哪些工具该推测、哪些不该（如 sub-LLM 调用该推测、但 sub-RLM 调用太贵）；② 对输入依赖内存中先前算过的变量的工具调用的推测机制（而非仅字面量）。",
+    "想要的契约类型是围绕想要推测的函数的钩子（如 RLM 里的 sub-call llm_query()），使得解析时能异步跑、存进工具输出全局 store、当作 promise 在 REPL 真正调用时从 store 取。还要区分相同工具调用的多次调用（当非确定、如 sub-call 时）。",
+    "核心契约代码："
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "核心代码：工具契约与 shadow 执行",
+   "paras": [
+    "spec.tool 装饰器契约定义可推测工具 + 对应的 shadow/hooked 版本（spec 版 launch 并注册 promise；真实 REPL 版命中 promise 则返回它、否则真跑）：",
+    "__CODE__python::\n@spec.tool(speculatable=True, pure=True)\ndef tool(...) -> OutputType:\n    ...\n\n# Speculated version\ndef tool_spec(...):\n    promise = launch(tool(...))\n    register_speculation(promise)\n\n# Hooked version run in real REPL\ndef tool_real(...):\n    if exists(promise, ID(...)):\n        return promise\n    else:\n        return tool(...)",
+    "shadowed 执行逻辑：把工具替换成 shadow 版本、LLM 流式期间持续拼代码、解析并 peek（只排队不执行）、再跑 shadow REPL 推测，最后 exec 真实代码路由到 promised 工具：",
+    "__CODE__python::\nreal_ns = {**locals, real_tools}\nshadow_ns = replace_tools(real_ns)\n\n# speculate while LLM is streaming\nwhile not LLM.done:\n    code += LLM.next_tokens()\n    parse_and_peek(code, shadow_ns)  # queue without code execution\n    parse_and_speculate(code, shadow_ns)  # re-run shadow REPL\n\n# real tools now route to promised tools\nexec(code, real_ns)",
+    "**Shadowed 执行用于推测**：容易的 case 是能直接解析工具调用并从 token 推断输入（输入是字面量）。棘手的 case 是工具调用嵌在条件/循环里、或输入依赖 REPL 调用里先前算好的内存变量——前者可能事先不知道条件是否满足或循环多长，后者不确定算变量输入是否 pure（是否改外部状态，不能预先算）。",
+    "有很多潜在解法可成为一整条工作线，但为简洁，作者维护主代码 REPL 的 deepcopy 分叉（称为 shadow REPL），边生成边执行部分 REPL。为防止不想要的副作用，大多数外部库和函数（如 open）被标为「unsafe」，用这些函数做输入依赖的可推测工具不会被推测。",
+    "**关键**：故意不用 partial「speculator」执行器当真实 REPL 执行器，因为整个 REPL 可能产出错误代码或不完整工具调用——这些情况不希望 speculator 真正改 REPL 状态，把整个 REPL cell 当计算单元。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "什么能被推测、提前运行",
+   "paras": [
+    "考虑什么能推测、多激进、以及跑部分代码的整体安全性。关心两点：① 是否足够信息提前跑工具调用；② 能否判断工具调用是否会真执行（尤其条件周围）。",
+    "sPTC 里可按**输入**（非确定时加 occurrence）唯一定位工具调用。流式期间若每个工具调用的输入无需代码执行即已知（全是字面量如字符串），可立即异步调用；更常见的 case 是输入依赖其他变量，有些可安全算、有些不能。对相同工具调用（如对多个 sub-agent 算多数投票），不想单个推测调用路由到每个副本，需追踪相同调用的唯一实例（除非知道该调用确定）。",
+    "**Case 1 字面量**：字符串/整数等字面量可立即解析转成工具调用，无需逐行 shadow 执行。",
+    "**Case 2 输入依赖**：只要所有输入都安全（纯函数、无副作用）就能推测。依赖其他被推测工具的会先等依赖算完、再在 LLM 仍在流式时执行。",
+    "**Case 3 可 peek 与不可 peek 依赖**：任何一步流式时我们有 shadow REPL 的工作命名空间。完整工具被解析时，即使依赖是内存变量（非字面量）也可推测输入，只要变量在 shadow REPL 里可安全计算。",
+    "**Case 4 被阻塞的推测调用**：推测时有一个允许用关键字和函数调用白名单来算输入依赖。也可指定不想当纯函数的新工具。任何依赖被阻塞的可推测工具不会被推测。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "核心代码：四个 case 示例",
+   "paras": [
+    "Case 1 字面量：",
+    "__CODE__python::\ntitle = llm_query(\"Give a title for: The Odyssey\")  # parses\nblurb = llm_query(\"One-line blurb for: The Odyssey\")  # parses\nprint(title, blurb)",
+    "Case 2 输入依赖（依赖也被推测则等）：",
+    "__CODE__python::\na = llm_query(\"Triage: \" + doc)  # parses then executes\nc = llm_query(\"Summarize: \" + str(a))  # parses, waits on a, then executes\nprint(c)\n\nif len(doc) > 10_000:  # will evaluate and speculate if safe\n    extra = llm_query(\"Also outline it: \" + doc)",
+    "Case 3 可 peek 与不可 peek（list capture 时 chunk 变量）：",
+    "__CODE__python::\ndef gist(t):\n    return llm_query(\"One-line gist: \" + t)  # non-peekable\n\nparts = [gist(c) for c in chunks]\n\nside = llm_query(\"Give me a random title for:\", chunks[0])  # peekable\nprint(side, parts)",
+    "Case 4 被阻塞依赖（open 读取文件 → 不推测）：",
+    "__CODE__python::\na = llm_query(\"Triage: \" + doc)  # speculated\nnotes = open(\"/tmp/scratch.txt\").read()  # blocked\nb = llm_query(\"Annotate with notes: \" + notes)  # blocked\nc = llm_query(\"Summarize: \" + a)  # speculated after a"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "推测开销",
+   "paras": [
+    "推测 PTC 的额外开销依赖具体实现和推理引擎设置。此实现运行时开销近乎可忽略——speculator 便宜地解析并检查它认为能否对部分生成的 REPL 推测。内存上对 harness 代码 REPL 做 deepcopy，相对实际 REPL 变量分配的内存通常便宜（因为大可变对象少）。",
+    "最坏情况是工具的 serving 引擎被很多并发且有潜在多余的推测请求堵住——可用推测多激进和这些工具怎么排队控制。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "相关想法与结束语",
+   "paras": [
+    "LLM 解码（streamed output）层的推测算法在旧 tool-calling 设计里探索较少——很可能是标准 tool-calling 里这些技巧没那么有用、或开销不值得边际延迟提升。",
+    "**Conveyor**（Xu 2024）让用户定义部分执行机会（如一行代码）在解码时解析；**Speculative Interaction Agents**（Hooper 2026）把 Conveyor 系统形式化为推测式工具调用，主要是通过把现代模型的长时间思考链与调用的工具调用重叠来降 TTFT；**AsyncFC**（Feng 2026）主张工具调用常以阻塞方式实现、定义函数调用的 future 式 async wrapper 契约——但有风险不与原始 harness 轨迹 1:1。",
+    "sPTC 对更复杂程序里工具加推测显著更有用，因为程序本身运行时未知：标准 tool-calling 时，等 LLM 生成足够 token 完整指明工具调用，可能也没多少剩余 token 可生成了；而 PTC 因代码执行使实际工具调用模式复杂得多、重叠空间更大。",
+    "作者想澄清：除了与 root LLM 流式 token 生成重叠，长期真正价值会来自更聪明的 JIT 编译技巧，把 PTC 设置里的工具调用与 REPL 实际执行重叠——随着 harness 生成更复杂程序会变贵。理想上还想要语言/harness 无关（目前主要 {Python, bash, Bun} × {Coding harness, RLM, game agent}）。当前实现已很有用，尤其对本地跑模型和 agent harness。已开源：github.com/alexzhang13/spec-ptc。"
+   ],
+   "fig_after": {}
+  }
+ ],
+ "conclusion": [
+  "Alex Zhang 这篇用一句话讲透：**当代码（REPL）成为 agent 唯一动作空间时，别等代码生成完再跑工具——边生成边把能确定的工具调用提前跑起来**。sPTC 由此而来：受 CPU 推测执行和推测解码启发，把 sub-LLM/sub-agent 这类高延迟工具在 token 流式时预启动，REPL 真调用到时直接用缓存。",
+  "两块收益：流式重叠（省等模型整段生成的时间）+ JIT 式并行化（代码没写 async 的独立工具调用也能并行）。实现靠 spec.tool 装饰器契约 + shadow REPL（deepcopy 分叉安全跑部分代码），只推测输入可确定（字面量或安全依赖）且真会执行的调用。OOLONG 实测 RLM 约 1-1.2×，但作者认为长期价值在更聪明的 JIT 重叠。对做 code harness / RLM / agent 的人值得一看。"
+ ],
+ "reference_url": "https://alexzhang13.github.io/blog/2026/spec-ptc/"
+}

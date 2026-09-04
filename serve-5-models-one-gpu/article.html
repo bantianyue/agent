@@ -1,0 +1,240 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">问题</strong>：真实AI流水线跑多个小模型，但vLLM/TEI/自定义服务各自为政，给每模型一块独立GPU浪费严重。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">方案</strong>：开源SIE把整块GPU当成共享池：模型按需加载/卸载、单一共享队列、按计算成本批处理、随负载扩缩容。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">机制</strong>：SIE用extract/score/generate三个原语统一100+ 模型；洪水保险理赔5阶段跑在单个共享集群上。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">真实AI流水线很少只跑单一模型。<strong>一个解析文档、下一个提取字段、第三个重排搜索、视觉模型读图、最终模型负责生成</strong>。这篇X长文讲的是：如何在一块GPU上用一套服务层，同时把SLM、OCR、NER、重排序器、目标检测器一起供起来。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本文为akshay_pachaar的长文全中文编译，讲透「为什么小模型流水线会碎片化」「标准服务工具的坑」，再给开源<strong>Superlinked Inference Engine（SIE）</strong> 的解法，图文全保留。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么小模型流水线才是趋势</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">生产级AI系统正从单一大型模型处理一切，转向多个小型模型各司其职。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个解析文档，下一个提取字段，第三个重排搜索结果，视觉模型读取图像，最终模型负责生成。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在模型层面，这通常能大幅降低成本。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">但模型只是推理成本的一部分。你仍需GPU来运行它，内存来保持加载，以及服务层来批处理和调度经过它的请求。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">若不想自行运维该基础设施，可将其托管给管理型提供商。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">当希望快速启动时，这很有效，但成本会随提供商使用量增长而增加，且失去对可运行模型及数据流向的控制。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于需要对模型、数据和基础设施拥有更高控制权的团队，自托管是自然之选。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">尽管单个小型模型在自托管中易于容纳，但真实的业务问题很少止步于一个模型。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">专用模型旨在将某一狭窄任务做好。您需要多个模型，各自处理工作的一部分，并整合到一条业务流水线中。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">此时，基础设施必须保持所有这些模型可用并为其提供服务。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">减速的钱回来了：<strong>你靠换小模型省下的成本，可能被它的服务方式加倍吐回去。</strong></p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">多模型流水线中的服务工具</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">大多数生产级Agent（智能体）系统并非运行在单一模型上。它们使用多个较小的专用模型，每个模型处理不同类型的计算。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">由于这些模型的工作方式不同，服务层通常也会随工作负载而变化。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两个常见例子是<strong>vLLM</strong>和<strong>TEI</strong>：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">LLM（大语言模型）逐个生成token，每个新token都需要访问之前token的信息。这些历史信息存储在称为KV缓存的结构中。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">vLLM围绕高效管理该内存而构建，采用名为PagedAttention的技术，使GPU能够处理大量生成请求，而不会浪费大块内存。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">嵌入和重排序模型没有这个问题。它们读取一次输入，返回一个向量或相关性分数；没有逐token生成的过程。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这正是Hugging Face的Text Embeddings Inference（TEI）的用武之地。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">它专为嵌入和重排序工作负载而构建，这些请求可以通过简单的批处理来处理，而非生成过程中使用的KV-cache机制。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">文档解析、OCR以及许多视觉或提取模型不符合上述任一服务模式。因此，Docling、Grounding DINO和GLiNER等模型往往最终部署在各自的自定义服务器上。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这就是多模型流水线最终碎片化的原因。一个模型跑在vLLM上，另一个在TEI上，其余由自定义API处理。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">洪水理赔：一个五模型流水线的样例</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">以洪水保险理赔的审核流程为例：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">阅读文档 → 提取理赔细节 → 匹配正确的保单条款 → 检查洪水损坏照片 → 撰写摘要</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在碎片化方法下，这五个工作负载通常会变成多个独立管理的服务组件。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：一个理赔走完五个阶段</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">标准服务工具的问题</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一旦智能体原生流水线开始使用多种模型类型，多框架服务问题也会演变成硬件问题。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">尽管流水线依赖vLLM、TEI和自定义服务器的组合，每种工具在其领域内都表现出色。挑战在于决定这些模型实际应在何处以及如何运行。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">遗憾的是，使用当今标准的AI服务工具，这两种配置都无法顺利工作。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">路线一：给每个模型一块自己的GPU</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最简单的配置是为每个服务栈分配自己的GPU。无需管理资源共享，每个服务都能获得所需的硬件资源。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">vLLM在一张GPU上处理主LLM，TEI获得另一张用于嵌入和重排序，而你的文档处理、NER和视觉模型各自拥有专用的GPU。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">虽然这种设置在操作上可行，但问题在于GPU成本和利用率。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">问题在于，单个索赔按顺序通过这些阶段，因此每个专用GPU大部分时间都在等待轮到它。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在多个索赔中，这些工作负载可以重叠，但这仍然不意味着每个专用GPU始终得到充分利用。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因此，如果每个阶段都有专用GPU，运行文档解析器的GPU在重排序器运行时处于空闲状态。然后重排序器在LLM运行时等待。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">空闲的GPU也不会被释放或分配给其他任务。服务进程仍在其上运行，因此硬件在整个时间内始终分配给该阶段，无论它是否在执行操作。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这是一个实际的预算问题，因为GPU基础设施是按持有时间付费的，而不是按GPU实际计算的秒数付费。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">此外，许多这类专用模型体积足够小，无需占用整块独立GPU。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个抽取模型、重排序器或小型视觉模型仅会使用L4 GPU 24 GB内存的一小部分，同时大部分时间都在等待任务。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">于是两难出现：<strong>为了省上模型的钱才换小模型，结果每加一个新的小模型任务，硬件数量反而跟着加</strong>。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">路线二：多个模型塞进一块GPU</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">从成本角度看，另一种选择看起来更优，即将多个模型部署在同一块GPU上。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">当模型能容纳在GPU内存中时，没有根本理由要求每个模型独占一块GPU。例如，单个L4拥有24 GB内存，足以同时容纳多个小型模型。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">难点不在于将模型适配到显卡上，而在于让多个独立的服务进程高效地共享这块显卡。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">服务进程通常围绕其启动时所用的模型构建，它管理该模型的内存、请求和批处理，却不知道同一GPU上其他进程的动态。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">以vLLM为例，其--gpu-memory-utilization设置默认值为0.92，这定义了该实例允许使用的GPU内存比例。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在其旁再运行一个服务进程，该进程不会自动知晓vLLM已用内存或哪些内存可安全供其使用。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">现在把vLLM、TEI和自定义解析/提取/视觉服务器全打包到同一块GPU：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig09.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">· 若给某进程分配过少的空间或显存，长文档或突发批次可能使该模型超出其限制。此时，它不仅自身失败，还可能拖垮共享该GPU的所有其他模型。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig10.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">· 若给某进程分配过多的空间或显存，这些内存对其他模型而言便不可用，即便该进程自身空闲时也是如此。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">当流量在阶段间移动时，情况会变得更糟。文档解析器可能会接收到突发的工作负载，而重排序器几乎无事可做。片刻之后，重排序器可能又成为流水线中的繁忙部分。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">但内存分配并不会随工作负载移动。而内存只是问题的一部分。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每个服务进程还有自己的队列和批处理逻辑。它们中没有一个能完整看到其他模型等待中的工作。因此，没有一个单一的调度器来决定GPU应如何整体使用。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个进程的队列可能为空，而另一个进程正在积压工作，但空闲进程不能简单地将未使用的容量转交给另一个进程。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这就是将标准服务工具组合在一块GPU上的真正局限。硬件可以共享，但服务进程仍独立运行。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig11.jpg"></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">选择：专用GPU还是共享GPU</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">目前，我们有两种方式运行多模型流水线：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">专用GPU更简单，但硬件与流水线一对一扩展。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">共享GPU能更高效地利用硬件，但需要某种机制来协调卡上的模型。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于这个流水线，我们选择第二种方案，因为它更符合我们的工作负载。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">由于所用模型较小，且它们的工作负载不会同时达到峰值，因此有明显的机会让它们共享同一GPU，而不是为每个模型单独分配一张卡。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为此，我们的服务层需要将GPU作为共享资源进行管理。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig12.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图：走共享GPU路线 / 你云里的SIE</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">小模型服务栈真正需要什么</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">首先，不要急于寻找另一个框架，而是理解理想服务器需要完成的任务。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>① 广度</strong>：服务器得在一个API后面同时跑嵌入、重排序、OCR、视觉、提取与生成。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig13.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>② GPU利用率</strong>：要把不同长度的请求打包进一次处理而不浪费算力，引擎必须为每种架构控制批处理与注意力路径。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>③ 模型内存跟随流量</strong>：流量挪动时能加载/驱逐模型，让忙碌的常驻、空闲的让位。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig14.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>④ 生产级行为</strong>：路由、自动扩缩容、监控、GPU池：不能只像个裸引擎；加副本应是配置变更而非重新部署。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如今这些都得开发者从零搭，数月定制工程：因为不同模型家族底层差异巨大：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Qwen模型处理位置和注意力的方式不同。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">ColBERT模型为每个token返回一个向量。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">重排序器返回单一分数，不返回任何向量。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">构建一个能够容纳所有这些形状并将其任意打包成完整批次的引擎，是至关重要的工作。这也是此前没有现成开源包的原因。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">开源解法：Superlinked Inference Engine</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SIE是一个开源推理引擎，作为生产集群运行于共享基础设施上，支持多模型流水线。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">它通过统一API支持100多个模型，使不同类型的模型能够通过同一服务层运行，而无需各自独立部署。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">统一API固然有用，但更大的优势在于协调能力。SIE能够围绕同一GPU池管理这些模型。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">它在您自己的云环境中作为一个集群运行，专为上述多模型流水线而设计，即多种不同类型的小模型在共享GPU上连续运行。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig15.jpg"></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">三个原语吃掉五类工作</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">面向洪水理赔这类多模型流水线，SIE把「负载类型」折叠成3个功能原语：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>extract（提取）</strong>：一个接口下干三种活：把表单/保单转成干净Markdown（docling）、抽取姓名/单号/日期等字段（GLiNER）、在图上做视觉检测。底层模型各异，服务接口无需且不和。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">score使用bge-reranker根据查询对保单分块进行重排序，并返回排序后的列表。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">generate汇总此前收集的所有信息：解析文档、提取字段、保单语言和照片分析：并使用Qwen3.5生成最终审查结果。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">单个SIE集群即可运行全部五个阶段，无需为任一阶段单独搭建服务栈。这实现了五个阶段、三个原语和一个共享服务层。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">API只是可见部分：真正的工作在底下，SIE要在共享GPU上实际协调这些模型。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">底层发生的五件事</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>1. 模型仅在需要时加载</strong>：请求实际需要才加载模型；GPU内存受限时，驱逐最近最少使用的模型。GPU不再是某模型的永久私有财产，而是一个可共享的池。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig16.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>2. 单一队列统筹所有工作</strong>：独立进程时各模型只看自己的请求；SIE把工作放进共享队列：网关发布请求、worker就绪即拉。服务层得以跨模型看到工作负载。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig17.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>3. 批处理遵循计算成本</strong>：按请求的预估计算成本分组，而非固定数量一堆：免得短输入被pad到长输入长度、GPU大量时间花在填充上。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig18.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>4. 共享服务器随工作负载扩展</strong>：网关 + worker层包在模型运行时外，迁移到生产也不断档；按需加/减worker，还带K8s基建、监控、AWS/GCP部署。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig19.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>5. 模型自带服务配置</strong>：支持新模型不止下载权重，不同架构有不同内存/批处理/精度要求；SIE的模型目录（当前112个）把服务配置打包，按名引用即用。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig20.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把上面几件事叠在一起，得到的一台引擎大致就是这样：一个能同时容纳多种任务形状、共享同一块GPU、并把批量、路由与扩缩替你管好的服务层。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig21.jpg"></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">用真实文档验证：一单洪水理赔走一遍</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把上述架构放到真实场景。材料刻意弄得杂乱、来自公共领域，用于给流水线施压：损失证明表单、维修估价、保单文档、+ 实际洪灾照片一批。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在碎片化方法下，这同样是前面提到的五工具扩展。SIE改为通过一个共享集群运行这五个作业。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">五个模型没有一个做同样的事：碎片化下要五套服务设置，SIE用一个共享集群跑这五个作业。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig22.jpg"></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">一个集群执行五个不同的作业</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">落到真实启动，就是这个集群跑五个不同作业的样子：每阶段命中一个模型，都在同一端点、同一调度之内。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig23.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">先安装并启动服务器（serve命令在8080端口拉起服务）：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig24.jpg"></figure>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code>pip<span style="color: #F8F8F2">&nbsp;</span>install<span style="color: #F8F8F2">&nbsp;</span><span style="color: #E6DB74">&quot;sie-server[local]&quot;</span><br/>sie-server<span style="color: #F8F8F2">&nbsp;</span>serve</code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">就绪后实例化客户端并指向运行中的服务器：<strong>管道里每个阶段都走这同一个对象、同一个端点，无论它背后命中哪个模型</strong>：</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #FF4689">from</span><span style="color: #F8F8F2">&nbsp;sie_sdk&nbsp;</span><span style="color: #FF4689">import</span>&nbsp;<span style="color: #F8F8F2">SIEClient</span><br/><span style="color: #F8F8F2">client</span>&nbsp;<span style="color: #FF4689">=</span>&nbsp;<span style="color: #F8F8F2">SIEClient(</span><span style="color: #E6DB74">&quot;http://localhost:8080&quot;</span><span style="color: #F8F8F2">)</span></code></pre>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">五阶段逐个执行</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每个阶段对应任务、模型与SIE端点，底层全部走extract/score/generate三个原语。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>① 解析保单文档（extract / docling）</strong>：把损失证明表、维修成本、保单转成干净的Markdown，保留表格与布局。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>② 提取索赔身份（extract / GLiNER）</strong>：把Markdown里抽出姓名、损失日期、财产地址等字段：GLiNER按你提供的标签做命名实体识别，无需预设模式。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>③ 找保单条款（score / bge-reranker）</strong>：保单很长，先按关键词重叠粗筛（“proof of loss”“signed”“60 days”），把最强候选送交叉编码器重排；score() 返回的是排序后的结果，顺序即答案。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>④ 读损坏照片（extract / Grounding DINO零样本）</strong>：零样本目标检测在图像里找“standing water”“flooded room”等类别：模型从没为此练兵，只是拿到文本描述就地匹配。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>⑤ 写审核结论（generate / Qwen3.5）</strong>：把解析文档、结构化索赔、排序结果、照片分析攒成context，一次生成最终审核：输出锁JSON模式，有固定结构。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">自行运行：一份GPU或两份都行</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最终，我们拥有一个包含五个模型、三个共享原语（extract、score和generate）的完整流水线，通过一个客户端针对一个SIE集群运行。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>关键在于这五个阶段不需要五个独立的服务堆栈。在该服务层之下如何放置模型取决于可用的GPU内存和需要运行的模型。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于此示例，您还可以运行两个SIE服务器：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">· 一个用于Docling、GLiNER2和重排序</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">· 第二个用于Grounding DINO和Qwen的生成</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">或者，如果您想复用单个GPU，可以加载一个模型包，运行其调用，释放它，然后加载第二个包。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因此，部署可以使用多个服务器或复用同一GPU。服务层保持不变。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">端到端运行这五次调用，检查每个模型的返回结果，并观察整个pipeline如何通过SIE运行。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">实际应用的价值</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">针对狭窄任务使用小型专用模型是正确的做法，这一点并无太大争议。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这些模型在其训练任务上足够准确，并且能将数据保留在自有环境中。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">但转向小型模型本身并不会降低推理成本。它只是将成本从按token计费转移到租用的GPU上，若每个模型独占一块GPU，大部分硬件将闲置，而你仍需为此付费。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">只有在模型共享GPU时才能实现节省，这要求有一个能运行所有模型的统一引擎。一旦用不同工具分别服务每个模型，每个模型又会独占一块GPU。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SIE（开源）已实现此功能，让你能在共享集群上运行Agent（智能体）所需的不同模型，并提供生产级路由和自动扩缩容，无需自行构建。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig25.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">它还能接入现有技术栈，从向量数据库（Chroma、Qdrant）到Agent（智能体）框架（LangChain、CrewAI）均可兼容。甚至提供即插即用的OpenAI兼容接口，现有embedding或聊天功能只需指向新URL即可。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">👉 互动环节：你的技术栈中单个请求会调用多少个独立模型？其中有多少目前正占用专用GPU？</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">生产级多模型推理让单一GPU干五份活，成本与自由兼得。开源项目见Superlinked GitHub（原始图、命令与完整仓库见参考链接）。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+一块L4能吃下好几个小模型的权重，真正的浪费不是容量，是<strong>怎么协调它们</strong>：给每模型一块独占GPU是按持有时间付钱、把空闲算力扔在那；而塞一起又面临内存不随流量分配、各自独立的队列与批处理无人统筹。<br  /><br  />Superlinked IE把GPU当成一块活的共享池：按需加载与驱逐、单一共享队列、按计算成本分批、模型目录自带配置，再塞进生产级的扩缩容与监控里。结论一句话：<strong>省到小模型只是开始，会共享GPU才能把省下来的钱真正落袋</strong>。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://x.com/akshay_pachaar/status/2084992645966016757</span></p>
+</section>

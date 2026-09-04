@@ -1,0 +1,236 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">问题</strong>：naive注意力中QK^T中间结果O(n²) 巨大（序列长n时n×n矩阵，内存随序列长度平方增长）。直觉想用tiling分块并行，但softmax难以并行化是障碍。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">三阶段优化</strong>：naive softmax（FP16下e^x在x>11溢出，e^12=162754>65504）→ safe softmax 3-pass（减最大值m，读Q/K三次，HBM访问贵）→ online softmax 2-pass（把max和sum合成一趟遍历）。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心洞察</strong>：softmax(QK^T) 本身无法合成1-pass，但我们真正要的是softmax(QK^T)V：输出只依赖d_i'、d_{i-1}'、m_i、m_{i-1}、x_i，所以能在单循环内融合整个Self-Attention；再用tiling分块装进SRAM，省掉S和P中间结果的HBM读写。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Flash Attention</strong>是一种IO感知（IO-aware）的精确注意力算法，用tiling减少GPU高带宽内存（HBM）与GPU片上SRAM之间的内存读写次数。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">它已被广泛用于LLM推理和训练，是SGLang、vLLM等现代服务引擎的默认注意力后端。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这是一篇可视化解释Flash Attention以及IO感知tiling如何降低现代注意力kernel内存流量的文章。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Naive Attention计算</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在弄清Flash Attention如何工作前，先看naive注意力计算。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">attention(Q,K,V) = softmax(QKᵀ/√d)·V，其中Q、K、V分别是query、key、value矩阵，d是每个注意力头的维度（用于缩放）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>关键挑战</strong>：QKᵀ 的中间结果可以极其巨大。序列长n时，QKᵀ 矩阵维度n×n，内存占用随O(n²) 缩放。随着序列长度增加（常见于大语言模型或多模态应用），GPU内存使用平方增长，使这种方法低效且资源密集。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">直觉上可以用tiling把大矩阵拆成小块并行计算。然而这个方法被softmax操作难以并行化的事实阻碍。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Softmax优化：Naive与Safe Softmax</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Naive Softmax方程</strong>：softmax(xᵢ) = e^{xᵢ} / Σⱼ e^{xⱼ}。当xᵢ > 11时，e^{xᵢ} 会溢出，因为FP16最大值是65504，而e¹² = 162754.79。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">naive softmax的代码实现如下：</p>
+<pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code>def naive_softmax(x):
+    &quot;&quot;&quot;Naive Softmax implementation, prone to overflow in FP16.&quot;&quot;&quot;
+    # Compute exponentials
+    exp_x = torch.exp(x)
+    # Compute sum of exponentials
+    sum_exp_x = torch.sum(exp_x)
+    # Normalize
+    return exp_x / sum_exp_x</code></pre>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Safe Softmax：3-pass</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们需要引入safe softmax避免溢出：safe-softmax(xᵢ) = e^{xᵢ-m} / Σⱼ e^{xⱼ-m}，其中m = max(xᵢ)。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1：3-pass safe softmax：三次遍历HBM计算max、exp、sum。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2：HBM-SRAM内存层级：SRAM小而快，HBM大而慢。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">可以用3-pass计算Safe Softmax的注意力输出。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">用这个方法，由于SRAM无法一次装下全部Q和K，我们会读Q、K三次。这不高效率，因为访问HBM昂贵。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">safe softmax的代码实现如下：</p>
+<pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code>def safe_softmax_three_pass(x):
+    &quot;&quot;&quot;Safe Softmax implementation using three passes to avoid overflow.&quot;&quot;&quot;
+    # Pass 1: Compute the maximum value for numerical stability
+    m = torch.max(x)
+    
+    # Pass 2: Compute the exponentials
+    exp_x = torch.exp(x - m)
+    
+    # Pass 3: Compute the sum and normalize
+    sum_exp_x = torch.sum(exp_x)
+    return exp_x / sum_exp_x</code></pre>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Online Softmax：2-pass</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Online softmax是一种减少计算softmax所需pass数的技术。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：2-pass online softmax：把max和sum的遍历融合成一趟。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">online softmax的代码实现如下：</p>
+<pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code>def online_softmax(x):
+    &quot;&quot;&quot;Online Softmax implementation using two passes for efficiency.&quot;&quot;&quot;
+    # Pass 1: Compute maximum and sum of exponentials in one traversal
+    m = float(&#x27;-inf&#x27;)  # Current maximum
+    s = 0.0           # Sum of exponentials
+    for xi in x:
+        m_old = m
+        m = max(m, float(xi))
+        s = s * torch.exp(torch.tensor(m_old - m)) + torch.exp(xi - m)
+    
+    # Pass 2: Normalize
+    return torch.tensor([torch.exp(xi - m) / s for xi in x])</code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们可以清楚看到3-pass softmax的前两个pass融合成一个pass，这相当好，但还能更好吗？</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Flash Attention V1：1-pass</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对softmax(QKᵀ) 的计算，把2个pass融成1个的答案是否定的；然而我们需要的是softmax(QKᵀ)·V。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4：Flash Attention 1-pass：输出只依赖d_i'、d_{i-1}'、m_i、m_{i-1}、x_i，可在单循环融合整个Self-Attention。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Flash Attention正是把softmax(QKᵀ) 和V的计算融合成一个pass的技术。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">算法如下。Flash Attention作者推导出输出只依赖d_i'、d_{i-1}'、m_i、m_{i-1} 和x_i，因此可以在单循环中融合Self-Attention的所有计算。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">代码实现如下：</p>
+<pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code>def flash_attention_v1(Q, K, V):
+    &quot;&quot;&quot;
+    FlashAttention V1 implementation with single-pass computation.
+    Fuses Softmax(QK^T)V into one loop without storing S or P.
+    
+    Args:
+        Q, K, V: Query, Key, Value matrices of shape (seq_len, head_dim)
+    Returns:
+        Output of attention: (seq_len, head_dim)
+    &quot;&quot;&quot;
+    seq_len, head_dim = Q.shape
+    scale = 1.0 / (head_dim ** 0.5)  # Scaling factor 1/sqrt(d)
+    
+    # Initialize output and running statistics
+    O = torch.zeros_like(Q)  # Output
+    l = torch.zeros(seq_len, dtype=torch.float32, device=Q.device)  # Sum of exponentials (d_i&#x27;)
+    m = torch.full((seq_len,), float(&#x27;-inf&#x27;), device=Q.device)  # Max values (m_i)
+    
+    # Single pass over sequence length
+    for i in range(seq_len):
+        # Compute Q[i] * K^T for row i
+        S_i = torch.matmul(Q[i:i+1], K.transpose(-1, -2)) * scale  # Shape: (1, seq_len)
+        
+        # Online Softmax for row i
+        m_i = torch.max(S_i)  # Current max (m_i)
+        m_old = m[i]  # Previous max (m_{i-1})
+        m_new = torch.maximum(m_old, m_i)  # Update max
+        l_old = l[i]  # Previous sum (d_{i-1}&#x27;)
+        
+        # Update sum of exponentials (d_i&#x27;)
+        exp_diff = torch.exp(m_old - m_new)
+        exp_S = torch.exp(S_i - m_new)
+        l_new = l_old * exp_diff + torch.sum(exp_S)
+        
+        # Update output: O[i] = O[i] * exp(m_old - m_new) + exp(S_i - m_new) * V
+        O[i] = O[i] * exp_diff + torch.matmul(exp_S / l_new, V)
+        
+        # Update statistics
+        m[i] = m_new
+        l[i] = l_new
+    
+    # Final normalization
+    O = O / l.unsqueeze(-1)
+    return O</code></pre>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Flash Attention V1：Tiling</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在单循环中融合Self-Attention的所有计算后，可以用tiling把大矩阵拆成小块，充分利用GPU SRAM的速度。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5：Flash Attention tiling：Q、K、V拆块加载到SRAM，省掉S、P中间结果的HBM读写。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">从上图可见，Q、K、V已被拆成块，我们可以一次性把它们加载到SRAM计算kernel中的注意力输出。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因此省掉了S和P中间结果存HBM的步骤，也减少了HBM到SRAM的IO访问。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">代码实现如下：</p>
+<pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code>def flash_attention_v1_tiling(Q, K, V, tile_size=128):
+    &quot;&quot;&quot;
+    FlashAttention V1 implementation with tiling to leverage SRAM.
+    Fuses Softmax(QK^T)V into one kernel with tiled computation.
+    
+    Args:
+        Q, K, V: Query, Key, Value matrices of shape (seq_len, head_dim)
+        tile_size: Size of each tile for tiling computation
+    Returns:
+        Output of attention: (seq_len, head_dim)
+    &quot;&quot;&quot;
+    seq_len, head_dim = Q.shape
+    d = head_dim  # Head dimension for scaling
+    scale = 1.0 / (d ** 0.5)
+    
+    # Initialize output and normalization statistics
+    O = torch.zeros_like(Q)  # Output
+    l = torch.zeros(seq_len, dtype=torch.float32, device=Q.device)  # Sum of exponentials
+    m = torch.full((seq_len,), float(&#x27;-inf&#x27;), device=Q.device)  # Max values
+    
+    # Tile over sequence length for Q and K
+    for i in range(0, seq_len, tile_size):
+        # Tile boundaries for Q
+        i_start = i
+        i_end = min(i + tile_size, seq_len)
+        
+        # Load Q tile into SRAM
+        Q_tile = Q[i_start:i_end]
+        
+        for j in range(0, seq_len, tile_size):
+            # Tile boundaries for K and V
+            j_start = j
+            j_end = min(j + tile_size, seq_len)
+            
+            # Load K and V tiles into SRAM
+            K_tile = K[j_start:j_end]
+            V_tile = V[j_start:j_end]
+            
+            # Compute S = QK^T / sqrt(d) for the tile
+            S_tile = torch.matmul(Q_tile, K_tile.transpose(-1, -2)) * scale
+            
+            # Online Softmax within the tile
+            m_tile = torch.max(S_tile, dim=-1, keepdim=True)[0]
+            exp_S = torch.exp(S_tile - m_tile)
+            l_tile = torch.sum(exp_S, dim=-1, keepdim=True)
+            
+            # Update global statistics
+            m_old = m[i_start:i_end, None]
+            m_new = torch.maximum(m_old, m_tile)
+            l_old = l[i_start:i_end, None]
+            l_new = l_old * torch.exp(m_old - m_new) + l_tile
+            
+            # Update output: O = O * exp(m_old - m_new) + exp(S - m_new) * V
+            O[i_start:i_end] = O[i_start:i_end] * torch.exp(m_old - m_new).squeeze(-1)
+            O[i_start:i_end] += torch.matmul(exp_S / l_new, V_tile)
+            
+            # Update m and l
+            m[i_start:i_end] = m_new.squeeze(-1)
+            l[i_start:i_end] = l_new.squeeze(-1)
+    
+    # Final normalization
+    O = O / l.unsqueeze(-1)
+    return O</code></pre>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+Biao这篇Flash Attention的可视化入门非常扎实：把从naive softmax → safe softmax（3-pass）→ online softmax（2-pass）→ FlashAttention V1（1-pass + tiling）的推导链讲得清清楚楚，还配了5段完整可运行的Python实现。<br  /><br  />最值得吸收的洞察是「为什么softmax是并行的障碍、而Flash Attention绕开了它」：softmax(QKᵀ) 本身没法1-pass（需要全局max），但我们要的是softmax(QKᵀ)·V：它只依赖滚动统计量（m_i、d_i'）和前一块输出，所以能在线性单循环里更新。这是「把算法重排成IO友好结构」的教科书案例。<br  /><br  />对做serving kernel优化的读者，这五段代码（naive_softmax → safe_softmax_three_pass → online_softmax → flash_attention_v1 → flash_attention_v1_tiling）本身就是一套可运行的参考实现，能直接对着理解SGLang/vLLM里默认attention后端的每一步。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://hebiao064.github.io/flash-attn</span></p>
+</section>

@@ -1,0 +1,465 @@
+{
+  "title": "Recirculation：不训练就能让 Transformer 跟踪状态",
+  "lead": [
+    "我们描述一种现成基础模型的推理时架构增强，显著降低困惑度、提升生成和推理任务准确率。方法在生成期间几乎无额外延迟，但 prefill 阶段需串行处理。",
+    "动机是前馈 transformer 中状态更新受模型深度限制的根本局限。我们的技术 *recirculation* 引入一种特定形式的循环，让模型作为 dynamical system 跟踪信念状态。",
+    "我们区分该技术与 chain-of-thought 计算（更适合复杂推理而非基本状态跟踪）、流行的 depth-recurrence 技术（looping）、以及昂贵的 recurrent transformer 训练。也提出并评估自适应变体——只需轻调超参、冻结原模型权重。",
+    "相对 off-the-shelf baseline，自适应 recirculation 在 Gemma3 家族取得显著增益：一套数据集上困惑度降 23%、GSM8k 准确率 +21%、其他下游任务可靠改进。"
+  ],
+  "summary": [
+    {
+      "key": "核心机制",
+      "body": "前馈 transformer 浅层无法访问深层的上下文化解歧义（bank 歧义示例：浅层看到混合表示、错误 respond ATM）。Patchscopes 干预把深层激活复制回浅层使 contextualization 错误降 60%。Recirculation 把这个想法推广到无差别执行：每步把深层一点激活「泄漏」到浅层（z_{t+1} = α·f(z_s) + β·z_d，convex mixture + L2 重归一化）。深度和步两个维度的循环（vs looping 只在深度）。"
+    },
+    {
+      "key": "结果",
+      "body": "Gemma3 1B/4B/12B PT 困惑度降 16%/16%/35%（最佳对 {11,4}/{18,9}/{35,16}）；跨模型族（Ministral3/Pythia/Qwen3/Phi2）都有效但量级小（Gemma 特强）。GSM8k pass@1/pass@128 都提升（sharpening + expansion）。自适应变体（学习 conditional vector α,β，MLP 映射 token embedding）困惑度降 23.0%（vs basic 8.5%、接近全微调 21.6%）、GSM8k 错误率 -8.8%（pass@1）/ -20.9%（pass@128）。"
+    },
+    {
+      "key": "关键区分",
+      "body": "与 temperature 无关（temp 1.2 只降 8.48%、recirculation 降 14.21%、两者近加性 19.55%）；与 looping 结构不同（looping 在 Gemma3 无稳健收益）；收益是 lag 的幂函数（短 lag 大、长 lag 有尾）、位置 20-200 最持久、副词/形容词/动词效果最大（数词/限定词/代词最小）；前 10 token 位置有害（1B，需 ramping）。"
+    }
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "状态跟踪问题",
+      "paras": [
+        "跟踪流动、演化的事态对理解语言、推理情境、建模世界至关重要。传统状态跟踪方法（RNN、Kalman filter）涉及迭代、顺序更新潜在变量捕捉动态。Transformer 训练和 prefill 的并行操作排除传统方式跟踪状态。",
+        "Transformer 学到各种巧解使其在有限序列长度对状态跟踪有效。但也会失败于跟踪理解论证结构和社会互动所需的状态信息。基础模型的状态跟踪失败导致多轮对话失连贯、信息收集低效、多 agent 场景沟通协作崩溃。跟踪缺陷可导致一系列推理失败：无效工作记忆、不稳定 theory-of-mind 表示、缺稳健内部世界模型。",
+        "无正确状态跟踪，模型会在解释间翻转、无法检测不一致。图 1 展示 contextualization error：polysemous 词 bank 的语义。模型维持同时接受 bank 两义（river bank 和 financial institution）的信念状态完全合理，但承诺 river edge 解释后，社交娴熟沟通者应承认意义反转。",
+        "通常模型和人维持跟踪信念状态变得不可行，因为分布维度爆炸。人采用启发式：采样、把分布坍缩成原型、或形成与前提最一致的具象心理模型（类似 MAP 估计）。所有这些仍需状态跟踪，即便无显式不确定性表示。",
+        "图 2a 用 bank 对话说明 transformer 的状态跟踪挑战。处理 day off work 和 fishing pole 后，用 Patchscopes 显示 bank 被处理时浅层反映词歧义（embedding 是 river edge 和 financial institution 义的混合）；深层（黄标）被前文语境化（蓝箭头），通过把 embedding 推向 river-edge 表示选择上下文适当解释。",
+        "因架构前馈，浅层无法访问该解释。所以模型被问 ATM 问题时，初始处理阶段只看到 bank 的歧义表示。若用歧义表示（蓝箭头）承诺响应，会选错答案。尽管之前解释 bank 为 river edge，它无法访问该状态、基于歧义 bank 与 ATM 的强关联回 yes。这被刻画为 race：模型响应生成可超过模型内部语义收敛。",
+        "图 2b 的干预实验支持该解释：bank token 呈现那步把深层（歧义解决后）激活拷回浅层再继续处理，contextualization 错误降 60%。",
+        "假如不是把操作瞄准特定 token，而是在每 token 位置*无差别*执行呢？可能灾难——模型没训练容纳放大的反馈。但假如不是替换而是*泄漏*一点激活从深层到浅层？泄漏可能足够丰富表示而不把表示推出分布。于是我们可能*在不修改完全训练模型权重的情况下*看到推理时收益。",
+        "这方案无需微调也可能工作，因为 transformer 的 residual stream 像共享黑板、所有层可写，鼓励跨层表示对齐。为什么应对齐？考虑 residual stream embedding 的一个特定特征、与水分（moisture）等语义概念相关。无论特征早还是晚激活，对输出分布的直接效应因加法交换律相同。pool 或 tears 等输入 token 可能直接在输入 embedding 激活 moisture 特征；bank 等歧义 token 因 polysemy 对 moisture 内在激活不多。但若把深层解歧义的 bank 反馈回去，moisture 特征被放大，为后续处理提供有用信息。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig01.png",
+            "caption": "图 1：bank 歧义对话——contextualization error 与延迟解歧义的 race。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "方法：Recirculation",
+      "paras": [
+        "我们形式化 *recirculation*：逐步运行 LLM，每步把一点深层激活泄漏到浅层。图 3a 给总图，循环箭头指定一个可能的 source-和 destination-layer 对。",
+        "**Looped transformer** 是参数高效变体：不堆叠*独特*块，而是多次应用一组共享块。图 3b 垂直按深度、水平按输入步展开。Looped transformer 的循环只在深度：箭头在栈内。",
+        "**Recirculation 的循环在深度和步两个维度**（图 3c）：两个输入栈每循环步并行跑（除第一步 warm up）。看似小重组，但任意状态跟踪时根本改变计算性质。",
+        "实现任意状态更新 z(t+1)=f(z(t),x(t))：looped transformer 里 z(t+1) 必须比 z(t) 深一层——它只是带权共享约束的更深前馈 transformer。Recirculation 里因深度和步都有投影，同一层可同时持 z(t) 和 z(t+1)。状态跟踪的代价是必须串行经过架构；因顺序更新，即使提供整个输入序列（如 prefill）也无法并行化。",
+        "图 3/4 模型展开为每步执行 transformer 栈两次（比标准多一次迭代）。该迭代数可增。本文所有实验用单额外迭代变体。迭代数无界时 recirculation 行为如真 RNN。",
+        "Looped transformer 与 recirculation 另一关键区别：looping 循环的是整个 residual stream、直接替代前一层来的输入；recirculation 把源和目的层激活混合。",
+        "形式上单迭代 recirculation 是混合：z_{t+1,t,d} = α·f(z_{t,t,s}|d,t) + β·z_{t,t,d}，其中 t 是更新顺序索引、s/d 是源/目的层索引、α/β 是混合系数、f 是重归一化函数、z_{i,j,l} 是第 l 层在展开步 i 输入步 j 计算后的 residual stream 输出。重归一化动机是层输出组合时 embedding 量级增长。总用凸混合 β≡1-α、把源重缩放为与目的相同 L2 范数：f(z|d,t) = (||z_{t,t,d}||2/||z||2)·z。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig02.png",
+            "caption": "图 2：超参扫描（Gemma3 1B，arXiv）——α 和 source/destination 层对热图，层 4 配高 5-7 层的 source 最佳。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "相关工作",
+      "paras": [
+        "**Looped transformers** 多次跑单层或层范围，无自由参数增加得到更深架构。Looping（确定性或自适应）非常流行成功，可增加 transformer 表达力但不保证无限状态跟踪。一些方法训练允许推理时扩展，其他经预训练或微调引入循环；出人意料几个纯作推理时方法改善推理——与 recirculation 最相似，但 looping（更大深度）概念上区别于 recirculation 的循环。",
+        "**训练目标**：提出训练损失让给定层 embedding 更有状态（以状态更新函数可解释）。",
+        "**状态跟踪**：现代大规模并行架构在天然顺序的问题（状态跟踪、多跳推理、规划，组合使并行不现实）上弱。Transformer 串行容量受深度限制，且有效利用状态表示随其上移到深层变难。有证明 log n 层足以识别长度 n 的 regular language 和 n 顶点的图连通问题——但只解决可构造性、非可学习性。实践上研究者对特定有限序列长度问题训练深度限制模型找到巧解。",
+        "**Recurrent transformers**：带顺序循环更新的模型可表达任意状态动态。一些 token-by-token 循环，大多 blockwise。State-space models（SSMs）常被吹捧为状态传播手段，但许多 SSM 不比普通 transformer 更可表达、没有像通用循环网那样可表达。",
+        "**Thinking models**：depth dilemma 的解法是 CoT 式「思考」——模型通过从深层到浅层顺序发信号对自己说话、从而前向传播状态。这种循环增强表达力。思考可在自然语言 token 或潜在空间进行。与其它 recurrent transformer 一样，训练思考模型贵（限制并行）。",
+        "**Activation steering**：语言模型行为可经干预潜在表示可预测调制。recirculation 可视为推理时自我引导机制——不用静态外部推导 steering vector，而是利用模型自身上下文化深层激活引导浅层表示轨迹。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "实验：超参扫描与困惑度",
+      "paras": [
+        "**超参扫描。**扫描 recirculation 三超参：混合系数 α（β=1-α）、源层 s、目的层 d。纳入 Gemma3 1B PT 算 arXiv 文档困惑度。四热图对应 α∈{0.04,0.07,0.10,0.16}；检查相距不超 12 层的源-目的对。热图蓝到红编码困惑度低于/高于 baseline（此数据集 16.6）。",
+        "热图相当平滑、揭示系统模式。增大 α 放大 recirculation 效果但更多源-目的对伤害困惑度。层 4 配高 5-7 层的源作目的理想。",
+        "三个数据集（arXiv、PG19、C4）固定 α=0.10 扫描源/目的层，最优对平均降 4.72%。1B/4B/12B 调优集最优源/目的对：{11,4}、{18,9}、{35,16}。",
+        "**困惑度评估。**选定源/目的层后用 α=0.15 评估十数据集。1B 和 4B 模型降 16%、12B 降 35%。十数据集九种稳健改进。Lambada 是异常（非常短序列和 tokenization artifacts）。",
+        "完整结果表（十数据集 × 三模型规模）："
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig03.png",
+            "caption": "图 3：三数据集平均的超参扫描（source/destination 层，α=0.10）。"
+          }
+        ]
+      },
+      "table": {
+        "head": [
+          "Dataset",
+          "1B base",
+          "1B recirc",
+          "1B %",
+          "4B base",
+          "4B recirc",
+          "4B %",
+          "12B base",
+          "12B recirc",
+          "12B %"
+        ],
+        "rows": [
+          [
+            "arxiv",
+            "19.10",
+            "16.54",
+            "13.99%",
+            "14.76",
+            "13.10",
+            "11.26%",
+            "33.93",
+            "25.38",
+            "25.20%"
+          ],
+          [
+            "big_patent",
+            "10.89",
+            "9.90",
+            "9.13%",
+            "8.74",
+            "8.12",
+            "7.08%",
+            "17.55",
+            "13.20",
+            "24.76%"
+          ],
+          [
+            "billsum",
+            "4.71",
+            "4.65",
+            "1.25%",
+            "3.57",
+            "3.41",
+            "4.46%",
+            "4.50",
+            "4.09",
+            "10.96%"
+          ],
+          [
+            "booksum/book",
+            "32.48",
+            "27.30",
+            "15.95%",
+            "29.09",
+            "24.45",
+            "15.95%",
+            "77.02",
+            "51.67",
+            "32.91%"
+          ],
+          [
+            "c4/webtextlike",
+            "17.10",
+            "16.43",
+            "3.93%",
+            "14.26",
+            "13.64",
+            "4.37%",
+            "19.21",
+            "16.71",
+            "13.01%"
+          ],
+          [
+            "gov_report",
+            "11.86",
+            "11.00",
+            "7.26%",
+            "10.79",
+            "9.78",
+            "9.37%",
+            "27.59",
+            "19.11",
+            "30.74%"
+          ],
+          [
+            "lambada",
+            "35.62",
+            "35.88",
+            "-0.72%",
+            "28.34",
+            "28.19",
+            "0.53%",
+            "25.47",
+            "26.19",
+            "-2.81%"
+          ],
+          [
+            "newsroom",
+            "14.11",
+            "13.75",
+            "2.56%",
+            "11.62",
+            "11.17",
+            "3.87%",
+            "13.74",
+            "12.45",
+            "9.40%"
+          ],
+          [
+            "pg19",
+            "22.27",
+            "19.06",
+            "14.41%",
+            "19.49",
+            "16.43",
+            "15.72%",
+            "52.86",
+            "34.15",
+            "35.40%"
+          ],
+          [
+            "pubmed",
+            "15.73",
+            "13.99",
+            "11.08%",
+            "11.65",
+            "10.58",
+            "9.21%",
+            "26.38",
+            "19.92",
+            "24.49%"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "归一化与 Ramping",
+      "paras": [
+        "因为 residual-stream embedding 量级随层增长，把源 embedding 喂目的前重归一化（式 1、2）更好调节模型、超参扫描得到一致可靠困惑度降模式。附录考虑多种归一化方案。归一化方案对最大困惑度降影响不大，只影响改进在源-目的景观上的鲁棒性——增强我们识别最优对的能力。附录显示多方案扫描，包括 identity mapping（无归一化）；也处理 4B/12B——它们关键需要非凸混合 β=1 而非 β=1-α。",
+        "结果指示 recirculating Gemma3 1B context 窗口开始处的 token 有害。不惊讶——窗口开始几乎无状态可传播；无 recirculation 收益时，把内部表示推出分布的成本可能压倒。但 4B/12B 无早期 token recirculation 之害。我们在 1B 引入 ramping 衰减前几个 token 的 α，带来小困惑度降。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig08.png",
+            "caption": "图 8：归一化方案扫描（Gemma3 1B）。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig09.png",
+            "caption": "图 9：归一化方案扫描（Gemma3 4B）。"
+          },
+          {
+            "src": "fig10.png",
+            "caption": "图 10：归一化方案扫描（Gemma3 12B）。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "分析：跨模型族鲁棒性",
+      "paras": [
+        "Gemma3 对 recirculation 的接受有什么特殊吗？四个其他模型族——Ministral3、Pythia、Qwen3、Phi2——都在 source-destination 热图显示稳健困惑度降区域，与 Gemma3 1B 类似。模型大致同尺寸、都从中部架构区域获益最多。",
+        "Gemma3 1B 的困惑度降百分比显著更大——约 5% vs 其他族小于 0.5%。但没为其他族探索归一化调整或 α 值。所以虽然对 recirculation 的接受看似普遍，效果量级可能取决于架构或训练流程细节。",
+        "Gemma 家族第二和第四代显示与 Gemma3 同样显著的增益——凸显 Gemma 模型特别兼容 recirculation。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig04.png",
+            "caption": "图 4：跨模型族（Ministral3/Pythia/Qwen3/Phi2）的鲁棒性热图。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig11.png",
+            "caption": "图 11：Gemma 家族其他代的 recirculation 效果。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "分析：与 Temperature、Looping 的区分",
+      "paras": [
+        "**Recirculation vs temperature tuning。**困惑度受 softmax 分布锐度影响，要排除 recirculation 只是无差别锐化/平滑分布。扫描温度：Gemma3 1B 温度 1.2（vs 默认 1.0）困惑度降 8.48%。Recirculation 单独降 14.21%，所以不可归约为温度调整。组合 recirculation + 温度调优得 19.55%（也温度 1.2）。两效应近加性，排除 token 无关温度调优的伪影解释。",
+        "**Recirculation vs looping。**验证 recirculation 与 looped transformer 在结构上不同方式影响模型动态。比较两者：扫描所有 (l1,l2) 层对（l2>l1），looping 在栈中 l2 后插入 l1+1 到 l2 的层副本，做训练无关评估。热图显示对 Gemma3 家族 looping 至少不产生稳健收益。Recirculation 跨模型规模受益，looping 预训练模型只在更大规模受益。热图质的差异确认 looping 和 recirculation 按不同原则运作。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig05.png",
+            "caption": "图 5：looping vs recirculation 热图对比（结构上不同）。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig12.png",
+            "caption": "图 12：temperature 扫描——recirculation 不可归约为温度调优。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "分析：哪些 token 受益",
+      "paras": [
+        "至此所有实验都 recirculate 窗口每位置 token。现在问能否识别哪些 token 最贡献 recirculation 改进。1024-token 窗口、Gemma3 1B，只 recirculate 位置 t 的 token、看 lag k（位置 t+k）的收益。目标 log likelihood 增加（困惑度降）是 k 的幂函数：短 lag 大增、长 lag 残余尾。",
+        "位置效应：最早位置（t<10）recirculation 降 log likelihood，但之后位置都增、尤其短 lag。大致位置 20-200 效果最持久、lag 256 也有可测收益。",
+        "内容效应：给每 token 标语法词性（PoS），副词、形容词、动词效果最大，数词、限定词、代词最小。有趣的是名词复数形式稳健受益、单数不——模型处理单复数名词的差异也被他人注意到。",
+        "也做了 recirculate 除一外的所有 token 的实验，结果互补，提示单 token recirculation 的收益在 log likelihood 上可加。总之位置和内容效应进一步排除伪影解释、支持 recirculation 帮助构建持久状态表示的叙事。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig06.png",
+            "caption": "图 6：token 分析——lag 幂函数收益、位置 20-200 最持久。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig13.png",
+            "caption": "图 13：PoS 分析——副词/形容词/动词效果最大。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "生成任务：指令跟随与 Contextualization",
+      "paras": [
+        "评估一系列要求模型生成响应的下游任务（单 token 选择和 thinking 响应）。总体上观察模型准确率中等到显著改进。",
+        "**指令跟随。**简单指令跟随任务（test of executive function，儿童/神经病人标准测试）。Baseline Gemma3 1B IT 表现如随机，所以聚焦 4B/12B。用之前选来最小化调优集困惑度的超参，recirculation 把 4B 错误率降约 25%、12B 降 75%。为得上界，专门扫超参最大化该任务准确率（只约束两参数层索引）——recirculation 显著改进。",
+        "**Contextualization。**curated 数据集探索 bank 对话那类 contextualization 失败。每实例含 context、cue、question，嵌零或多干扰句，要求 yes/no 回答。反平衡保证偏差不影响结果；模型须回答问题两变体（Is it a financial institution? 和 Is it a geographical feature?）才算对，所以随机准确率 25%。还有事实性和性别相关问题。",
+        "图 7 显示 Gemma3 1B/4B/12B IT 结果。横轴干扰句数；三种问题类型 baseline（实线）和 recirculation（虚线）。1B 三类型中两清晰改进（第三两者都随机）；4B 两可靠改进（第三持平）；12B 两处于劣势（第三两者天花板）。总体上 recirculation 是赢，虽然 12B 失败令人失望。用困惑度评估选的超参（针对*预训练*非*指令调优*模型）；用指令调优模型扫超参得到更大增益。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig07.png",
+            "caption": "图 7：Contextualization 结果（baseline vs recirculation，三模型规模）。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "生成任务：多选题与 GSM8k",
+      "paras": [
+        "**多选题和单 token 响应。**评估 Open LLM Leaderboard 标准数据集：ARC easy、ARC challenge、MMLU、Winogrande、BoolQ、PiQA、HellaSwag、Lambada。Lambada 是填空单 token；其余多选。零样本评估。用 MMLU development set 扫超参。",
+        "八数据集中六改进（正负差都温和）。",
+        "**GSM8k。**与单 token 数据集相反，这里用 chain-of-thought 推理解决小学数学。单 token 响应时 recirculation 收益须依赖处理问题陈述的推理；CoT 时 recirculation 有额外机会支持扩展推理。",
+        "GSM8k 也允许大量候选响应。候选多时改进可按能力*锐化*或*扩展*刻画：pass@1（贪婪）改进指示锐化（正确响应胜出候选集）；pass@128（接受 128 样本中任何正确）改进指示可能集扩展。用 pass@1 和 pass@128 评估。",
+        "图 12 对比 baseline 和 recirculated Gemma3 4B（棕/蓝条）pass@1 和 pass@128。Recirculation 同时改进两者——支持锐化和扩展。Recirculation 对扩展生成响应比对单 token 响应更受益，揭示其高级问题解决和复杂推理的潜力。"
+      ],
+      "fig_after": {},
+      "table": {
+        "head": [
+          "Dataset",
+          "Baseline %",
+          "Recirc %",
+          "Adaptive (MMLU test)"
+        ],
+        "rows": [
+          [
+            "MMLU",
+            "57.90",
+            "58.28",
+            "59.83"
+          ],
+          [
+            "ARC Easy",
+            "81.78",
+            "82.07",
+            "82.79"
+          ],
+          [
+            "ARC Challenge",
+            "54.44",
+            "54.86",
+            "54.95"
+          ],
+          [
+            "PiQA",
+            "79.98",
+            "80.52",
+            "80.20"
+          ],
+          [
+            "BoolQ",
+            "79.08",
+            "79.11",
+            "81.04"
+          ],
+          [
+            "WinoGrande",
+            "69.46",
+            "69.38",
+            "69.61"
+          ],
+          [
+            "HellaSwag",
+            "75.89",
+            "75.86",
+            "76.01"
+          ],
+          [
+            "Lambada",
+            "70.02",
+            "70.27",
+            "71.07"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "自适应 Recirculation",
+      "paras": [
+        "此前的策略是看纯推理时技术能推多远。Recirculation 因开箱即用而惊人。明显下一步经模型适配改善鲁棒性和增益。训练 recurrent 架构高成本、整模型微调有过拟合风险，所以我们从训练无关设置小步出发，聚焦调节 recirculation 超参 α 和 β。目标做最小改动、显示优于训练无关 recirculation 的收益。",
+        "训练实验用 arXiv、C4、PG19 各 250 文档，Gemma3 1B PT。固定先前产生结果的源/目的层，探索学习表示混合项 α、β 最小化预测损失的方法。",
+        "六种适配方法（按困惑度降排序）：**Fixed**（固定 α=0.15、β=0.85）；**Learned constant scalars**（标量 α/β 梯度下降）；**Learned conditional scalars**（MLP 映射 token 特定源/目的 embedding 到标量）；**Learned constant vectors**（学习向量值 α、β，Hadamard 积）；**Learned conditional vectors**（MLP 映射到向量值 α/β）；**Model fine tuning**（带 recirculation 循环连接的微调，固定系数）。",
+        "学习系数的方法中，向量值（第四五组）优于标量（第二三组）；token-conditional（第三五组）优于静态（第二四组）。最佳（第五组 learned conditional vector α,β）训练 MLP 生成 token 特定混合向量。其余方法是消融，证明向量值系数和 token 条件化都必需。称该优越方法为 *adaptive recirculation*。",
+        "Adaptive recirculation 平均困惑度降 **23.0%**，对比 basic recirculation 的 8.5%。九数据集每个都胜。性能至少匹敌全 Gemma3 1B 微调（23.0% vs 21.6%）。优势是 Gemma3 模型本身未动、微调过拟合风险更低。",
+        "下游任务上 adaptive recirculation 也有前景（caveat：训练 MLP 的数据集关键）。适应 MMLU test split 小部分（3600/14000）给跨板改进；适应 MMLU aux train split 总体改进；直接在其他数据集（ARC）训练大幅降性能。",
+        "虽然 recirculation/adaptive 对单 token 响应任务无稳健准确率增益，GSM8k 增益为扩展生成响应任务提供有希望信号。Adaptive recirculation 大幅惠益 GSM8k：pass@1 错误率 -8.8%、pass@128 -20.9%——考虑模型本身未动是惊人结果。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "讨论：模型设计 Affordances",
+      "paras": [
+        "我们把 recirculation 视为方法论或哲学贡献，而非「shovel ready」技术。聚焦训练无关架构修改，本质是让模型揭示其根植的改进路径。我们对架构放循环何处、如何混合归一化激活的搜索由模型自身告知。",
+        "替代——ML 研究的典型路径——是提出任意架构修改、经昂贵训练评估。我们的关键假设：若在不动权重的情况下识别预训练模型*想要*我们怎么微调它，也识别了促进简化训练的 inductive bias——无论从零还是微调。Adaptive recirculation 实验支持该假设。",
+        "产品设计谈 design *affordances*——对象告知如何使用它的属性。门把手 afford grasping and pulling。类比地，我们探索 *model-design affordances*——基础模型可开发利用放大的自然属性。通过改进基础 substrate，改进构建其上的一切能力。多数在基础模型内层引入循环的方法用 adapters 或 cross attention；我们的观察建议混合激活向量的更简单策略可能就够。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "局限与未来方向",
+      "paras": [
+        "**超参确定**：最优超参（源/目的层、α/β）看似 domain/problem dependent。但基于一数据集或一准则选的超参常泛化到其他。除非能找到 task-universal 超参或 task→超参自动映射，recirculation 实用适用性受限。",
+        "**模型族依赖**：Gemma 的 Peri-LN 架构和训练优化流程可能产生比其他族更大收益。泛化到其他架构需进一步调查。",
+        "**归一化**：对源激活向量归一化让 recirculation 更稳健。Gemma3 家族中多候选方案中一个跨模型规模好用。是否必要、如何为其他族归一化仍需实验。",
+        "**Blockwise recurrence**：自回归生成时 recirculation 计算便宜（现代硬件两栈并行近单栈效率）。但 prefill 时需 token-by-token 处理，大上下文可能不可行。缓解：blockwise recirculation——并行处理 K 个 token、首次 pass 时与下 K 个同时 recirculate。K 与性能的权衡未探索。",
+        "**多次循环迭代**：真循环网会在步 t 循环栈 1 到 t-1 的激活。我们探索的变体只循环栈 t-1，每栈恰好循环一次。每栈循环 r 次的中间方法未研究。",
+        "**多循环路径**：选了单 {source, destination} 对，但可沿多路径同时 recirculate。一些架构超参扫描出现不同、不连通的区域都有效——可能这些不同区域互补，如在不同抽象层级传达状态信息。",
+        "**适配**：只是刮了表面。Adaptive recirculation 结果极有前景——调优集很小、无需调模型权重就得稳健改进。转向模型权重微调前还有很多改进途径（token-conditioned recirculation pathways、归一化方法）。",
+        "通过倾听模型自身内部动态而非强迫昂贵架构大修，recirculation 提供强大、计算便宜的前进路径。解锁这些内在 affordances 可能巩固模型的基本上下文理解，为扩展、多轮推理提供关键 scaffolding。"
+      ],
+      "fig_after": {}
+    }
+  ],
+  "conclusion": [
+    "这篇 Recirculation 论文是「不训练也能让 Transformer 跟踪状态」的干净示范：每次输入步把深层一点激活「泄漏」回浅层（z_{t+1} = α·f(z_s) + β·z_d，凸混合 + L2 重归一化），利用 residual stream 的表示对齐让模型当 dynamical system 跟踪信念状态。**推理时生成几乎零成本**（两栈并行近单栈效率），只有 prefill 需串行。",
+    "三个最值得吸收的点：**① 与常见方案的结构区分**——CoT 的循环经 token（适合复杂推理不适合基本状态跟踪）；looping 只在深度循环（Gemma3 上无稳健收益）；recurrent transformer 要训练。Recirculation 在深度和步两维循环，同一层可同时持 z(t) 和 z(t+1)。**② 效果与证据链**——Gemma3 1B/4B/12B 困惑度降 16%/16%/35%，跨 5 模型族有效（Gemma 特强）；与 temperature 无关（近加性 19.55%）；GSM8k pass@1/pass@128 双升（sharpening + expansion）；收益是 lag 幂函数、副词/动词受益最大、前 10 token 有害（需 ramping）。**③ Model-design affordances 哲学**——不动权重、问模型「想被怎么改」，再把这个 inductive bias 用于训练：adaptive recirculation（MLP 学 conditional vector α,β）困惑度降 23.0% 接近整模型微调的 21.6%，GSM8k 错误率 -20.9%，模型本身完全未动。",
+    "局限也清楚：最优超参（源/目的层）task-dependent、Gemma Peri-LN 可能特强、prefill 串行处理大上下文不可行（blockwise 是方向）。对做长程推理架构的人，这是「用模型自身属性引导架构演化」的一条低门槛新路线。"
+  ],
+  "reference_url": "https://arxiv.org/html/2608.17981v1"
+}

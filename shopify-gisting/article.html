@@ -1,0 +1,101 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心机制</strong>：gist token是加入模型词表的特殊token。用知识蒸馏训练嵌入序列：teacher pass看完整自然语言prompt得到logits，student pass换gist tokens再跑一遍，用KL散度最小化差异。4:1压缩=每4个prompt token加1个gist token，只训练嵌入、冻结权重。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">结果</strong>：350 RPM下：TTFT降19%（438→354ms）、E2E降约38%（6.8→4.2s）、吞吐 +16%（20.2→23.4 QPS）、生产GPU少14%。部署简单：写回embedding矩阵 + 注册特殊token，推理时仅请求侧换prompt。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">Autoresearch发现</strong>：初始化用prompt chunk均值（非随机噪声）→ 初始loss降7×；4:1是质量开始下降的最优压缩比；损失归一化按batch平均（per token平均会幻觉）；预计算teacher logits + 预tokenize把单次训练从30h砍到6h。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Gisting把上下文压缩成一组学习到的token，在保留质量的同时让模型更快更便宜。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">System prompts每个请求可以占数千token。更长的prompt意味着更慢、更贵的推理。这导致在专用硬件上服务模型时，为容纳同样流量需要更多GPU。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们对gisting的实现（最初由Wingate, Shoeybi和Sorensen在《Prompt Compression and Contrastive Conditioning for Controllability and Toxicity Reduction in Language Models》中提出）让我们能以短prompt的成本获得长prompt的行为优势。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">通过gisting，我们把Sidekick GraphQL agent的system prompt从约<strong>6,000 token砍到约1,500 gist token（4:1压缩）</strong>，且不损失预测质量。我们通过知识蒸馏学习一组特殊token的嵌入，推理时用它们替换system prompt来实现这一点。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把system prompt 4:1压缩成gist token带来的服务增益显著。在350 RPM下，median time to first token（TTFT）从438ms降到354ms，median端到端请求延迟从6.8s降到4.2s，吞吐从20.2升到23.4 queries per second（QPS）。这些增益让我们能为GraphQL agent的流量减少分配的GPU数。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Gisting如何工作</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>gist token</strong>是我们加入模型词表的特殊token。我们训练嵌入序列，使它们替换进上下文后诱导模型表现得像看过了完整prompt。在4:1压缩下，每四个prompt token加一个gist token。我们冻结模型权重，只训练gist嵌入。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1：Gisting如何工作：训练gist token嵌入序列，使其替换进上下文后模型表现得像看过完整prompt。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">知识蒸馏训练</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们通过知识蒸馏学习gist嵌入。对每条轨迹跑两次前向。<strong>teacher pass</strong>中模型看到完整自然语言prompt，为模型响应中每个位置导出teacher logits。<strong>student pass</strong>中我们把完整prompt换成gist tokens，再跑同一模型，导出对应每个teacher响应位置的student logits。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2：Teacher vs student预测：teacher看完整prompt，student看gist tokens，KL散度对齐。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们用teacher logits和student logits之间的KL散度训练gist嵌入，直到student的预测紧密匹配teacher。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">部署gisted模型很简单</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">训练结束时，我们把gist嵌入直接写进模型的embedding矩阵，并把新gist token注册为模型tokenizer的特殊token。模型像任何其他模型一样在推理时加载和运行：没有自定义attention mask、额外encoder或特殊服务路径。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">唯一的推理时变化在请求侧：把prompt换成gist token字符串。压缩的全部成本只在训练时付一次。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么prefix caching不够</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Gisting和prefix caching的优势并不互斥。所有现代服务引擎维护KV cache，存储先前见过的序列的keys和values。当新请求包含缓存中存在的序列（通常包括system prompt）时，该序列的KV tensors被取回而非重算。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">虽然prefix caching强大，但它不消除decode成本。模型每生成一个token，该token就attend序列中的每个key，无论是否缓存。因为decode受内存带宽约束，每个生成的token必须从高带宽内存流式读整个KV cache，而那个读取随缓存序列长度线性增长。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Gisting减少attention计算和KV cache读取的成本，后者在batch变大时对吞吐尤其有影响。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Gisting和prefix caching的优化叠加，我们在实验和生产服务栈中两者都用。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Autoresearch找到配方</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为调优超参数，我们把一个autoresearch loop指向trainer。它提出配方、训练gist嵌入、评估结果模型、重复。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：Autoresearch进展：自动循环提出配方、训练、评估、重复，找到4:1最优压缩比和初始化/归一化优化。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在autoresearch循环中，三个优化尤其影响大：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>初始化</strong>：不用随机噪声初始化嵌入，而是把system prompt拆成k长度的序列（k由k:1压缩比导出），用第n个system prompt chunk的均值初始化第n个gist嵌入。这个优化把初始loss降了一个因子7。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>压缩</strong>：试验一系列压缩比后，我们找到预测质量开始下降的比值（对我们的领域复杂度，4:1是最优比；其他领域不同）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>数据量和多样性</strong>：策展大规模多样化数据集补上剩余缺口。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">除了精简超参数调优，autoresearch还帮我们在训练基础设施中实现几个关键优化。第一个是我们如何归一化loss：按每响应token平均会让模型幻觉，而按batch平均保留长响应的更多信号、产生稳定嵌入。第二个是速度：预计算teacher logits和预tokenize数据把一次完整运行从三十小时砍到六小时。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">回报：延迟和吞吐</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们跑了对照同一模型压缩prompt与完整prompt的负载测试。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4：结果：350 RPM下TTFT降19%、E2E降约38%、吞吐 +16%、GPU -14%。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Gisting相对完整prompt带来显著延迟增益，且随请求并发上升、batch变大，差距更明显。在350 RPM下，TTFT降19%，E2E延迟降约38%，吞吐升16%。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">实践中，那16% 的吞吐增益直接转化为我们生产工作负载的GPU节省。用服务GraphQL流量的硬件配置，我们能用gisting少用14% 的GPU。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Gisting与持续学习</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Gisting也很好融入Shopify的持续学习循环。一旦我们有了一个模型的蒸馏gist嵌入，就可以把这个模型当作持续学习的新起点。我们可以用gist嵌入作为前缀做后训练，把梯度更新同时应用到模型权重和gist嵌入。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">通过在增量数据上同时优化权重和gist嵌入，我们可以持续校准和改进模型，而无需每次都从头蒸馏gist嵌入的计算负载。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">要点</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">长system prompts有用但贵。Gisting让agent用一小部分token利用广泛指令的所有优势，降低延迟和GPU开销。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在GPU需求超过供给的近期时代，每个推理优化都重要，但我们也拒绝在质量上妥协。Gisting两者都给，在Shopify它是新标准。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+Shopify这篇Gisting工程实录很实在：把Sidekick GraphQL agent的6,000-token system prompt压成1,500个gist token（4:1），TTFT降19%、E2E降约38%、吞吐 +16%、生产GPU少14%。<br  /><br  />机制本身简单（特殊token嵌入 + 知识蒸馏，冻结权重只训嵌入），但有三个值得抄的工程点：<strong>初始化用prompt chunk均值而非随机噪声</strong>（loss降7×）、<strong>loss按batch平均而非per token</strong>（per token平均会幻觉）、<strong>预计算teacher logits + 预tokenize把训练从30h砍到6h</strong>。<br  /><br  />还有一个反直觉的洞察：<strong>prefix caching不消除decode成本</strong>：每生成一个token仍要attend所有key、流式读整个KV cache，读取随缓存长度线性增长，而gisting直接砍这个。两者叠加使用，不是二选一。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://shopify.engineering/gisting</span></p>
+</section>

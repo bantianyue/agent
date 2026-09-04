@@ -1,0 +1,544 @@
+{
+  "title": "ExoFormer：用外生锚定解决注意力投影复用的第一层张力",
+  "lead": [
+    "跨层复用早期 attention 投影能改善优化和数据效率，但它制造一个结构冲突：**第一层必须同时充当所有更深层的稳定可复用锚点，和有效的计算块**。我们证明这个张力约束了 internal-anchor 设计的性能。",
+    "我们提出 **ExoFormer**，通过在顺序层栈之外学习*外生锚定投影*（exogenous anchor projections）解决冲突。我们引入统一归一化混合框架，用可学习系数混合 queries、keys、values 和 gate logits（探索系数粒度：elementwise、headwise、scalar），并证明归一化锚定源是稳定复用的关键。",
+    "ExoFormer 变体持续超过 internal-anchor 对应物；dynamic 变体匹配验证 loss 的同时用约 1.5× 更少 token 赢得约 1.5 个下游准确率点（vs Gated Attention）。我们经 **Offloading Hypothesis** 解释：外部锚点保留关键 token 身份，让层专精于特征变换。",
+    "代码和模型已开源（github.com/jon123boss/ExoFormer、HuggingFace Jonnester）。"
+  ],
+  "summary": [
+    {
+      "key": "第一层张力",
+      "body": "复用第一层投影（ResFormer 思路）时，第一层被迫双职：稳定可复用锚点（偏好不变性）+ 有效计算块（需要变化）。这一结构性妥协两头受限——附录 B 显示 NuResFormer 第一层采用宽松 gating 策略，牺牲选择性当稳定锚。"
+    },
+    {
+      "key": "ExoFormer",
+      "body": "在层栈外学一组专用外生锚定投影（H0 输入 embedding 上独立的 WancQ/WancK/WancV/WancG），每层经可学习系数混合：Ŝn = λn,1⊙RMSNorm(Sanc) + λn,2⊙Sn。RMSNorm 归一化锚源是关键——无归一化时近零系数比例约三倍（模型在补偿分布不匹配）。Dynamic 变体加小 MLP 做上下文相关调制。"
+    },
+    {
+      "key": "Offloading Hypothesis",
+      "body": "外部锚点专精「身份保持」（保证每层高保真 token 独特性），顺序层专精「渐进计算」（只做 Stage 3 refinement，占约 2/3 层 vs baseline 1/3）。消融验证：去锚后 NuResFormer 崩到 181 PCA 维（ExoFormer 321）；只靠锚时 ExoFormer 留 822 维 vs 611。H1 锚最佳（PPL 14.02）。"
+    }
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "引言：复用的张力",
+      "paras": [
+        "Transformer 架构已成为现代 LLM 和广泛序列/上下文任务的基础。其成功核心是多头自注意力机制，实现跨序列动态、上下文相关的交互。然而，随模型深度扩展以捕捉更复杂抽象，确保稳定高效训练与有效信息传播仍是挑战。",
+        "研究表明 token 级信息会在更深层稀释，一种与 over-smoothing 相关的现象。这激发了对更直接机制的兴趣以保留早期表示。",
+        "然而现有方案大多孤立运作，留下关键问题未答。ResFormer 只关注 residualize *values*，留下其他 attention 组件（queries、keys、gating logits）的复用未探索。",
+        "我们引入跨所有 attention 路径的跨层混合统一框架，系统评估混合 queries（Q）、keys（K）、gating logits（G）以及已确立的 value（V）residual 的贡献，用不同系数粒度（elementwise、headwise、scalar）。关键洞察：混合前对 residual 源应用 RMSNorm 解决分布不匹配，实现稳定有益的复用。",
+        "分析复用第一层投影的架构揭示根本张力。第一层被迫扮演两角色：(1) 所有更深层的稳定可复用锚点；(2) 渐进特征变换的有效计算块。这一双目标本质限制两角色的效力。",
+        "我们的主要贡献是 **ExoFormer**，在顺序层栈之外学习一组*专用外生锚定投影*。internal-anchor 版本称 NuResFormer（归一化统一），作对比基础。解耦两角色被证明持续有益：每个 ExoFormer 变体在困惑度上超过对应 NuResFormer，下游准确率保持竞争力，宽度深度无增。我们经 **Offloading Hypothesis** 解释高性能：外部锚承担保留 token 身份的角色，让顺序层几乎专精于精炼。此外，锚定稍深表示可进一步改善困惑度同时提高吞吐。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig01.png",
+            "caption": "图 1：验证 loss 曲线（约 450M 模型）——ExoFormer 变体 vs NuResFormer/Gated Attention。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig02.png",
+            "caption": "图 2：验证 loss 曲线（约 1B 模型，20B token）。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "相关工作",
+      "paras": [
+        "**Value Residuals and Gated Attention。**ResFormer 引入 *Value Residual Learning*：从第一层 value projection（V1）到后续所有层的 residual connection（标量系数 λ1、λ2 调节）。这个简单有效的方法大幅改善性能和数 据效率。但初步尝试 residualize queries 和 keys 不稳定。同时 gated attention 机制为 attention 输出引入动态输入相关调制。我们的工作把所有 attention 路径的 residual learning 泛化，并经归一化混合稳定，桥接 residual connection 与 gated attention。",
+        "**跨层通信与 residual mixing。**Hyper-Connections 扩展 residual stream 宽度；Manifold-Constrained Hyper-Connections（mHC）恢复 hyper-connected 架构的 identity-like 信号保持性质。",
+        "最接近我们（方向正交）的是 **MUDDFormer**：提出 Multiway Dynamic Dense（MUDD）connections，把每个 Transformer 块的输入解耦成四流（query、key、value、residual），用小 MLP 生成上下文特定权重动态聚合*所有*先前层输出。它主要处理 attention 投影的*输入*；我们的框架聚焦*混合*投影本身——投影*之后*的混合 vs MUDDFormer 投影*之前*的输入增强。两者可共存。",
+        "**第一层复用、KV 效率、低秩跨层结构。**SkipV1Former 用第一层 heads 替换每层一半 Value heads，KV cache 省约 25% 同时改善困惑度。YOCO 缓存一次全局 KV pairs 并经 cross-attention 复用。从参数效率角度，inter-layer activation residuals 是低秩的，可经跨层低秩差异减少可训练参数。这些与我们的方法互补但不同：ExoFormer 经*解耦*锚与顺序栈解决第一层张力，在全秩投影空间运作，跨*所有* attention 路径启用可学习归一化混合。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "方法论：统一混合公式",
+      "paras": [
+        "**记号。**对第 n 层，Hn-1∈R^(T×d_model) 是输入隐藏状态（pre-normalization 后），T 是序列长，d_model 是模型宽。h 个 attention heads、每头维度 d_k，d_model = h·d_k。投影 queries、keys、values、gate logits 记为 Qn、Kn、Vn、Gn。RMSNorm(·) 表示对每个 attention head 独立应用的 per-token RMS 归一化（带可学习 gain）。",
+        "**三种系数粒度。**Scalar（S）：所有通道共享单系数；Headwise（H）：每头一系数广播过 d_k；Elementwise（E）：每通道一系数。Elementwise 和 headwise 对复用机制提供细粒度控制。",
+        "**MHA 三阶段。**阶段 1：QKV 线性投影 Qn=Hn-1·WnQ、Kn=Hn-1·WnK、Vn=Hn-1·WnV（含 RoPE 和 QKNorm）。阶段 2：缩放点积注意力 An=softmax(QnKn^T/√d_k)、Un=An·Vn。阶段 3：输出投影 On=Un·WnO。NuResFormer/ExoFormer 中这些阶段用式(10)的混合张量。",
+        "**Gated Attention。**对拼接多头输出应用 elementwise 头特定乘法门控：Ũn = Un ⊙ σ(Gn)，On = Ũn·WnO，其中 Gn=Hn-1·WnG。注意：消融显示 post-norm 而非 pre-norm 会大幅降低 gated attention 性能。",
+        "**统一混合。**每层 attention 路径用一组持久 *anchor projections* {Qanc,Kanc,Vanc,Ganc} 经可学习混合跨所有层复用。当前层投影照常计算。锚定投影两种实例化：NuResFormer——锚是第一个 attention 层的投影（Qanc=Q1 等）；ExoFormer——锚由输入 embedding 上的专用外部投影模块产生（Qanc=H0·WancQ 等，独立可学习权重矩阵）。",
+        "**归一化源混合。**对每个组件 S∈{Q,K,V,G}：Ŝn = λn,1S ⊙ RMSNorm(Sanc) + λn,2S ⊙ Sn。λ 系数张量按所选粒度（scalar/headwise/elementwise），全部初始化为 0.5、可学习。",
+        "**第一层张力和 ExoFormer。**跨层 residual 复用让早期信息每深度可用，但隐式迫使第一层满足两压力：可复用锚点（产生整深度有价值的广用参考表示）和渐进计算（产生易被下游变换的特征）。理论上可共存（可选路径由 λ 调制），但结构约束给第一层妥协压力，本质限制两角色。经验支持：NuResFormer 第一层相对标准 baseline 采用宽松 gating 策略。ExoFormer 用式(9)的专用外生投影实例化框架。",
+        "**Dynamic Mixing 模块。**受 MUDDFormer Depth-wise Aggregate 启发：可学习参数被层输入 Hn-1 经小 MLP 计算的上下文相关缩放因子调制。每层 MLP：DMn(Hn-1) = σ(GELU(Hn-1·Wn,1DM)·Wn,2DM + bnDM)，输出维 8 对应 {γn,1Q,γn,2Q,γn,1K,γn,2K,γn,1V,γn,2V,γn,1G,γn,2G}。输出层零初始化保证初始 sigmoid 输出 0.5，所以 base λ 初始化为 1.0 达有效 identity mixing。调制混合：Ŝn = (λn,1S·γn,1S) ⊙ RMSNorm(Sanc) + (λn,2S·γn,2S) ⊙ Sn。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "实验：设置与主结果",
+      "paras": [
+        "**训练细节。**所有模型用现代 pre-normalized Transformer 架构：SwiGLU 激活、QKNorm、RoPE。遵循 prior work：projection 和 classification 层零初始化、移除 bias（除 DM 模块）、z-loss 正则、无 dropout。FineWeb-Edu 数据集训练：约 450M 参数模型 10B token，约 1B 参数模型 20B token。",
+        "**优化。**矩阵参数用 Muon（Polar Express 变体）+ cautious weight decay 0.1；1D 参数用 Adam。梯度范数 clip 1.0，所有模型同一优化设置公平比较。全局 batch 262,144 token、序列长 2,048。",
+        "**评估。**每基准示例 5-shot prompt，长度归一化准确率。困惑度在含 1 亿 token 的 FineWeb-Edu 验证集上测。6 个多选题基准：arc_challenge、arc_easy、hellaswag、openbookqa、piqa、winogrande。单张 NVIDIA H100 80GB、原生 BF16、FlashAttention。",
+        "主结果（约 450M / 10B token）：Dynamic E-ExoFormer 最优平均准确率 50.27%、PPL 14.09；静态 E-ExoFormer 平均 49.85%、PPL 14.13。所有 ExoFormer 变体在 PPL 上超过对应 NuResFormer。",
+        "完整结果表："
+      ],
+      "fig_after": {},
+      "table": {
+        "head": [
+          "Model",
+          "ARC-c",
+          "ARC-e",
+          "Hella.",
+          "OBQA",
+          "PIQA",
+          "Wino.",
+          "Avg Acc",
+          "PPL"
+        ],
+        "rows": [
+          [
+            "Base Transformer",
+            "30.97",
+            "63.38",
+            "42.02",
+            "33.60",
+            "67.30",
+            "51.54",
+            "48.14",
+            "14.79"
+          ],
+          [
+            "Gated Attention",
+            "30.89",
+            "64.69",
+            "42.73",
+            "34.00",
+            "67.14",
+            "53.35",
+            "48.80",
+            "14.64"
+          ],
+          [
+            "ResFormer (Value Residual)",
+            "33.62",
+            "64.86",
+            "43.49",
+            "34.40",
+            "68.88",
+            "52.64",
+            "49.65",
+            "14.32"
+          ],
+          [
+            "Naive Combination",
+            "32.94",
+            "64.52",
+            "43.47",
+            "32.60",
+            "68.34",
+            "52.64",
+            "49.09",
+            "14.25"
+          ],
+          [
+            "E-NuResFormer (Only Q/K Norms)",
+            "31.74",
+            "64.27",
+            "43.83",
+            "33.00",
+            "68.23",
+            "52.41",
+            "48.91",
+            "14.21"
+          ],
+          [
+            "H-NuResFormer (Only Q/K Norms)",
+            "34.73",
+            "64.06",
+            "44.45",
+            "34.20",
+            "67.57",
+            "53.04",
+            "49.68",
+            "14.21"
+          ],
+          [
+            "S-NuResFormer (Only Q/K Norms)",
+            "32.85",
+            "66.08",
+            "43.87",
+            "34.20",
+            "68.28",
+            "53.67",
+            "49.83",
+            "14.22"
+          ],
+          [
+            "E-NuResFormer",
+            "33.70",
+            "65.07",
+            "44.23",
+            "33.60",
+            "68.34",
+            "53.12",
+            "49.68",
+            "14.15"
+          ],
+          [
+            "H-NuResFormer",
+            "33.79",
+            "65.11",
+            "44.09",
+            "33.40",
+            "67.41",
+            "52.72",
+            "49.42",
+            "14.17"
+          ],
+          [
+            "S-NuResFormer",
+            "32.42",
+            "64.02",
+            "43.93",
+            "33.20",
+            "67.90",
+            "53.20",
+            "49.11",
+            "14.17"
+          ],
+          [
+            "E-ExoFormer (No Norm)",
+            "32.08",
+            "63.76",
+            "43.49",
+            "34.40",
+            "68.77",
+            "55.64",
+            "49.69",
+            "14.30"
+          ],
+          [
+            "Dynamic E-ExoFormer",
+            "33.36",
+            "65.87",
+            "44.54",
+            "34.40",
+            "68.28",
+            "55.17",
+            "50.27",
+            "14.09"
+          ],
+          [
+            "E-ExoFormer",
+            "32.42",
+            "64.65",
+            "44.28",
+            "36.40",
+            "67.74",
+            "53.59",
+            "49.85",
+            "14.13"
+          ],
+          [
+            "H-ExoFormer",
+            "32.17",
+            "65.87",
+            "44.00",
+            "32.40",
+            "68.23",
+            "52.72",
+            "49.23",
+            "14.14"
+          ],
+          [
+            "S-ExoFormer",
+            "32.17",
+            "65.66",
+            "44.33",
+            "33.60",
+            "68.06",
+            "51.14",
+            "49.16",
+            "14.15"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Anchor 归一化的角色",
+      "paras": [
+        "RMSNorm 两个角色：作为 scale-dependent 有理函数，给原本线性的 residual 路径引入非线性变换；作为温和的 isotropization 算子，独立归一化每个 token 表示跨 heads，把向量重缩放到单位 RMS，保留方向信息、移除 per-token 尺度差异。这个 per-token 操作保留维度间相对对齐，编码语义和句法特征。",
+        "对 anchor 源应用 RMSNorm 的必要性被无归一化模型学习到的混合系数分析经验支持。例如无 residual 归一化的 ExoFormer 变体，λ1（anchor 信号强度）近零系数（<0.001）比例约为归一化变体的三倍。这个对 anchor 路径的抑制表明模型在主动补偿分布不匹配。",
+        "我们假设 naive combination 表现差因为无归一化混合引入 anchor 与当前层投影的分布不匹配，迫使 gating 机制把容量从选择性过滤转向补偿性尺度校正。σ(G) 必须补偿不匹配而非执行意图的过滤角色，导致训练不稳定和比单独 ResFormer 更差的下游准确率。梯度诊断量化：naive combination 梯度 spike score 0.0108，高于 Gated Attention（0.0085）、两倍于 E-ExoFormer（0.0054）。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig03.png",
+            "caption": "图 3：Dynamic E-ExoFormer 的 elementwise 混合系数热图。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig04.png",
+            "caption": "图 4：ExoFormer 的 elementwise 混合系数热图（V 有 sharp head 边界，Q/K/G 有 intra-head striping）。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "扩展到 Q、K、G 路径",
+      "paras": [
+        "**无归一化 Q/K residual 的不稳定性与 QKNorm 的稳定作用。**与先前观察一致，稳定性有清晰层级。无 QKNorm 用无归一化 Q/K residuals 的模型难优化，初步运行显示发散 loss。关键地，仅加 QKNorm 就稳定训练并恢复 baseline 性能。我们假设因为 QKNorm 压缩 Q 和 K 的尺度，缓解把早期层 routing 信号注入更深层时出现的分布不匹配。此外，QKNorm 之上对 Q/K anchor 源加显式 RMSNorm 给出最好结果，启用正复用。",
+        "**Gating logit 混合天然更稳定。**与 Q 和 K 相反，gating logits G 的 residual connection 无需归一化即可直接加入。我们假设被 sigmoid 压缩的 gate logits 天然对分布不匹配较不敏感。",
+        "**NuResFormer 的粒度。**scalar 混合达到最高平均下游准确率（49.83%）参数最少；headwise 几乎持平（49.68%→49.42%），表明每 attention 头一个自由度捕捉大部分有益结构；elementwise 给最好语言建模困惑度（14.15）但下游略低——增加的参数自由度改善分布内 loss 但泛化不一定更好。",
+        "**ExoFormer 的粒度。**Elementwise 混合（E-ExoFormer）整体最优：静态模型最高平均准确率 49.85%、最低验证困惑度 14.13。这个反转表明系数粒度有效性是架构相关的：在更干净设置（因解耦），优化器能有效利用细粒度混合编排精确复用策略而不损泛化。",
+        "**elementwise 混合中的涌现头结构。**学习到的 elementwise 系数可视化揭示每 attention 组件特定模式：value 路径热图有*与头块精确对齐的 sharp 边界*——尽管优化器可自由独立设每通道，结构涌现，与 heads 作为路由信息专用子模块的研究一致。相反，queries、keys、gate logits 展示*更细粒度、intra-head 结构*（如交替的高/低复用带「striping」），提示 sub-head 特化。Q 的高/低带位置常与 K 对齐。",
+        "**Dynamic Mixing 的灵活性。**动态变体中 Q/K/G 的 λn,1/λn,2 跨通道层更均匀分布。模型不收敛到固定层特定复用策略，而是能基于输入序列实时调制每组件的 anchor 路径强度，给混合系数本身更多表达自由。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "Mix-Compress-Refine 理论",
+      "paras": [
+        "Baseline Transformer 行为与 Mix-Compress-Refine 理论一致：(1) 高 attention entropy 阶段作 token 信息的广上下文整合；(2) 过渡到以主导 attention sinks 和 core features 剧降为标志的压缩谷，停止混合并降低表示维度过滤无用信息；(3) 以 attention entropy 骤升收尾（sinks 消散），启用生成所需的精炼 token 特定处理。",
+        "这三个阶段在标准 Transformer 自然涌现，但非为计算效率优化。模型花计算能力坍缩上下文信息，随后又重建——标准架构的低效。",
+        "**Gated Attention 和 residual mixing 经瞄准阶段 2 改善性能。**基于经验模式，gated attention 和 residual mixing 的收益部分源自对第二阶段（压缩）的影响。",
+        "gating 机制解决模型过滤无关上下文的需求（阶段 2 核心功能）。引入每层选择性调制信息流的输入相关稀疏性，gated attention 提供分布式过滤形式，可能减少或消除以主导 attention sinks 为标志的尖锐专用压缩阶段需求。经验证据一致：有 gating 的模型无清晰压缩谷，attention sink 幅度相对 baseline 剧减。",
+        "同样，residual mixing 模型里 residual 路径提供 abrupt sink 过滤的隐式学习替代。学习到的混合减少模型对极端 sink 驱动压缩的依赖以隔离有用信号。两者都缓解阶段 2 的 abrupt 信息瓶颈，用更连续、学习到的过程替代低效 sink 过滤。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig05.png",
+            "caption": "图 5：attention entropy 轨迹——三阶段 Mix-Compress-Refine 模式。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig06.png",
+            "caption": "图 6：token similarity 轨迹——ExoFormer 约 2/3 层花在 Stage 3 精炼，baseline 只 1/3。"
+          }
+        ],
+        "2": [
+          {
+            "src": "fig07.png",
+            "caption": "图 7：PCA core features——压缩谷的表示维度变化。"
+          }
+        ],
+        "3": [
+          {
+            "src": "fig08.png",
+            "caption": "图 8：first-token attention——attention sinks 的行为对比。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Offloading Hypothesis：外生锚定实现特化",
+      "paras": [
+        "ExoFormer 的架构解耦启用有趣的功能特化，我们形式化为 **Offloading Hypothesis**：通过提供专用、高保真的 token 身份源，外生锚允许顺序层卸载保留静态特征的重担，几乎专精于 Mix-Compress-Refine 循环的最终「精炼」阶段（Stage 3）。",
+        "特化证据清晰可见于 token-similarity 轨迹：所有模型展示特征模式——similarity 升到早期最大（Stage 1 混合）、跌到局部最小（Stage 2 压缩）、再升、最后一层落（Stage 3 精炼）。关键地，ExoFormer 变体和 NuResFormer 约 2/3 层花在这个特化精炼阶段，任何模型最高比例；baseline 只 1/3。",
+        "这个特化可能因为外生锚根本性重配 Transformer 内信息管理。标准架构里 residual stream 必须并发携带两类冲突信息：(1) 保留 token 身份的独特静态特征（「我是什么 token？」）；(2) 经层演进支持 next-token 预测的变换后任务相关特征。标准模型的 over-smoothing 灾难性丢失第一类，削弱模型有效路由信息的能力。ExoFormer 引入每层再注入的持久外部锚，绕开张力，保证高保真 token 身份可达。",
+        "**锚专精「身份保持」。**专用锚参数（WancQ/WancK/WancV/WancG）可专精于最大化方差和独特性，优化作通用参考。",
+        "**顺序层专精「渐进计算」。**身份信息外部供给后，内部层从保留早期层几何的约束解耦，不再需要在 residual stream 内维护稳定高保真 token 身份记录。卸下保留静态 token 特征的重担，层能更高效分配容量学习复杂高层模式，带来困惑度和下游准确率双改善。",
+        "**受控消融强化因果解释。**做两类受控推理时干预。第一，anchor-removal 消融（λn,1=0）：NuResFormer 崩溃比 ExoFormer 更灾难性——最终层 PCA core features 骤跌到仅 181 维（ExoFormer 321），token 相似度峰更高。这个不对称直接支持 First-Layer Tension 假设：NuResFormer 强迫第一层既当计算块又当可复用锚，结果 internal anchor 移除时本质更脆。",
+        "第二，inverse ablation（λn,2=0，只靠锚）：ExoFormer 跨层平均保留 822 PCA core features，NuResFormer 只 611。确认外生锚提供比妥协的 internal anchor 显著更高保真的身份信号。",
+        "Table 4 消融数据："
+      ],
+      "fig_after": {},
+      "table": {
+        "head": [
+          "Model",
+          "Ablation",
+          "Final Layer PCA",
+          "Avg. Layer PCA"
+        ],
+        "rows": [
+          [
+            "ExoFormer",
+            "Anchor Removed (λn,1=0)",
+            "321",
+            "756"
+          ],
+          [
+            "NuResFormer",
+            "Anchor Removed (λn,1=0)",
+            "181",
+            "685"
+          ],
+          [
+            "ExoFormer",
+            "Inverse (λn,2=0)",
+            "916",
+            "822"
+          ],
+          [
+            "NuResFormer",
+            "Inverse (λn,2=0)",
+            "577",
+            "611"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Anchor 深度：H0、H1、H2",
+      "paras": [
+        "因为外生锚与顺序层栈解耦，其源表示不必限于输入 embedding H0。我们调查锚定稍深表示 H1 或 H2 是否改善性能。",
+        "出乎意料地，锚定 H1 给出最好结果（PPL 14.02），超过 H0 锚（14.09）和 H2 锚（14.09）。用 H1 锚的静态 ExoFormer 也超过 dynamic H0 baseline（14.07 vs 14.09）。",
+        "这与 Value Residual Learning（ResFormer）对比鲜明——它发现最早表示（H0）最优。我们把差异归因于锚的*外生*性质：因为锚模块与顺序层栈解耦，它能有效利用 H1 更丰富的语义信号，不受 internal-anchor 设计固有的第一层张力之苦。",
+        "我们假设 H1 提供最优「有效锚深度」：保留核心 token 身份同时提供略多处理的特征。H2 不再改善，提示饱和点——超过它锚丢失 offloading 机制所需的高保真身份信号。除困惑度收益，H1 和 H2 锚还通过减少混合开销改善吞吐。"
+      ],
+      "fig_after": {},
+      "table": {
+        "head": [
+          "Model",
+          "Anchor Source",
+          "Val. PPL"
+        ],
+        "rows": [
+          [
+            "Dynamic",
+            "H0 (input embeddings)",
+            "14.09"
+          ],
+          [
+            "Dynamic",
+            "H1 (layer 1)",
+            "14.02"
+          ],
+          [
+            "Dynamic",
+            "H2 (layer 2)",
+            "14.09"
+          ],
+          [
+            "Static",
+            "H0 (input embeddings)",
+            "14.13"
+          ],
+          [
+            "Static",
+            "H1 (layer 1)",
+            "14.07"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "附录：复杂度分析",
+      "paras": [
+        "**参数开销。**Baseline（Gated Attention）每层参数：attention 投影（Q/K/V/G/输出）5d² + FFN 6d² = 11d²，总 P_base = 11Ld²。ExoFormer 引入外生锚 4 个 d×d 矩阵（ΔP_anchor = 4d²）。静态混合每层 8d 参数（ΔP_static = L·8d）。Dynamic Mixing 模块每层加 MLP（ΔP_DM ≈ L·d·d_DM，d_DM=16、d_out=8）。",
+        "静态 ExoFormer 总开销 ΔP = 4d² + 8Ld；动态另加 L·d·d_DM。相对 baseline 比例：R_P(static) = 4/(11L) + 8/(11d)，R_P(dynamic) = 4/(11L) + (8+d_DM)/(11d)。对 L=32、d=1024、d_DM=16，约静态 1.2%、动态 1.3% 开销。",
+        "虽然原始参数数看似可忽略，它们低估锚模块的有效容量贡献：外生参数结构上被特权——经混合框架每层复用。ExoFormer 用最小可训练参数增加（约 1.3%）换取有效容量显著增益，专精一个模块于身份保持。这比简单加宽 hidden dimension 更参数高效（那会无差别跨所有层分配额外容量）。",
+        "**计算开销（FLOPs）。**外生锚投影每 token 只算一次（输入 embedding 上），不随深度 L 缩放：ΔC_anchor ≈ 8d²。DM 模块每层：L·(2·d·d_DM + 12d)。总 FLOPs 比例 R_FLOPs = 8/(22L) + d_DM/(11d) + 6/(11d)。对 L=32、d=1024、d_DM=16：锚投影约 1.1%、DM 投影约 0.14%、elementwise 混合约 0.05%，总约 1.33% FLOPs 增加。",
+        "**效率-性能权衡。**FLOPs 分析是计算开销下界。实际延迟增加约 8-15%（参考实现优先模块化和可解释性而非速度）。我们强调主要贡献是统一 attention 投影混合的新架构，非生产优化层。即使计运行时开销，净性能收益仍为正（准确率 +1.5 点、数据效率 1.5×），优化 kernel 会收敛到理论 1.3% 开销。",
+        "**替代归一化位置。**从 E-ExoFormer（全 residual norms）baseline 出发，加 post-mixing 归一化：QKV-Norm（对 V̂n 应用）PPL 14.08；QKVG-Norm（对四个混合张量都应用）14.07。收益边际（0.05-0.06），说明注入*前*归一化 anchor 源捕捉了绝大多数稳定化收益，额外 post-mixing 归一化收益递减。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig09.png",
+            "caption": "图 9：NuResFormer elementwise 混合系数热图（全 residual norms）。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig10.png",
+            "caption": "图 10：NuResFormer elementwise 混合系数热图（half）。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "附录：梯度稳定性与超参数",
+      "paras": [
+        "**梯度稳定性。**定义 spike score 为梯度 L2 范数超过去 1,000 步滚动均值七个标准差的比例。更高分数 = 更严重梯度瞬变、更不稳定优化。",
+        "ResFormer 最高 spike score（0.0458），确认无归一化 value residuals 引入严重梯度不稳定。Naive combination 部分缓解（0.0108）但仍高于单独 Gated Attention，与假设一致（σ(G) 被从过滤角色转移去补偿分布不匹配）。E-ExoFormer 最低（0.0054），证明把锚从第一层解耦消除了作为独立梯度不稳定源的架构张力。",
+        "**超参数（约 450M 模型）。**Layers 32（gated 29）、Hidden 1024、FFN 4096、Heads 16、Vocab 57,601、SwiGLU、RoPE（θ=500,000）、Seq 2048、Batch 262,144 token、10B token、Muon + Adam、Muon LR 0.01 / Adam LR 0.003、Gradient Clip 1.0、Cautious WD True、Muon WD 0.1、Z Loss 1e-5、QKNorm True。",
+        "1B 模型：Hidden 1536、FFN 6144、20B token、Muon LR 0.003 / Adam LR 0.001、总步 76,293。",
+        "梯度稳定性表："
+      ],
+      "fig_after": {},
+      "table": {
+        "head": [
+          "Model",
+          "Spike Score (%)"
+        ],
+        "rows": [
+          [
+            "ResFormer (Value Residual, unnormalized)",
+            "0.0458"
+          ],
+          [
+            "Naive Combination (Gated + ResFormer, unnormalized)",
+            "0.0108"
+          ],
+          [
+            "Gated Attention",
+            "0.0085"
+          ],
+          [
+            "E-NuResFormer (full residual norms)",
+            "0.0081"
+          ],
+          [
+            "E-ExoFormer (full residual norms)",
+            "0.0054"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "结论",
+      "paras": [
+        "我们引入 ExoFormer，一种通过学习专用外生锚定投影把 token 身份保持与计算精炼解耦的新 Transformer 架构。通过跨 queries、keys、values、gates 的统一归一化混合框架，ExoFormer 解决复用第一层投影固有的架构张力。",
+        "实验证明这个解耦持续改善性能，dynamic 变体相对标准 gated attention baseline 在下游准确率和数据效率取得显著增益。这些结果验证 **Offloading Hypothesis**：外部化身份保持让顺序层专精于高层特征变换，为增强大语言模型提供高效架构路径。",
+        "**影响声明。**主要正面社会影响是环境可持续性——减少训练高性能模型所需 token 数，直接应对 LLM 训练不断上升的能耗和碳足迹。开源发布促进民主化，降低研究和中小组织开发和部署 SOTA NLP 工具的计算障碍。Offloading Hypothesis 提供信息如何流经深网的理论框架，助益 LLM 的可解释性和机制理解。",
+        "虽然贡献是架构性的（聚焦效率和结构），它促进更有能力 AI 系统的部署，可能被恶意利用。此外消融提示鲁棒性，但「offloading」机制扩展到显著更大参数（如 100B+）存在固有不确定性，可能引入 450M-1B 范围未观察的新失败模式或安全挑战。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig11.png",
+            "caption": "图 11：λ 系数分析。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig12.png",
+            "caption": "图 12：gating 均值激活（第一层选择性对比）。"
+          }
+        ],
+        "2": [
+          {
+            "src": "fig13.png",
+            "caption": "图 13：gating 稀疏度。"
+          }
+        ],
+        "3": [
+          {
+            "src": "fig14.png",
+            "caption": "图 14：NuResFormer vs ExoFormer 对比网格。"
+          }
+        ]
+      }
+    }
+  ],
+  "conclusion": [
+    "这篇 arXiv 论文（v4）解决的是 ResFormer 式「复用第一层投影」的核心矛盾：第一层被迫双职（可复用锚点 + 有效计算块），两头受限。**ExoFormer 的解法干脆——在层栈外学一组专用外生锚投影**（H0 上的独立 WancQ/WancK/WancV/WancG），每层经可学习系数混合，彻底解耦「身份保持」与「渐进计算」。",
+    "三个最值得吸收的点：**① 归一化是复用的前提**——无 RMSNorm 时近零混合系数比例约 3×（模型在补偿分布不匹配），QKNorm 本身就能稳定无归一化 Q/K residuals；gate logits 因 sigmoid 压缩天然稳定。**② Offloading Hypothesis 有因果证据**——去锚时 NuResFormer 崩到 181 PCA 维（ExoFormer 321），只靠锚时 ExoFormer 留 822 维 vs 611；且 ExoFormer 约 2/3 层花在 Stage 3 精炼（baseline 1/3）。**③ 成本极小**——参数开销 1.2-1.3%、FLOPs 约 1.33%（锚投影每 token 只算一次不随深度缩放），动态变体 +1.5 准确率点、1.5× 数据效率。",
+    "与 MUDDFormer 的对照也清晰：MUDD 在投影*前*增强输入，ExoFormer 在投影*后*混合——两者可共存。对做长程 LLM 架构优化的人，这是「如何把复用的锚点从层栈里解放出来」的干净参考答案。"
+  ],
+  "reference_url": "https://arxiv.org/html/2601.08131v4"
+}

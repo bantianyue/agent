@@ -1,0 +1,88 @@
+# -*- coding: utf-8 -*-
+"""Red Hat: The CPU is back 编译 build"""
+import json
+
+DATA = {
+  "title": "CPU 回来了：重新思考 LLM 推理的 CPU-GPU 分工（Red Hat）",
+  "lead": [
+    "过去三年，GPU 主导了 LLM 的话题。这篇 Red Hat 博客审视：那些让 GPU 成为 LLM 推理显而易见选择的假设，正在被重新谈判——以及两个关键驱动如何把推理推向 CPU。",
+    "核心论点：GPU 不会消失，但 agentic AI 引入的工作负载类（编排、工具执行、上下文堆叠）和小型化本地模型的经济性，正在把一部分推理拉回 CPU。"
+  ],
+  "summary": [
+    {"key":"CPU 擅长什么","body":"GPU=数万核 SIMD，FLOPS 论成败（AI 是海量小数网络）；CPU=1到数百核、优化顺序/条件/分支，指令延迟论成败。二者非竞争、互补。逼 GPU 跑混乱的 Python 运行时，其 FLOP 能力闲置。FLOPS 与指令延迟的分工决定谁干什么。"},
+    {"key":"两大驱动","body":"① Agentic AI：模型不单发 prompt 等响应，而是生成行动计划、迭代工具调用、堆上下文——放大 CPU 特定计算。Georgia Tech+Intel 研究确认 agentic 负载 CPU 工作增多；Intel Q1 2026 DC/AI 收入 $5.1B(+22%)、Arm 预测传统 AI 数据中心需约 3000万 CPU。② 更小本地模型：SLM 成熟（SmolLM2 135M-1.7B 等）+领域数据 100× 更省算力，边缘部署经济。"},
+    {"key":"行业与落地","body":"OpenAI-Assets $38B/7年 (2025.11)、Arm AGI CPU（35 年首次生产硅）、NVIDIA Vera Rubin NVL72（72 GPU+36 CPU）、Morgan Stanley 估 agentic CPU 增量 $32.5-60B。vLLM CPU 后端支持 continuous batching/PagedAttention/prefix caching/chunked prefill/tensor parallel；Arm 用 oneDNN+ACL+INT4、Intel 用 IPEX AMX BF16。"}
+  ],
+  "sections": [
+    {"type":"h2","title":"引言：GPU 是显而易见的答案吗","paras":[
+      "过去三年，GPU 主导了 LLM 对话。本文审视：那些让 GPU 成为 LLM 推理显而易见选择的假设正在被重新谈判——以及为什么、它对推理栈意味着什么。",
+      "这里要考察：为什么让 GPU 成为 LLM 推理显而易见选择的假设正在被重新协商？是什么在改变推理栈？以及其后果。",
+      "但这里没有抛弃 GPU 的意思。弄清激励这场转变的驱动、它们在现实世界已多快发生、以及如何在你的环境中衡量和部署它们。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"CPU 擅长什么","paras":[
+      "归根结底（无 pun 意），CPU 和 GPU 解决根本不同的问题。",
+      "现代 GPU 含数万核心，设计成在同一操作上对数千数据元素执行（SIMD）——一次取回大量数、同时做相同运算。现代 CPU 则通常有 1 到数百核，为顺序、条件、分支控制流优化——跳转、分支、逻辑、连接和变量。",
+      "这两种架构虽本质不同，却不是竞争者；它们最适合搭档工作。真正的问题不是「哪个更好」，而是「正确的分工是什么」——哪种架构最擅长处理哪种特定的 AI、或 AI 邻近的工作负载。",
+      "这种分工归结为如何衡量它们的工作：**FLOPS vs 指令延迟**。",
+      "GPU 以每秒浮点运算次数（FLOPS）论成败。因为 AI 模型是海量小数（decimal）的网络，FLOPS 是所有语言模型的心跳。CPU 则专长指令延迟——单核能多快执行一条指令。对活跃在变量、对象、条件状态中的顺序工作负载，低延迟在执行细粒度、不可预测的操作上不可战胜。",
+      "若逼 GPU 跑一个混乱的 Python 运行时，其庞大 FLOP 容量闲置、被任务切换和序列化反复窒息。让 CPU 做算术密集型模型推理，它几十 Gbps 的内存带宽也拖累它——它更适合快速、单点决策而不是海量并行数学。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"传统推理栈：CPU 是乘客","paras":[
+      "想到传统推理栈，会想到聊天机器人的 serving 应用。这里 CPU 往往只是乘客（a passenger）。",
+      "典型流程：请求到达 API server，CPU 做 tokenize 和调度。CPU 处理所有初始任务，然后工作被送到 GPU，GPU 成为推理主力——前向传播一个接一个。",
+      "这种模型里，CPU 当接待员（receptionist），做协调和组织工作，GPU 做重活。对大多数第一代、相对简单的单 prompt-单响应聊天用例，这完全没问题。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"驱动一：Agent 正在改变工作负载","paras":[
+      "随着 agentic AI 兴起，出现一种新的推理画像，放大了对 CPU 特定计算的需求。",
+      "「Agentic AI」让人想到集成的 agent harness（开源框架与 agent 运行时）……但在核心，agentic 从根本上改变了模型消费和产出 token 的方式。",
+      "agentic 系统里，模型不单发一个 prompt 然后等响应。它生成一个行动计划，然后用一组工具（tool calls）执行——读文件、查询数据库、写代码、调 API——每次工具调用后更新上下文并决定下一步。结果：大量短 prompt + 短响应交织，都在共享上下文之上，中间穿插复杂顺序逻辑和分支决策。",
+      "这正是 CPU 的地盘。在 Georgia Tech 和 Intel 研究者的合作中，他们发现 agentic 工作负载里 CPU 的参与（CPU 工作占比）显著增大。",
+      "Intel Q1 2026 财报电话会的数字量化了这在多大程度上已经发生：",
+      "Intel Q1 2026 数据中心和 AI 段收入 $5.1B，同比 +22%，需求跑在供应前面。",
+      "Arm 自己的分析更直白地预测这个转变。传统 AI 数据中心需要约 3000 万 CPU；当推理走向 agentic、走向边缘，这个数字会急剧放大。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"驱动二：更小、更本地的模型","paras":[
+      "与 agentic AI 催化的转变分开，第二个结构性变化正把推理推向 CPU——更小、更本地化的模型。",
+      "这波变化归因于施加在 provider 上的 4 个主要压力：",
+      "**小型语言模型（SLM）成熟到可行的程度**：Hugging Face SmolLM2（135M 到 1.7B）、Qwen2.5-VL 等小模型现在能处理日常任务。",
+      "**领域专用数据**：在精心策划的数据上训练的模型，可用比通用训练少 100× 的算力获得领域特定性能。",
+      "（其余压力包括：边缘部署的延迟/隐私/成本/离线可用性考量。）"
+    ],"fig_after":{}},
+    {"type":"h2","title":"行业现状","paras":[
+      "这些不是理论工作负载。CPU 时代正快速逼近，如果还没到的话。",
+      "OpenAI 和 AWS 在 2025 年 11 月签了 $38B、7 年的基础设施伙伴关系。",
+      "3 月，Arm 发布 AGI CPU——其 35 年历史里首个量产硅。",
+      "第一批交付给了 Anthropic、OpenAI、SpaceXAI 和 Oracle Cloud Infrastructure，它们宣布了部署计划。",
+      "NVIDIA 旗舰级 agentic 推理平台 Vera Rubin NVL72 把 72 块 Rubin GPU 和 36 块 Vera CPU 配对（比 GPU-only 的配置在 agentic 推理上带来约 1.8× 性能）。",
+      "Morgan Stanley 估计 agentic CPU 转变到 2030 年代表 $32.5–$60B 的增量 CPU 市场增长。"
+    ],"fig_after":{"0":[{"src":"fig01.png","caption":"图 1：行业向 CPU 密集 AI 基础设施的转变——NVIDIA Vera CPU 1.8× 性能优势、NVL72 机架 CPU-to-GPU 比例 1:8→1:2、以及 Arm、OpenAI/AWS、Morgan Stanley 对 2030 年 CPU 市场增长 $32.5–$60B 的预测。"}]}},
+    {"type":"h2","title":"在 CPU 上测量与部署 LLM","paras":[
+      "对 GPU 主导的推理工作负载，GPU 优势巨大且有据可查。单块 H200 在高并发下服务大量 token……但衡量 CPU 推理时，**高并发下的峰值吞吐不是最相关的基准**。",
+      "CPU 推理更重要的是：GPU 被占用时可以运行的离线/后台工作负载；长尾/空闲时间的补充容量；以及永远不需要达到峰值、但必须可靠、私密、经济上可持续的服务。",
+      "GPU 基准已建立规范，但 CPU 推理基准目前是供应商特定或更差的混乱状态。",
+      "如果你的 LLM 部署思维模型还建立在 GPU 集群上，这听起来挺吓人。vLLM 今年有专门的 CPU 部署工作流——我们最近的 vLLM 办公时间讨论了端到端部署。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"让 CPU 推理可行的架构","paras":[
+      "软件栈的几项进展让 CPU 推理达到 2 年前达不到的可用水平。",
+      "vLLM 的 CPU 后端支持 continuous batching、PagedAttention、prefix caching、chunked prefill 和 tensor parallel——正是 GPU 前向主干启用的功能。",
+      "OpenAI 兼容 API 跨后端一致——意味着先在 CPU 基础设施上启动的部署，无需改动应用层就能扩展到 GPU。",
+      "在 Arm 上，oneDNN 和 Arm Compute Library 构建路径，结合 llmcompressor 的 INT4 量化，是可生产（production-grade）的方案。",
+      "在 Intel 上，Intel Extension for PyTorch（IPEX）在 Xeon 上自动启用 AMX 支持的 BF16 运算。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"结论","paras":[
+      "GPU 不会消失。对大规模模型的高并发生产 serving，GPU 是正确答案且仍将是。",
+      "变化的是那句话的边界（perimeter）。Agentic AI 引入了一类工作负载——编排、工具执行、上下文堆叠——它们需要大量的顺序、不可预测的、指令延迟受限的算力，无论多少 GPU 都填不满那个 niche。",
+      "同时，边缘部署的经济性和约束——延迟、隐私、成本、离线可用性——让在终端完成的小型本地推理日益可行。",
+      "NVIDIA 造 Vera、Arm 重出江湖、Intel Xeon 需求跑在供应前、OpenAI 签大额合同——这些不是虚构，当 CPU 在推理栈里东山再起。"
+    ],"fig_after":{}}
+  ],
+  "conclusion": [
+    "Red Hat 这篇把「CPU 在 LLM 推理里回归」讲得很清楚。核心是**工作负载画像变了**：传统聊天是单 prompt-单响应（GPU 全包）；agentic AI 是大量短 prompt+短响应 + 工具调用 + 顺序分支逻辑（正是 CPU 指令延迟的强项），Georgia Tech+Intel 实测确认 agentic 负载 CPU 参与度大增，Intel DC/AI 营收 +22%、Arm 预测传统 AI 数据中心需约 3000 万 CPU。",
+    "第二个驱动是小型本地模型：SLM（SmolLM2、Qwen2.5-VL）成熟 + 领域数据 100× 省算力，边缘部署（延迟/隐私/成本/离线）把推理推向终端 CPU。行业已经在动：OpenAI-AWS $38B/7 年、Arm AGI CPU、NVIDIA Vera Rubin NVL72（72 GPU+36 CPU、约 1.8× agentic 性能）、Morgan Stanley 估 $32.5-60B 增量。技术上 vLLM CPU 后端已把 continuous batching/PagedAttention/prefix caching/chunked prefill/tensor parallel 都给了 CPU，API 跨后端一致。结论不是「GPU 完了」而是「GPU 不再垄断推理」——对做部署规划的人，这篇是「agentic 时代 CPU 该在栈里占什么位」的好参考。"
+  ],
+  "reference_url": "https://www.redhat.com/en/blog/cpu-back-rethinking-cpu-gpu-split-llm-inference"
+}
+
+with open("article_data.json", "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=1)
+print("✅ 写入 article_data.json")

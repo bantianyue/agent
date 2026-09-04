@@ -1,0 +1,178 @@
+{
+  "title": "Accelerate ND-Parallel：多 GPU 高效训练的并行策略指南",
+  "lead": [
+    "跨多 GPU 训练大模型因不同并行策略的复杂性而有挑战。在 Accelerate 中，与 Axolotl 合作，我们集成了在训练脚本中使用任意并行策略组合的快捷方式！",
+    "以下是如何加入训练脚本："
+  ],
+  "summary": [
+    {
+      "key": "四种基础策略",
+      "body": "DP（复制+切数据、同步梯度）；FSDP（ZeRO-3 分片权重/梯度/优化器状态、逐层 gather 通信换内存）；TP（线性层列/行切分、单 all-reduce、只限节点内）；CP（序列维分片 + RingAttention 循环传 K/V）。"
+    },
+    {
+      "key": "ND 组合",
+      "body": "多节点当二维拓扑（节点内快轴+节点间慢轴）：HSDP（节点内 FSDP+节点间 DP）、FSDP+TP（延迟/batch 各降 8×）、HSDP+TP（3D 层级最灵活）。"
+    },
+    {
+      "key": "工程要点",
+      "body": "有效 batch = micro_batch×grad_accum×dp_world_size；引入 DP 要缩放学习率；内存受限加 grad_accum 而非 micro_batch；gradient checkpointing 时间+20-30% 换激活-60-80%；TP 不支持 PCIe、FSDP 避免超整节点。"
+    }
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "快速上手：ParallelismConfig",
+      "paras": [
+        "以下代码演示如何在 Accelerate 中配置并行策略组合：",
+        "__CODE__python::from transformers import AutoModelForCausalLM\nfrom accelerate import Accelerator\nfrom accelerate.parallelism_config import ParallelismConfig\nfrom accelerate.utils import FullyShardedDataParallelPlugin\n\n# configure your desired parallelisms here - this particular configuration requires at least 2 nodes with 8 GPUs each. \n# setting any parallelism degree to 1 disables it i.e. dp_replicate_size=1 disables DP.\npc = ParallelismConfig(\n    dp_shard_size=2, # Fully Sharded Data Parallel degree\n    dp_replicate_size=2, # Data Parallel degree\n    cp_size=2, # Context Parallel degree\n    tp_size=2, # Tensor Parallel degree\n)\n\nfsdp_plugin = FullyShardedDataParallelPlugin(\n    fsdp_version=2,\n    auto_wrap_policy=\"transformer_based_wrap\",\n    transformer_cls_names_to_wrap=[\"LlamaDecoderLayer\"],\n    state_dict_type=\"SHARDED_STATE_DICT\",\n)\n\naccelerator = Accelerator(\n    parallelism_config=pc,\n    fsdp_plugin=fsdp_plugin\n)\n\nmodel = AutoModelForCausalLM.from_pretrained(\n    \"NousResearch/Hermes-3-Llama-3.1-8B\", \n    device_mesh=accelerator.torch_device_mesh\n)\n\nmodel = accelerator.prepare(model)\n",
+        "__CODE__bash::# note: this requires a minimum world size of 16 \naxolotl train examples/distributed-parallel/llama-3_1-8b-hsdp-tp.yaml\n",
+        "__CODE__yaml::# Fully Sharded Data Parallel degree (note: also requires the fsdp_config field) \n# see https://docs.axolotl.ai/docs/multi-gpu.html#sec-fsdp for more details\ndp_shard_size: 2\n# Data Parallel degree\ndp_replicate_size: 2\n# Context Parallel Degree\ncontext_parallel_size: 2\n# Tensor Parallel Degree\ntensor_parallel_size: 2\n"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "Data Parallelism（DP）",
+      "paras": [
+        "数据并行（DP）是多 GPU 训练最常用的技术：跨每设备复制模型、梯度和优化器状态，同时把数据 batch 均匀分布到 GPU 之间，更新参数前跨设备同步梯度。相比单设备训练显著提高吞吐，但要求模型能装进单设备。",
+        "我们用 Accelerate ParallelismConfig 的 dp_replicate_size 参数（或 Axolotl 配置字段）控制模型副本数。注意 DP 是*最顶层*并行策略：用 dp_replicate_size=2 并与其他策略组合时会有 2 个模型副本、每个也受其他策略影响。例如 dp_replicate_size=2 且 tp_size=2，则有 2 个模型副本、每个有 2 个 tensor parallel shards。",
+        "> 我们用 *shard* 表示单设备上是更大数据分区的数据。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig01.png",
+            "caption": "图 1：Data Parallel——复制整个模型、把数据均匀切成子 batch 分给每设备（源：Martynas Šubonis）。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Fully Sharded Data Parallelism（FSDP）",
+      "paras": [
+        "模型大到单设备装不下怎么办？完全分片数据并行（FSDP）把模型权重、梯度、优化器状态跨 GPU 分片（灵感来自 DeepSpeed 的 ZeRO-3）解决，同时每设备仍收全 batch 的对应部分。如右图，不是每设备要整个模型副本，而是在前向前只 gather 单层的权重，之后权重可再分片。",
+        "这样用通信开销换内存：前向/后向 gather 分片参数、reduce-scatter 本地梯度。FSDP 里可调 gather 粒度控制权衡。极端情况每层 gather/reshard 峰内存最低但通信最高；实践中常用一次 gather 整个 transformer decoder block。",
+        "还可进一步做内存-计算权衡、把参数和梯度 offload 到 CPU 训更大模型，但那可能慢得离谱。我们考虑如何有效利用更多设备训更大模型同时保持高数据吞吐。",
+        "用 *node* 指单台机器（最多 8 GPU）、GPU 间有 NVLink 等快速节点内通信。多节点训练依赖相对慢的节点间通道（如 Infiniband）。process pool 设备总数称 world size——8 GPU 单节点 world size 8、4 节点 32。",
+        "多节点 FSDP 时把跨节点整个设备集当作单节点训练。例如 4 节点×8 GPU 在 32 设备上分片，用 inter-and-intra-node 通信后端做 all-reduce/reduce-scatter。FSDP 单独可扩展到大量 GPU 配大 global batch 提数据吞吐。但某点后出现需与其他技术组合的挑战。我们通常避免 FSDP 超过整节点——通信开销太高，在 Hybrid Sharded Data Parallelism 一节讲怎么解决。",
+        "> 用 Accelerate ParallelismConfig 的 dp_shard_size 参数 + prepared FullyShardedDataParallelPlugin，或 Axolotl 的 dp_shard_size 字段设 FSDP 度。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig02.png",
+            "caption": "图 2：Fully Sharded Data Parallel——每设备只持每参数的分片，前向/后向前 gather（源：Martynas Šubonis）。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Tensor Parallelism（TP）",
+      "paras": [
+        "Tensor Parallel（TP）是一种模型并行：模型分片永久住在独立设备上，与数据并行相反，每设备收相同 batch。TP 把线性层计算分布到设备，每设备只算矩阵乘法的一部分。大线性层（如 transformer 的 feed-forward 层）效果最好，也可用于 attention 的 Q/K/V/O projections 几乎无额外通信。",
+        "最佳性能需特定方式分布连续层参数、最小化所需通信。处理线性层对时，第一层列式切分、后续层行式切分，只用一个 all-reduce 合并分片输出。",
+        "与 FSDP 的动态分片不同，TP 创建静态内存分区、内存降随 TP group 大小恒定缩放。这对超大模型关键——甚至单个 decoder 层在 FSDP all-gather 期间装不进内存（回忆 FSDP 常规是整 decoder 层一次 gather）。但 FSDP 跨节点相对线性扩展（到约 512 GPU），TP 只在单节点边界内有效——TP 计算中需频繁设备间激活同步，每设备只算部分输出、继续前向前需其他设备输出通信。多节点用 TP 需与其他技术组合、TP 只在单节点内。因大通信开销，TP 不推荐 PCIe 链接 GPU。",
+        "> Accelerate 里 TP size 用 ParallelismConfig 的 tp_size 配置，Axolotl 用 tensor_parallel_size 字段。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig03.png",
+            "caption": "图 3：Tensor Parallel——跨设备切分大线性层，第一层列式、后续行式，单个 AllReduce 合并分片输出。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Context Parallelism（CP）",
+      "paras": [
+        "最近 LLM 推理能力让序列长度暴涨——模型用越来越多 token 解复杂任务。微调实现这行为需训练超长序列（可达百万 token）。",
+        "Transformer attention 随上下文长度平方缩放，单 GPU 不可能。例如微调 Mistral-7B（32 attention heads）序列长 128k，单 attention 矩阵 128k×128k×2 bytes×32 heads = 约 32GB×32 = 约 1TB 激活内存！这例子用 FlashAttention 等优化实现不现实，但展示上下文长度增长的内存需求。",
+        "Context parallelism（CP）沿序列维分片输入，每设备只处理全上下文的 chunk、算完整巨大 attention 矩阵的小部分。回忆 attention 计算：Attention(Q,K,V) = softmax(QK^T)V，Q/K/V 分别是 query/key/value 矩阵。Q 的每个 query 向量（row 或输入 embedding）必须对 K 的*每个* key 向量算 attention score 才能正确 softmax 归一化；这些 score 再与 V 的*所有* value 向量加权。",
+        "关键细节：Q 每行可独立算 attention score，但每个 query 向量仍需完整 K 和 V 矩阵。给定输入序列长 n，Attention(Q,K,V)_i = softmax(Q_i K^T)V，∀i∈{1,2,...,n}。",
+        "跨设备分片输入时，从这些输入分片算出的 Q/K/V 矩阵也沿序列维自动分片——每 GPU 只算其序列部分的 queries/keys/values。例如 world size W、序列长 n：GPU 0 算 Q_{1:n/W}、K_{1:n/W}、V_{1:n/W}；GPU 1 算 Q_{n/W+1:2n/W} 等。",
+        "怎么保证 attention 算对？每设备只需自己 Q 分片、但需完整 K/V 矩阵。用 **RingAttention**：1) 初始每 GPU 持自己 Q/K/V 分片；2) 每 GPU 为自己 Q_i 分片和本地 K_j/V_j 分片算部分 attention 矩阵 A_{i,j}；3) 每 GPU 把 K/V 分片发给环上下一 GPU；4) 从上一 GPU 收不同 K/V 分片；5) 用收到的 K/V 分片算额外部分矩阵 A_{i,j+1} 等；6) 重复直到收到所有 K/V 分片、算完全部部分矩阵。",
+        "Accelerate 用 accelerator.maybe_context_parallel 装饰器启用（也展示在示例脚本）。",
+        "> 类似 TP，Accelerate 里 CP size 用 cp_size 配置，Axolotl 用 context_parallel_size 字段。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig04.png",
+            "caption": "图 4：Context Parallel——跨 GPU 沿序列维分片输入，RingAttention 循环传 K/V 分片。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "ND Parallelisms：为什么需要组合",
+      "paras": [
+        "多节点设置里 FSDP 等数据并行把整个网络拓扑当作单维存在。你会因多种原因觉得受限：",
+        "扩展到更多节点时 FSDP 的 collective 操作被节点间延迟瓶颈，训练慢得不可行；巨大模型的 decoder 层可能装不进 GPU 内存、甚至分片状态也太大无法前向；可能无法达成理想 batch size——要么太大纯数据并行处理低效，要么因模型大小内存约束太小。",
+        "为解决这些问题，把多节点集群视为二维拓扑：一个轴是设备间快速节点内通信、另一轴是相对慢的节点间通信。考虑如何组合已介绍的并行技术利用它。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "Hybrid Sharded Data Parallelism（HSDP）",
+      "paras": [
+        "Hybrid Sharded Data Parallelism（HSDP）是 2D 并行：节点内 FSDP、节点间 DP——模型跨每节点复制、节点内 FSDP 分片。这让 FSDP 较大的通信开销利用更快节点内链路，DP 把较慢节点间通信开销减到单次梯度同步。若面对问题 1（跨节点 FSDP 慢）想加速训练可考虑，代价是内存增加。",
+        "重要：可自由配置 2D 网络拓扑形状，不受限于维度与物理节点边界对齐——可在 2 个节点上做 FSDP 同时按 2 节点组复制，内存更低但吞吐更慢，仍把节点内 FSDP 通信开销减半。这是建议按硬件和微调需求调的旋钮。",
+        "> 在 Accelerate ParallelismConfig 或 Axolotl 同时定义 dp_shard_size 和 dp_replicate_size 启用 HSDP。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig05.png",
+            "caption": "图 5：Hybrid Sharded Data Parallel——每 replica 组内 FSDP、跨 replica 组 AllReduce 同步梯度，组合 FSDP 内存效率和 DP 跨节点通信效率。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "组合：FSDP+TP、FSDP+CP、HSDP+TP",
+      "paras": [
+        "**FSDP + TP。**TP 应在节点内用高带宽节点内通信，所以组合 TP 和 FSDP 是跨节点用 FSDP 分片模型、节点内用 TP。一定程度上漂亮解决上面三个问题：FSDP 的延迟成本降 8 倍、单设备装不下的大层均匀分布到设备、每 TP group 收相同 batch 故 global batch 也可降 8 倍。但若仍不够，无法跨节点增 TP size，须考虑替代。",
+        "**FSDP + CP。**这是组合 FSDP 和 CP 的 2D 并行，虽不常用（CP 已与 FSDP 组合），某些情况有用——需要大序列长、因而大 cp_size 时。若仍装不进内存预算，可之上叠加 FSDP 进一步降内存。",
+        "**HSDP + TP。**world size 足够大时（注意 3D 并行最小 world size 8，更大规模最有效），可组合 HSDP 与 TP 建层级：DP 先跨节点组复制模型、FSDP 组内分片、TP 节点内切分单层。面对上述全部扩展约束时可考虑——通过内存/吞吐权衡提供最大灵活性适配具体训练设置。",
+        "**Usage notes。**还有未覆盖的组合方式，如 HSDP+TP+CP 的 4D 并行，但运作与已覆盖技术非常类似。最鼓励你尝试不同技术和配置——这是获得内存/吞吐权衡直觉的最佳方式。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "使用提示：加载、Batch、学习率、Checkpointing",
+      "paras": [
+        "**大模型加载与 checkpoint。**FSDP 处理单设备装不下的模型时，启用 CPU RAM 高效加载和分片 state dict checkpointing 至关重要。经 FullyShardedDataParallelPlugin 的 cpu_ram_efficient_loading 和 state_dict_type 参数启用：",
+        "__CODE__python::fsdp2_plugin = FullyShardedDataParallelPlugin(\n    fsdp_version=2,\n    auto_wrap_policy=\"transformer_based_wrap\",\n    transformer_cls_names_to_wrap=[\"LlamaDecoderLayer\"],\n    state_dict_type=\"SHARDED_STATE_DICT\", \n    cpu_ram_efficient_loading=True\n)\n",
+        "__CODE__yaml::fsdp_version: 2\nfsdp_config:\n  auto_wrap_policy: TRANSFORMER_BASED_WRAP\n  transformer_layer_cls_to_wrap: LlamaDecoderLayer\n  state_dict_type: SHARDED_STATE_DICT\n  cpu_ram_efficient_loading: True\n"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "Batch 大小、学习率缩放与 Gradient Checkpointing",
+      "paras": [
+        "**Batch 大小。**训练总 batch size 对训练稳定、内存使用、数据吞吐重要。用 DP/FSDP 时有效 batch size：effective_batch_size = micro_batch_size × gradient_accumulation_steps × dp_world_size，其中 dp_world_size = (dp_shard_size × dp_replicate_size)/tp_size。",
+        "可经增加 total micro batch size 或 gradient accumulation steps、或增加 dp_world_size（加 GPU）增 batch。这强加 *最小* 总 batch size = dp_world_size——纯 DP/FSDP 时即总 world size，太高时唯一降总 batch 的方法是引入 tensor parallelism。固定 GPU 数、内存受限时，建议增加 gradient_accumulation_steps 而非 micro_batch_size 达更大有效 batch，反之亦然。",
+        "**学习率缩放。**有效 batch 因数据并行增大时应缩放学习率维持稳定。常用线性缩放 scaled_lr = base_lr × (effective_batch_size / base_batch_size) 或平方根缩放 scaled_lr = base_lr × sqrt(effective_batch_size / base_batch_size)。",
+        "**Gradient checkpointing。**内存约束即使并行策略也持续时，gradient checkpointing 用计算换内存提供额外节省。前向只保留部分激活（通常在 transformer block 边界）、反向重算中间激活。与上述所有并行策略无缝工作。Accelerate 里经 FullyShardedDataParallelPlugin 设 activation_checkpointing=true 启用：",
+        "注意 gradient checkpointing 通常训练时间 +20-30%（激活重算），但激活内存 -60-80%，训练超大模型或长序列时特别有价值。",
+        "__CODE__python::fsdp2_plugin = FullyShardedDataParallelPlugin(\n    fsdp_version=2,\n    auto_wrap_policy=\"transformer_based_wrap\",\n    transformer_cls_names_to_wrap=[\"LlamaDecoderLayer\"],\n    state_dict_type=\"SHARDED_STATE_DICT\", \n    cpu_ram_efficient_loading=True,\n    activation_checkpointing=True\n)\n",
+        "__CODE__yaml::fsdp_version: 2\nfsdp_config:\n  auto_wrap_policy: TRANSFORMER_BASED_WRAP\n  transformer_layer_cls_to_wrap: LlamaDecoderLayer\n  state_dict_type: SHARDED_STATE_DICT\n  cpu_ram_efficient_loading: True\n  activation_checkpointing: True\n"
+      ],
+      "fig_after": {}
+    }
+  ],
+  "conclusion": [
+    "HuggingFace Accelerate（与 Axolotl 合作）这篇是 N-D 并行的清晰入门：从四种基础策略到二维组合，核心是把多节点集群看成**二维拓扑**（节点内快轴+节点间慢轴）让每种策略走对轴。要点：FSDP 动态分片通信换内存（避免超整节点）、TP 静态分区限单节点、CP 用 RingAttention 处理百万 token、3D 层级 HSDP+TP 最灵活、dp_world_size 公式（作者确认不除 tp_size 是旧版 bug）。",
+    "7 段代码全部原样保留（ParallelismConfig、Axolotl 配置、fsdp2_plugin）。自己写多 GPU 训练脚本的人可把这个当 Accelerate + Axolotl ND 并行接口的参考。"
+  ],
+  "reference_url": "https://huggingface.co/blog/accelerate-nd-parallel"
+}

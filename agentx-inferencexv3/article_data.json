@@ -1,0 +1,436 @@
+{
+  "title": "AgentX 与 InferenceX v3：CUDA 护城河在 Agentic 推理里还成立吗",
+  "lead": [
+    "自 2025 年 11 月 Claude Code 拐点以来，长上下文多轮 agentic 工作负载快速增长，现在主导生产推理流量。2026 年 4 月 OpenAI 的 Enterprise agentic 支出超过 ChatGPT 支出。",
+    "Agentic 工作流已决定性接过接力棒。**今天，我们发布 AgentX 1.0——世界上第一个 Apache 2.0 的全开源、百万上下文的轮式 agentic 编码推理基准**。完整 dashboard 在 inferencex.semianalysis.com。",
+    "过去大多数测量基于固定序列长度 prefill/decode 负载，这是不准确的测量方式。现实是多轮、长上下文、高 prefill 复用、subagent 突发、KV cache offload、大量 tool calls。我们旨在构建行业测量 AI 硬件和软件性能的正确方式。",
+    "**我们花了超过 $3M 构建这个数据集，今天全部开源**。"
+  ],
+  "summary": [
+    {
+      "key": "AgentX 1.0",
+      "body": "开源多轮 agentic 编码基准（1M 上下文，Apache 2.0）：在约 2MW 持续算力、1000+ 芯片上跑（MI355X、GB300/GB200 NVL72、B300/B200、MI325、MI300X、H200、RTX Pro）。用 393 个匿名 Claude Code 会话轨迹重放（8,000+ 会话、3.4M 请求、610B token、$3M 花费）。NVIDIA 和 AMD 在 agentic 负载都表现好。已驱动 70+ 上游 PR 优化 vLLM/SGLang/TRT-LLM/ATOM/AITER/Dynamo/LMCache/Mooncake。"
+    },
+    {
+      "key": "关键结果",
+      "body": "DeepSeek V4 Pro（1.6T/49B active）：ISL p50=88k/p99=675k。MI355X 开源 vLLM 落后 ATOM；B300 vLLM/B200 SGLang 仍超 MI355X；8/21 后 vLLM 优化让 B200 perf/$ 超 MI355X。Kimi K3：MI355X 部分曲线段 ATOM 超 GB300 vLLM。MiniMax M3：NVIDIA 完胜（AMD 软件在长上下文差）。Qwen3.5 397B：NVIDIA SGLang 比 AMD 好 20×+。GLM 5.3：150 tok/s 时 NVIDIA 成本效率好 5×。"
+    },
+    {
+      "key": "CUDA 护城河",
+      "body": "DCP/PCP 是 CUDA 护城河一部分——AMD 的 DCP/PCP 实现未优化，vLLM 支持矩阵里每个 AMD backend 都不支持。ATOM 引擎原本只支持单轮、需大重构支持 agentic；AMD 的 hipMemcpyBatchAsync API 缺失到 ROCm 7.14 才有，导致 CPU KV offload 低效。大量开源优化（best-effort merging、rollout 级统计、KV offload 修复、routing affinity、incremental tokenization）都因 AgentX 现实负载而落地。"
+    }
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "Agentic 工作负载概览",
+      "paras": [
+        "高层看，agentic 工作负载由四要素刻画：",
+        "**1. 多轮**：一个会话含大量（几十到几百次）用户/助手交互，对比聊天场景的少数几次。**2. 长上下文**：system prompts、tool definitions、大量轮次让上下文快速累积。**3. 高前缀复用**：对话线性推进（第 n-1 轮输出拼到第 n 轮），大部分上下文可从 KV cache 服务而非重算（取决于存 KV tensor 的存储量）。n 增长时缓存输入对未缓存的比率趋向 1。**4. Sub-agent 突发**：会话启动多个短命 subagent、带新鲜上下文，制造突发 KV cache 模式。",
+        "考虑到这些特征，基准这些工作负载与现有固定序列长度基准根本不同。Agentic 推理本质是 *系统问题*。因极高前缀复用，KV tensor 必须跨节点/rank 高效传输（NIXL、MoRI-IO、Mooncake）。不同对话应路由到不同节点/rank，取决于合适前缀驻留何处以最大化 cache hit rate（llm-d、Dynamo、vLLM/SGLang router）。长上下文对话压 HBM 容量装 KV cache，需把 KV tensor offload 到不同内存层级（DRAM、SSD），该过程要高效执行（Mooncake Store、LMCache、vLLM Simple Offloading、SGLang HiCache）。",
+        "这对比固定序列长度单轮负载：前缀复用不相关，推理性能大致反映 baseline chip/kernel 性能。这不是说 InferenceX 上大量固定序列数据不重要——剥离 agentic serving 复杂性清楚显示低层推理性能优化如何推进，也为 AgentX 结果提供重要 baseline。",
+        "为使 AgentX 负载尽可能现实，我们收集 393 个内部 SemiAnalysis 匿名 Claude Code 轨迹初始语料重放。用类似 Qwen-Bailian 数据集的方法匿名化内容同时保留原前缀复用模式。用 AIPerf 按原请求调度在变化并发级别重建轨迹。我们与 Anthropic 合作发两个 Claude Code 特性让 AgentX 数据集成为可能。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig01.png",
+            "caption": "图 1：AgentX 1.0——世界首个全开源百万上下文多轮 agentic 编码推理基准。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Agentic 编码推理性能：总览与关键指标",
+      "paras": [
+        "看推理编码性能时，OpenAI、Anthropic、xAI 等前沿实验室关注三件事：每美元性能 vs 交互性（TPOT）、TTFT（首 token 时间）、端到端任务完成。每兆瓦性能也重要——地面数据中心电力是关键约束。",
+        "一般**既看每用户每秒 token（TPS，aka 交互性）也看 TTFT**，因为两者常互为代价。例如一些 SKU 在不错交互性下达成很高吞吐，但 TTFT 严重劣化。「可接受」的 p90 TTFT 因应用而异。多数服务 agentic 负载的生产系统 p90 TTFT 在 200-5,000ms。超 5-10s 就推离「在线推理」边界。超高吞吐曲线段仍有实用应用（batch 处理、*非常长*运行 agent），那里延迟无所谓、峰值系统利用可取。",
+        "单节点看，MI355X 开源性能（vLLM）落后厂商特定 ATOM（AMD 版 TensorRT-LLM）。AMD 用 ATOM 快速推前沿很好，但我们鼓励他们把改进更高优先级 upstream 进 vLLM。",
+        "AMD 分布式推理（DI）团队过去半年在 8k1k 场景进步大，但离现实负载可用仍有路。吞吐每 GPU vs 交互性看，1×DEP8+1×DEP8 disagg 配置只在高峰吞吐场景实现微小增益，低延迟场景反而更差。更糟的是中高交互性配置的吞吐增益被 p90 TTFT 显著尖峰盖过——部分因 SGLang 的 --enable-prefill-delayer 参数（并发超 64 后推迟 prefill 准入让 DP rank 组更满 batch，最多 30 个前向），且这些点把 chunked prefill 大小从 8,192 增到 65,536。",
+        "e2e 延迟上 ATOM MI355X 超 B200 vLLM（但不超 B300 或 B200 SGLang）。问题是最多中国/西方 AI 实验室不想生产用 ATOM（除阿里一个小广告业务单元），缺大量特性。阿里主 Qwen LLM org 生产不用 ATOM。",
+        "2026-08-21 前，AMD MI355X 的强 SGLang 团队在 e2e perf/$ 匹配 B200 vLLM。但 B300 vLLM 和 B200 SGLang 仍超 MI355X。8/21 后因 Inferact 和 NVIDIA 的 vLLM 优化，B200 的 perf/$ 超 MI355X。这是接近的竞赛，未来几周优化值得期待。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig02.png",
+            "caption": "图 2：AgentX 发布与结果（DeepSeek V4 Pro 各 SKU 每 TCO 最佳性能）。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "DeepSeek V4 Pro 0813",
+      "paras": [
+        "DeepSeek V4 Pro 0813 是来自中国的超流行前沿开源权重模型，约 1.6 万亿参数、490 亿活跃参数。",
+        "截至 8 月 21 日，下图显示所有提交按每 SKU 的最佳性能，按总拥有成本（TCO）归一化。",
+        "所有 DeepSeek v4 运行中所有请求的 ISL/OSL 分布：ISL p50=88k、p90=272k、p95=404k、p99=675k；OSL p50=413、p90=2.2k、p95=3.7k、p99=8.6k。",
+        "NVIDIA 侧最有竞争力的是 GB300 Dynamo TRTLLM 和 GB200 Dynamo vLLM。两配置都靠 PD disagg 在合理交互性达成高吞吐。GB300 配置还用 wide-EP（DEP32）decode 实例在曲线中部达更高吞吐。",
+        "2×DEP8+1×DEP12 GB200 点相对 3×DEP8+1×DEP16 GB300 点在 TPS 上比 TTFT 更接近。TTFT 一般对工作负载「尖峰性」更敏感——GB300 点达成更高总并发、更多 subagent 流量、更多冷 prefill。",
+        "按 TCO 归一化，B300 vLLM vs B200 vLLM 聚合性能相当接近。主要区别是 B300 因 HBM 容量比 B200 多 50% 可「挤」出额外吞吐。",
+        "384 并发 agentic 轨迹负载下，B300 vLLM DEP8 w/ 3TB DRAM（vLLM simple offloading）达 91% HBM cache hit rate + 1.36% DRAM cache hit rate。因为该配置 HBM KV cache 工作集约 43M token，负载几乎不超这数。",
+        "B200 并发 196（其余参数相同）只见 73% HBM cache hit rate、更依赖 DRAM（offload cache hit rate 近 20%）。其 HBM KV cache 工作集 22M token，约 B300 一半。",
+        "DRAM KV offloading 通常实现为 write-through cache（每前缀写 HBM cache 也写 DRAM cache），所以 DRAM 可用量显著大于 HBM KV cache 容量（1.5-3 倍）时最有效。",
+        "H200 SGLang FP8 低并发能服务 DeepSeek v4，perf/$ 上甚至与 B200/MI355X SGLang 竞争。但高吞吐场景因缺 HBM 无法与新 SKU 竞争，高并发依赖 DRAM KV offloading 会导致用户增长时延迟不合理。",
+        "总体 MI355X 相对主要对手 B200/B300 表现尚可。曲线低吞吐/低延迟段（只用 tensor parallelism 和更初级 kernel）性能最可比。AMD 需优化 MI355X 的 DEP kernels 才能在高吞吐场景更有竞争力，尤其考虑其 HBM 比 B200 多 1.5×。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig03.png",
+            "caption": "图 3：DeepSeek V4 Pro——各 SKU 每 TCO 归一化最佳性能（TPS vs TTFT 权衡）。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig04.png",
+            "caption": "图 4：GB300 vs GB200——TTFT 对 subagent 流量/冷 prefill 更敏感。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Kimi K3 2.8T",
+      "paras": [
+        "Kimi K3 是另一中国前沿开源权重模型，2.8 万亿总参数，与 Claude 的 Mythos/Fable5 架构同级参数（作开源权重代理）。Kimi K3 大到单台 B200 server 都装不下，须用 wide EP/wide TP 或 pipeline parallelism 装全部权重。",
+        "vLLM 上 speculation decoding/DSpark 直到最近才与 pipeline parallelism 组合，所以 B200 在 Kimi K3 上性能惨、被 MI355X 压制（B200 无法对 pipeline parallelism 用 spec decode）。",
+        "MI355X vLLM 短上下文单轮负载 day-0 开箱即用，但长上下文多轮负载第一周 MI355X AITER 和 Triton kernels 剧烈 panic，upstream vLLM 在现实负载对 MI355X 完全不可用。",
+        "Hopper 难服务 AgentX Kimi K3 负载——Kimi 巨型模型、vLLM maintainers/NVIDIA 没聚焦优化 Hopper for K3。Hopper（SM90）需为 K3 定制 tuned kernels 加 TP32/EP32 tuned shapes 才能高交互性服务。",
+        "AMD 快速推 K3 性能很好（ATOM），但鼓励进一步优先 upstream 到 vLLM——ATOM 是 AMD 最强引擎，但 vLLM 仍是客户用 upstream 开源 serving 栈的更相关对比。",
+        "曲线 40-60 秒 e2e 延迟段，MI355X ATOM 在 perf/$ 上甚至超 GB300 NVL72 vLLM。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig05.png",
+            "caption": "图 5：Kimi K3——MI355X ATOM 在部分 e2e 段 perf/$ 超 GB300 vLLM。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "MiniMax M3 与 Qwen3.5 397B",
+      "paras": [
+        "**MiniMax M3 432B**：NVIDIA 完胜所有对手。AMD 软件在 MiniMax 上表现糟糕，尤其在长上下文——因 AMD 工程领导激励只调短上下文单轮负载、忽视长上下文多轮。",
+        "B300 TRT-LLM TP2 拿下 M3 皇冠。缺 DP-attention 点（M3 上非最优，KV cache locality 成 routing 约束）。GB200 并发 40 时 TP4/EP4/DPA 只达普通 TP4 的 0.60× 吞吐、p90 TTFT 3×+。并发 32 时 cache 命中 28.8% vs 96.0% 理论——每 DP rank 私有 pool 的 1/4，300k-token 会话重落到错误 rank 全重算。",
+        "B200/B300 在 TCO 归一化吞吐上完全超 rack-scale 对应物。AgentX 上 rack-scale 优势不明显——Dynamo router 可能成瓶颈（其工作量随活跃前缀数量和长度缩放）。无 well-tuned 的 wideEP/wide DCP/wide TP kernels；GB200/300 TCO 更高、无 wide ep/wide DCP 就以更差 perf per TCO 显现。",
+        "无提交跑 context parallelism，尽管 p90 ISL 317k。4 KV heads 下 DCP 即使 TP8 也封顶 2，MSA indexer 需自己的 context-parallel 处理。",
+        "NVIDIA 全部 Pareto 最优点在并发 20 以上都用 KV offload；AMD 无 Pareto 点用 DRAM KV offload、其他模型也少用。原因是 AMD vLLM 的 GPU-to-CPU 传输极低效：hipMemcpyBatchAsync API 到 ROCm 7.14 才存在，没有它 vLLM 原生 Simple CPUOffloading 需串行 Memcpy 而非批量更大消息。",
+        "vLLM 吞吐 vs p90 交互性上与 TRT-LLM 很接近；吞吐 vs p90 TTFT 上 vLLM 更好。",
+        "**Qwen3.5 397B**：用 GatedDeltaNet（每几层替代普通 attention）。GatedDeltaNet 由 MIT/NVIDIA Research 发明，理论上恒定状态存储 vs 普通 attention 的线性存储。",
+        "模型原生最大上下文 262k，我们用截断数据集（模拟用户在更小模型频繁到达 max context 的场景）。",
+        "Qwen3.5 397B 是 NVIDIA 在 SGLang-vs-SGLang 的强势堡垒，90 tok/s/user 时性能好 20×+。AMD 对 Qwen3.5 SGLang 零竞争。NVIDIA 过度优化交互性牺牲 TTFT（TRT-LLM 最明显）——所有 NVIDIA SGLang 提交的 p90 TTFT 都远低于 TRT-LLM。",
+        "相对 H100，Qwen3.5 上 B300 FP4 每美元性能好 12×。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig06.png",
+            "caption": "图 6：MiniMax M3——NVIDIA 完胜（TTFT 对比）。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig07.png",
+            "caption": "图 7：Qwen3.5 397B——NVIDIA SGLang vs AMD SGLang（20×+ 差距）。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "GLM 5.3 与 E2E Normalized Interactivity",
+      "paras": [
+        "GLM 5.3 在 GLM5.2 744B 基础上加 post training，是前沿级模型。",
+        "OSS SGLang 性能上，这又是 NVIDIA 在现实 agentic 推理超 AMD 的模型。150 tok/s/user p90 交互性时 NVIDIA 成本效率好到 5×。以 AMD 当前软件状态，即使对手芯片硬件白送（但提供商仍付数据中心托管、电力、运营成本），NVIDIA 的 per-token 成本仍更便宜。",
+        "ATOM 上 AMD perf/$ 比 GB300 NVL72 SGLang 甚至部分范围的 TRTLLM 更好。AMD 团队干得好；期待把优化移植到 SGLang。",
+        "我们引入实验指标 **E2E Normalized Interactivity**：评估用户考虑 TTFT 和 TPS 时体验到的响应速度。定义为 OSL/E2EL。代入 E2EL = TTFT + OSL×TPOT（实际只 decode OSL-1 个 token），得：这实际是交互性（1/TPOT 部分）加一个与 TTFT 成比例的额外惩罚。",
+        "该指标实验性、不完美：重度惩罚高 TTFT、不捕捉 PD 分离等优化的所有细微处。所有 AgentX v1.0 提交分别优化常规交互性和 TTFT。我们会继续开发反映现代 agentic 推理所有细微处的新 north star 指标。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig08.png",
+            "caption": "图 8：GLM 5.3——NVIDIA 在 agentic 推理成本效率领先。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "AgentX 行业影响：70+ 上游 PR",
+      "paras": [
+        "AgentX 首月最有价值的产出不是初始结果，而是基准已经在产生的**行业影响：70+ 上游 PR**——AgentX 伙伴用其作 north star 优化现实生产 agentic 负载（vLLM、SGLang、TensorRT-LLM、ATOM、AITER、Dynamo、LMCache、Mooncake）。多数优化可迁移到生产流量。",
+        "AgentX 的真实 agentic 流量不只基准原始 prefill/decode kernels，还测完整端到端 token 生成过程：KV cache 生命周期、hybrid-attention cache 正确性、CPU KV offload、transfer progress、routing affinity、incremental tokenization、request serialization、scheduler bookkeeping。",
+        "这也是我们持续使命的延续：帮生态加速改善、在软件上带来光速改进。典型例子是与 AMD 软件开发团队的多年合作，持续反馈输入帮其现代化软件开发原则。",
+        "**分布式推理生态简介。**Agentic 推理本质是系统级问题。大规模*分布式系统*处理数十万 agentic 请求时，请求调度和 KV cache 管理变得非平凡且有真实性能影响。例如 sub-agents 给突发 KV cache 模式，优化不当会错误逐出主 agent 的 cache。",
+        "栈顶层是 routers（frontends）把请求路由到不同 worker。跑 data parallel attention 时每 DP rank 有独立 KV cache；为不击穿任一 cache，请求按不同策略路由（如 consistent hash，同会话/subagent 请求按唯一 ID 路由）。",
+        "请求路由后由推理引擎（vLLM、SGLang 等）的 scheduler 处理。每引擎有接口连引擎内部 KV cache 到外部 KV cache managers——「pluggable」生态，不同 KV cache managers 集成多种引擎。",
+        "简单部署（当前 AgentX 结果用）在 vLLM 同节点跑 Mooncake：每 vLLM worker 嵌 Mooncake Store client、把部分 host DRAM 贡献给外部 KV-cache pool。Mooncake Store 管理外部 cache（placement/eviction），Mooncake Transfer Engine 实际移动 GPU-CPU 内存间数据。",
+        "生态由多独立组件组成：推理引擎、routers、KV-cache managers、数据传输库、cluster controllers。NVIDIA Dynamo、llm-d、AMD Infera 等平台把所选组件「打包」成完整软件分发，通常是一组协调容器而非单体服务。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig09.png",
+            "caption": "图 9：分布式推理生态——routers → 推理引擎 scheduler → KV cache managers/transfer engines 的分层栈。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Context Parallelism 与 CUDA 护城河",
+      "paras": [
+        "长上下文让固定 8k prompt 无法强锻炼的并行技术受益——8k 时几乎无可分、TTFT 已短。TP 和 DP attention 在长上下文非最优：TP 会让全 KV 复制到每 rank；DP attention 虽共享 KV，但长上下文工作负载的上下文长度方差更高，可能卡住。",
+        "**Context parallelism** 把 query tokens 跨 GPU 拆分，两种形式：**PCP**（prefill context parallelism）和 **DCP**（decode context parallelism）。PCP 每 rank prefill 自己的 query chunk（KV ring-passed）——prefill 倾向 compute-bound，并行化 FLOPs 让 prefill 更快、无单 rank 巨 prompt prefill 尖峰。DCP 每 rank 扫自己的 KV shard，部分 attention 以 flash-decode 风格合并——decode memory-BW-bound，并行 KV 读可更快 tok/s。",
+        "该并行技术部分由 NVIDIA Research 发明。**DCP/PCP 构成 CUDA 护城河的一部分——AMD 的 DCP/PCP 实现尚未优化**。vLLM 支持矩阵里每个 AMD backend 都不支持。",
+        "接下来的几节变更聚焦 DCP/PCP。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig10.png",
+            "caption": "图 10：Context parallelism（PCP/DCP）——query tokens 跨 GPU 拆分。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "vLLM Agentic 优化",
+      "paras": [
+        "与 Inferact、Red Hat、NVIDIA、AMD 的 vLLM maintainers 合作，用 AgentX 现实 replayer 作 north star，修复大多 upstream 落地且高度可迁移到生产。几个例子：",
+        "vLLM 改进 hybrid-attention prefix caching，短命 sliding-window 分配不逐出有用长上下文 checkpoint。Selective retention 保留稀疏 replay 边界，14 并发请求、百万 token 上下文时前缀 cache hit rate 超 95%。同一 reachability 策略应用到 Mooncake，移除 unreachable sliding-window lookups。",
+        "高并发 agents 需 offloading。AgentX 影响下已有 vLLM 工作流让 hybrid 模型而非仅 uniform full-attention 模型支持 CPU KV offload。区别重要：uniform 模型每 token 一个 KV layout，connector 用单 block geometry 描述；hybrid 模型同时带多个 cache group、形状和 lifetime 各异。SimpleCPU connector 先来，ROCm 启用，再扩展到 DeepSeek-V4 hybrid attention——报告输出吞吐高 81.7%、mean e2e 延迟低 46.6%（对比前缀不再装 HBM 时重算）。",
+        "Mooncake 也获等效 hybrid-memory allocation 支持。同一 layout 问题在分离 serving 重现：pending change 把 Kimi-K3 的 conv+ssm recurrent state 随 attention KV 经 MoRI-IO 传输（1P1D prefill/decode split）；没有它 decode 侧从未初始化 recurrent state 开始。",
+        "profiling 现实负载时 vLLM maintainers 注意 offload 期间成本移到 store path（写太多太频繁）。三个新修复：store 在相同传输已在途时跳过（并发会话共享前缀只付一次）；store 只覆盖新生成 KV 范围（扩展历史的会话写 delta 而非每轮重写全前缀）；store 不再依赖相同 block 是否仍在 HBM（已调度工作不被底层逐出丢弃）。",
+        "load path 单独调：lookup 每次调度决策都发生而非仅数据实际移动时。scheduler 路径异步化 lookup（step 不阻塞 CPU 侧 cache 查询）；compact zero-copy lookup keys、parallel receive-side loading、prebuilt Mooncake key strings 移除剩余 CPU/传输开销。",
+        "长命 hybrid state 也迫使 fixed-shape 请求极少触达的正确性/记账修复：vLLM 每 hybrid cache group 发 cache events、distributed-context stores 正确 stride、distributed context/prefill 下正确算 lookup prefixes、context-parallel accounting 对齐 cache ownership 与 sharded token ranges。Speculative state 跨 merged Mooncake groups 和 SimpleCPU coordinator 传播，防重复轮 cache 静默丢 EAGLE state。",
+        "ROCm 侧优化继续在 cache 层之下——剩余成本是 per-layer 而非 per-request。前缀存活并按时到达后，剩 decode 步本身，session 每轮跑数千次、每次可避免的 copy 和错配 kernel 都付代价。三个开放变更攻击该层：Kimi-K3 把 KDA decode 结果直接写层输出 buffer（移除每 KDA 层一个 device copy）；选 AITER sparse-MLA decode kernel 替代 generic path（报告 AgentX 输出吞吐高 5.22%、inter-token 延迟显著降）；full-graph attention projections 走 tuned AITER GEMMs（固定序列低并发 2.3% 增益——显示 kernel 级变更在 uniform shapes 干净增益、被 agentic trace 的 cache/scheduling 方差淹没）。pending change 把形状敏感本身做成 dispatch 判据：gfx950 上 DeepSeek V4 C4A selector 用 hybrid AITER/native path，短中上下文走 AITER、长上下文走 graph-safe tuned native fallback，报告端到端 selector 加速 1.21-1.76×、decode-kernel geomean 1.2-2.9×（84-shape matrix）。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig11.png",
+            "caption": "图 11：vLLM agentic 优化——KV cache 生命周期修复（selective retention、hybrid offload）。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "SGLang Agentic 优化",
+      "paras": [
+        "AgentX 团队与 RadixArk、Meta、NVIDIA、AMD 的 SGLang maintainers 紧密合作驱动 agentic 优化。",
+        "从 allocator 侧，SGLang 的 sliding-window 工作处理 vLLM retention 政策解决的同一冲突：window pages 和 prefix pages 来自同一 pool，window 是更贪婪消费者——不断翻转而 prefix 静止，压力下瞬态分配挤掉持久分配。",
+        "三个设计改进从不同角度进攻：主动在 pages 离开 window 时释放（死 window state 不再抢它用不到的 pages）；caps compute locks 到单 window（bound 在途请求一次钉住多少 pool）；移除过期 full-KV entries。",
+        "主动释放有 fork 形盲点：从共享前缀分支的请求仍持有可复用 full-KV，而分支点 window state 已释放，整个前缀为缺便宜一半而重算。开放工作保留分支点 SWA state，让 fork 继承 window 而非重建。",
+        "ROCm ring-cache fix 是正确性而非容量变更：ring buffer 按构造复用 slot，复用仍被引用的旧内容产生错误输出。这些在单 8k prompt 全不可见；多轮 hybrid session 上它们决定昂贵 full-attention 历史下轮是否还在。",
+        "**HiCache** 是 SGLang 的一等公民 in-tree offloading 机制。它用不对称解决 hybrid 问题：offload full-attention cache、返回时重建短 sliding-window tail——只有昂贵一半值得跨 bus 移动，便宜一半重建比取回快。AMD 上 staged write-back 让移动不阻塞引擎。Recurrent state 是剩余缺口（无法像 window tail 从邻近 token 重建）；FlashInfer GDN checkpoints 让它参与前缀复用，吞吐 47,771→53,004 tok/s/GPU、92.4% cache hit rate。",
+        "两个进一步变更处理变长流量对 kernel pipeline 的影响。AgentX 现实 session 趋向连续变化上下文长度到达。naive 按长度特化 runtime 会对几乎每个请求编译新 kernel。SGLang 把上下文长度作为 runtime scalar 而非收进单次编译——AgentX 并发 384 输出吞吐 +26.75%、mean TTFT -36.25%，靠移除编译而非算得更快。同样精神，移除 per-step device-to-host sequence-length 同步，消除只因 host 想要 device 已有长度而存在的 decode bubble。",
+        "变长也咬 attention kernel 内部。GB300 上 mixed-context decode batch 付 tail tax：匹配 profile 把 9.8ms decode-step delta 的 8.4ms 归因 attention，最长请求拖长 persistent kernel 共享 wave。开放工作把 TRTLLM MHA decode batches 拆成 KV-length-sorted groups，短请求不再等最长。",
+        "Decode 也可能在上一级饥饿——scheduler 而非 kernel。DP attention 下每 rank 加入同一 MoE collective、本地调度 attention 工作，被 chunked-prefill continuation 流喂的 rank 一直赢 prefill-first 决策，peer ranks 运行 batch 空等。可配置 decode interval 在 prefill 后强制 decode rounds：AgentX DSv4 Pro 上输出吞吐 +141%、p99 inter-token 延迟 -97.3%，代价 median TTFT 36.5→59s——用首 token 等待换流平滑。",
+        "请求无可复用历史（如 subagent 开始）时任何 worker 都行、只问负载均衡。请求带 MB 缓存前缀时发到不持该前缀的空闲 worker 是贵选择，router 需知道 state 住在哪。SGLang 加 DP cache affinity（session 粘到持其 cache 的 rank）、DP-aware prefill/decode routing（分离部署两半一致决策）、cache balance 作 routing signal（affinity 不退化成一个 hot worker）。Router 只能按被告知行动，所以 hybrid cache events 也变 radix-cache aware 和 sliding-window aware。",
+        "Speculative decoding 获特别关注，因为 MTP 加第二块 per-request 小 state、必须随主 cache 存活一切。SGLang 修分离 serving 的 draft-window transfer、加高并发在线解码 overlap scheduling、移除 no-op EAGLE renormalization、避免 EAGLE prefill 期间 host synchronization。开放 resource-lease scheduling 和 data-parallel graph-metadata fix 继续同一努力——让 overlap 在请求可撤回/恢复而非简单跑完时也安全。",
+        "Heterogeneous prefill/decode 拓扑的 agentic 负载需 prefix-aware staging——prefix caching 和分离在此糟糕交互。两侧 shard 不一致时 KV 不能作一个连续流拷贝，须在 transfer grid 上拆分、在 decode 侧期望的 offset 重组。Prefix hit 让它更难——prefill worker 只发未缓存余量、decode 侧仍期望完整正确定位 cache。Radix-cache staging buffer 支持按 grid 拆分缓存发送、scatter 到正确 decode offsets。",
+        "这修正正确性问题：127,500-token 共享前缀测试从 128 针中 2 对到 128/128（cache 之前静默落错位置，吞吐基准会把它记为快而自信但错的答案）。AgentX 对比还提升 median per-user 输出吞吐 9.6%。传输本身也带死重：decode-side PREBUILT batches 从不进模型前向，但每个传输 prompt 仍展平拷进 CUDA input tensor。丢弃那无用 prompt 传输是最大单一胜利：AgentX GB300 上 per-user 输出吞吐 +18.0%、decode 吞吐每 GPU +12.7%。跟进把 prefill DP-rank bootstrap query 移出 decode scheduler 关键路径，再 +1.36% per-user 输出吞吐。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig12.png",
+            "caption": "图 12：SGLang agentic 优化——sliding-window 保留、HiCache、decode interval、routing affinity。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "TensorRT-LLM Agentic 优化",
+      "paras": [
+        "TRTLLM 的前端优化针对重复聊天轮次，一个只因多轮负载存在的成本。每轮对话重发整个历史加一点，naive 实现全量重 tokenize。每 KB tokenize 便宜，但同一 100,000 token 每轮重 tokenize 就灾难。",
+        "明显修法（只 tokenize 新后缀）以易漏方式错误：byte-pair encoding 非位置无关。token 可跨 join 合并，边界处拆分文本再拼接两 token 序列可产生不同于整体 tokenize 的序列，悄悄偏离 prefix cache 建起的序列。",
+        "TRTLLM 实现 **Boundary-aware incremental tokenization**：找 rendered-text 公共前缀、回滚一个完整 token（跨 join 的任何合并重算）、只从那 tokenize 变更后缀。Qwen3.5 AgentX trace 上匹配全部 1,087 次 transition 的全量 tokenization（正确性经测而非假设），mean 处理时间 185.1ms→11.3ms。固定 8k1k 请求无前渲染轮可复用，这些都不出现。chat-template rendering 移入 input-processing pool，长 template 不再串行化主请求循环。",
+        "MiniMax-M3 工作聚焦分离 KV 移动，失败是粒度问题。prefill/decode 头布局不一致时，一逻辑请求的 KV 从少数大连续区变成数千小 strided 片，每片变自己的 transfer descriptor。移动字节不变；per-descriptor 开销爆炸，恰在重要长 prompt 上以最坏方式爆。Corrected multi-pool mapping + chunked NIXL bounce path 用有界可复用 arena 合并这些片——额外 staging copy 换少几个数量级 descriptor。AgentX 诊断把 request-critical KV p99 从 26.74s 降到 125ms（并发 5）、10.15s→288ms（并发 40）。",
+        "Nonblocking context-transfer polling 保护同一路径（scheduling 停顿也 reap 完成传输），打破完成 KV blocks 保持 pinned 阻止新准入的反馈环。停顿本身也有可移除原因：避免 DeepSeek-V4 context sparse-attention metadata 的隐式 device-scalar sync，每步消 18 个强制 cudaStreamSynchronize 的 4 字节 device reads。",
+        "TRTLLM 还把不规则长上下文工作移到更高效执行路径：MiniMax-M3 的 context graph producers 捕获稳定稀疏 producers、request-dependent attention 保持 eager，per-user 输出吞吐 +12.58%。",
+        "AgentX 也暴露只在规模和时长下出现的 kernel-selection 和 scheduler-lifetime 失败。MiniMax-M3 给 MXFP8 autotuning 加 CuTeDSL choices（候选集变宽，低并发聚合点输出吞吐每 GPU +7-10%）；禁用 corrupt split-K MoE tactics（先崩了七个 AgentX 运行中五个、之后七次匹配运行零崩——快而错比仅慢更糟，autotuner 会热情选它除非移出 pool）。kernel 错误还有另一种：M3 短 query 的 legacy sparse-attention path 可能给 SM100 kernel 一个非连续、head-major block-index view 而它当作连续读，选错 KV pages 产生错误/非有限输出。Honoring block-index strides（q_len≤32）修索引。",
+        "另两个是 lifetime bugs——长运行的特性失败而非大规模。Sequence-slot headroom + consistent slot-indexed buffer sizing 处理完成请求和新准入请求同时要 slot 的瞬态重叠。attention-data-parallel dummy-request fix 保住九个 Qwen3.5 分离 cell 存活（多数早期 cell 几分钟内失败）——区分能 benchmark 和能活过一个 session 的配置。",
+        "两个开放传输变更针对极长分离 prompt，一起显示修复如何创造下一瓶颈。默认安排 decode worker 必须等整个 prompt prefill 完再传输——两个贵阶段背靠背，尽管第一个增量产出。Pipelined KV transfer 每完成 prefill chunk 就开发，transfer 与 prefill compute 重叠、只有最后 chunk 在关键路径。这让 chunk 处理频繁，暴露之前只做一次的工作；follow-up 只取当前 chunk 的 block IDs 而非整 prompt 的 block list——128,000-token prompt 拆 1,024-token chunks，是建一次 4,096-entry list 还是每 layer group 重建 128 次之差。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig13.png",
+            "caption": "图 13：TensorRT-LLM agentic 优化——boundary-aware incremental tokenization、KV transfer 粒度修复。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "AMD ATOM Agentic 优化",
+      "paras": [
+        "AMD ATOM 引擎原本只设计单轮负载、非现实 agentic 多轮生产负载，所以核心 ATOM 引擎和 kernels 需大量变更支持长上下文多轮。ATOM 相对 vLLM/SGLang 现状仍差很远。AgentX 是 ATOM 重构支持 agentic 负载的现实 north star。",
+        "首个优化：DeepSeek-V4 paged sliding-window attention 智能用 sparse checkpoint retention。merged 实现保持选中 window tails 存活，分支和 replay 请求可从有用边界恢复。测量干净分离两效果：同一 AgentX trace 并发 48，实际前缀 hit rate 从 5.6%→96.45%，sliding-window gate 损失从 91.35%→0.16%。第二数是第一数的机制——十分之九前缀匹配被找到又因缺 window tail 丢弃，cache 不是没命中而是被否决。",
+        "两个更早 cache-manager 修复先落地才可测。一个阻止 free-pool hits 摧毁共享 cache entries；另一个 restored prefix hashing（默认 scheduler 模式）把重复长 prompt 从零缓存 token 变成复用每完整前缀 block。单独变更让 prefix-hit prefill 留在优化 sink attention kernel 而非回退 generic path。",
+        "Hybrid 模型也带 recurrent/compressor state，与普通 KV 决定性不同：无法从周围 token 重建。window tail 可从邻近上下文重算，recurrent state 是之前一切积累——丢弃就只能重放序列。ATOM 给这 per-request state 内容寻址 checkpoint 生命周期，生成轮次留可复用 resume points 而不预留独立受保护 cache。一测试中请求复用 512 个生成 token、只算两 token 后缀。",
+        "调优细节与特性同等重要：无条件发 checkpoint 在 zero-hit 流量花 17.5% 吞吐——每从不回来的 session 为帮回来的那些付价。按 token 间隔 spacing checkpoints 避免惩罚，1k1k 吞吐保持测量噪声内——面向 agentic 复用的特性不应向永不用的负载征税。",
+        "ATOM 的 AgentX-relevant CPU path 从为 offload 辩护的算术开始：Standalone LMCache offload 从 CPU 重载 32,000-token 前缀约 0.32s vs 重算约 2.5s（八倍余量）。这使这些上下文长度跨 bus 值得，短 prompt 不成立。",
+        "其余 path 关乎 ownership 和 index placement 而非带宽。ATOM 抄 vLLM 的 multi-connector 设计：prefill worker 可发 KV 到远端 decode worker 同时把同前缀存 CPU，不释放 blocks 直到两消费者都完成——两独立读者同 blocks 是单轮不会遇到的局面。",
+        "把恢复 blocks 提升回 GPU prefix index 修更隐蔽浪费：否则 CPU 加载的前缀用了却不注册为 resident，下轮跨 bus 再取同一热前缀——为已在 HBM 的 cache 反复付传输。follow-up 一起修 async save ordering、packed-KV geometry、unaligned handoffs、remote request accounting，消跨两轮 2,638-request 验证的 reload corruption。这 bug 只在同 blocks 反复保存、逐出、恢复时浮现。",
+        "分布式路径在不同代码库重复同一模式：routing 必须知道 state 住哪。ATOM 的 router（ATOMesh）是 SGLang router 的 fork、删了大多特性。不幸 ATOMesh 需要 SGLang 的 cache-aware routing 特性，所以加回去。ATOM 获 KV lifecycle events 给 cache-aware routers、多节点 prefill/decode routing、session-sticky data-parallel routing。Sticky 政策是双侧妥协：对话回健康的持其 state 的 worker，但 idle 分配过期、sticky 不因消失 session 永久失衡 cluster。",
+        "分离必须移动模型实际保留的一切，不总是一个 uniform cache。DeepSeek-V4 传输其 mixed FP8/BF16 cache layout 的两个 buffer；EAGLE 分离移动 draft model 的独立 KV cache 旁目标 cache——TRTLLM 和 SGLang 各自解决的同一 second-cache 问题。Remote-KV admission/backpressure 闭环：decode 侧不接受多于能安全 resume 的 parked transfers。",
+        "ATOM 上 PCP 报告 mean TTFT 低 35-43%，64,000-token 输入总吞吐最多 +49%——增益随输入长而非 batch 增大。实用化需它与其他 session 依赖组合：DCP 兼容 prefix caching/chunked prefill/FP8 KV、扩展到 MTP。与 prefix cache 不能共存的并行会把一个长上下文赢换另一个。单 GPU 内部同样稀缺：batch-1 MLA decode 无 head/query 维可摊、只剩 KV walk，硬编码 split budget 16 让 walk 只跑 gfx950 256 CU 中 16 个。开放变更停止覆盖 kernel 自身 split derivation，Aiter 把 walk 切成机器有的 cluster 数那么多块。",
+        "Chunked pipeline-parallel prefill 从内存侧攻击同一问题，用流式 layer-stage handoffs 替代重复 tensor-parallel collectives。GLM-5.2 高负载结果本节最完整：输出吞吐翻倍、median TTFT 28.6s→8.7s、每 prefill GPU 持 3.68× KV blocks——最后数最先读，prefill GPU 容量决定部署撞 HBM cliff 前多少长 session 能在途。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig14.png",
+            "caption": "图 14：AMD ATOM agentic 优化——sparse checkpoint retention、KV lifecycle、PCP/DCP、chunked PP prefill。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "ROCm AITER 与 Dynamo 优化",
+      "paras": [
+        "**AITER。**ATOM/AMD vLLM/AMD SGLang 的长上下文执行依赖匹配低层 AITER kernels——引擎层并行策略只有 kernel 能表达才真实。Prefill context-parallel process groups 提供 prefill context parallelism 需要的额外 query-sharding 维，还加宽 131,000+ token prompt 的 fused-kernel row indexing。Decode context parallelism（DCP）跨已存在的 tensor-parallel GPUs shard KV，更长序列或更大 batch 装下而不复制整 cache 到每 rank。",
+        "大 cache 也暴露短固定请求几乎不达的失败类：地址宽度。32-bit offset 完全够用直到单 cache pool 跨界，之后算术 wrap、kernel 寻址错误行而不抛错。AITER 加 batch prefill >4GB 的 runtime 64-bit dispatch、>2GB 的 64-bit MLA offsets、DeepSeek-V4 unified cache paths 全程 64-bit addressing（约 1.5 亿行 pool 中防静默错误读写）。",
+        "DeepSeek-V4 decode 也获 64/128-head MTP packings 的 persistent MLA kernel——普通解码和 spec 验证实际产生的两个 head 数，给引擎常见形状专用长上下文路径而非当短上下文 kernel 的偶然变体。与 vLLM AITER sparse-MLA selection 同论证：长上下文里 generic path 不是适度妥协，是错误 kernel。",
+        "**Dynamo。**相当多 NVIDIA 提交用 Dynamo Inference Orchestration and Router。Dynamo 的 AgentX 系列显示 engine kernels 改善后分布式 serving 层可成瓶颈。Router 工作量与活跃前缀数量和长度成比例而非生成 token 数，很多长重叠长寿 session 的负载以 fixed-shape 流量从不的方式加载它。第一系列 PR 降每 routing 决策成本：lookup hot path 少做事、无冗余 suffix invalidation、batched KV matching/registration/ownership/terminal dereferences（并发 512 报 median 输出吞吐 +22.2%）。",
+        "第二系列改 ownership 表示——底下更难的问题。每缓存 block 需归属依赖它的请求，用中不释放、全用完不钉住。数千并发 session 共享重叠前缀时记账本身变显著。Dynamo 从 shared block chains → arena-level ownership counts → backend-specific request leases，每步粗化跟踪单元。Lease 设计把 vLLM backend 的 AgentX replay 时间降 23.7%、SGLang 22.0%，同时降峰值内存——前表示是问题而非流量。",
+        "进一步 router profiles 移除同形状成本。Bucketed expiry pruning 替换扫描所有跟踪物，高 churn AgentX 吞吐 +13.7%。Delta-only suffix cleanup 只处理变化，同窗口吸收约 28× store/remove events。Compressed prompt paths 前端 CPU -35.3%、显著改善尾 TTFT——此负载 prompt 长且大多重复。Overload state 增量跟踪而非重算。",
+        "一个 routing 变更是刻意权衡而非纯赢。Dynamo 可在 routing score 中计活跃 decode 请求，已承诺长 decode 的 worker 显得比 queue depth 单独暗示更贵。报告调优点 median AgentX 延迟改善、小吞吐成本——请求长期占据 worker 才可见的选择。开放 follow-up 打包成新 agentic router preset 更推同方向：prefix overlap 计 2、prefill load 缩放 4、活跃 decode 请求权重 64。8×H200 AgentX 运行上该 preset 固定窗口完成输出吞吐 +8.26%、run-level p95 TTFT -43.1%、p95 inter-token 延迟 -22.6%、多完成一条完整轨迹。",
+        "请求平面优化：agentic trace 不只发一请求一响应，发多相关请求带大体相同 prompt、每 token 流回自己的 frame，序列化和拷贝每轮每 token 付。MessagePack request payloads 吞吐 +8.1%、mean TTFT -9.7%；direct Python transcoding 移除中间 value tree。后续序列全移除一次拷贝而非加速一次：不拷 MessagePack event payloads、不拷 received ZeroMQ frames、不每 token 付全 inter-token-latency metrics 开销。chat streaming hot path 缩短。单看平凡；乘每并发 session 每流 token 就是前端能维持多少 req/s 的决定者。",
+        "高并发 profiling 找与移动数据无关的成本。Static logging filters 移除共享 span-matcher lock（争用点而非量问题），前端吞吐 932→1,133 req/s。Simpler positional radix buckets 32-worker 运行峰值内存 -5.51 GiB。开放变更每响应 flush 一次 detokenization metrics 而非每流 chunk 更新累计 counters，匹配 diagnostic profile 前端 CPU 约减半——instrumentation 每调用便宜、每 token 一次就灾难。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig15.png",
+            "caption": "图 15：Dynamo agentic 优化——routing 成本、ownership leases、请求平面序列化。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "LMCache、Mooncake 与其他优化",
+      "paras": [
+        "**LMCache** 是开源 KV cache 层，坐推理引擎下，按前缀 hash 存可复用 KV chunks 到 CPU DRAM、本地 NVMe、远端 backend（Mooncake、Redis、S3）。",
+        "LMCache multiprocess path 因 agentic cache 移动的量和形状而变。每请求上下文超 100,000 token 时先为整载预留 blocks——pool 被全在等、无一推进的请求耗尽。Chunked external-cache loading 按 chunk 预留，loads 交错排干。并发 32 完成 120 请求（旧 path 28 后死锁），并发 48 保持运行、KV pool 98.5% 满。",
+        "其他变更减少移动量和 runtime 干扰：只存 DeepSeek-V4 hybrid groups 有用部分（每 token 存储近 20× 降）；sliding-window prefetch 只载活 window；每 object group 一个原生 transfer call 移除重复 Python lock handoffs（开销与片数而非字节成比例）。",
+        "两个当前 LMCache 变更特别 AgentX 特定但开放。Hybrid lock-accounting fix 阻止一请求释放另一请求在共享 sliding-window/recurrent-state chunks 上的 read locks。多请求须共享同 chunks、记账须 per-chunk 而非 per-holder、逐出须真开始。持续 Kimi-K3 运行配 DRAM offload 供给三者并产生数万警告、损坏生成、最终逐出开始后 GPU 崩溃。",
+        "并行 LMCache 工作把以上全部带到 AMD Instinct。CacheBlend 非前缀复用依赖 flashinfer（CUDA-only），所以 Triton block-sparse attention backend 重实现三 kernel：block-sparse attention（CSR indices + log-sum-exp 输出）、causal prefill、log-sum-exp 输出 blending。ROCm 检测到或 flashinfer 缺失时自动路由。AMD hipFile backend 经 ctypes 绑 ROCm 的 hipFile 扩展 GDS L1 slab-file tier（原本只经 NVIDIA cuFile 达存储）。",
+        "分发是剩余缺口：CUDA 用户装预建 wheel、AMD 用户源码构建。与 AMD 合作发布预建 gfx942/gfx950 wheel，装进 upstream image、过 MI350X 全部 56 个 KV-transfer kernel tests、发 GitHub release（pip install lmcache 保持 CUDA 构建）。",
+        "DCP-aware CPU offload 解决长上下文强制并存的两特性间直白不兼容。DCP 启用时每 rank 只持 KV 的 stride，任何单 rank 能存的不是可用前缀；fix 保存前收集 strided shards、加载后重分配。否则启用 context parallelism 静默禁用恰为两特性动机的长前缀 CPU cache hits。验证记录 30,000+ CPU hit events、单请求加载达数十万 token。",
+        "**Mooncake** 服务 Moonshot 的 Kimi 生产流量和许多实验室生产流量，是分离 vLLM/SGLang 配置下层的 transfer engine。直到最近 AMD 支持停在 RDMA registration 和可安装包两处。",
+        "NVIDIA 上为 RDMA 注册 GPU 内存用 nvidia-peermem kernel module 或导出 dmabuf FD。AMD 无 nvidia-peermem 等价物，GPU-direct RDMA 无路、部署回退经 host DRAM staging KV。HIP dmabuf registration branch 加现有 CUDA dmabuf path 的镜像（经 ROCm 而非 CUDA handle call 导出，先解真 allocation base——caching allocator 在大 allocation 内 offset 处打包 tensors）。",
+        "不可安装的支持不是支持。Mooncake 发 CUDA 和 MUSA wheels 无 ROCm 包，AMD 用户每镜像源码构建引擎。ROCm wheel/CI/release path 发 mooncake-transfer-engine-rocm 到 PyPI。该工作流因 dogfooding agentic 负载注意 ROCm 从源码构建 MoonCake 不是一等公民模式。",
+        "Transfer engine 无 device kernels、不依赖 torch，所以一个 arch-agnostic wheel 覆盖 gfx942/gfx950，ROCm runtime 加载时绑定（非 vendored）——同 wheel 在 upstream vLLM ROCm image 和 SGLang ROCm image 原样工作。验证为完整交叉积：MI300X/MI355X × vllm-openai-rocm/lmsysorg-sglang × master binary + HIP buffer transfer test。一起，这些 PR 让 AMD AgentX 运行可从发布产物装 transfer engine 和 KV cache layer 到 stock upstream images、在 GPU memory 和 fabric 间直接移 KV。",
+        "**其他优化。**MiniMax-M3 测试 ROCm 工作是否复利成 day-zero 就绪。AMD 首个公开分离 recipe（MI355X FP4）1 月达 InferenceX、落后 NVIDIA 数月；M3 FP4 分离 day zero 落地——从 DeepSeek-R1 时代（parity 花数月）的改进。三个 vLLM fix 在那 day-zero path 上，各是正确性而非性能失败：",
+        "分离先被堵。NixlConnector 的 handshake 断言 SPLIT-region block_len 随 prefill-to-decode TP ratio 缩放，但 block_len 跟 per-rank KV heads。M3 有 4 KV heads，TP4 prefill 配 TP8 decode 两侧 GQA-capped 每 rank 一头、两长度相等而断言要 2 倍。Handshake 被拒、无 KV 移动、decode 全重生成、gsm8k 0 分。Validating against actual head ratio 修复。",
+        "另两个平台分叉。M3 的 sparse-attention backend 对每 E4M3 配置把 byte-backed FP8 cache 读作 float8_e4m3fn。但 gfx942 的 platform dtype 是 e4m3fnuz，两编码不同，K/V 在 kernel 消费前被改。Using platform dtype for cache view 修两半。M3 也作为分离 NVIDIA/AMD 模型文件发货，只有 NVIDIA 实现 EAGLE3 接口，ROCm 上 spec decoding 引擎 init 就 abort。Bringing AMD model to parity 恢复，MI355X gsm8k 匹配非 EAGLE3 MI355X 运行和 B200。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig16.png",
+            "caption": "图 16：LMCache 与 Mooncake——agentic KV cache 层与跨架构分发。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "AgentX 方法论深潜：$3M 轨迹收集",
+      "paras": [
+        "AgentX 是开源现实世界长上下文多轮 agentic 轨迹重放的巨大转变，我们收集了价值 $3M 的 token 轨迹（Claude Code、OpenAI Codex 等真实流量）。除数据集，我们开发了公平重放流量模式的全面方法论。",
+        "设计 AgentX 时 north star 是让基准在 KV 负载形状和 KV 复用模式上尽可能现实。最初试重放 SWE-bench、Qwen-Bailian、HuggingFace 上随机 Claude Code traces——当时这些没有显著 subagents、1M context、compactions、动态工作流。SemiAnalysis 团队大多 AI 重度用户、用 agents 做编码/分析研究/Excel 建模/社媒运营等，决定内部捕捉最可实现现实轨迹。",
+        "创建 intercept Claude/Codex HTTP 请求的 proxy 收集大量轨迹，用户改 base URL 指向 proxy 上传。撰写时已收集 8,000+ sessions、340 万请求、6,100 亿 token，代表超 $3M 花费。开源 AgentX v1.0 基准的代表性子集。",
+        "为保护员工隐私，replay 数据集无原 prompt、源码、工具参数、工具结果。每请求内容 tokenize 后分 64-token blocks、每 block 换 session-scoped chained hash——匹配 prompt 前缀产生匹配 hash 前缀而不泄露内容。Replay 时 hash blocks 用编码数据集 token 替换，保留原工作负载的近似上下文增长和对话 KV 复用模式。",
+        "该过程必然不完美：用前沿模型提供商 API 时，端 LLM server 真正看到的内容大多隐藏（SOTA 模型 thinking 内容现加密于 HTTP 请求、换确定性 hash 阻蒸馏）。API providers 还服务端加额外 chat templating、不可观察 Anthropic 专有 tokenizer 或服务端工具引入的上下文。用确定性占位符和经验校准的模型特定 padding 重建 prompt 长度。",
+        "总之：收集 Claude Code 轨迹到与原服务器重放完全一致的方式不易（信息不全），但有足够上下文以极高保真度匹配原流量模式、时序、前缀缓存、DAG 模式。",
+        "**数据集。**AgentX v1.0 数据集是 8.3k session proxy 语料的 393 session 子集。后处理清异常：移除 Claude Code security monitor（auto mode）和 title generation 请求（Claude Code 特定、非通用 agentic 流量）；移除重建输入长度 >990k 的请求；移除重复请求（连接 dropped 时 proxy 收到相同请求）。每对话格式化为 WEKA trace format（Callan Fox 的 kv-cache-tester 项目提出）。",
+        "处理后分布：ISL/OSL 和 inter-turn 延迟（agentic 里主要是 tool use 时间）相对 log-normal。Median ISL 142k token、median OSL 444 token、median inter-turn 延迟 3.84s。约 10% inter-turn 延迟 >1 分钟（可能 harness 等真人响应的间隙）。",
+        "数据集 175 sessions 含至少一个 subagent（约 44%），共 1,697 个 subagent rollouts、median 每 session 4 个。Subagent median wall-clock 2.27 分钟。数据集含 1M 上下文（测最新前沿开源权重模型），另有截断 256k 数据集给 max context 256k 或更小的模型。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig17.png",
+            "caption": "图 17：AgentX 轨迹收集——proxy 拦截、匿名化、$3M 数据集分布。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "AgentX 方法论深潜：Replayer 与公平性",
+      "paras": [
+        "**Replayer。**与 AIPerf（NVIDIA 的 vendor-agnostic HTTP replayer，tenstorrent/AWS/AMD 等采用）合作而非从零建。为更 vendor-neutral 维护独立 fork。",
+        "Agentic session 天然描述为有向无环图（DAG）：每请求是节点，边表示 head 请求须等 tail 完成才能发出。每边带延迟（precondition 满足后等多久）。最简单 session 完全线性（无 subagent 无并行），图退化成线、边只编码 inter-turn 延迟（tool use time 或 think time）。",
+        "Agentic traces 中也可 spawn subagents——独立请求流、自有上下文、通常做聚焦任务。多 subagents 可并行跑更多聚合工作、部分情况与主 agent 并行。主 agent 等 subagent 组完成、把输出并入主 context。这让线性链成 DAG。识别 subagent 组时 AIPerf 找最近主 agent predecessor 指定为 spawning request；join request 是 subagent 组结束后下一个主 agent request。",
+        "AIPerf 按（spawning request, join request）对 key 每 subagent，所以多流塌缩成分支、分支取首成员名。主 agent 也可与自家 subagents 重叠（请求 25s 发出时 003/004 还在跑——主 agent 只被 join 它的组阻塞、非每个在途 subagent）。Auxiliary requests 是与其他请求不共享上下文的一次性请求（如 Claude Code 的 summarize this session、/btw）——从主 agent 分支、永不 join 回。",
+        "**Pareto 前沿扫描。**AgentX 里对单部署扫并发 Claude Code session 数生成 Pareto frontier。因每对话有现实 inter-turn 延迟和 subagent 使用，得到更尖峰、更现实流量模式。",
+        "评估 agentic 负载时重要指标：交互性（TPS）和 TTFT 仍重要、是行业 SLO 标准。看 AgentX 结果时*极重要*地同时看 TPS 和 TTFT——存在优化提升一个牺牲另一个。正开发组合 TPS/TTFT 的新指标，也考虑 agentic 里人们更关心*任务*完成的端到端速度。End-to-end 延迟现形式意义减小（与 OSL 直接成比例，p90 E2E 被最长输出序列长度的 10% 尾重影响）。",
+        "**Warmup、时序、确定性、对话复用。**AgentX 目标是基准已稳态的系统。Agentic 负载意味着 profiling 应从一些上下文轨迹已缓存的点开始；也期望不是所有对话从 turn 0 开始（防 thundering herd）。",
+        "Warmup 两阶段：AIPerf 用固定随机 seed 选每对话 25%-75% 墙钟点、识别每流最晚请求（含主 agent 和活跃 subagents）作 primer requests 一起发出重建对话状态；第二阶段每 replay lane 再推进 10 请求给 KV cache 更多物化机会。所有 warmup 请求无 inter-turn delay、最大输出长度 1 token。",
+        "Warmup 完成开始 profiling 一小时，所有指标严格在此期间收集。每 stream 5 分钟 idle cap（长 inter-turn gap 不占 worker lane）——也是 Anthropic 默认 KV cache TTL。确定性保证同引擎/硬件/并发/server 设置的运行可复现。",
+        "会话完成时 replay lane 从 dataset sampler 选另一对话。每 replay 收唯一确定性 cache-bust marker 前置到每独立前缀链（主 agent 链和新鲜 context subagent/one-off 链），forked subagents 继承父 marker。Marker 同 replay 内不变（保留 KV 复用模式）、replay 间变（防人为高 cache hit rate）。也启用并发大于数据集会话数（393）的场景。",
+        "**公平 Spec Decoding 方法论。**数据集收集时匿名化，64-token hash blocks 须重放前合成填充。AIPerf 从合成编码/tool-use token pool 确定性采样。KV 复用模式和请求时序保留，但合成请求数据有额外考量：合成数据上跑 spec decoding 可能让 speculator 接受/拒绝异常数量 token（speculator 没在合成数据训练）。",
+        "自 InferenceX v2 改进：与社区合作确保多数 OSS 推理引擎有强制从 speculator 接受多少 draft token 的机制。对每 (model, speculator, draft length, thinking mode) 组合在 SPEED-Bench agentic coding 数据集收集平均 AL。Runtime 对 AgentX 应用这些现实 spec decoding acceptance lengths 保 vendor-neutral 公平。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig18.png",
+            "caption": "图 18：AIPerf replayer——DAG 轨迹、subagent spawn/join、auxiliary 请求。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Telemetry 教程与未来方向",
+      "paras": [
+        "AgentX 需要的不止新基准 harness 和数据集，还重建部分 InferenceX 可视化让 agentic 结果易探索。单 AgentX datapoint 代表数千请求跨增长对话、subagents、warmup 期、cache states、动态变化在途负载，Pareto 曲线上单点藏很多信息。",
+        "主要变更之一是构造曲线方式。之前 InferenceX 中 spec decoding 启用/禁用常显示为分离曲线；现前端组合允许的推理优化、为每 model/SKU/engine 组合显示最佳可用曲线——单曲线上的个体点可能用不同优化技术和配置（spec decoding、分离、KV cache offload）。目标显示每硬件/软件栈的最佳生产性能而非每优化组合单独曲线。仍暴露每点底层配置和 provenance（tooltip 显示产生它的精确配置 + run metadata + CI provenance + AgentX 统计）。",
+        "详细点视图含：输入输出序列长度分布、interactivity/TTFT 随时间、KV cache 利用、请求队列深度、前缀 cache hit rate、输入/decode 吞吐、prompt-token source 分解、唯一输入 token 随时间。分离 warmup 和 profiling 数据。KV offload 点被额外虚线圈围绕；选中时 detail 页显示 offload type、KV offload engine、chip cache-hit rate、CPU cache-hit rate。",
+        "新请求 timeline 按 conversation 或 worker 组织；conversation 视图把 subagents 组在根对话下，易见对话和 subagents 何时重叠。每请求可点、直连 InferenceX datasets 页对应对话和轮次。AgentX 页含 flamegraph 可视化单对话结构——每 bar 一轮、相对最大轮缩放、分缓存前缀 token/未缓存输入 token/生成输出 token。",
+        "**未来。**继续小修 v1.0.x harness、计划 v1.1 更大变更。每不同模型提交总跑同 minor version 保结果可比。快速跟进加 SSD/NVMe KV offloading（更大 KV cache 工作集、支撑 Pareto 曲线高吞吐左侧）。",
+        "捕获更大、更多样、更新的 agentic traces（更宽模型和 harness）。下版数据集保留 system instructions、user/assistant messages、tool calls、tool results 的边界——让 AgentX 评估用 harness 可得但推理引擎通常隐藏信息的 workload-aware serving 技术。例如 router 可把低复用 tool 流量导向专用 prefill workers、长 tool call 期间保留 agent 前缀、subagents fork 时 prefetch/share prefixes。",
+        "SGLang RFC 提供具体例：router-initiated hint interface 用 session lifecycles、shared-prefix boundaries、tool-call duration、subagent state 告诉引擎 KV 何时共享/prefetch/demote/pin/retain。",
+        "还捕获细/粗粒度 power telemetry 数据，更准评估 Joules per intelligence。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig19.png",
+            "caption": "图 19：InferenceX telemetry——点详情、request timeline、flamegraph。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig20.png",
+            "caption": "图 20：AgentX 数据分布与未来方向（NVMe offload、更丰富 trace 结构）。"
+          }
+        ]
+      }
+    }
+  ],
+  "conclusion": [
+    "SemiAnalysis 这篇是 agentic 推理基准的开山之作（InferenceX v3 / AgentX 1.0）：用 $3M、8,000+ 真实 Claude Code/Codex 会话轨迹重放，把「固定序列长度刷分」换成「多轮长上下文 + subagent 突发 + KV offload + tool calls」的现实负载，并驱动 **70+ 上游 PR** 落地 vLLM/SGLang/TRT-LLM/ATOM/AITER/Dynamo/LMCache/Mooncake。",
+    "四个最值得带走的点：**① 基准哲学**——agentic 推理是系统问题：极高前缀复用（要 KV 跨节点传输 + routing affinity + 多级 offload）、subagent 突发（要 cache 生命周期管理）、TTFT 与 TPS 必须一起看（常互为代价）。**② 结果**——DeepSeek V4 Pro 上 MI355X 追得最紧（8/21 前 e2e perf/$ 平 B200 vLLM，之后被反超）；Kimi K3 部分段 ATOM 超 GB300；MiniMax M3/Qwen3.5/GLM5.3 是 NVIDIA 完胜（150 tok/s 时成本效率好 5×）。**③ CUDA 护城河实锤**——DCP/PCP 在 vLLM 支持矩阵里 AMD backend 全不支持；ATOM 原只支持单轮需大重构；AMD 的 hipMemcpyBatchAsync 到 ROCm 7.14 才有致 CPU KV offload 低效（NVIDIA Pareto 点并发 20+ 全用 KV offload，AMD 一个都没有）。**④ 方法论亮点**——轨迹匿名化（64-token chained hash 保前缀复用模式）、DAG replayer（subagent spawn/join）、warmup 从会话 25-75% 点开始（防 thundering herd）、cache-bust marker、SPEED-Bench 校准 spec decoding acceptance length 保公平。",
+    "开源细节都很实：boundary-aware incremental tokenization（TRTLLM 185→11ms）、丢弃无用 prompt transfer（+18%）、保留滑动窗口 checkpoint（ATOM 前缀命中 5.6%→96.45%）、Mooncake ROCm wheel。**付费区（末尾 8k1k 历史单轮数据）未覆盖**——本文编译基于免费区全文，已含全部模型结果、优化深潜与方法论。做 LLM serving/推理优化的人强烈建议细读原文 + inferencex.semianalysis.com。"
+  ],
+  "reference_url": "https://newsletter.semianalysis.com/p/agentx-inferencexv3-does-cuda-moat"
+}

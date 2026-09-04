@@ -1,0 +1,97 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心命题</strong>：编译器本质是个函数：把程序输入，吐出带相同语义的更优版本。AI可作为随机优化器把程序在优化空间里走向更优。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">与经典区别</strong>：经典优化靠固定的数据流规则启发式，AI不太受限，更像微型人肉优化专家，能跨程序合成而非只做局部变换。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">MLA内核实证</strong>：Jalapeño MLA内核正是AI优化迭代的产物，48小时内置出近roofline的实现，性能可反超人类专家调优。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Jalapeño MLA内核在HotChips亮相后，讨论大多在讲这个事实：OpenAI的硬件团队说『AI在写我们的kernel』：关键是，当它写的时候，我们并不真正需要逐行读懂它在做什么。本文作者原就是XLA创始人、在OpenAI做了两年多编译器，他要把背后的问题讲透：这事是怎么可能的。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">他的框架是把AI当成随机优化器，编译器则从『数据流规则的优化』走向更接近程序合成的领域。下面是一趟从超优化(Superoptimization)起源讲到MLA内核生成的旅程。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">背景：编译器是什么</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">编译器接收程序，吐出程序翻译或改进后的版本。输入输出两侧的程序都有语义，语义告诉我们程序意味着什么、它能做什么、以及如何推理它可能做的事。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">做编译器的人把编译器想成纯函数，它吃进一个数据结构，吐出一个应当保有对应语义的数据结构。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">有些时候编译器专注在『降级(lowering)』或『翻译』，比如接收C输出x86-64汇编，我们通常认为这是更低层的东西。但在实践中它们往往不只是翻译。更多时候，编译器专注在『优化』：它们接收代表程序的中间表示(IR)，试着产出那个程序的更优版本。有时『更优』意味着跑起来更少周期，有时意味着更少冗余代码，有时是把我们证明过『必然成立』的东西特化进去(部分求值)。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">换个角度看LLM的来历：它们本来就是为了把人类文本从一种语言翻译成另一种，翻译自然是看家本领。而日常用LLM也可见它们能写出新方案、改进既有方案。很多写代码的人让LLM『优化这段代码』，它能做得不错(不过我们需要确认它优化得是否正确，这点稍后再谈)。这无非是想说，LLM具备优化编译器应有的那些能力。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">优化与最优性</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">优化编译器自然是在试着按某个目标(通常是执行时间)提高所处理程序的最优性。这在任意程序的通用场景下难得惊人，以至于存在一条『编译器工程师的充分就业定理(full employment theorem)』(作者是当上编译器工程师之后才发现的，但它仍让人安心)。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>『超优化器(Superoptimizers)』是优化编译器下一个迷人的小子领域。给定一个程序，我们能借语义说明它的行为，那么拥有同样语义的最优程序是什么？超优化器想解决的就是这个问题，本质上是个搜索问题。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">设想我在找具有相同语义的最短程序，而且有能力问某个候选程序是否语义等价。我可以假设性地按目标次序枚举每一个程序，挑出语义相同里最小的那个。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">不过按目标顺序枚举所有程序听起来相当不可行。作者最爱的一篇学术论文、2013年的《STOKE: Stochastic Superoptimization(随机超优化)》反问道：如果我们只是反复随机地改动程序，最终会否看到最优程序？他们提出靠随机游走(配合机器学习的元老马尔可夫链蒙特卡洛 / Metropolis-Hastings)，最终能看到那个最优程序。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">蒙特卡洛式的改动通常很笨(只是随机挑一个策略)，但很快。LLM很聪明(有大量推理token)，但相对慢。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">那么，与其用又笨又快的蒙特卡洛改动，何不让LLM去判断该把程序带向哪个方向？我们将得到一个非常聪明的随机优化器，把程序在优化的程序空间里渐进推进。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">优化的直觉</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">退一步看。想想你认识的那位最能把『把代码性能榨到极致』体现到极致的人，姑且称他『优化匠Ollie』。Ollie大概率对哪类代码改动可能有收获有直觉。他会试些东西看能不能成，不成就回滚再去试别的。但他对哪些事情是可能的、以及如何可能击败编译器有一份直觉。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Ollie的这些直觉常常超出经典编译器的能力。尽管现代优化编译器结果相当出色，它们建立在相当简单的规则与启发式之上，说白了是『把局部数据流变换迭代跑到不动点』这个思路。我们还会对考量做相位排序(phase ordering)：构造编译流水线时先考虑A再考虑B，而不是处理复合的AB问题。调度器与寄存器分配器是臭名昭著的例子，有大量博士论文尝试去啃『调度-分配协同』这个复合问题(为了获得合并相位排序的好处)，但实践中一直难以奏效。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这正是Ollie专长的价值。他常常知道如何用针对当下情境的专门启发式去权衡几个NP完全问题，因此有更多量身定制的情境感知与敏感性。他还能动用那些优化编译器未必能有效运用的技巧，尤其是组合使用：如外提(outlining)、定制ABI、为了向量化做的变换，以及那一堆让人嘀咕『编译器要是能直接这么做就好了』的杂活。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">现在试想，AI凭借它无论怎样的推理能力，可以扮演迷你Ollie。它未必有Ollie那般对未来终局的准确直觉，但它对什么可能有效有一点嗅觉，而且它能投很多很多的球。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这套做法和STOKE不太一样的一点是：我们无法保证时间趋于无穷时必然看到最优程序；但因为AI拥有更接近人类的推理能力，它在单位时间里能获得可观的人味进展。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">回到MLA内核</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">先说清楚：作者并不知道AI为他们的Jalapeño MLA内核吐出的底层代码是什么，但他知道怎么用numpy打出MLA。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在作者曾参与的XLA编译器中，会把一批numpy运算融合成团块，再用一个叫『发射器(emitter)』的元程序把它降级成循环、指令与更低层的原语。当XLA / 发射器那么做的时候，作者并不需要在意后端吐出的汇编是什么。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对我们的随机优化器而言，AI概念上取代了那个emitter元程序：它既做降级又做优化，而我们还能请它再一路优化到贴近roofline(算力峰值)。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">AI在编译器系统中取代了发射器角色，既降级又持续优化到贴近roofline</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">在哪里验收语义等价</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">希望这讲清了AI的位置，以及它如何类比已有优化编译器系统里的一个组件。还有个有用的想法：我们现在视为『汇编代码』的一层在往上移。你敲普通C++ 用 -O3编译时，不会指望理解吐出的汇编，即便你完全懂敲进去的C++。这里做的是同类的事，只是输入规范更高层、更数学化。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">于是一个关键问题浮现：我们如何检查AI给出的程序确实与那份更高层的描述 / numpy等价？这个检查机制确立了AI随机优化过程的可靠性(soundness)。作者预期将来有篇博客详细展开，但现在只需说：语义等价性测试是可行的，而且我们确实在做。加速器程序尤其适合强而完整的契约：它们大体上相当数学化、以数据流为导向，能够验证『契约与我AI优化后的程序行为完全一致』。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">可补充的是，该领域很多相关技术由程序合成(program synthesis)这个子方向开创。优化编译器说『这有个带语义的程序，请在不改语义的前提下把它变好』；程序合成则说『我相信存在一个带这些语义的程序，请尽力找到你能找到的最优的那一个』。程序合成是比优化编译更难的题，但它受的束缚也更少。当人类里的Ollie做得比优化编译器更好时，它们做的本质上就是程序合成；而这是AI现在能帮我们自动化的一件事。AI可以从原始程序里汲取灵感，但不必只对它做些轻微局部变换。经典优化编译器看到『哦你写了个冒泡排序』不会(靠理解契约)换成快排，但Ollie和AI都能做到。这让我们更处在『随机优化的程序合成』区间，而非经典优化编译器区间。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把这些拼起来：你可以从一个『离numpy不远』的东西出发，等48小时，得到一份语义相同的已优化内核，这正是我们在HotChips演讲里展示的：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.jpg"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">在作者机器上，AI时常跑赢我们认为已调得不错的内核，人肉性能工程师会因组合太多而难以探索</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">重述与结论</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">演讲里的幻灯片还指出，在他们的机器上，AI往往能在我们觉得已经调得相当顺手的内核上也把性能顶到超过人类专家。这常因为仍有可观的可达成百分比的提升空间，只是源于需要探索的大量种种组合与排列，而这些组合对一位人肉性能工程师来说往往难以忍受地繁琐。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">剥到内核，编译器终究只是一个函数。我们把程序交给它，拿回一个更好版本的程序，输入输出之间期望保有相同语义。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">经典优化编译器靠数据流规则与启发式让程序变好，它们的源头完全可解释，但能做的动作也更容易受限。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">相比之下，AI作为随机优化器，只需要『认真想』然后吐出结果。它的动作没那么多根本性限制，因此更接近我们的人类专家优化者。我们确实需要某种方式去核实它吐出的程序是可靠的、实现的是我们送入的相同语义，而且这套机制我们已经就位。这种AI优化特别适合数学运算那种契约很强的场景：契约让你不必逐行读懂这个内核在做什么。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这就是我们拿到AI生成的MLA内核的方式。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+文章把『AI生成内核』放进编译器理论的坐标里：经典优化是数据流规则的局部变换，AI则是替程序在做超优化式推理，本质更接近程序合成，也因此不必逐行看懂它吐出的代码：验收靠的是与高层numpy间的语义等价契约。<br  /><br  />一个值得掂量的洞察是『汇编』那层在向上迁移：以前 -O3编译C++ 你不看汇编，如今把更数学化的输入交给AI也不看它生成的kernel，逻辑同源。在强契约、数据流导向的加速器程序上，这一步已经走得比人肉优化更远。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://x.com/cdleary/status/2094878051238887834</span></p>
+</section>

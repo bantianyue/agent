@@ -1,0 +1,130 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">目的与严格顺序</strong>：把原始nn.Module变换成完全并行化训练模块；确保TP、CP、AC、FSDP无功能冲突组合。顺序关键：后阶段依赖前阶段（权重分片/模块包装）。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">五阶段管线</strong>：① TP/CP（full_dtensor直接parallelize否则apply_cp_to_forward + inner_attention）② Async TP（maybe_enable_async_tp，配torch.compile）③ AC（apply_ac，TP/CP后compile前，full/selective）④ torch.compile（TransformerBlock级）⑤ FSDP2（apply_fsdp_to_decoder）。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">模型差异与配置</strong>：各模型parallelize_<model> 入口（标准化签名）；GPT-OSS/Llama标准TP计划，Qwen3 skip_dp供纯推理，HF后端apply_non_moe_tp。配置参数（spmd_backend、enable_async_tensor_parallel等）直接控制管线。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这个DeepWiki页面记录torchtitan使用的完整并行化管线，展示模型从原始nn.Module变换成完全并行化、优化好的可训练模块所经过的连续阶段（sequential stages）。它解释各阶段的顺序要求、每阶段实现细节、以及不同模型架构（Llama3、DeepSeek-V3、Qwen3、GPT-OSS）如何应用这些变换。按原文100% 保留格式编译。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">目的与范围</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本页记录torchtitan使用的完整并行化管线，展示模型从原始nn.Module变换成完全并行化、优化、可训练模块所经过的连续阶段。它解释各阶段的顺序要求、每阶段的实现细节、以及不同模型架构（Llama3、DeepSeek-V3、Qwen3、GPT-OSS）如何应用这些变换。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">管线确保诸如张量并行（Tensor Parallelism, TP）、上下文并行（Context Parallelism, CP）、激活检查点（Activation Checkpointing, AC）和全分片数据并行（Fully Sharded Data Parallel, FSDP）等复杂分布式策略被正确组合、无功能冲突（without functional conflicts）。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">并行化管线总览</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">torchtitan里每个模型都遵循严格顺序的并行化管线。顺序是关键的，因为后阶段依赖前阶段应用的变换（如权重分片或模块包装）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>标准管线顺序（The Standard Pipeline Order）</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">标准管线顺序的关键位置是torch.compile（见下面第4阶段细节）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>来源（Sources）</strong>：torchtitan/models/llama3/parallelize.py 27-104、torchtitan/models/gpt_oss/parallelize.py 27-108、torchtitan/models/deepseek_v3/parallelize.py 28-112、torchtitan/models/qwen3/parallelize.py 31-123。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">主要并行化入口点（Main Parallelization Entry Points）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每个模型族提供一个parallelize_<model> 函数来编排管线。这些函数在模型物化（materialization）后由trainer调用。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>入口点函数对照表</strong>：</p>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">Model</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">Entry Point Function</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">File Path</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Llama 3</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">parallelize_llama</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">llama3/parallelize.py 27</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">DeepSeek-V3</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">parallelize_deepseekv3</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">deepseek_v3/parallelize.py 28</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Qwen 3</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">parallelize_qwen3</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">qwen3/parallelize.py 31</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">GPT-OSS</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">parallelize_gptoss</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">gpt_oss/parallelize.py 27</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">HF Transformers</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">parallelize_hf_transformers</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">experiments/transformers_modeling_backend/parallelize.py 39</td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">标准化签名（Standardized Signature）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">大多数实现遵循此签名来消耗全局配置（consume the global configuration）：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">即parallelize_<model>(model, parallel_dims, model_config, training_config) 形式的标准化签名。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>来源</strong>：llama3/parallelize.py 27-36、gpt_oss/parallelize.py 27-36、qwen3/parallelize.py 31-41。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">管线各阶段详解（Pipeline Stage Details）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>1. 张量与上下文并行（Tensor and Context Parallelism）</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">若后端选择full_dtensor，则直接调用model.parallelize(parallel_dims)（来源gpt_oss/parallelize.py 50）。否则：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">先应用apply_cp_to_forward处理inner_attention后备（fallback）环境，再调用model.parallelize(parallel_dims)。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>2. Async TP（Async TP）</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Async TP允许把一个线性层的all-reduce与下一个线性层的计算重叠。通过maybe_enable_async_tp启用，通常只有在torch.compile同时激活时才有效（来源llama3/parallelize.py 63-64、config/configs.py 136-137）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>3. 激活检查点（Activation Checkpointing, AC）</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">AC用apply_ac应用。它必须发生在TP/CP包装<strong>之后</strong>、torch.compile<strong>之前</strong>。支持模式：full（全量）、selective（选择性）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>4. torch.compile</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">编译应用在TransformerBlock级，而非整个模型。这利用模型的重复结构改善编译时间（来源distributed/compile.py 35-39）。相关：FlexAttention、aot_eager。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>5. 数据并行（Data Parallelism, FSDP2）</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">apply_fsdp_to_decoder是最后一步。它处理：dp_replicate、fsdp参数分片、param_dtype、reduce_dtype，由TrainingConfig控制。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">模型特定实现（Model-Specific Implementations）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">虽然管线顺序严格，但具体层的分片方式依架构而异。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>GPT-OSS和Llama（GPT-OSS and Llama）</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这些模型用标准TP计划：tok_embeddings行式分片（row-wise）、output列式分片（column-wise）。TransformerBlock内部切成ColumnParallel（列并行，FFN gate/up、Attn QKV）和RowParallel（行并行，FFN down、Attn out）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Qwen 3（Qwen 3）</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Qwen 3的parallelize_qwen3里有skip_dp标志，允许管线在AC/Compile之后停下，用于纯推理（inference-only）用例：这时FSDP hooks可能与torch.inference_mode() 冲突、须避开（来源qwen3/parallelize.py 86-87）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>HF Transformers（实验性，HF Transformers (Experimental)）</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">transformers_modeling_backend提供通用apply_non_moe_tp函数，把标准HF层名（如q_proj、k_proj、v_proj）映射到TP分片风格（来源experiments/transformers_modeling_backend/parallelize.py 111-150）。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">概念到代码：技术映射（Technical Mapping: Concept to Code）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下面这些图桥接高层并行化概念与torchtitan仓库中的具体代码实体（code entities）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>并行化逻辑流（Parallelization Logic Flow）</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">该图展示ParallelismConfig和ParallelDims如何驱动特定分布式函数的执行。来源：config/configs.py 85-156、llama3/parallelize.py 27-104、distributed/compile.py 35-40。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>TP分片计划映射（TP Sharding Plan Mapping）</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">该图展示模型层如何与torch.distributed.tensor.parallel风格关联。来源：experiments/transformers_modeling_backend/parallelize.py 111-150、llama3/parallelize.py 61-62。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">配置总结（Configuration Summary）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">来自ParallelismConfig和TrainingConfig的以下配置参数直接控制管线行为。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>参数与管线影响对照表</strong>：</p>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">Parameter</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">Pipeline Impact</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">Code Reference</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">spmd_backend</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">在default与full_dtensor逻辑间切换</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">configs.py 142-149</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">enable_async_tensor_parallel</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">触发maybe_enable_async_tp</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">configs.py 136-137</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">mixed_precision_param</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">设置FSDP的param_dtype</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">configs.py 58-64</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">fsdp_reshard_after_forward</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">控制FSDP中内存vs通信的权衡</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">configs.py 109-122</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">enable_fsdp_symm_mem</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">启用FSDP2硬件特定优化</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">configs.py 124-128</td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">来源与模块索引（Sources）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">相关配置与实现索引：config/configs.py 28-156、gpt_oss/parallelize.py 93-106。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>完整inline代码实体标识符</strong>：nn.Module、parallelize_<model>（parallelize_llama、parallelize_deepseekv3、parallelize_qwen3、parallelize_gptoss、parallelize_hf_transformers）、full_dtensor、model.parallelize、parallel_dims、apply_cp_to_forward、inner_attention、maybe_enable_async_tp、apply_ac、TransformerBlock、apply_fsdp_to_decoder、dp_replicate、fsdp、param_dtype、reduce_dtype、TrainingConfig、tok_embeddings、output、ColumnParallel、RowParallel、skip_dp、torch.inference_mode()、transformers_modeling_backend、apply_non_moe_tp、q_proj、k_proj、v_proj、torch.distributed.tensor.parallel、ParallelismConfig、ParallelDims、spmd_backend、default、full_dtensor、enable_async_tensor_parallel、mixed_precision_param、fsdp_reshard_after_forward、enable_fsdp_symm_mem。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+torchtitan并行化页面完整读完，核心是不可违反的管线顺序：TP/CP → Async TP → AC → torch.compile → FSDP2，后阶段依赖前阶段。各阶段细节：full_dtensor直接parallelize（否则apply_cp_to_forward + inner_attention后备）、async TP配合compile、AC卡在TP/CP后compile前、compile在TransformerBlock级（重复结构提速）、FSDP2收尾（dp_replicate/param_dtype/reduce_dtype由TrainingConfig控）。<br  /><br  />各模型共享管线但分片不同：GPT-OSS/Llama标准TP计划（tok_embeddings行切/output列切、FFN gate-up+Attn QKV列并行、FFN down+Attn out行并行）；Qwen3 skip_dp专为纯推理（避开FSDP hooks与torch.inference_mode() 冲突）；HF后端apply_non_moe_tp把q_proj/k_proj/v_proj映射到分片。配置参数（spmd_backend、enable_async_tensor_parallel、mixed_precision_param、fsdp_reshard_after_forward、enable_fsdp_symm_mem）直接控制管线行为。对用torchtitan训/跑多模型的人，这是最全的并行化落地参考。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://deepwiki.com/pytorch/torchtitan/4.8-parallelization-pipeline-and-model-specific-implementation</span></p>
+</section>

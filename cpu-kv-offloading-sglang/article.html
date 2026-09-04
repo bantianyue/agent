@@ -1,0 +1,144 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">场景与目标</strong>：16×H100分离式4P4D（4 Prefill+4 Decode）。核心问题：GPU VRAM耗尽时，offload到CPU内存能否保吞吐？从RAM取64K缓存token比在Tensor Cores重算快多少？能否激进offload prefill而不拖慢生成？KV-aware routing能否保缓存命中？<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">架构与四组件</strong>：混合并行（TP=1+DP-Attention、EP=2 MoE）：attention用DP、稀疏MoE用EP，避免NVLink同步瓶颈。① Dynamo Router（KV-aware、<1.5ms 选 worker）；② Prefill + HiCache（write_back、PCIe Gen5 ~45ms 重载、page_first_direct+direct 后端）；③ NIXL over RDMA 单边 GET、<15ms 交接、UCX zero-copy/ODP；④ Decode 全 VRAM 驻留零抖动。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">结果（C=128）</strong>：峰值吞吐 +29.3%、1,843 tok/s、request 7.x/s；P99 TTFT 49.96s（快21.6%、省13.76s）；解码隔离<10ms P99 ITL；缓存命中 baseline 77.0%→54.4% 崩、HiCache 防崩；零 GPU 成本翻倍前缀缓存容量到 3.10M token。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">KV cache offloading是现代推理基础设施里最有趣的技术之一：它让固定的GPU服务器集群能在不换硬件的情况下服务显著更多的并发用户。本文是一个生产级深度实测（作者为开源中的LLM inference方向工程师）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在16块H100的分离式（Disaggregated）4P4D集群上，对比Baseline KV-Aware Routing与Baseline + CPU KV Offloading（HiCache），模型为Qwen3.6-35B-A3B-FP8，任务规模3.10M token故意超出物理GPU VRAM容量。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本文为GitHub README格式，命令摘录作说明用途，含代码标识符。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">目标与评测方法</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">KV cache offloading是当今推理基础设施最有意思的技术之一：它通过把不活跃的KV cache从昂贵的VRAM移到便宜的CPU/系统内存，解锁在固定GPU服务器上服务显著更多并发用户的能力。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1：4P4D集群硬件与互联规格。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这篇深度工程评测对比<strong>Baseline KV-Aware Routing</strong> vs<strong>Baseline + CPU KV Offloading</strong>（利用SGLang的分层HiCache进行），部署在<strong>分离式4 Prefill + 4 Decode（4P4D）服务拓扑</strong>、16块H100的裸金属集群上（Qwen3.6-35B-A3B-FP8）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">目标是评估Hierarchical CPU KV Offloading（HiCache）如何为一个生产4P4D集群扩展到更高的并发。随并发增长评估四个性能支柱：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>① 吞吐</strong>：VRAM耗尽时offload到CPU内存能否保吞吐，还是成为瓶颈？</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>② 取回速度</strong>：从系统RAM取64K缓存token比在Tensor Cores上重算快多少？</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>③ prefill隔离</strong>：能否激进offload prefill worker而不拖慢活动用户的token生成？</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>④ 缓存命中</strong>：KV-aware routing在持续多用户压力下能否保护缓存命中率？</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">硬件与系统设计</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>硬件规格</strong>：本文给出精确的裸金属集群硬件、互联（16×H100规格 + 互联拓扑，见原文规格区）。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2：16-GPU分离式4P4D集群总体架构。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>总体架构</strong>：16-GPU分离式集群，4个Prefill worker + 4个Decode worker。Prefill负责prompt tokenization、自注意力计算、线性循环状态更新；Decode专职逐token自回归生成；两者经NIXL高效传输KV cache。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">混合并行策略（TP=1、DP+EP）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对Qwen3.6-35B-A3B-FP8，标准张量并行（TP）跨attention层会引入不可忽略的all-reduce通信开销。为在2-GPU worker pod上最大化效率，配置了专用混合并行策略：<strong>稠密（attention与线性）路径用数据并行，稀疏MoE用专家并行</strong>。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：混合并行：DP-Attention + EP-MoE并行策略。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在SGLang里跨2-GPU pod服务这个混合MoE模型，需要把混合架构的两种路径解耦。关键：pod用 `--tp-size 2` 建跨两块物理卡的进程组；但为去掉瓶颈设 `--moe-dense-tp-size 1`，告诉MoE运行时稠密路径不要用TP=2；配合 `--enable-dp-attention`、`--enable-dp-lm-head`、`--dp-size 2`，attention和LM-head走数据并行：尤其在大prefill阶段价值大，避免把NVLink变成同步屏障。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4：SGLang分布式flag在2-GPU pod里如何协作。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">2-GPU pod的并行flag配置片段（原文）：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5：整体执行路径流。</figcaption></figure>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #959077"># Hybrid parallelism (2-GPU pod)</span><br/>--tp-size<span style="color: #F8F8F2"></span><span style="color: #AE81FF">2</span><br/>--moe-dense-tp-size<span style="color: #F8F8F2"></span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2"></span><span style="color: #959077"># dense path -&gt; no TP all-reduce</span><br/>--enable-dp-attention<span style="color: #F8F8F2"></span><span style="color: #AE81FF">1</span><br/>--enable-dp-lm-head<span style="color: #F8F8F2"></span><span style="color: #AE81FF">1</span><br/>--dp-size<span style="color: #F8F8F2"></span><span style="color: #AE81FF">2</span><br/>--ep-size<span style="color: #F8F8F2"></span><span style="color: #AE81FF">2</span><span style="color: #F8F8F2"></span><span style="color: #959077"># sparse MoE -&gt; expert parallel</span><br/>--disaggregation-transfer-backend<span style="color: #F8F8F2"></span>nixl</code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">稀疏MoE层用完全不同的策略：`--ep-size 2` 把expert权重分布到两张卡、NVLink all-to-all交换token。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">也就是说两块GPU同时扮演两个并行角色：attention/稠密路径：两块像独立的数据并行worker（零all-reduce）；稀疏expert层：两块像双向专家并行团队（NVLink all-to-all token交换）。这让部署同时利用pod的聚合160GB VRAM容量和算力。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最后是分离：`--disaggregation-transfer-backend nixl`，prefill/decode worker分离；prefill构造好生成所需请求状态后，NIXL直接把完整KV cache流式转移到decode卡。整个执行路径无缝流动。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">组件1：Dynamo Router（数据面）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Dynamo Frontend扮演智能入口网关和集群的中心路由大脑：终止连接、据此分发请求。相比盲目round-robin，它做<strong>KV-aware routing</strong>。Frontend配置片段（原文）：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图6：Dynamo Frontend与KV-aware路由逻辑。</figcaption></figure>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #959077"># Dynamo Router · KV-aware routing</span><br/>--router-mode<span style="color: #F8F8F2"></span>kv<br/>--router-host-cache-hit-weight<span style="color: #F8F8F2"></span><span style="color: #AE81FF">0</span>.75<br/><span style="color: #959077"># scores GPU-resident KV workers first,</span><br/><span style="color: #959077"># then workers able to reload from host &lt;50ms</span><br/><span style="color: #959077"># candidate affinity evaluated in &lt;1.5ms</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">配置片段和原文一致（见原文组件1的Frontend YAML snippet）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">评分优先GPU驻留KV块的worker、其次能快速（sub-50ms）从host重载的worker。router在<1.5ms 内评估候选 worker 亲和度、派发给最高分 worker。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>生产警告</strong>：扩展frontend前要知道你的工作负载、按规模放大frontend。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">组件2：Prefill + HiCache（计算与缓存层）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Prefill Worker处理初始prompt tokenization、自注意力计算、线性循环状态更新。高并发下，单一GPU VRAM装不下多个64K前缀组的工作集，SGLang的HiCache在pinned host DDR5缓冲被逐出的块。Prefill worker配置片段（原文）：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图7：Prefill Worker + HiCache offload配置与数据面。</figcaption></figure>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #959077"># Prefill worker · HiCache offloading</span><br/>--enable-hierarchical-cache<br/>--hicache-write-policy<span style="color: #F8F8F2"></span>write_back<br/>--hicache-mem-layout<span style="color: #F8F8F2"></span>page_first_direct<br/>--hicache-io-backend<span style="color: #F8F8F2"></span>direct<br/>--disaggregation-mode<span style="color: #F8F8F2"></span>prefill<br/>--disaggregation-transfer-backend<span style="color: #F8F8F2"></span>nixl<br/>--disaggregation-bootstrap-port<span style="color: #F8F8F2"></span><span style="color: #AE81FF">30001</span><br/>--enable-cache-report<span style="color: #F8F8F2"></span><span style="color: #959077"># ZeroMQ -&gt; router</span><br/><span style="color: #959077"># reload over PCIe Gen5 ~45ms (40 lanes)</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">说明：`--enable-hierarchical-cache` 激活多级存储子系统；`--hicache-write-policy write_back` 优化PCIe效率：新生成的KV块活跃计算期间独占留在GPU VRAM、被逐出时写回；`--hicache-mem-layout page_first_direct` 配 `--hicache-io-backend direct` 让引擎绕过中间CPU staging、直接驱动PCIe Gen5；`kv-events-config` 用ZeroMQ把实时块分配/逐出通知流给router。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>警告</strong>：标准工作负载避免 `write_through` 策略：谨慎使用 `--hicache-` 相关write-through配置。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">组件3：NIXL over RDMA状态传输</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">分离式P/D架构里，prefill算prompt激活但不生成token。端口与通信是部署里最关键的决策之一。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图8：NIXL端口架构与跨worker通信映射。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Decode Worker如何「拉取」状态（分步）</strong>：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>① Bootstrap协调</strong>（Port 30001→30002）：prefill完成prompt tokenization和attention后，经bootstrap端口通知decode worker就绪。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>② 单边RDMA GET</strong>：decode worker不让prefill经CPU内存推数据，而是自己主动用单边RDMA GET拉取。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>③ 双状态注入</strong>：自注意力KV块和GDN循环线性状态同时被拉取。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>④ Sub-15ms交接</strong>：完整64K上下文状态在<15ms 内直接落到 decode GPU 的 VRAM 开始生成。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">State Transfer环境配置片段（原文）：</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #959077"># NIXL over RDMA · state transfer env</span><br/><span style="color: #F8F8F2">UCX_TLS</span><span style="color: #FF4689">=</span>rc_x,rc,cuda_copy,cuda_ipc<br/><span style="color: #F8F8F2">UCX_RNDV_SCHEME</span><span style="color: #FF4689">=</span>get_zcopy<br/><span style="color: #F8F8F2">UCX_RNDV_THRESH</span><span style="color: #FF4689">=</span><span style="color: #AE81FF">0</span><br/><span style="color: #F8F8F2">UCX_IB_REG_METHODS</span><span style="color: #FF4689">=</span>odp,rcache<br/><span style="color: #F8F8F2">NIXL_TELEMETRY_ENABLE</span><span style="color: #FF4689">=</span><span style="color: #AE81FF">1</span><br/><span style="color: #F8F8F2">NIXL_TELEMETRY_PROMETHEUS_PORT</span><span style="color: #FF4689">=</span>&lt;port&gt;</code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">说明：`UCX_TLS rc_x,rc,cuda_copy,cuda_ipc` 让UCX用CUDA IPC做节点内GPU传输、RDMA做跨节点；`UCX_RNDV_SCHEME get_zcopy`+`UCX_RNDV_THRESH 0` 强制zero-copy；`UCX_IB_REG_METHODS odp,rcache`（On-Demand Paging）消除内存注册开销；`NIXL_TELEMETRY_ENABLE` 暴露实时传输吞吐/延迟指标。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">组件4：Decode Worker（自回归引擎）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Decode Worker专职逐token自回归生成，直接从prefill拉取live KV注入生成循环。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig09.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图9：Decode Worker架构与端口绑定。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>为何offload只放prefill</strong>：解码worker不开分层缓存。把host offloading全集中到prefill：前缀缓存命中在prefill最要紧，decode保持100% VRAM驻留保证零抖动token生成。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Decode worker显式镜像prefill的混合并行拓扑（TP=1 DP-Attention + EP=2 MoE），保持相同内存参数（context-length 131072、page-size、mem-fraction-static）；绑到port 30002分离入站decode控制面。Decode配置片段（原文）：</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #959077"># Decode worker (AR engine)</span><br/><span style="color: #959077"># mirror prefill hybrid topology</span><br/>--disaggregation-mode<span style="color: #F8F8F2"></span>decode<br/>--disaggregation-bootstrap-port<span style="color: #F8F8F2"></span><span style="color: #AE81FF">30002</span><br/>--context-length<span style="color: #F8F8F2"></span><span style="color: #AE81FF">131072</span><br/><span style="color: #959077"># keep 100% VRAM-resident, zero-jitter generation</span></code></pre>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">基准与性能分析</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>评测设定</strong>：模型Qwen/Qwen3.6-35B-A3B-FP8；输入64,536 token（64K）固定模式；输出256 token；共享前缀工作集=64个不同前缀组、75% 目标前缀复用（48,402共享token/组）；并发扫描8→128；每级300秒稳态 + 16个warmup。这是prefill-heavy实验（64K输入vs 256输出，约252:1）。3.10M token有意超出物理GPU VRAM缓存容量。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig10.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图10：峰值并发（C=128）下Baseline vs HiCache逐项对比。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>① 吞吐与并发悬崖</strong>：C=128时baseline VRAM-only撞上严重内存墙、因缓存逐出崩溃；HiCache下输出吞吐跳到<strong>1,843 tokens/s</strong>、请求率7.x/s。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>② P99 TTFT</strong>：极端饱和下baseline因prefill worker持续卡在重算而排队阻塞；HiCache下P99 TTFT降到<strong>49.96秒</strong>，快<strong>21.6%</strong>、省<strong>13.76秒</strong>。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>③ 解码隔离（P99 TPOT/ITL）</strong>：因为offload严格限定在prefill worker、decode 100% VRAM驻留，token生成不被host RAM流量拖慢。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>④ 端到端（P99 E2E）</strong>：靠巨大prefill加速，整体工作流周转大幅改善，企业agentic工作流端到端完成更快、不牺牲逐token生成质量。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>⑤ 缓存动态</strong>：baseline缓存命中率从<strong>77.0% 崩到54.4%</strong>、触发昂贵的64K prefill重算；HiCache通过在pinned host DDR5缓冲被逐出块并重载、阻止这种崩溃。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">NIXL与HiCache运行时遥测</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>零拷贝RDMA KV传输（NIXL）</strong>：warmup后NIXL平均传输时间稳定在紧凑的15ms–20ms（sub-20ms传输延迟）；NIXL累计传输字节数跨worker稳步超过2.50 TiB：单边UCX内存注册完全防住网络传输瓶颈。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Host RAM饱和与工作集吸收（HiCache）</strong>：CPU HiCache Used Tokens面板显示token数在负载期快速攀升；4个prefill worker的CPU HiCache利用率表计显示<strong>99.7%–100%</strong>：pinned DDR5 host RAM层以最高效率运转、持有超额前缀工作集。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">结论</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这个参考部署证明：<strong>分离式4P4D服务 + HiCache CPU KV Offloading从根本上重塑GPU隔离能力</strong>。分布式推理最大的瓶颈之一是在worker间管理海量KV cache：当prefill需要长时间持有的KV块超出VRAM时。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把host DDR5 RAM当作无缝的二级缓存水库，prefill worker得到增长所需的净空；把这种分层内存层与Dynamo的前缀感知路由、NIXL的零拷贝RDMA状态传输耦合，得到具体收益：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>消除并发悬崖</strong>：C=128时峰值吞吐 +29.3%（防VRAM逐出崩塌）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>砍尾延迟</strong>：负载下P95 TTFT -44.1%、经 ~45ms PCIe重载把P99响应省13.76s。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>保护解码速度</strong>：100% VRAM驻留decode保持坚如磐石的token间延迟（<10ms P99 ITL）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>零GPU成本扩容</strong>：现成硬件上翻倍有效前缀缓存容量（3.10M+ token）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">作者的话：承诺这系列带来生产级推理基准，做到了；从无法想象能拿到集群，到这里一步步跑通。特别感谢开源社区与算力赞助者的支持（作者使用开放预算）。下一篇写张量并行如何意外损害整体吞吐。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+这篇16×H100上的生产级深度实测，把「CPU KV offloading到底能不能打」讲得极有数据支撑。核心是<strong>分离式4P4D + HiCache</strong>：prefill worker把不活跃的KV块offload到pinned host DDR5（`write_back` 策略 + `page_first_direct` + direct PCIe5后端，~45ms重载），decode worker保持100% VRAM驻留零抖动。叠加Dynamo的KV-aware路由（`--router-mode kv`）和NIXL单边RDMA状态传输（<15ms 交接、zero-copy UCX）。<br  /><br  />结果非常实：并发128时VRAM-only baseline因64K前缀重算崩溃，HiCache把吞吐拉到1,843 tok/s（+29.3%）、P99 TTFT降到49.96s（快21.6%）、缓存命中率守住77%（baseline崩到54.4%）、解码<10ms ITL，并在零 GPU 成本下把前缀缓存容量翻倍到 3.10M token。值得记的工程点：① <strong>offload只放prefill、decode全驻留</strong>：保证生成零抖动；② 混合并行（DP-Attention + EP-MoE）避开NVLink all-reduce瓶颈；③ 单边RDMA GET而非push，避免CPU内存中转。对做LLM serving/推理引擎、且受限于固定GPU显存的人，这是「不花钱扩卡却翻倍会话容量」的实操级案例。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://x.com/jaga_prasanna/status/2093217133841064233</span></p>
+</section>

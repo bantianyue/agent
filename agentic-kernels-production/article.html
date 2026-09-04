@@ -1,0 +1,175 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">问题</strong>：agent在kernel开发已很在行（从构思到生成），但「赢benchmark ≠ 上线生产」。原因：① 最佳kernel配置依赖生产工作负载；② 更快microbenchmark不必然 = 更快模型；③ 单独优化kernel错过更高层机会（端到端trace常显示瓶颈在kernel之间的交互）；④ 集成新kernel进生产引擎非平凡。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">方案</strong>：双层优化栈：Model-Level（理解完整模型工作负载、profile时间花哪、提出如kernel融合/跨层改动）+ Per-Kernel（对生成的和性能关键kernel探索变体）。加自改进机制：通过正确性+端到端性能检查的kernel进经验库 → 每次迭代从积累经验开始。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">结果</strong>：目标Qwen-Image与FLUX.2（SGLang on B300）。共用：Prepacked FP8 Scales（-7.3%/-6.1%）、Fused QKV projection+epilogue、Norm+quant kernel fusion。Qwen-Image追加Bias absorption、CFG modulation cache（-2.1% FP8/-3.1% NVFP4）、per-kernel（-7.6%/-13.4%）；总FP8 -15.8%、NVFP4 -1.3%。FLUX.2追加qknorm+RoPE（2×）、fused SwiGLU+quant、gated residual norm、per-kernel（-1.9% FP8/-2.8% NVFP4）。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>TL;DR</strong>：我们构建了一个agentic kernel开发框架：识别模型级优化机会、生成改进的kernel、并在我们的serving栈中验证。在我们当前的扩散模型初始化实验里，端到端延迟改善最高达15.8%（Qwen-Image，FP8）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">（原文含代码/配置片段与kernel表格，命令与标识符摘录作说明用途。）</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">问题：从benchmark到生产的鸿沟</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">近些年agent在kernel开发上变得惊人地强，从构思到生成。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1：Baseten agentic kernel优化框架的优化流程。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">然而「赢得kernel benchmark」和「把优化上线生产」之间有鸿沟。几个原因：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>① 最佳kernel配置依赖生产工作负载</strong>。在通用benchmark上赢的kernel，在负载上可能输（通用基准的优胜者未必适合你的负载）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>② 更快的microbenchmark不必然产生更快的模型</strong>。改动集成后，与其它kernel/内存/调度的交互会让孤立kernel的快慢失真。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>③ 单独优化kernel会错过更高层的机会</strong>。端到端trace常显示只有一小部分kernel花最多时间；这些时间常被未优化路径或跨kernel交互消耗。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>④ 把新kernel集成进生产serving引擎非平凡</strong>。不同于改独立torch模型，serving栈有形状/精度/内存约束。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">带着这些，我们创建了一个桥接benchmark与生产的方案：给定一个模型和serving栈，它系统性地识别机会、生成kernel、并在生产集成层验证。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">The Stack：双层优化</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>双层优化栈</strong>：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Model-Level Optimization</strong>：理解完整模型工作负载、profile时间花在哪、提出改动（如kernel融合、跨层算子合并、重排计算）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Per-Kernel Optimization</strong>：对生成的性能关键kernel和trace里识别出的kernel，探索多种变体、选择并验证。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第一层帮助把搜索空间扩到「一对一kernel改进」之外：不只优化单个kernel，它在更高抽象层识别机会；第二层则对剩余热点做微优化。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">跨优化运行的持续学习</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">框架有自改进机制：通过正确性和端到端性能检查的kernel被记录进经验库，代表生产已验证的模式。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2：持久化知识架构：经验库驱动的自改进循环。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这创造自改进循环：每次优化迭代从积累的经验开始，使框架随处理更多模型越来越强。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">结果与案例研究</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">初始实验锁定扩散模型：<strong>Qwen-Image与FLUX.2</strong>，用SGLang服务在B300 GPU上。优化流程对两模型都识别并发起多个优化。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：baseline、model-level与kernel-level优化之间的提升。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Qwen-Image与FLUX.2的总体改善见图3。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">共同优化 #1：Prepacked FP8 Scales</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Qwen-Image和FLUX.2的FP8路径在把scale元数据转成DeepGEMM要求的格式时浪费了launches。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4：FLUX.2注意力投影baseline。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们消除此开销：把主要FP8激活生产者改成直接发射packed scales，同时把scale转换下推到各kernel。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5：FLUX.2注意力投影optimized（packed scales）。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">例如FLUX.2的注意力投影（baseline对比optimized，见fig04/05）：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图6：Qwen-Image前馈层baseline。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Qwen-Image的前馈层亦同（fig06/07）：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图7：Qwen-Image前馈层optimized。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">此优化把端到端延迟降低<strong>7.3%（Qwen-Image）</strong> 和<strong>6.1%（FLUX.2）</strong>，这些收益在正确性和端到端检查后持续。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">共同优化 #2：Fused QKV projection + epilogue</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两模型原始注意力路径独立计算图像query、key、value投影：尽管它们共享同输入、同FP8格式。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图8：QKV三投影独立（baseline）。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">优化把三个FP8投影合并成一个GEMM，然后融合bias addition、QK normalization、RoPE、以及后置epilogue算子。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig09.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图9：合并单GEMM + 融合epilogue（optimized）。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">baseline（fig08）对比optimized（fig09）：</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">共同优化 #3：Normalization + quantization kernel fusion</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两模型里，normalization之前产生大的BF16张量，由随后的quantization kernel立即消费。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig10.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图10：归一化+量化融合baseline。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">融合后：<strong>Qwen-Image</strong>融合kernel同时发射原始BF16结果和QKV/前馈的预量化FP8激活；<strong>FLUX.2残差路径</strong> 融合kernel发射归一化输出、更新的残差、packed E2M1值与swizzled E4M3 scales。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig11.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图11：归一化+量化融合optimized。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两模型的模型级 + kernel级累加改善（FP8 / NVFP4 latency降低）见下表：</p>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">Model</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">FP8 latency</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">NVFP4 latency</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Qwen-Image</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">15.8% lower</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1.3% lower</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">FLUX.2</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1.3% lower</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1.1% lower</td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Qwen-Image专属优化</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>优化 #1 - Bias absorption</strong>：上轮优化后，注意力与前馈之后还有两个独立bias addition，把它们吸收进融合kernel的epilogue。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig12.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图12：Qwen-Image per-kernel优化总结。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>优化 #2 - CFG modulation cache</strong>：Classifier-free guidance在同一timestep跑两次去噪pass，两次pass用不同condition（一个收文本、一个空），但共享同一noisy latent和timestep。公式化：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">ε_cond = F(x_t,t,c),   ε_uncond = F(x_t,t,∅)</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">ε_CFG = ε_uncond + w( ε_cond − ε_uncond )</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">noisy latent和timestep被两pass共享。图像和文本modulation分支是</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">e_t = embed(t)</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">于是</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">m_image = W_image·e_t + b_image,   m_text = W_text·e_t + b_text</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因为这些modulation分支只依赖e_t和固定权重，它们的输出在两次pass间是相同的（无关pass的condition）。所以可在第一次pass缓存、第二次复用，消除整块重复GEMM。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在DiT入口创建cache key（同一timestep对象传给两个CFG branches）：</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #66D9EF">def</span><span style="color: #F8F8F2"></span><span style="color: #A6E22E">_cfg_cache_optimization_enabled</span><span style="color: #F8F8F2">(active)</span><span style="color: #FF4689">-&gt;</span><span style="color: #F8F8F2">bool:</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #66D9EF">return</span><span style="color: #F8F8F2">active</span><br/><br/><br/><span style="color: #959077"># QwenImageTransformer2DModel.forward</span><br/><span style="color: #66D9EF">if</span><span style="color: #F8F8F2">_cfg_cache_optimization_enabled()</span><span style="color: #FF4689">and</span><span style="color: #F8F8F2">isinstance(timestep,</span><span style="color: #F8F8F2">torch</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">Tensor):</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #959077"># Both CFG branches receive the same timestep tensor.</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #959077"># Keep a reference to it so tensor identity can be used safely.</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #F8F8F2">cache_key</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">{</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #E6DB74">&quot;timestep&quot;</span><span style="color: #F8F8F2">:</span><span style="color: #F8F8F2">timestep,</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #E6DB74">&quot;version&quot;</span><span style="color: #F8F8F2">:</span><span style="color: #F8F8F2">version_if_available(timestep),</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #F8F8F2">}</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在每个block缓存image和text modulation输出：</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #959077"># QwenImageTransformerBlock.forward</span><br/><span style="color: #F8F8F2">cached</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">getattr(self,</span><span style="color: #E6DB74">&quot;modulation_cache&quot;</span><span style="color: #F8F8F2">,</span><span style="color: #66D9EF">None</span><span style="color: #F8F8F2">)</span><br/><br/><span style="color: #F8F8F2">cache_hit</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">(</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #F8F8F2">cache_key</span><span style="color: #FF4689">is</span><span style="color: #FF4689">not</span><span style="color: #66D9EF">None</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #FF4689">and</span><span style="color: #F8F8F2">cached</span><span style="color: #FF4689">is</span><span style="color: #FF4689">not</span><span style="color: #66D9EF">None</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #FF4689">and</span><span style="color: #F8F8F2">cached[</span><span style="color: #E6DB74">&quot;timestep&quot;</span><span style="color: #F8F8F2">]</span><span style="color: #FF4689">is</span><span style="color: #F8F8F2">cache_key[</span><span style="color: #E6DB74">&quot;timestep&quot;</span><span style="color: #F8F8F2">]</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #FF4689">and</span><span style="color: #F8F8F2">cached[</span><span style="color: #E6DB74">&quot;version&quot;</span><span style="color: #F8F8F2">]</span><span style="color: #FF4689">==</span><span style="color: #F8F8F2">cache_key[</span><span style="color: #E6DB74">&quot;version&quot;</span><span style="color: #F8F8F2">]</span><br/><span style="color: #F8F8F2">)</span><br/><br/><span style="color: #66D9EF">if</span><span style="color: #F8F8F2">cache_hit:</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #959077"># Second CFG pass: reuse the cached outputs.</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #F8F8F2">image_modulation</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">cached[</span><span style="color: #E6DB74">&quot;image_modulation&quot;</span><span style="color: #F8F8F2">]</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #F8F8F2">text_modulation</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">cached[</span><span style="color: #E6DB74">&quot;text_modulation&quot;</span><span style="color: #F8F8F2">]</span><br/><br/><span style="color: #66D9EF">else</span><span style="color: #F8F8F2">:</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #959077"># First CFG pass: compute the modulation outputs.</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #F8F8F2">image_modulation</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">image_modulation_GEMM(timestep_embedding)</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #F8F8F2">text_modulation</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">text_modulation_GEMM(timestep_embedding)</span><br/><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #959077"># Cache them for the second CFG pass.</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #66D9EF">if</span><span style="color: #F8F8F2">cache_key</span><span style="color: #FF4689">is</span><span style="color: #FF4689">not</span><span style="color: #66D9EF">None</span><span style="color: #F8F8F2">:</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #F8F8F2">self</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">modulation_cache</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">{</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #E6DB74">&quot;timestep&quot;</span><span style="color: #F8F8F2">:</span><span style="color: #F8F8F2">cache_key[</span><span style="color: #E6DB74">&quot;timestep&quot;</span><span style="color: #F8F8F2">],</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #E6DB74">&quot;version&quot;</span><span style="color: #F8F8F2">:</span><span style="color: #F8F8F2">cache_key[</span><span style="color: #E6DB74">&quot;version&quot;</span><span style="color: #F8F8F2">],</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #E6DB74">&quot;image_modulation&quot;</span><span style="color: #F8F8F2">:</span><span style="color: #F8F8F2">image_modulation,</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #E6DB74">&quot;text_modulation&quot;</span><span style="color: #F8F8F2">:</span><span style="color: #F8F8F2">text_modulation,</span><br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #F8F8F2">}</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">此优化对FP8延迟降低2.1%、对NVFP4降低3.1%。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>优化 #3 - Per-kernel optimization</strong>：对性能关键的和此前融合的kernel再运行优化pass，产出改进（见fig12）。这些per-kernel优化对FP8改善7.6%、对NVFP4改善13.4%。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">FLUX.2专属优化</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>优化 #1 - Single-Block QK normalization + RoPE</strong>：FLUX.2的单流transformer block没用生产融合的QK-norm+RoPE kernel。新替代是per-token-CTA kernel：载入每个连续12KB Q/K head tile、做归一化、应用RoPE。融合kernel给2× 加速，端到端延迟改善FP8 2.3%。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig13.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图13：qknorm+RoPE baseline。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>优化 #2 - Fused SwiGLU + FP8/NVFP4 quantization</strong>：每次SwiGLU调用之前产生大的BF16中间量、由独立FP8/NVFP4 kernel量化。此优化以单个fused kernel替代多阶段路径（GEMM + 门控 + 激活 + 直接量化为训练格式）。对FP8需保留原始操作顺序保证数值等价；对NVFP4直接发射packed E2M1值和swizzled E4M3 scales。融合kernel把延迟降低2.3%（FP8）和3.8%（NVFP4）。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig14.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图14：qknorm+RoPE fused（2× speedup）。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>优化 #3 - Gated Residual Normalization</strong>：FLUX.2残差路径之前把gated residual update和layer normalization作为两个独立kernel。新kernel把gate乘、残差更新、归一化、scale/shift融进一个。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig15.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图15：fused SwiGLU+quant baseline。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>优化 #4 - Per-Kernel Optimization</strong>：同Qwen-Image，再跑per-kernel优化循环，识别以下改进：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig16.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图16：fused SwiGLU+quant optimized。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这些kernel合计降低NVFP4延迟2.8%、FP8延迟1.9%。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig17.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图17：gated residual norm baseline。</figcaption></figure>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">Original Kernel</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">What it does</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">New Kernel</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">swiglu_fp4_quant</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Fuses SwiGLU with NVFP4 quantization (opt #2)</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1.43× / 1.41×</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">resnorm_quant</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Fuses residual normalization + quantization (opt #3)</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1.65×</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">qknorm_rope</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Fuses double-block QK norm + RoPE (opt #1)</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">2.0×</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">token_cat</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Accelerates image-text concatenations (opt #2)</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">4.6×</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">norm_out</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Fuses boundary norm, scale mult, residual add (opt #3)</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">3.35×</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">swiglu</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Optimizes remaining unquantized SwiGLU sites (opt #2)</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1.24×</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">gate_res_norm</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Optimizes remaining gated residual-norm path (opt #3)</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1.27×</td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">未来方向</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">框架设计成model-agnostic和engine-agnostic，允许同样的优化循环应用到一个模型家族、再迁移到另一个。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">随着harness和生产集成继续改进，我们看到一条路径：自动为新的生成模型生成生产级kernel、无缝扩到更广模型/引擎组合。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+Baseten团队这篇《Agentic Kernels in Production》展示了把「agent写kernel」从benchmark领进真实生产的完整闭环：双层优化栈（model-level机会识别 + per-kernel变体探索）+ 经验库自改进，桥接benchmark与生产工作负载、microbenchmark与端到端、单kernel与跨层交互、以及生产引擎的集成约束。<br  /><br  />对Qwen-Image与FLUX.2（SGLang on B300），结果有说服力：共用Prepacked FP8 Scales（-7.3%/-6.1%）、Fused QKV+epilogue、Norm+quant fusion；Qwen-Image还靠Bias absorption、CFG modulation cache（公式：两pass共享e_t + 固定权重 → modulation输出相同可缓存）+ per-kernel，总FP8 -15.8%、NVFP4 -1.3%；FLUX.2靠qknorm+RoPE（2×）、fused SwiGLU+quant、gated residual norm + per-kernel，FP8 -1.9%、NVFP4 -2.8%。<br  /><br  />对做推理引擎/GPU kernel优化的人，这篇的启发性在于：真正的提速来自模型级跨kernel联动（融合/缓存/吸收）而非只扫单个热点，且一个「agent循环 + 经验库 + 生产验证」的框架能让这类优化自动化、跨模型复用。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://x.com/BrianLi23/status/2093487934448214351</span></p>
+</section>

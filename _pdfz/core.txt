@@ -1,0 +1,856 @@
+
+===== PAGE 1 =====
+2026-08-21
+EnvHarness: Awakening Static Worlds for
+Agent Learning
+Chengsong Huang1*, Zifeng Wang2, Rujun Han2, Jun Yan2, Yanfei Chen2, Zoey CuiZhu2, Ke Jiang2, Peng Xia4,
+Han Yu2, Yufan Zhuang2, Yifei Ming2, Jiaqi Pan3, Bhavana Dalvi Mishra2, Jiaxin Huang1, Burak Gokturk2,
+Tomas Pfister2 and Chen-Yu Lee2
+1Washington University in St. Louis, 2Google Cloud AI Research, 3Google Cloud, 4University of North Carolina at Chapel Hill
+LLM agents learn by interacting with environments, yet these environments are hand-built and static:
+blind to an agent’s weaknesses, and quickly left behind as it improves. While recent environment
+generation methods attempt to address this, they require domain-specific pipelines, rely on expensive or
+unreliable verifiers, and still produce static environments. To alleviate the engineering burden of rebuild-
+ing environments from scratch, we propose Environment Harness (EnvHarness), a programmable
+layer of plug-in components that wraps a static environment to reshape its behavior without modifying
+the underlying logic. Operating through standard interfaces, EnvHarness applies across diverse
+domains while ensuring every reshaped environment retains its original verifier. To automate this
+process, we introduce EnvRigger, which treats the target policy as a black box, observing its execution
+trajectories to synthesize EnvHarness components targeting diagnosed flaws, and validating them
+via fresh rollouts. Across five benchmarks in four domains, EnvHarness outperforms both original
+environments and domain-specific environment generation pipelines, achieving up to a 9.0-point im-
+provement on held-out instances with 9.8% fewer execution steps. Furthermore, EnvHarness provides
+a superior optimization signal for reinforcement learning, enabling continuous, targeted co-evolution of
+the policy and its environment.
+github.com/google-research/envharness
+www.envharness.com
+45
+50
+55
+SWE-bench Verified
+47.7
+49.9
+52.6
+OfficeQA
+54.2
+54.4
+56.2
+SpreadsheetBench
+46.4
+45.9
+49.1
+Base agent
+Learn from real envs
+Learn from EnvHarness envs (ours)
+48
+51
+54
+0
+100
+200
+300
+Number of environments
+Resolved rate (%)
+EnvHarness
+envs (ours)
+SWE-Lite
+(real envs)
+SWE-smith
+(SOTA scaling)
+Figure 1 | Overall performance. Left: Agents learning from EnvHarness environments consistently
+outperform those learning from the original environments across software engineering and office
+automation benchmarks, including SWE-bench Verified, OfficeQA, and SpreadsheetBench. Right:
+On SWE-bench Verified, under an identical environment budget, EnvHarness keeps improving as
+environments scale, while real and generated environments flatten out.
+1. Introduction
+As LLMs are deployed as autonomous agents, the source of learning shifts from curated text data to
+interactive environments. Whether navigating web pages (Gur et al., 2024), resolving issues in a
+Corresponding author(s): chengsong@wustl.edu, {zifengw, chenyulee}@google.com
+* This work was done while Chengsong interned at Google Cloud AI Research.
+arXiv:2608.19880v1  [cs.AI]  20 Aug 2026
+
+===== PAGE 2 =====
+EnvHarness : Awakening Static Worlds for Agent Learning
+Figure 2 | While an agent harness transforms a frozen LLM into a capable agent via plug-in components
+(e.g., skills, memory, tools) without altering model weights, EnvHarness applies this same principle
+to the other side of the interaction. It customizes a frozen environment with plug-in components
+while leaving original environment unchanged.
+codebase (Yang et al., 2024), or controlling an embodied platform (Wang et al., 2023), agents rely
+on their respective environments to acquire learning signals (Yao et al., 2022b). These environments
+act as interactive counterparts that present specific tasks, manage changing states, respond to actions,
+and evaluate success (Li et al., 2026). Unfortunately, building them requires substantial human effort
+to hardcode the interaction logic and verifiers (Merrill et al., 2026; Zhang et al., 2025). Consequently,
+the resulting environments remain rigidly static, behaving identically regardless of which agent
+interacts with them or how much that agent has improved (Hu et al., 2026). This rigidity limits agent
+learning in two fundamental ways: it fails to provide a targeted signal that addresses a particular
+agent’s weaknesses (Dennis et al., 2020; Jiang et al., 2021), and it has nothing more to teach once
+the agent learns to solve the existing tasks (Beukman et al., 2024; Wang et al., 2019).
+Since manually building environments is expensive, a growing line of work has turned to auto-
+mated environment generation (Guo et al., 2025; Song et al., 2026; Zala et al., 2024). Despite its
+scalability, this approach suffers from two major limitations. First, generation pipelines are inherently
+domain-specific. Existing systems generate environments for web navigation (Trabucco et al., 2025),
+programming (Pan et al., 2024), or tool use (Lee et al., 2026a), but a pipeline built for one setting
+cannot transfer to the others. Second, ensuring correctness is both costly and unreliable. Because
+these environments and verifiers are generated by LLMs, practitioners must over-generate and heavily
+filter them (Wang et al., 2026; Yang et al., 2026a), which still cannot fully guarantee their correctness.
+Rather than creating new environments to obtain learning signals, we propose Environment
+Harness (EnvHarness), a programmable layer that transforms an existing, static environment
+into a dynamically customized one without modifying the environment itself. We make an analogy
+between EnvHarness and agent harness (Anthropic, 2025, 2026b; OpenAI, 2026) in Figure 2:
+An agent harness provides LLMs with external memory, tools, and skills to handle complex tasks
+beyond basic text generation. EnvHarness extends this concept to environments, equipping a
+static environment with modular, plug-in components. A Stage sets the starting point of an episode,
+a Contract controls the allowed actions and observations, and a Chain connects multiple base
+environments to form an extended episode. The agent continues to use the standard interface, but
+EnvHarness mediates this interaction. This enables a single environment to fulfill needs it was
+never built for: isolating a specific skill, extending a task’s horizon, or calibrating difficulty so the
+agent struggles but ultimately succeeds. Crucially, operating strictly at the interface level makes
+EnvHarness domain-agnostic, while allowing every new environment to safely inherit the trusted,
+human-built verifier of its original environment.
+2
+
+===== PAGE 3 =====
+EnvHarness : Awakening Static Worlds for Agent Learning
+While EnvHarness provides a universally applicable framework, its specific configuration must
+be tailored to each target policy and task. To automate this customization process, we introduce
+EnvRigger. By treating the policy strictly as a black box, EnvRigger observes both successful and
+failed execution trajectories within the base environment to diagnose specific behavioral vulnerabilities.
+Guided by these findings, it synthesizes candidate EnvHarness components and wraps the current
+environment to evaluate them. EnvRigger then runs fresh policy rollouts, judging acceptance solely
+on whether the candidate environment effectively cultivates the missing capabilities while remaining
+solvable. Components failing this evaluation undergo iterative revision until they succeed. Ultimately,
+this workflow realizes fully automated, task-policy-conditioned environment customization.
+We conduct experiments on challenging benchmarks spanning embodied tasks (ALFWorld (Shrid-
+har et al., 2020)), web browsing (WebArena (Zhou et al., 2024)), software engineering (SWE-bench
+Verified (Jimenez et al., 2024)), and office work (OfficeQA (Databricks, 2025), SpreadsheetBench (Ma
+et al., 2024)). Specifically, we evaluate EnvHarness across two representative learning paradigms:
+skill-based learning (SL) and reinforcement learning (RL). In SL settings, agents trained with En-
+vHarness environments outperform those trained on original environments, achieving up to 9.0
+points of improvement on held-out tasks (Table 2) while using 9.8% fewer interaction steps (Table 3).
+In RL settings, EnvHarness-customized environments similarly yield significantly stronger policies,
+with up to 6.5 points of improvement (Table 4). Finally, repeatedly executing the EnvRigger loop
+enables continuous co-evolution between the agent and its environment, unlocking compounding
+performance gains that scale effectively with the number of customized tasks.
+Our contributions are threefold: (1) We propose EnvHarness, a programmable layer that
+customizes a static environment into a controllable one through its own reset/step interface,
+instantiated as three types of plug-in components that reshape environment initial states, agent-
+environment interaction interfaces, and composite tasks from different environments, all while the
+original environment’s tasks and verifiers stay unchanged. (2) We introduce EnvRigger to automate
+task-policy-conditioned environment customization. By diagnosing policy flaws from rollouts and
+iteratively revising candidate components until fresh rollouts confirm their success, EnvRigger
+ensures that every new environment targets the specific weaknesses of the policy. (3) Across five
+benchmarks in four domains, EnvHarness improves both effectiveness (up to 9.0 points on held-out
+tasks) and efficiency (9.8% fewer steps), strengthens policies under reinforcement learning, and
+scales agent performance where both human-built and generated environments flatten out.
+2. EnvHarness
+2.1. The EnvHarness Paradigm
+Table 1 | Analogy between Agent Harness and EnvHarness. Both scale capabilities through external
+layers rather than changing the core system.
+Agent Harness
+EnvHarness (Ours)
+Base System
+Frozen LLM
+Static environment
+Designed to Solve
+Lack of action, memory, or loops
+Hardcoded interaction logic
+Harness Layer
+Capabilities (tools, memory)
+Customization (states, rules, observations)
+Unified Output
+Autonomous agent
+Customized environment
+An agent harness (Anthropic, 2025, 2026b; OpenAI, 2026) is the software layer (execution loops,
+tool registries, and context management) (Meng et al., 2026) that wraps a LLM to form an autonomous
+agent (Agent = Model + Harness). It adds new capabilities without changing the model weights. We
+3
+
+===== PAGE 4 =====
+EnvHarness : Awakening Static Worlds for Agent Learning
+apply the same idea to the other side of the agent-environment loop. We define EnvHarness as
+a programmable layer that wraps an existing, static environment and turns it into a customizable
+one (Customized Env = Static Env + EnvHarness). EnvHarness achieves this customization by
+modifying the information flow through the standard interface, leaving the underlying environment
+completely untouched. Analogous to the tools and memory of an agent harness, EnvHarness is
+assembled from modular plug-in components that tailor the environment to specific training needs
+like isolating a specific skill, extending a task’s horizon, or adjusting task difficulty.
+Formal Definition of EnvHarness.
+We model an environment as a tuple 𝐸= (S, A, O, 𝑇, 𝑅, 𝑠0),
+where S is the state space, A the action space, O the observation space, 𝑇: S × A →S the transition
+function that maps a state and an action to the next state, 𝑅the reward induced by the verifier, and
+𝑠0 the initial state. An EnvHarness component is an environment-agnostic transformation 𝑤:
+𝐸′ = 𝑤(𝐸),
+𝐸′ = (S′, A′, O′, 𝑇′, 𝑅′, 𝑠′
+0).
+(1)
+𝑤reshapes the environment strictly at the interface level, without modifying its underlying
+simulator backend or implementation details. It customizes the initial state (𝑠′
+0), filters exposed
+spaces (A′, O′), and updates transition mechanics (𝑇′). Because all interventions remain external, the
+ground-truth evaluation logic is preserved, ensuring the original verifier still can score the episode.
+2.2. Three EnvHarness Components
+Environment
+❄️
+reset()
+step(a)
+obs()
+Environment
+❄️
+reset()
+step(a)
+obs()
+Stage  ( )
+Environment
+❄️
+reset()
+step(a)
+obs()
+Contract  (
+)
+Environment
+❄️
+reset()
+step(a)
+obs()
+Chain  (logic 
+)
+Figure 3 | Overview of EnvHarness components wrapping the standard environment inter-
+face. The underlying base environment (native state transitions and original task verifier) remains
+completely frozen. From left to right: the base environment, followed by three EnvHarness compo-
+nents—Stage, Contract, and Chain. Highlighted arrows and headers indicate overridden interface
+methods, with code blocks showing how each wrapper modifies state initialization, transition dynam-
+ics, or observation handling without altering the base environment.
+The mapping 𝑤of Eq. (1) defines a general interface, and any transformation that follows this
+interface is a valid EnvHarness component. In this work, we introduce three concrete types of
+components, chosen to cover three fundamental modes of environment customization, and we expect
+more to follow. Each type is specified by its own parameters, overriding standard environment
+interface methods such as reset or step. Figure 3 compares the three component types with the
+original interface, highlighting the specific method each component overrides. We detail the software
+implementation of this interface protocol and class architecture in Appendix C. Throughout this
+subsection, we illustrate the components on one ALFWorld task, “put a clean mug on the desk”,
+where the default instance leaves the mug in the open and ends immediately upon placement.
+4
+
+===== PAGE 5 =====
+EnvHarness : Awakening Static Worlds for Agent Learning
+Stage: changing the initial state.
+A Stage, 𝑤stage,𝛿, is specified by a sequence of state-manipulation
+actions 𝛿= (𝑎1, . . . , 𝑎𝑘). These actions are applied to the initial state 𝑠0 produced by reset():
+𝐸′ = 𝑤stage,𝛿(𝐸) = (S, A, O, 𝑇, 𝑅, 𝑠′
+0),
+where 𝑠′
+0 = 𝑇(· · · 𝑇(𝑇(𝑠0, 𝑎1), 𝑎2) · · · , 𝑎𝑘) .
+(2)
+Under this transformation, only the initial state changes. A Stage customizes the agent’s starting
+point, either introducing obstacles that require specific skills to tackle or completing early subgoals
+in advance to shorten the task horizon. For example, in our running task, one Stage executes the
+following sequence of actions: take mug 1, open drawer 1, put mug 1 in drawer 1, and
+close drawer 1 on the state returned by reset(). This Stage intentionally hides the mug from
+the agent, forcing the agent to face a more challenging scenario: search for the object first instead of
+directly reaching for it in plain sight. Conversely, another Stage can simplify the setup by executing
+cleaning the mug in advance, leaving only the final placement steps.
+Contract: rewriting the interaction.
+A Contract, 𝑤contract,𝑟, is specified by a triplet of transfor-
+mation maps 𝑟= ( 𝑓𝐴, 𝑓𝑇, 𝑓𝑂), each defaulting to the identity. These maps rewrite the action space,
+transition dynamics, and observation space, respectively:
+𝐸′ = 𝑤contract,𝑟(𝐸) = (S, A′, O′, 𝑇′, 𝑅, 𝑠0),
+where (A′, O′, 𝑇′) =  𝑓𝐴(A), 𝑓𝑂(O), 𝑓𝑇(𝑇)
+.
+(3)
+In practice, these transformations enforce action preconditions, augment or mask observations, and
+attach structured feedback to specific outcomes to steer agent learning. For example, on our running
+task, one Contract configures 𝑓𝑂to truncate the room description after the first two sentences,
+requiring the agent to build its spatial representation across several steps; another Contract uses 𝑓𝑇
+to block the clean mug action if the agent is not holding the mug, forcing the agent to pick up the
+object first; and a third Contract configures 𝑓𝐴to remove high-level teleport navigation commands,
+forcing the agent to move and search step by step.
+Chain: extending the environment.
+A Chain, 𝑤chain,ℓ, is specified by a pair ℓ= (𝐸ext, 𝑔), where
+𝐸ext is an additional environment and 𝑔is a composition logic. The composition logic combines the
+original environment 𝐸and 𝐸ext into a composite environment 𝐸′ exposed through the same interface:
+𝐸′ = 𝑤chain,ℓ(𝐸) = (S′, A′, O′, 𝑇′, 𝑅′, 𝑠′
+0),
+where 𝐸′ = 𝑔(𝐸, 𝐸ext).
+(4)
+To allow cross-environment combinations, the new spaces are simply the union of the base
+environments (e.g., A′ = A ∪Aext), and 𝑅′ acts as the new composite reward. The composition logic
+𝑔is unrestricted, allowing environments to be concatenated, interleaved, or branched dynamically
+based on intermediate outcomes (see Appendix D for examples). The composition logic 𝑔can either
+combine both environments from the start, or use the transition function 𝑇′ to dynamically transition
+from one environment to the next once a specific condition is satisfied. For our running environment,
+one Chain appends “heat a potato and put it on the countertop” in the same house, returning success
+under 𝑅′ only when both environments are verified. This requires the agent to learn to carry its goal
+past the point where it would otherwise have stopped.
+Composition.
+Because all EnvHarness components share a standard interface, they compose
+freely. For example, stacking a Stage, a Contract, and a Chain on our base mug task yields a
+single composite environment:
+𝐸′ = 𝑤chain,ℓ
+ 𝑤contract,𝑟
+ 𝑤stage,𝛿(𝐸)
+.
+(5)
+5
+
+===== PAGE 6 =====
+EnvHarness : Awakening Static Worlds for Agent Learning
+In this setup, 𝑤stage,𝛿initializes the episode with the mug hidden in a drawer to enforce spatial
+search; 𝑤contract,𝑟truncates the observation to two sentences to evaluate partial observability; and
+𝑤chain,ℓappends a follow-up task to test goal persistence. Note that these transformations are non-
+commutative (𝑤1 ◦𝑤2 ≠𝑤2 ◦𝑤1); the nesting order determines how the resulting environment is
+constructed and which constraints apply during initialization versus active interaction.
+3. EnvHarness for Agent Learning
+3.1. Problem Setup
+Given a base environment 𝐸supporting a set of base tasks, and a target policy agent 𝜋, our objective
+is to automatically generate a modified environment 𝐸′ tailored to a specific task 𝑡, exposing the
+unique flaws of 𝜋to facilitate targeted policy improvement. A single EnvHarness component is
+itself policy-agnostic, as Eq. (1) defines 𝑤as a transformation of the environment alone, allowing
+the same component to be applied without modification to any policy. Conversely, the selection and
+parameterization of these components must be conditioned on both the base task 𝑡and the observed
+behavior of the policy 𝜋. We therefore introduce the task-policy-conditioned map H:
+𝐸′ = H (𝐸, 𝑡; 𝜋) = (𝑤𝑘◦𝑤𝑘−1 ◦· · · ◦𝑤1)(𝐸),
+(6)
+where each 𝑤𝑖is a customized EnvHarness component designed to wrap the base environment
+𝐸and expose the critical weaknesses of 𝜋on task 𝑡. Rather than inspecting internal model weights,
+these components treat the agent as a black box and operate solely on its outputs to generate a steady,
+corrective training signal.
+3.2. EnvRigger
+We introduce EnvRigger to realize the task-policy-conditioned map H of Eq. (6). EnvRigger
+runs 𝜋in the environment on task 𝑡, analyzes the resulting trajectories, writes specific EnvHarness
+components to customize the environment for this task, and validates the customized environment
+using fresh policy rollouts. Candidates from customized environments that provide an appropriate
+learning signal are accepted, while the EnvHarness components of unsuccessful candidates are
+rejected or revised. Figure 4 illustrates this complete workflow, in which EnvRigger operates
+systematically through four distinct stages: Observe, Diagnose, Write, and Validate. To ensure that
+the initial state mutations introduced by Stage can be reliably reproduced, we assume the base
+environment supports deterministic resets during the validation phase.
+Observe.
+The EnvRigger begins by running the policy 𝜋on the base task 𝑡in the current en-
+vironment to collect and analyze a batch of rollout trajectories. While failures expose the specific
+weaknesses to be addressed within this task, successes help define the boundaries of these flaws,
+showing which capabilities are already intact and where they begin to fail.
+Diagnose.
+EnvRigger analyzes the collected trajectories to identify the root causes of the ob-
+served behaviors, focusing on systemic issues such as repetitive action loops, failures in parsing long
+observations, or misread tool constraints. This diagnosis also determines the customization direction.
+For a struggling policy, the goal is to scaffold missing steps and simplify the task. Conversely, if the
+policy achieves a perfect success rate, it indicates the current environment is too forgiving to expose
+6
+
+===== PAGE 7 =====
+EnvHarness : Awakening Static Worlds for Agent Learning
+Figure 4 | EnvRigger generating EnvHarness components for a target policy based on given task.
+The execution loop on the left runs the policy against the current environment, which is a frozen base
+environment wrapped by the active EnvHarness containing accepted components 𝑤1, . . . , 𝑤𝑘, while
+the resulting rollout trajectories feed the EnvRigger loop on the right. The EnvRigger operates
+systematically through four distinct stages: Observe, Diagnose, Write, and Validate, where the last
+two steps form a write-and-validate loop that generates a candidate component, evaluates it on fresh
+rollouts, and revises it upon failure.
+any remaining weaknesses. Under this scenario, the EnvRigger diagnoses that the environment
+must be made harder, shifting the customization to inject more challenging scenarios that force the
+policy’s potential flaws into the open. EnvRigger then outputs these findings as a textual diagnosis.
+Write.
+Based on the diagnosis, EnvRigger synthesizes one or more EnvHarness components
+to target the identified flaws. A single flaw may require combining multiple components, such as a
+Stage that customizes the initial state and a Contract that filters subsequent interactions, emitted
+together as a candidate set. For example, if the diagnosis reveals that the policy relies on a fragile
+shortcut that bypasses learning, EnvRigger can write a Contract that blocks this action under
+specific conditions, forcing the policy to explore and master the intended skills.
+Validate.
+To evaluate the candidate components from the Write stage, EnvRigger wraps the
+current environment with them to instantiate 𝐸′ and runs fresh rollouts of 𝜋on the base task 𝑡.
+Based on some trajectory metrics, like the success rate and failure distribution, EnvRigger analyzes
+these fresh rollouts to decide between three validation behaviors: accepting the candidate, rejecting
+those that are unsolvable or non-challenging, or refining candidates with poorly scaled signals. If
+the candidate requires refinement, the trajectories and scaling feedback flow back into the Write
+stage, repeating this Write-and-Validate loop until a candidate is accepted or the revision budget is
+exhausted. All accepted components are ultimately added to the EnvHarness. The exact system
+prompt and decision-making criteria guiding these validation actions are detailed in Appendix A.
+7
+
+===== PAGE 8 =====
+EnvHarness : Awakening Static Worlds for Agent Learning
+4. Experiments
+4.1. Experimental Setup
+In this section, we mainly focus on the skill-based learning paradigm, where skills are extracted from
+environments to improve agent capabilities. We also evaluate the compatibility and performance of
+our framework under the online reinforcement learning paradigm, which is presented as part of our
+broader analysis in Section 5.
+Benchmarks and Evaluation.
+We evaluate our framework on five benchmarks spanning four distinct
+domains: ALFWorld (Shridhar et al., 2020) for text-based embodied environments, WebArena (Zhou
+et al., 2024) for web interaction, SWE-bench Verified (Jimenez et al., 2024) for software engineering,
+and OfficeQA (Databricks, 2025) with SpreadsheetBench (Ma et al., 2024) for office automation.
+We report each benchmark’s native metrics, additionally tracking the average steps on SWE-bench
+Verified as a measure of execution efficiency. Training and evaluation episodes are strictly disjoint on
+every benchmark, with detailed split configurations provided in Appendix E.1.
+Importantly, EnvRigger and the policy agent utilize the same model backbone on each bench-
+mark: Gemini-3.1-Flash-Lite for ALFWorld and WebArena, and Gemini-3.5-Flash elsewhere, ensuring
+that performance gains do not stem from distilling a stronger external model. On each training
+set, EnvRigger executes the optimization loop of Section 3 to generate EnvHarness-customized
+environments. We then extract skills from trajectories collected in these environments following
+ReasoningBank (Ouyang et al., 2025), and evaluate the skill-equipped policy agent on the held-out
+instances. We exclude the Chain component from this automated pipeline because it is difficult for
+EnvRigger to observe the internal states of joined environments. Instead, we analyze the effect of
+chaining separately in Section 5.
+Baseline Methods.
+We compare EnvHarness against four skill sources: No Skills (the frozen
+policy agent alone), Original Envs (skills from original environments to isolate reshaping effects), and
+GenEnv (Guo et al., 2025), VeriEnv (Chae et al., 2026), or SWE-smith (Yang et al., 2026a) for their
+respective benchmarks. While these baseline generators are domain-specific, EnvHarness applies
+generically across all domains via a unified interface, including the office automation environments
+where no generation baseline exists. To ensure a fair comparison, all baselines share the same seed
+instances, environment count, extraction pipeline, and policy model. EnvRigger operates strictly on
+training episodes under the same oracle verification access, and each evaluation instance is attempted
+once. Baseline details are in Appendix E.2.
+4.2. Main Results
+Table 2 and Table 3 summarize the primary results across five benchmarks. Based on these evaluations,
+we present the following key observations.
+EnvHarness delivers consistent gains where static environments cannot.
+Skills acquired in
+environments customized by EnvHarness consistently outperform those extracted from original
+environments on every benchmark, yielding up to a 9.0-point improvement on ALFWorld. Conversely,
+extracting skills from static base environments can actually degrade performance; for instance, on
+SpreadsheetBench, skills from unmodified environments fall below the no-skill baseline, while on
+SWE-bench Verified, they lengthen execution trajectories. Because static environments only allow
+8
+
+===== PAGE 9 =====
+EnvHarness : Awakening Static Worlds for Agent Learning
+Table 2 | Performance of agents equipped with skills extracted from different environment sources on
+ALFWorld and WebArena. All numbers are the mean over three independent runs, with standard
+deviations as gray subscripts. Higher is better for every metric, and the last row reports the improve-
+ment of EnvHarness Envs over Original Envs. “–” denotes that the method is benchmark-specific
+and cannot be applied to the other domain.
+Skill Source
+ALFWorld
+WebArena
+In-Dist
+OOD
+Avg.
+Reddit
+Shopping
+Shop Admin
+GitLab
+Avg.
+No Skills
+62.6 1.7
+60.7 5.2
+61.7 3.4
+39.6 2.3
+35.2 3.3
+44.1 2.3
+35.8 8.4
+38.7 2.3
+Original Envs
+63.3 2.8
+61.4 4.3
+62.4 3.4
+38.7 9.7
+35.2 1.3
+44.6 3.0
+35.4 4.0
+38.5 3.1
+GenEnv
+63.3 1.2
+61.9 2.7
+62.6 1.9
+–
+–
+–
+–
+–
+VeriEnv
+–
+–
+–
+39.6 4.2
+30.2 0.0
+49.7 2.4
+38.9 5.6
+39.6 1.4
+EnvHarness Envs
+66.2 0.3
+70.4 2.3
+68.3 1.3
+40.6 4.7
+37.4 0.3
+50.8 1.5
+37.7 3.1
+41.6 1.8
+Improvement
++2.9
++9.0
++5.9
++1.9
++2.2
++6.2
++2.3
++3.1
+Table 3 | Performance of agents equipped with skills extracted from different environment sources on
+SWE-bench Verified, OfficeQA, and SpreadsheetBench. Standard deviations are gray subscripts. “–”
+denotes that the method is benchmark-specific and cannot be applied to the other domain.
+Skill Source
+SWE-verified
+OfficeQA
+SpreadsheetBench
+SR (↑)
+Average Step (↓)
+EM (↑)
+F1 (↑)
+Pass@1 (↑)
+Mean Score (↑)
+No Skills
+47.67 0.93
+53.58 2.93
+54.23 2.84
+55.77 2.98
+46.44 0.15
+61.32 0.37
+Original Envs
+49.88 2.59
+55.01 1.69
+54.40 1.84
+55.77 1.59
+45.88 1.19
+61.47 0.59
+SWE-smith
+50.12 1.74
+54.72 2.03
+–
+–
+–
+–
+EnvHarness Envs
+52.58 2.72
+49.61 2.49
+56.20 2.34
+57.73 2.29
+49.15 0.36
+62.48 0.27
+Improvement
++2.70
++5.40
++1.80
++1.96
++3.27
++1.01
+the agent to practice behaviors it already executes, they fail to address its specific limitations, often
+retrieving redundant or suboptimal skills. In contrast, the write-and-validate loop of EnvRigger only
+commits environment components verified by fresh policy trajectories, ensuring that EnvHarness
+consistently improves upon the no-skill baseline across all benchmarks.
+EnvHarness generalizes across domains through a domain-agnostic interface.
+The underlying
+interface protocol, EnvRigger loop, and the skill extraction pipeline apply consistently across all
+five benchmarks, requiring only domain-specific prompt templates to adapt to different environments.
+By contrast, specialized generation baselines are constrained to their specific target benchmarks
+(indicated by dashes for inapplicable domains in Tables 2 and 3). Nevertheless, EnvHarness
+consistently outperforms these specialized baselines wherever they can be applied. On ALFWorld,
+EnvHarness skills surpass GenEnv by 5.7 points on average and by 8.5 points in out-of-distribution
+settings, where generic instance generation merely increases repetitive practice without addressing
+policy weaknesses. On SWE-bench Verified, EnvHarness outperforms the purpose-built SWE-smith
+by 2.46 points in success rate while requiring 5.11 fewer execution steps per episode. Targeting
+diagnosed vulnerabilities through a unified interface thus proves superior to merely scaling up the
+quantity of training episodes through domain-specific generation.
+EnvHarness improves efficiency by repairing wasteful behaviors.
+On SWE-bench Verified,
+skills extracted from EnvHarness-customized environments reduce the average steps per episode
+from 53.6 to 49.6, whereas skills from unmodified environments actually increase it to 55.0. This
+9
+
+===== PAGE 10 =====
+EnvHarness : Awakening Static Worlds for Agent Learning
+efficiency gain directly correlates with the specific diagnostics from EnvRigger: targeted Contracts
+and Stages designed to disrupt repetitive action loops and filter verbose observations successfully
+shorten execution trajectories.
+5. Analysis
+We analyze EnvHarness along five dimensions: its compatibility as a training signal for rein-
+forcement learning, its scaling efficiency compared to standard dataset expansion, its transferability
+across different policy model families and strengths, the unique value of the Chain component on
+long-horizon environments, and the capability of the EnvRigger to accept explicit, user-defined
+target constraints. Additional analyses are reported in Appendix G.
+ALFWorld
+WebShop
+Training Set
+In-Dist OOD Avg. Score
+SR
+Original Envs
+81.4
+89.6 85.5
+75.6
+66.0
+EnvHarness Envs
+87.9
+88.8 88.4
+79.2
+67.4
+Table 4 | Reinforcement learning on ALFWorld and Web-
+Shop, comparing policies trained on the original environ-
+ments and on EnvHarness environments. ALFWorld
+is scored by success rate on in-distribution and held-out
+instance types; WebShop reports environment score and
+success rate.
+EnvHarness enables better RL.
+Be-
+yond skill-based learning, we investigate
+whether EnvHarness-customized envi-
+ronments can provide active training sig-
+nals in online reinforcement learning. We
+perform this analysis on ALFWorld and
+WebShop (Yao et al., 2022a) using Qwen3-
+8B-base (Yang et al., 2025) as the policy,
+optimized via Group Relative Policy Opti-
+mization (GRPO) (Shao et al., 2024); train-
+ing details are provided in Appendix F.1.
+We train two distinct policies: one trained
+solely on the original static environments,
+and one trained entirely on environments reshaped by EnvHarness, evaluating both on the same
+held-out instances. Table 4 reports the results. Training on EnvHarness environments consistently
+improves policy performance, outperforming the baseline trained solely on original environments on
+three out of four metrics. Specifically, on ALFWorld, EnvHarness Envs achieves an in-distribution
+success rate of 87.9 compared to 81.4 for original environments. On WebShop, it achieves a higher
+score of 79.2 (versus 75.6) and success rate of 67.4 (versus 66.0). Although there is a slight, negligible
+trade-off in the ALFWorld OOD success rate (88.8 versus 89.6), the overall results underscore a
+fundamental advantage: the reshaped environments are not merely auxiliary data but provide a
+highly effective, independent optimization signal for online policy learning.
+SR (%) ↑
+AS ↓
+No Skills
+47.67
+53.58
+Original Envs
+49.88
+55.01
+EnvHarness (Stage/Contract Only)
+52.58
+49.61
+EnvHarness (Chain Only)
+49.63
+41.96
+Combined Skills (Stage/Contract + Chain)
+54.30
+43.12
+Table 5 | Performance on long-horizon environments. SR
+stands for Success Rate, and AS represents Average Steps.
+Chain enables efficient long-hori-
+zon task solving.
+Real-world appli-
+cations often require agents to op-
+erate over extended horizons. The
+Chain component addresses this by
+joining two randomly paired base en-
+vironments into a single, extended
+episode. To isolate its effect, this pair-
+ing operates independently of the au-
+tonomous EnvRigger loop. We eval-
+uate the extracted skills on standard single-environment test instances, reporting Success Rate (SR)
+and Average Steps (AS) in Table 5.
+10
+
+===== PAGE 11 =====
+EnvHarness : Awakening Static Worlds for Agent Learning
+Skills from Chain environments yield substantial efficiency gains, reducing AS from 53.58 to
+41.96. Their standalone SR (49.63) is marginally below the 49.88 baseline. This aligns with their
+stringent training condition—where success requires solving both halves—which prioritizes long-term
+goal preservation over short-task maximization. Combining both skill sets (Stage/Contract +
+Chain) achieves the best of both worlds: the highest SR (54.30) and excellent efficiency (43.12 AS),
+demonstrating highly complementary behaviors. Representative skills are in Appendix F.3.
+0
+50
+100
+150
+200
+250
+300
+Number of Environments
+48
+50
+52
+54
+56
+Resolved Rate (%)
+Generated envs
+Original envs
+EnvHarness envs (ours)
+47.7
+54.8
+52.1
+50.4
+Figure 5 | Environment scaling on SWE-bench Ver-
+ified. All three sources supply the same number
+of environments and feed the same extraction and
+retrieval protocol.
+EnvHarness enables efficient environment
+scaling.
+Environment scaling evaluates perfor-
+mance as the available training environments ex-
+pand, comparing three allocation strategies un-
+der an identical budget: EnvHarness environ-
+ments, unmodified benchmark environments,
+and SWE-smith generated environments. Hold-
+ing the policy model, environment budget, and
+skill retrieval protocol fixed, each batch of 50
+environments yields one skill bank (alternating
+between 2 and 3 skills per bank, totaling 15
+skills at 300 environments). Crucially, while
+both baselines draw environment batches inde-
+pendently of the learner, EnvHarness synthe-
+sizes each batch specifically targeting the policy equipped with previously accumulated skills, enabling
+the environments and the policy to co-evolve. As shown in Figure 5, EnvHarness climbs from 47.67
+to 54.79 (a 7.12-point gain) and maintains an upward trajectory at 300 environments. In contrast,
+the same budget yields only 52.13 on original environments and 50.37 on generated ones. This
+performance gap confirms that targeting the learner’s current capability boundary is fundamentally
+more effective than unconditioned environment scaling. Representative skills from each round are
+provided in Appendix F.2.
+Gemini 3.1
+Flash-Lite
+Qwen3.6
+27B
+Gemini 3.5
+Flash
+Claude
+Sonnet 4.6
+30
+40
+50
+60
+70
+Success Rate (%)
+30.7
+36.8
+40.0
+41.0
+48.4
+52.1
+47.7
+49.9
+52.6
+67.2
+69.2
+72.4
+No skills
+Skills from original envs
+Skills from EnvHarness envs
++8.7%
++7.6%
++5.4%
++4.6%
+Figure 6 | Cross-model results on SWE-bench Verified.
+Each group represents one policy model, ordered from
+weakest to strongest. Bars show success rates with no
+skills, with skills from unmodified environments, and
+with skills from EnvHarness environments. Percent-
+ages represent relative gains over original environments.
+EnvHarness generalizes across differ-
+ent LLM backbones.
+To evaluate gener-
+alizability, we test four distinct models on
+SWE-bench Verified: Gemini 3.1 Flash-Lite,
+Qwen3.6 27B (Qwen Team, 2026), Gem-
+ini 3.5 Flash, and Claude Sonnet 4.6 (An-
+thropic, 2026a). These span open-weight
+and proprietary architectures across a wide
+capability spectrum. In each setting, we
+use the same model backbone for both the
+target policy and the EnvRigger to keep
+the setup consistent, while the extraction
+pipeline and protocol remain unchanged.
+Figure 6 shows the results. EnvHar-
+ness skills outperform real environment
+skills on all four policies, by 2.7 to 3.7 ab-
+solute points, even though the skill-free success rates span a broad range from 30.7 to 67.2. The size
+of this gain is largely independent of how strong the underlying policy is: the customization loop
+neither breaks down on the weakest model nor saturates on the strongest, and the same pipeline,
+11
+
+===== PAGE 12 =====
+EnvHarness : Awakening Static Worlds for Agent Learning
+prompts, and acceptance criteria are used throughout. What the policy’s capability level appears to
+change is the content of the diagnoses rather than the applicability of the loop. We note that skills of
+either kind help the two weakest policies most relative to no skills at all (+9.3 and +11.1 points for
+EnvHarness, and +6.1 and +7.4 for unmodified environments, versus under 5.5 points for the two
+strongest).
+EnvHarness produces environments on demand.
+While the EnvRigger loop autonomously
+identifies training targets via behavioral diagnosis in standard settings, the same machinery can
+readily accept explicit, user-defined constraints. We evaluate two classes of constraints. The first is a
+quantitative target (success rate or average steps) for an objective performance metric in Appendix G.
+The second constraint targets capability weaknesses described in natural language. For example,
+given the weakness below, the EnvRigger generates a Contract that rejects code submissions
+unless tests are run. This forces the agent to verify its fixes. From the resulting trajectories, we distill
+the skill shown below. Rather than overfitting to a single task, the skill combines a general principle
+with actionable steps, perfectly matching our requirement for a skill (Yang et al., 2026b).
+Specified weakness
+The policy submits a patch without running the failing test, so the fix stays unverified.
+Generated component (Contract, 𝑓𝑇axis)
+class _Contract(Contract):
+def modify_transition(self, action, response, env_state):
+cmd = bash_command(action)
+if "pytest" in cmd or "runtests.py" in cmd:
+env_state.extras["ran_tests"] = True
+if is_submission(cmd) \
+and not env_state.extras.get("ran_tests"):
+return failed(response,
+"githook: pre-commit hook ’verify-tests’ "
+"failed. Run the test suite before submitting.")
+return response
+Verification-Driven Development Loop
+Description: Whenever a code change is made to fix a bug or implement a feature, especially where the
+test suite needs setup or configuration.
+Content: Before finalizing any change, run the relevant test suite to confirm the failure exists, then run it
+again after the patch to verify the fix, initializing the environment first when needed.
+6. Related Work
+6.1. Environment Scaling
+Environment scaling has emerged as a research direction that supplies agents with more environments
+to learn from (Huang et al., 2025b; Xi et al., 2025). Existing efforts scale environments in various
+forms, including simulating environments and their feedback with an LLM (Guo et al., 2025; Wang
+et al., 2025; Zala et al., 2024), up to world models that simulate or synthesize whole families of
+12
+
+===== PAGE 13 =====
+EnvHarness : Awakening Static Worlds for Agent Learning
+agentic environments (Wang et al., 2026; Zuo et al., 2026), synthesizing executable environments
+programmatically (Chae et al., 2026; Dong et al., 2026; Song et al., 2026; Sun et al., 2026; Tang
+et al., 2026), and synthesizing new task instances inside an existing benchmark (Pan et al., 2024;
+Yang et al., 2026a). Beyond producing more tasks, another line adapts what the environment presents
+to the learner, from curriculum generation in reinforcement learning (Dennis et al., 2020; Jiang
+et al., 2021; Liu et al., 2026; Wang et al., 2019) to hand-designed corrective feedback and reward
+shaping (Lu et al., 2025). Different from previous works that rely on benchmark-specific pipelines
+or hand-designed curricula, EnvHarness reshapes an existing environment through one interface
+shared across benchmarks, conditions the reshaping on the diagnosed weaknesses of the current
+policy, and leaves tasks and verifiers untouched.
+6.2. Self-Evolving Agent
+Self-evolving agents improve themselves from their own experience without additional human super-
+vision (Fang et al., 2025). Existing efforts evolve different parts of the agent, including prompts and
+reflections (Madaan et al., 2023; Shinn et al., 2023), skill and workflow libraries (Huang et al., 2026b;
+Wang et al., 2023, 2024; Xia et al., 2026a,b; Yang et al., 2026b), experience memory distilled from
+past trajectories (Ouyang et al., 2025; Zhao et al., 2024), the model weights through self-generated
+rewards or self-proposed tasks (He et al., 2025; Huang et al., 2025a, 2026a; Xia et al., 2025; Yuan
+et al., 2024; Zhao et al., 2026), and recently the agent harness itself, rewritten and tested around
+a frozen model (Lee et al., 2026b). Different from these methods that evolve the agent while the
+world it learns from stays fixed, EnvHarness reshapes the environment itself against the diagnosed
+weaknesses of a frozen policy.
+7. Conclusion
+We introduce EnvHarness, a programmable layer that turns a static, existing environment into a
+controllable one. EnvHarness wraps a frozen benchmark with three plug-in components, Stage,
+Contract, and Chain, and reshapes it entirely through the standard reset/step interface, making it
+possible to isolate a skill, extend a task’s horizon, or calibrate difficulty in environments that were
+never built for any of these purposes. Since EnvHarness never touches internal code, a single
+implementation works seamlessly across different domains. Furthermore, by leaving the original
+tasks unchanged, every reshaped environment safely retains its trusted, human-built verifier. To
+fully automate this customization, we introduce EnvRigger, an autonomous loop that diagnoses
+policy weaknesses from execution trajectories and synthesizes targeted EnvHarness components
+to provide precise learning signals. This reframes environment construction as a wrapping problem
+rather than an authoring one, and suggests a practical pathway toward scalable environment supply
+for agent learning. We present future directions and limitations in Appendix I and Appendix H.
+References
+Anthropic.
+Effective harnesses for long-running agents.
+https://www.anthropic.com/
+engineering/effective-harnesses-for-long-running-agents, 2025. Accessed: 2026-
+07-07.
+Anthropic.
+Claude 4.6 sonnet.
+https://www.anthropic.com/news/claude-sonnet-4-6,
+2026a. Accessed: 2026-07-28.
+13

@@ -1,0 +1,358 @@
+[
+ {
+  "type": "unstyled",
+  "text": "Everything you need to understand why your GPU sits idle under load and which batching strategy fixes it. Three strategies from first principles, the flaw each one leaves behind, chunked prefill, and how to choose for your workload."
+ },
+ {
+  "type": "unstyled",
+  "text": "A modern GPU can run trillions of floating-point operations every second. Serving an LLM on one, you will often watch it sit at a small fraction of that."
+ },
+ {
+  "type": "unstyled",
+  "text": "The reason is that generating a single token means reading every weight in the model out of memory. That read dominates the time, and the compute units spend most of it waiting."
+ },
+ {
+  "type": "unstyled",
+  "text": "Batching closes the gap. Load the weights once, push many sequences through the same pass, and the memory cost gets spread across all of them."
+ },
+ {
+  "type": "unstyled",
+  "text": "Every serving engine does this. What separates them is when the batch gets decided."
+ },
+ {
+  "type": "unordered-list-item",
+  "text": "Static decides once, before the batch starts"
+ },
+ {
+  "type": "unordered-list-item",
+  "text": "Dynamic decides on a timer"
+ },
+ {
+  "type": "unordered-list-item",
+  "text": "Continuous decides again at every forward pass"
+ },
+ {
+  "type": "unstyled",
+  "text": "That last one is where nearly all the throughput in modern serving comes from. The other two are worth understanding first, since each fails in a way the next is built to fix."
+ },
+ {
+  "type": "unstyled",
+  "text": "And today we are going to break down and understand each of them one by one. "
+ },
+ {
+  "type": "unstyled",
+  "text": "Let's go! 🚀"
+ },
+ {
+  "type": "header-one",
+  "text": "Why batching exists"
+ },
+ {
+  "type": "unstyled",
+  "text": "An A100 does roughly 312 teraFLOPs of BF16 math per second and moves about 2 terabytes per second out of memory. Decoding leans entirely on the second number."
+ },
+ {
+  "type": "unstyled",
+  "text": "Reading the weights is the whole cost, and the compute sits idle waiting. That idle compute is free capacity, so a batch of sixty rides the same weight read as the batch of one did, and throughput climbs while the memory read time stays the same."
+ },
+ {
+  "type": "unstyled",
+  "text": "Note that, throughput climbs steeply with batch size, then flattens."
+ },
+ {
+  "type": "unordered-list-item",
+  "text": "Below the bend you are memory bound, and batching is close to free"
+ },
+ {
+  "type": "unordered-list-item",
+  "text": "Above it you are compute bound, and each added sequence costs time"
+ },
+ {
+  "type": "unstyled",
+  "text": "The bend moves with the model, the GPU, and the sequence length, so measure it on your own hardware."
+ },
+ {
+  "type": "unstyled",
+  "text": "Now, you might be thinking: if batching is this effective, why not batch as much as possible?"
+ },
+ {
+  "type": "unstyled",
+  "text": "Well, with LLMs, that is harder than it sounds. Let’s understand why."
+ },
+ {
+  "type": "header-one",
+  "text": "What breaks for LLMs"
+ },
+ {
+  "type": "unstyled",
+  "text": "Batching is older than LLMs. For a classifier or an embedding model, it is a packing problem."
+ },
+ {
+  "type": "unstyled",
+  "text": "Pad the inputs to a common length, stack them into one tensor, run one pass."
+ },
+ {
+  "type": "unstyled",
+  "text": "That works because three things hold. One pass produces the whole answer, no row depends on another, and every row's cost is known before it starts."
+ },
+ {
+  "type": "unstyled",
+  "text": "This doesn't work for autoregressive LLMs."
+ },
+ {
+  "type": "unstyled",
+  "text": "Decoding breaks all three."
+ },
+ {
+  "type": "ordered-list-item",
+  "text": "One pass produces one token, not the answer. A 400-token reply needs 400 forward passes."
+ },
+ {
+  "type": "ordered-list-item",
+  "text": "Rows depend on their own history. Each pass writes into that request's KV cache, which the next pass reads back."
+ },
+ {
+  "type": "ordered-list-item",
+  "text": "Cost is unknown until it is over. The model decides by emitting a stop token, which can after 12 tokens or after 4,000."
+ },
+ {
+  "type": "unstyled",
+  "text": "Padding does not rescue this. It equalizes input width, not how long a request holds the GPU."
+ },
+ {
+  "type": "unstyled",
+  "text": "So a batch fixed at the start runs at the pace of its slowest member. The three strategies are three answers to that, in increasing order of how much they do about it."
+ },
+ {
+  "type": "header-one",
+  "text": "Static batching"
+ },
+ {
+  "type": "unstyled",
+  "text": "The simplest answer does nothing about it. Collect a fixed number of requests, run them together, and return everything when the last one finishes."
+ },
+ {
+  "type": "unstyled",
+  "text": "Here's how the end state looks like: "
+ },
+ {
+  "type": "unstyled",
+  "text": "R3 stops generating at t=9 and sits on the GPU until t=15, because R2 is still running. That costs you twice:"
+ },
+ {
+  "type": "unordered-list-item",
+  "text": "Six units of latency for a user whose answer was already done"
+ },
+ {
+  "type": "unordered-list-item",
+  "text": "A held slot that a queued request could have used"
+ },
+ {
+  "type": "unstyled",
+  "text": "Waste scales with higher output variance. Anyscale measured this on OPT-13B on a 40GB A100. Widening the spread of output lengths dropped static batching to roughly 81 tokens per second, while continuous batching held an order of magnitude higher."
+ },
+ {
+  "type": "unstyled",
+  "text": "Still the right call sometimes. Static batching only looks bad when output lengths vary. Take that away and the slow-member problem goes with it."
+ },
+ {
+  "type": "unstyled",
+  "text": "Classification, embeddings, and scoring do exactly that. Each emits a fixed-size output, a label or a vector, so every request in the batch finishes at nearly the same step and none waits on a straggler."
+ },
+ {
+  "type": "unstyled",
+  "text": "For that kind of work, static batching is simpler and gives up nothing."
+ },
+ {
+  "type": "unstyled",
+  "text": "Here's how you configure static batching in vLLM:"
+ },
+ {
+  "type": "unstyled",
+  "text": "llm.generate hands the engine the whole workload at once. Cap max_tokens, keep prompt sizes similar, and every sequence finishes at nearly the same step."
+ },
+ {
+  "type": "blockquote",
+  "text": "👉 The Hugging Face pipeline API with a batch_size argument is also static batching. Fine for evaluation scripts, poor for live traffic."
+ },
+ {
+  "type": "header-one",
+  "text": "Dynamic batching"
+ },
+ {
+  "type": "unstyled",
+  "text": "Static batching has a second cost. A request can wait a long time just to enter a batch."
+ },
+ {
+  "type": "unstyled",
+  "text": "If the batch size is 8 and only 5 have arrived, those 5 sit idle until three more show up."
+ },
+ {
+  "type": "unstyled",
+  "text": "Dynamic batching adds a timer. The batch fires on the size limit or when the window expires, whichever comes first."
+ },
+ {
+  "type": "unstyled",
+  "text": "Here's how the end state looks like:"
+ },
+ {
+  "type": "unstyled",
+  "text": "Batch 1 fires at t=4 (the fixed interval) with only R1 and R2, because the window expired before a third arrived. Both start four units earlier than static batching allowed."
+ },
+ {
+  "type": "unstyled",
+  "text": "It shortens the wrong wait. R1 finishes at t=7 and still waits until t=12, because R2 is not done."
+ },
+ {
+  "type": "unstyled",
+  "text": "Dynamic batching decides once per batch, then hands control to the engine until every member is done. For fixed-output models that is a complete answer, which is why Triton ships it."
+ },
+ {
+  "type": "blockquote",
+  "text": "👉 preferred_batch_size lists the sizes the scheduler tries to form. max_queue_delay_microseconds caps how long a request waits for company."
+ },
+ {
+  "type": "header-one",
+  "text": "Continuous batching"
+ },
+ {
+  "type": "unstyled",
+  "text": "Both strategies so far treat a batch as one unit of work that starts and runs until every request in the batch has finished. That assumption is what still costs you, and continuous batching drops it."
+ },
+ {
+  "type": "unstyled",
+  "text": "The scheduler runs one iteration, gets control back, and decides again. The moment a sequence emits its final token it leaves the batch, and a waiting request takes that slot on the next pass."
+ },
+ {
+  "type": "unstyled",
+  "text": "The batch composition changes every iteration, which is why this is iteration-level scheduling. No slot waits for the slowest sequence, so the GPU stays saturated even when output lengths vary wildly."
+ },
+ {
+  "type": "unstyled",
+  "text": "This is how the end state looks liek:"
+ },
+ {
+  "type": "unstyled",
+  "text": "The limit is memory, not compute. Every active sequence holds a KV cache that grows with each token, and that cache, not the math, is what caps how many sequences fit."
+ },
+ {
+  "type": "unstyled",
+  "text": "On a 40GB A100 with a 13B model resident, only a handful of long sequences fit at once. When the pool runs out, the scheduler evicts a running request and recomputes it later."
+ },
+ {
+  "type": "unstyled",
+  "text": "That looks like the GPU running out of headroom, when it is really the same prefill computed twice."
+ },
+ {
+  "type": "blockquote",
+  "text": "👉 Every engine ships continuous batching under a different name: vLLM, SGLang, and TGI call it that, TensorRT-LLM calls it in-flight batching, LMDeploy calls it persistent batching."
+ },
+ {
+  "type": "header-one",
+  "text": "Chunked prefill"
+ },
+ {
+  "type": "unstyled",
+  "text": "Rebuilding the batch every pass fixes the slow-member problem and introduces a new one, which users see as a stutter."
+ },
+ {
+  "type": "unstyled",
+  "text": "A joining request is prefilled in one iteration. A 32K-token prompt is one large, compute-heavy pass that every active decode waits behind, so output pauses mid-sentence because someone else pasted a long document."
+ },
+ {
+  "type": "unstyled",
+  "text": "Here's how things look without and with chunked prefill."
+ },
+ {
+  "type": "unstyled",
+  "text": "Whole prefill:"
+ },
+ {
+  "type": "unstyled",
+  "text": "Chunked prefill:"
+ },
+ {
+  "type": "unstyled",
+  "text": "(prompt of request C is broken down into smaller chunks of 2k tokens each)"
+ },
+ {
+  "type": "unstyled",
+  "text": "Split the prompt across iterations. Chunked prefill breaks the prompt into fixed-size token ranges scheduled over several passes, each extending the request's KV cache."
+ },
+ {
+  "type": "unstyled",
+  "text": "The attention math is unchanged, since later chunks attend to what earlier chunks processed. The first token arrives after the final chunk."
+ },
+ {
+  "type": "unstyled",
+  "text": "Prefill is compute bound and decode is memory bound, so one batch containing both uses both parts of the chip."
+ },
+ {
+  "type": "unstyled",
+  "text": "When choosing values, note that:"
+ },
+ {
+  "type": "unordered-list-item",
+  "text": "Smaller chunks give the scheduler more opportunities to run decodes, reducing ITL spikes for active requests."
+ },
+ {
+  "type": "unordered-list-item",
+  "text": "Larger chunks process the new prompt more efficiently and usually improve the TTFT, but active decodes may wait longer between tokens."
+ },
+ {
+  "type": "unordered-list-item",
+  "text": "Chunks that are too small can lower GPU utilization and add attention overhead because later chunks must reread KV cache entries created by earlier chunks."
+ },
+ {
+  "type": "unstyled",
+  "text": "Chunked prefill is on by default in vLLM V1, where --max-num-batched-tokens caps tokens per iteration. SGLang uses --chunked-prefill-size, and -1 disables it."
+ },
+ {
+  "type": "unstyled",
+  "text": "vLLM:"
+ },
+ {
+  "type": "unstyled",
+  "text": "SGLang:"
+ },
+ {
+  "type": "blockquote",
+  "text": "👉 There is no universal best chunk size. It depends on the model, the GPU, your prompt length distribution, and which latency metric your SLO measures."
+ },
+ {
+  "type": "header-one",
+  "text": "Conclusion"
+ },
+ {
+  "type": "unstyled",
+  "text": "The three strategies differ only in when they fix the batch, and each answers a different workload shape."
+ },
+ {
+  "type": "unstyled",
+  "text": "For live traffic with variable output lengths, continuous batching is the only one that holds up, and every major engine gives it to you by default."
+ },
+ {
+  "type": "unstyled",
+  "text": "This whole article rests on one fact about GPUs: a forward pass is bottlenecked on reading weights out of memory, not on the math. "
+ },
+ {
+  "type": "unstyled",
+  "text": "I have written a detailed article on how a GPU works: "
+ },
+ {
+  "type": "unstyled",
+  "text": "It builds up from first principles why memory and compute compete, why that gap exists in the hardware, and what makes a workload memory-bound in the first place. It needs no prior background, and it is the natural prequel to everything above."
+ },
+ {
+  "type": "unstyled",
+  "text": "Stay tuned for more!"
+ },
+ {
+  "type": "unstyled",
+  "text": "Thanks for reading. "
+ },
+ {
+  "type": "unstyled",
+  "text": "Cheers! :)"
+ }
+]

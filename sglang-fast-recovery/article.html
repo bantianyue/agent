@@ -1,0 +1,229 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">瓶颈</strong>：Ling-2.6-1T FP8在8×H20-3e上冷启动约8.52分钟，其中<strong>权重从磁盘加载占93.9%</strong>（每TP rank读约120GB safetensors、反序列化、TP分片、FP8量化重打包）。这些工作在每次重启都完全相同地重复，即使结果GPU tensor是确定性的、常已在GPU内存中。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">方案</strong>：每GPU一个守护进程持有后量化TP分片权重；引擎重启时经CUDA IPC zero-copy映射，无磁盘I/O、无反序列化、无量化。引擎在meta device初始化模型，把每个参数data指针直接指向IPC映射tensor。CacheConfig指纹（model_path/tp_size/quant/dtype/环境戳）不匹配则回退磁盘全载。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">生产模式</strong>：多实例共享（每GPU权重只从磁盘加载量化一次）；优先级协同服务（低优先级实例可亚秒级逐出重建）；active-standby故障切换<1 秒且不浪费整组 GPU 给空闲副本。Qwen3-235B FP8 约 500×、Ling-2.6-1T 约 780× 加速。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如今SOTA模型越来越大，崩溃后重载模型服务非常昂贵。因此我们引入<strong>Weight Cache Daemon</strong>：一个持久的GPU进程，把后量化模型权重留在GPU内存，通过CUDA IPC zero-copy映射服务给新的SGLang引擎实例。这把权重加载从分钟级降到秒级。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Weight Cache Daemon是我们<strong>Fast Engine Recovery Framework</strong>的第一阶段，目标是生产LLM serving的<strong>< 10 秒冷重启</strong>和<strong>< 1 秒热备切换</strong>。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">关键结果：<strong>权重加载 ~495s → ~0.63s（约785× 加速）</strong>，基于Ling-2.6-1T FP8模型；<strong>总启动8.8min → 0.528min（端到端引擎启动时间降93.9%）</strong>；<strong>多实例权重共享</strong>（同GPU上多引擎实例映射同一IPC handle，消除冗余磁盘I/O和后量化变换）；<strong>active-standby故障切换< 1 秒</strong>；<strong>多节点实例权重共享</strong>支持大模型。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">背景：冷启动时间去哪了</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">随着LLM模型越来越大：Qwen3-235B、Ling-2.6-1T、新发布的2.8T Kimi K3：服务引擎的冷启动时间成为生产效率的关键瓶颈。一个8×H20-3e GPU上的Ling-2.6-1T FP8实例要约<strong>8.52分钟</strong>才能就绪服务，权重存在3.5T NVME SSD。生产中这意味着：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">重启期间<strong>P99尾延迟尖峰</strong>：所有在途请求失败或无限排队；<strong>可用性降低</strong>：多分钟恢复窗口违反SLA目标；<strong>运营摩擦</strong>：滚动更新、配置变更、故障恢复都被重启周期瓶颈；<strong>GPU资源浪费</strong>：传统active-standby部署把整组GPU给空闲副本，故障切换硬件成本翻倍。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">时间去哪了？我们剖析了Ling-2.6-1T FP8的完整SGLang引擎启动：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">瓶颈清楚：<strong>从磁盘加载权重占启动时间的93.2%</strong>。对Ling-2.6-1T FP8，每个TP rank从磁盘读约120GB safetensors、反序列化、应用TP分片、跑后量化变换（FP8量化、权重重打包）。这个工作<strong>每次重启都完全相同地重复</strong>，即使生成的GPU tensor是确定性的、常已在GPU内存中。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们能否避免每次从磁盘重载？答案<strong>能</strong>：通过让权重跨引擎重启留在GPU内存。</p>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">阶段</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">时间(s)</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">百分比</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">说明</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Pre-init & ServerArgs</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~1</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">0.2%</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Pre-init和ServerArgs解析</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Tokenizer init</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~13</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">2.4%</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">加载初始化tokenizer</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Init torch distributed</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~5</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">0.9%</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">NCCL 2.28.9、8卡H20、NVLink mesh 370.8 GB/s、P2P/IPC</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Load weight (disk)</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~495</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">93.9%</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">161 shard、W8A8 FP8、最慢rank 495.3s、每卡120GB、Disk I/O bound</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Cache allocation (KV+Mamba)</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~1</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">0.2%</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">KV 553,599 tokens/5.94GB bf16、Mamba SSM state 5.33GB</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Capture CUDA graph</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~7.7</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1.5%</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">仅3个decode BS [1,2,4]</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Server ready</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~4</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">0.8%</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">RadixTree init、HTTP/uvicorn、warmup请求</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong>Total</strong></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong>~527</strong></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong>~8.8分钟</strong></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"></td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">设计：核心思想：经CUDA IPC的持久权重缓存</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Weight Cache Daemon是持久的GPU进程，在GPU内存持有后量化、TP分片权重。引擎重启时，新引擎进程通过<strong>CUDA IPC zero-copy</strong>从daemon映射权重：无磁盘I/O、无反序列化、无量化。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1：架构：Weight Cache Daemon每GPU一个进程，从磁盘加载+TP分片+量化+重打包，导出CUDA IPC handle，经Unix socket服务给引擎进程。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每个GPU为其TP rank跑<strong>一个daemon进程</strong>。daemon做：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">1. 从磁盘加载模型权重（完整流水线：disk → TP shard → quantize → repack）。
+2. 把model.state_dict() 里每个参数和buffer导出为CUDA IPC handle。
+3. 记录CacheConfig指纹（model path、TP/DP size、quant config hash、dtype）。
+4. 通过Unix socket把IPC handle服务给请求的引擎进程。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">引擎连接daemon、验证配置兼容性、把权重直接映射进其地址空间：引擎和daemon经CUDA IPC<strong>共享同一物理GPU内存</strong>。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">设计：经Meta Device的Zero-Copy加载</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>亚秒级加载的关键是<strong>zero-copy</strong>：引擎的param.data指针直接设为IPC映射的GPU tensor。无数据拷贝。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为实现这点，引擎在<strong>meta device</strong>上初始化模型（无GPU/CPU内存分配），然后把每个参数的data指针替换为IPC映射tensor。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">由process_weights_after_loading() 创建的后量化参数（如FP8量化的weight_scale）也被daemon缓存并直接映射：无需重新量化。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">设计：配置校验：安全第一</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">引擎配置与daemon缓存配置任何不匹配都触发<strong>完整磁盘重载</strong>，确保正确性：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最后两个字段构成<strong>环境戳</strong>：跑了不同后处理分支（不同计算能力或torch/kernel版本）的daemon和client能产出映射干净却服务垃圾的权重：把环境戳进CacheConfig把它变成干净的不匹配。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这对生产安全至关重要：若操作员改模型或量化配置，引擎会检测不匹配、回退磁盘加载而非映射不兼容权重。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">配置校验之上，量化方法由<strong>IPC allowlist</strong>门控。CUDA IPC zero-copy只导出原始tensor数据，所以只有当process_weights_after_loading() 的全部效果被那数据捕获时才正确。在Python侧盖章元数据或重打包/转置权重的（per-tensor FP8、Marlin、AWQ/GPTQ）会静默服务错误数值：它们会抛硬错误。当前已验证：<strong>unquantized</strong>和<strong>block-wise FP8</strong>（设置weight_block_size）；端到端验证后会加更多方法。</p>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">字段</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">不匹配示例</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">后果</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">model_path + model_arch + revision</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">不同模型或版本</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">权重完全错误</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">tp_size + tp_rank</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">不同TP分片</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">该rank分片错误</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">pp_size + pp_rank</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">不同PP划分</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">该流水线阶段层错误</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">dp_size + ep_size</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">不同DP/EP策略</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">权重分布错误</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">quant_method + quant_config_hash</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">不同量化</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">未量化vs FP8不匹配</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">dtype</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">float16 vs bfloat16</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">类型不匹配</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">device_capability + torch_version</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">不同GPU架构或torch版本</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">权重映射干净但服务错误数值</td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">设计：三种模式daemon / client / off</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>daemon模式</strong>：引擎启动时spawn daemon进程并等它们从磁盘加载权重。首次启动仍慢（daemon必须从磁盘加载），但后续重启即瞬。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>client模式</strong>：引擎连接已跑daemon。这是快重启路径：daemon更早启动、已持有GPU内存中的权重。</p>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">模式</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">流程</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">权重加载时间</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">GPU内存</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">用例</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">daemon</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">引擎启动daemon → daemon从磁盘加载 → 引擎映射IPC</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">< 1s（daemon 就绪后）</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1×（共享）</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">首次启动；引擎管理daemon生命周期</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">client</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">连接预跑daemon → 映射IPC</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">< 1s</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1×（共享）</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">引擎重启；daemon预跑</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">off</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">正常磁盘加载</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">405-411s（Ling-2.6-1T FP8）</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1×</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">默认；无缓存</td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">设计：安全与鲁棒性</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Weight Cache Daemon设计为<strong>非侵入和安全</strong>：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>最小侵入</strong>：特性自包含在python/sglang/srt/weight_cache/，核心引擎改动最小（只有load_model() 分发和一个CLI flag）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>崩溃安全</strong>：若daemon崩溃，现有引擎实例继续运行：它们已通过CUDA引用计数持有IPC映射tensor的引用。GPU内存只在daemon和引擎<strong>都</strong>退出时释放。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>daemon恢复</strong>：daemon重启时从磁盘重载权重、重新导出IPC handle。新引擎实例可连接重启的daemon。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>不匹配回退</strong>：配置不匹配自动回退磁盘加载（client模式）或抛错误（daemon模式，回退会OOM因为两进程共享同GPU）。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">超越重启：生产场景</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Weight Cache Daemon解锁了传统磁盘加载不现实的生产模式：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2：多实例权重共享：多个引擎实例映射同一IPC handle，每GPU权重只加载量化一次。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：Active-Standby故障切换：待机引擎零拷贝映射权重保持热，主实例失败<1 秒接管。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>多实例权重共享</strong>：每GPU一个daemon持有内存权重；多个引擎实例（如独立服务）经zero-copy映射同一IPC handle。无论多少实例消费，权重每GPU只从磁盘加载和量化<strong>恰好一次</strong>。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>优先级协同服务</strong>：在同一GPU上跑高优先级在线服务和低优先级批处理任务，由同一权重缓存daemon支撑。低优先级实例可在<strong>亚秒级被逐出和重新spawn</strong>，无需从磁盘重载权重：实现灵活GPU时间共享而无常规启动惩罚。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Active-Standby故障切换</strong>：在主实例旁部署待机引擎，都由同一weight cache daemon支撑。待机经zero-copy映射权重保持热。主实例失败时待机在<strong>< 1 秒</strong>内接管：无权重加载、无磁盘I/O。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这实现近零停机故障切换<strong>而不把整组GPU专给空闲副本</strong>，避免传统热备部署昂贵的GPU资源浪费。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">性能：磁盘vs IPC Zero-Copy</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>单节点</strong>：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4：性能对比：磁盘加载vs IPC zero-copy，Qwen3-235B约500×、Ling-2.6-1T约780×。</figcaption></figure>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">模型</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">权重大小</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">磁盘加载(s)</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">IPC Zero-copy(s)</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">加速</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Qwen3-235B FP8</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~235 GB</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~306-327</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><1</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~500×</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Ling-2.6-1T</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~1 TB</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~405-411</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><1</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~780×</td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">如何使用：启动权重缓存Daemon</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>单节点启动</strong>：一条命令启动所有TP rank daemon。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">等待daemon就绪（每rank写一个 .ready文件）：</p>
+<pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code># Standalone daemon launch (one command for all TP ranks):
+python -m sglang.srt.weight_cache.daemon \
+    --model-path /path/to/model --tp-size 4 \
+    --load-format auto --dtype auto --quantization fp8</code></pre>
+<pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code># Check readiness:
+ls /tmp/sglang_weight_cache_rank*.ready</code></pre>
+<pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code># Engine Client ： connect to pre-running daemons (restart)
+python -m sglang.launch_server \
+    --model-path /path/to/model --tp-size 4 \
+    --weight-cache-mode client</code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>启动带权重缓存的引擎</strong>：连接预跑daemon（重启路径）。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">如何使用：多节点启动</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">多节点部署中每个节点为本地TP rank跑自己的daemon。所有daemon加入同一分布式组，所以 --nnodes、--node-rank、--dist-init-method必须跨节点一致，$MASTER_ADDR指向node 0。</p>
+<pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code># Daemon on node 0:
+python -m sglang.srt.weight_cache.daemon \
+    --model-path /path/to/model --tp-size 2 \
+    --load-format auto --dtype auto --quantization fp8 \
+    --nnodes 2 --node-rank 0 \
+    --dist-init-method tcp://$MASTER_ADDR:29500
+
+# Daemon on node 1:
+python -m sglang.srt.weight_cache.daemon \
+    --model-path /path/to/model --tp-size 2 \
+    --load-format auto --dtype auto --quantization fp8 \
+    --nnodes 2 --node-rank 1 \
+    --dist-init-method tcp://$MASTER_ADDR:29500</code></pre>
+<pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code># Engine client on node 0:
+python -m sglang.launch_server \
+    --model-path /path/to/model --tp-size 2 \
+    --weight-cache-mode client \
+    --nnodes 2 --node-rank 0 \
+    --dist-init-addr $MASTER_ADDR:29600 --port 34000
+
+# Engine client on node 1:
+python -m sglang.launch_server \
+    --model-path /path/to/model --tp-size 2 \
+    --weight-cache-mode client \
+    --nnodes 2 --node-rank 1 \
+    --dist-init-addr $MASTER_ADDR:29600</code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每个节点报告daemon就绪后启动引擎client。它们用独立rendezvous port（29600），与daemon的29500分开。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Fast Engine Recovery Framework：路线图</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Weight Cache Daemon是更广<strong>Fast Recovery Framework</strong>的第一阶段，目标<strong>< 10s 冷重启</strong>和<strong>< 1s 热备切换</strong>：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">更多模型支持也在路上。</p>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">阶段</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">当前(s)</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">目标(s)</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">方法</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">状态</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Load weight</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~306-327</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">< 1</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Weight Cache Daemon（CUDA IPC）</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">完成（本PR）</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Capture CUDA graph</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~34.9</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">< 3</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">CUDA graph序列化+回放</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">计划</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">DeepGEMM JIT warmup</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~23.1</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">< 2</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Kernel缓存持久化、并行warmup</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">计划</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Server init & Tokenizer</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~17.3</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">< 3</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">懒tokenizer init、配置缓存</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">计划</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Init torch distributed</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~4.7</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">< 2</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">NCCL session复用、持久进程组</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">计划</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">KV Cache allocation</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~0.5</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">< 0.5</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">kvcache复用</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">计划</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Server ready</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~3.4</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">< 1</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">重启时跳过warmup请求</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">计划</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong>Total（单节点）</strong></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong>~390</strong></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong>< 10</strong></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"></td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">公开路线图</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Weight Cache Daemon只是<strong>第一步</strong>：还有很多要建。Phase 1今天覆盖TP + PP、单/多节点启动、per-GPU zero-copy CUDA IPC、unquantized加block-wise FP8。此外许多高影响方向仍开放：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>更多模型与量化</strong>：把IPC allowlist扩展到block-wise FP8之外（per-tensor FP8、INT8、MXFP8、NVFP4、AWQ/GPTQ……），覆盖更多架构含多模态和LoRA base weights。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>DP/EP与多节点</strong>：DP/EP shard keying、跨节点daemon协调、生命周期管理、故障切换。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>不重载的权重更新</strong>：为RL/在线更新做原位权重刷新，daemon作交付代理。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>跨GPU与fleet共享</strong>：peer-copy和fleet-fill让集群冷启动每个shard group只付约一次磁盘读。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>KV cache恢复</strong>：跨重启/故障切换保留和重映射KV cache（KV复用、交接给待机）让在途上下文幸存恢复而非从头重算。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>启动路径其余部分</strong>：CUDA graph序列化、kernel-warmup持久化、更快server/分布式init达成<strong>< 10s</strong> 冷重启目标。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>其他硬件后端</strong>：把该特性扩展到暴露类似功能的其它加速器（AMD和Intel都有可比IPC机制）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Ops与可靠性</strong>：指标、状态工具、安全加固、CI覆盖。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这是非常社区化的工作。完整计划在sgl-project/sglang#33522公开跟踪：<strong>非常欢迎贡献和反馈</strong>，有很多有影响力的工作可接。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+蚂蚁（Ant Ling Infra）+ 阿里 + SGLang团队这篇把「模型太大、冷启动太贵」的痛点解决得很干脆：<strong>权重根本不该每次重启都从磁盘读</strong>。Ling-2.6-1T FP8的启动剖析显示93.9% 时间花在权重加载（每TP rank读120GB、反序列化、TP分片、FP8量化重打包），而这些工作在每次重启完全相同地重复。<br  /><br  />方案是Weight Cache Daemon：每GPU一个持久进程持有后量化权重，新引擎经CUDA IPC zero-copy映射（meta device初始化后直接换data指针），权重加载495s → 0.63s（785×）、总启动8.8min → 0.5min。三个值得抄的工程点：<strong>CacheConfig指纹校验</strong>（model/tp/pp/quant/dtype/环境戳任一不匹配就回退磁盘，杜绝映射错权重）、<strong>IPC allowlist</strong>（只允许数据能完全捕获后量化效果的量化方法，per-tensor FP8/Marlin/AWQ直接硬错误）、<strong>崩溃安全</strong>（daemon死引擎照跑，CUDA引用计数双释放）。<br  /><br  />生产模式的想象力也在扩展：多实例共享（每GPU权重只载一次）、优先级协同服务（低优先级实例亚秒级逐出重建）、active-standby<1s 切换不浪费 GPU。路线图剩余部分（CUDA graph 序列化、NCCL session 复用、KV cache 恢复）把目标钉在 <10s 冷重启；对万亿参数 serving 来说这是把「分钟级灾难恢复」变成「秒级」。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://www.lmsys.org/blog/2026-08-21-sglang-fast-recovery</span></p>
+</section>

@@ -1,0 +1,186 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心问题</strong>：GPU生成单token被读权重卡住、算力空转；批处理把一次权重读取摊给多个序列。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">三策略</strong>：静态/动态/连续批处理区别在批次何时决定，连续批处理是现代高吞吐主力。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">关键权衡</strong>：分块预填充缓解长prompt卡顿；块大小在decode机会与prompt效率间取舍，需实测。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为什么高速GPU服务LLM时常闲着？因为生成单个token就要把全部权重从内存读一遍，<strong>读取耗时主导、算力大部分在等待</strong>。批处理弥合这一差距：权重只读一次、多个序列同一前向通过。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这篇X平台博主Akshay的长文从第一性原理讲透静态、动态、连续三种批处理策略，各自解决什么问题、留什么缺陷，并落vLLM / SGLang真实配置。<strong>本文全中文编译，正文原样照搬不压缩，图片全部保留。</strong></p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">引言：GPU为何闲置</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这里涵盖了理解以下问题的所有内容：为什么你的GPU在负载之下仍然空闲，以及哪种批处理策略能解决这个问题。我们将从第一性原理出发介绍三种策略、每种策略遗留的缺陷、chunked prefill（分块预填充），以及如何针对你的工作负载做出选择。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一块现代GPU每秒可以执行数万亿次浮点运算。但当你用它来服务（serve）一个LLM时，你往往会看到它的利用率只达到这个能力的一小部分。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">原因是：生成单个token意味着要把模型中的每一个权重都从内存中读出来。这种读取占用了绝大部分时间，而计算单元在其中大部分时间里都在等待。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">批处理（batching）弥合了这一差距。只需加载一次权重，让许多序列在同一个前向传播中通过，那么内存成本就会被分摊到所有这些序列上。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每一个推理服务引擎都会这样做。它们之间的区别在于：batch（批次）是在什么时候被决定的。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">静态批处理（Static batching）在批次开始之前决定一次。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">动态批处理（Dynamic batching）按计时器来决定。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">连续批处理（Continuous batching）在每一次前向传播时都会重新决定。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最后这一种几乎是现代推理服务中绝大部分吞吐量的来源所在。另外两种值得首先理解，因为每一种的失败方式，正是下一种被设计出来所要修复的。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">今天，我们将一个一个地拆解并理解其中的每一种。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们开始吧！🚀</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.jpg"></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么需要批处理</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一块A100每秒大约执行312 teraFLOPs的BF16运算，并且每秒大约要从内存中搬移2 terabytes数据。解码（decoding）完全依赖于后面这个数字。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">读取权重的成本占据了全部开销，计算单元则空转着等待。这段空闲的计算能力就是免费的容量，因此六十个请求组成的batch与只有一个请求的batch分摊的是同一次权重读取，于是吞吐量（throughput）上升了，而内存读取时间保持不变。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">请注意，吞吐量会随batch大小先急剧攀升，然后趋于平缓。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在拐点以下，你是memory-bound（内存受限）的，此时批处理几乎等同于免费。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在拐点之上，你是compute-bound（计算受限）的，每增加一个序列都要花费时间。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">拐点的位置会随模型、GPU以及序列长度而变化，所以要在你自己的硬件上测量它。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">现在，你可能会想：如果批处理如此有效，为什么不尽可能多地批处理呢？</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">嗯，对于LLM而言，这比听起来要难得多。让我们来理解其中的原因。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">什么让LLM出问题</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">批处理比LLM出现得还要早。对于分类器或嵌入（embedding）模型来说，它只是一个装箱（packing）问题。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把输入填充（pad）到一个共同的长度，把它们堆叠成一个张量，然后运行一次前向传播。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这样做可行，是因为三个条件成立：一次前向传播就产生完整的答案；没有任何一行依赖于另一行；每一行的成本在它开始之前就已经知道了。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">但这对自回归（autoregressive）LLM来说并不成立。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">解码（decoding）破坏了全部三个条件。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一次前向传播只产生一个token，而不是最终答案。一个400个token的回复需要400次前向传播。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每一行都依赖于它自身的历史。每一次前向传播都会写进该请求的KV cache，而下一次前向传播又会把它读回来。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">成本直到结束才能确定。模型通过发出一个停止token（stop token）来决定何时结束，这个token可能在12个token之后出现，也可能在4,000个token之后出现。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">填充并不能解决这个问题。它只能拉平输入的宽度，而不能决定一个请求占用GPU多长时间。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">所以，在开始时固定的batch，其运行速度取决于其中运行最慢的那个成员。这三种策略就是对这一问题的三种回答，且按照它们对此问题处理力度的递增顺序排列。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">静态批处理</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最简单的答案是对此问题什么都不做。收集固定数量的请求，一起运行它们，并在最后一个请求完成时返回所有结果。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最终状态是这样的：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">R3在t=9时停止生成，却一直占着GPU直到t=15，因为R2仍在运行。这会让你付出两倍的代价：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对一个结果早已完成（可由GPU释放）的用户来说，等待了六个单位时长的延迟</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个被占用的槽位，本可以被排队中的请求所使用</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">浪费随着输出差异（variance）的增大而扩大。Anyscale在40GB A100上对OPT-13B测量了这一点。拓宽输出长度的差异度，会让静态批处理的吞吐跌到大约每秒81个token，而连续批处理则保持了高出约一个数量级的水平。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">但有时它仍是正确的选择。静态批处理只有在输出长度差异较大时才显得不佳。去掉这一因素，运行最慢成员拖后腿的问题也随之消失。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">分类、嵌入（embeddings）和打分（scoring）正好属于这类任务。每个请求都产生固定大小的输出：一个标签或一个向量：因此batch中的每个请求几乎在同一时间步完成，没有请求会等待掉队的慢序列。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于这类工作，静态批处理更简单，而且不会损失任何东西。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下面是在vLLM中配置静态批处理的方法：</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #FF4689">from</span><span style="color: #F8F8F2"> vllm</span><span style="color: #FF4689">import</span><span style="color: #F8F8F2">LLM,</span><span style="color: #F8F8F2">SamplingParams</span><br/><br/><span style="color: #F8F8F2">llm</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">LLM(model</span><span style="color: #FF4689">=</span><span style="color: #E6DB74">&quot;meta-llama/Llama-3.1-8B-Instruct&quot;</span><span style="color: #F8F8F2">)</span><br/><span style="color: #F8F8F2">outputs</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">llm</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">generate(prompts,</span><span style="color: #F8F8F2">SamplingParams(max_tokens</span><span style="color: #FF4689">=</span><span style="color: #AE81FF">64</span><span style="color: #F8F8F2">))</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">llm.generate一次性把整个工作负载交给引擎。限制max_tokens、保持prompt大小相近，这样每个序列都会在几乎相同的时间步完成。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">👉 Hugging Face带batch_size参数的pipeline API也属于静态批处理。适用于评估脚本，但对于实时流量而言表现不佳。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">动态批处理</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">静态批处理还有第二个代价：一个请求可能要等待很久才能进入一个batch。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如果batch size为8，但只有5个请求到达，那么这5个请求必须空等着，直到再有3个请求到来。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">动态批处理加入了一个定时器。batch在达到大小上限时触发，或在窗口期满时触发，以先到者为准。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig09.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最终状态是这样的：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig10.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Batch 1在t=4（固定间隔）触发，只包含R1和R2，因为在第三个请求到来之前窗口已经期满。两者都比静态批处理所允许的时间提前了四个单位开始。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">它缩短的是错误的等待。R1在t=7时完成，却仍然要等到t=12，因为R2还没有完成。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">动态批处理每个batch决定一次，然后就把控制权交给引擎，直到每个成员都完成。对于输出固定的模型，这就是一个完整的解决方案，这就是Triton内置它的原因。</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #ED007E; background-color: #1E0010">dy</span><span style="color: #66D9EF">na</span><span style="color: #ED007E; background-color: #1E0010">mic_ba</span><span style="color: #66D9EF">t</span><span style="color: #ED007E; background-color: #1E0010">chi</span><span style="color: #66D9EF">n</span><span style="color: #ED007E; background-color: #1E0010">g</span><span style="color: #F8F8F2"> {</span><br/><span style="color: #F8F8F2"></span><span style="color: #ED007E; background-color: #1E0010">pre</span><span style="color: #66D9EF">ferre</span><span style="color: #ED007E; background-color: #1E0010">d_ba</span><span style="color: #66D9EF">t</span><span style="color: #ED007E; background-color: #1E0010">ch_size</span><span style="color: #F8F8F2">: [</span><span style="color: #AE81FF">4</span><span style="color: #F8F8F2">,</span><span style="color: #AE81FF">8</span><span style="color: #F8F8F2"> ]</span><br/><span style="color: #F8F8F2"></span><span style="color: #ED007E; background-color: #1E0010">max_queue_delay_microseco</span><span style="color: #66D9EF">n</span><span style="color: #ED007E; background-color: #1E0010">ds</span><span style="color: #F8F8F2">:</span><span style="color: #AE81FF">100</span><br/><span style="color: #F8F8F2">}</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">👉 preferred_batch_size列出调度器试图构成的各batch大小。max_queue_delay_microseconds则限定了一个请求最多等待多少时间以凑齐同行伙伴。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">连续批处理</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">到目前为止的两种策略都把batch视为一个单元的工作，从启动开始一直运行到batch中的每个请求都完成为止。正是这个假设仍在让你付出代价，而连续批处理摒弃了它。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">调度器运行一次迭代，收回控制权，然后再做一次决定。一旦某个序列发出它的最终token，它就会离开batch，而一个在等待的请求会在下一轮迭代中占住这个槽位。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">batch的构成在每一次迭代都会发生变化，这就是为什么它被称为迭代级调度（iteration-level scheduling）。没有槽位会等待最慢的序列，因此即使输出长度的差异极大，GPU也能保持满载。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig11.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最终状态是这样的：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig12.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">限制因素是内存，而不是算力。每个正在运行的序列都持有一个KV cache，它会随着每个token而增长；限制有多少序列能够放得进来的是这个cache，而不是那些数学计算本身。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在一块40GB A100上常驻一个13B模型时，同时只能容纳得下寥寥几个长序列。当内存池耗尽时，调度器会逐出（evict）一个正在运行的请求，并在之后重新计算它。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这看起来像是GPU没有足够的余量（headroom），而实际上它只是把同一次prefill计算了两遍而已。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">👉 每个引擎都以不同的名字提供连续批处理：vLLM、SGLang和TGI称之为continuous batching，TensorRT-LLM称之为in-flight batching，LMDeploy则称之为persistent batching。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">分块预填充（Chunked prefill）</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每一轮都重建批次确实解决了慢成员的问题，但同时又引入了一个新问题，而用户会把它感知为卡顿（stutter）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个新加入的请求会在一次迭代内完成预填充。一个32K-token的prompt就是一次大规模、计算密集的pass，所有正在活跃解码的请求都要在它后面等待，于是输出会在句子中间停顿下来：仅仅因为别人粘贴了一份超长的文档。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下面看看没有开启和开启分块预填充时的情况有何不同。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">整体预填充（Whole prefill）：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig13.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">分块预填充（Chunked prefill）：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">（请求C的prompt被拆分成每块2k tokens的较小块）</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig14.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">将prompt拆分到多次迭代中执行。分块预填充会把prompt拆成固定大小的token范围，安排在若干次pass中调度执行，每一步都扩展该请求的KV cache。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">注意力（attention）计算并未改变，因为后面的块会关注前面块已处理过的内容。首个token会在最后一个块处理完之后才到来。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Prefill是计算密集（compute bound）的，而decode是内存密集（memory bound）的，因此一个同时包含两者的批次可以同时利用芯片的这两部分能力。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig15.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在选择数值时，请注意以下几点：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">更小的块给调度器提供更多执行decode的机会，从而降低活跃请求的ITL（token间延迟）峰值。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">更大的块能更高效地处理新来的prompt，通常还能改善TTFT（首token延迟），但那些正在活跃解码的请求可能在两两token之间等待更久。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">块如果太小，会降低GPU利用率并增加注意力（attention）开销，因为后面的块必须重新读取前面块所创建的KV cache条目。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">分块预填充在vLLM V1中默认开启，其中 --max-num-batched-tokens限制了每次迭代的token数量。SGLang则使用 --chunked-prefill-size，将其设为 -1即可禁用。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">vLLM：</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code>vllm<span style="color: #F8F8F2"></span>serve<span style="color: #F8F8F2"></span>meta-llama/Llama-3.1-8B-Instruct<span style="color: #F8F8F2"></span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2"></span>--max-num-batched-tokens<span style="color: #F8F8F2"></span><span style="color: #AE81FF">8192</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SGLang：</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code>sglang<span style="color: #F8F8F2"></span>serve<span style="color: #F8F8F2"></span>--model-path<span style="color: #F8F8F2"></span>meta-llama/Llama-3.1-8B-Instruct<span style="color: #F8F8F2"></span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2"></span>--chunked-prefill-size<span style="color: #F8F8F2"></span><span style="color: #AE81FF">8192</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">👉 并不存在普适的最佳块大小。它取决于模型、GPU、你的prompt长度分布，以及你的SLO所衡量的究竟是哪个延迟指标。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">结语</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这三种策略唯一的区别在于它们何时固定批次，而每一种都对应着一种不同的工作负载形态。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig16.jpg"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于输出长度可变的实时流量，连续批处理是唯一能撑起局面的方案，而且每个主流引擎默认都会提供这一能力。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这篇文章通篇建立在一个关于GPU的事实之上：一次前向传播（forward pass）的瓶颈在于从内存中读取权重，而不是在于数学计算本身。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我写过一篇关于GPU工作原理的详细文章：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">它从第一性原理出发，层层推导为什么内存与计算会相互竞争、为什么硬件中会存在这一差距，以及什么会让一个工作负载从一开始就变成内存密集（memory-bound）。它不需要任何前置知识，也是上面所有内容的天然前传。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">敬请期待更多内容！</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">感谢阅读。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">干杯！：)</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+三种批处理策略唯一区别是何时固定批次：静态适合定长输出、动态适合固定产出模型、连续批处理扛得住长度剧烈变化的实时流量，配以分块预填充可在吞吐与延迟间精细权衡。<br  /><br  />整篇地基是GPU事实：前向传播瓶颈在读内存而非算数。看清这一点，就明白为何批处理与KV cache是推理系统命脉。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://x.com/akshay_pachaar/status/2094490705024676272</span></p>
+</section>

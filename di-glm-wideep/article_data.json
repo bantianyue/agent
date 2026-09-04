@@ -1,0 +1,399 @@
+{
+  "title": "把 GLM-5.1-FP8 扩展到 64 张 MI300X：PD 分离 + WideEP 实战",
+  "lead": [
+    "服务好前沿 Mixture-of-Experts（MoE）模型是系统问题，一旦单节点不够就变得更难。GLM-5.1 是很好的例子：它是个大而稀疏的 MoE，用户想在**长上下文**上跑，而且它带一个**新 attention family**，打破了旧 serving 栈默默依赖的假设。把它塞进八张 GPU 只是开始。真正的问题是跨几个节点扩展时如何保持正确和快。",
+    "这篇演示如何把 **GLM-5.1-FP8** 带到 AMD Instinct™ MI300X 上做 **prefill-decode（PD）分离 serving** + **wide expert parallelism（WideEP）**，用 vLLM 内的 AMD **MoRI** 通信栈。过程中覆盖两个只在分离和 scale-out 后出现的生产阻塞缺陷，以及两者的修复。",
+    "结果是正确长上下文 serving 和干净吞吐扩展，跨四种拓扑：从单 prefill/decode 对（EP8）到 prefill 和 decode all-to-all 路径都是 EP32。",
+    "*这是 AMD Disaggregated Inference（DI）博客系列第一篇，把前沿开源模型从单节点 demo 带到 AMD Instinct™ GPU 上的生产多节点 serving。*"
+  ],
+  "summary": [
+    {
+      "key": "配置",
+      "body": "GLM-5.1-FP8（MLA+DSA，78 层 256 专家 MoE、FP8 block-128）在 64 张 MI300X 上做 PD 分离 WideEP serving：MoRI-EP 扛 MoE all-to-all、MoRI-IO 扛 RDMA KV 传输，EP8 一路扩到 EP32。"
+    },
+    {
+      "key": "两个 bug",
+      "body": "① 30k 上下文准确率崩溃——sparse-MLA 元数据 key 在 chunked prefill 下碰撞（#47766 改 per-request key）；② 8k prefill 分离崩溃——DSA 第二套 indexer KV 不经 save_kv_layer 被 MoRI-IO 漏传（修复按层配对全传）。"
+    },
+    {
+      "key": "容量墙",
+      "body": "per-token KV 固定 53.6 KiB/token，max_context = 657k×8×(decode 实例数)/concurrency；28k+c256 单实例饱和，2P/4D 达 16,525 tokens/s 峰值，满 202k 上下文需约 10 个 decode 实例（~80 GPU）。"
+    }
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "一览：核心结果与修复",
+      "paras": [
+        "以下要点总结这篇的主要结果和修复：",
+        "**GLM-5.1-FP8**（GlmMoeDsaForCausalLM，Multi-head Latent Attention + **DeepSeek Sparse Attention**）已在 MI300X 上启用 PD-分离 WideEP serving，**MoRI-EP** 扛 MoE all-to-all、**MoRI-IO** 扛 RDMA KV-cache 传输。",
+        "两个生产阻塞缺陷已修复：**约 30k token 后的长上下文准确率崩溃**，以及由 GLM-5.1 稀疏 attention 引入的第二套易漏 KV cache 导致的 **8k-prefill 分离崩溃**。",
+        "**长上下文检索在每种测试拓扑上都通过**：1P/1D（EP8）、2P/2D（EP16）、1P/4D 和 2P/4D（decode EP32）、4P/4D（两侧 EP32），覆盖完整 2k-35k 范围，DeepSeek-V3 在共享栈上无回退。",
+        "**完整 72-cell 基准矩阵**（4 拓扑 × 3 形状 × 6 并发）。峰值 **16,525 tokens/s**（2P/4D、28k 输入、并发 256）。",
+        "决定性发现是**可从第一性原理预测的容量墙**：28k 输入 + 并发 256 时，单 decode 实例塌到 **1,405 tokens/s，比多 decode 拓扑慢 11.8×**，因为其 KV 工作集超出池。一个闭式 KV-capacity 模型复现墙出现的位置，把「我需要几个节点？」变成算术。",
+        "图 1 展示这篇所基于的代表性 2P/2D（EP16）部署。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig01.png",
+            "caption": "图 1：2P/2D EP16 部署——prefill/decode head 和 child 节点各 8 GPU + 8 backend NIC，经 InfiniBand/RoCE fabric 连接；MoRI-EP 扛 MoE dispatch（蓝）和 combine（橙）all-to-all，MoRI-IO 扛 prefill 到 decode 的 RDMA KV 传输。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "为什么分离，为什么 WideEP",
+      "paras": [
+        "推理有两个性格相反的阶段。**Prefill** 在一次 compute-heavy pass 里读整个 prompt。**Decode** 然后一次一个 token 输出，受内存带宽限制。两者跑在相同 GPU 上就互相干扰：一阵长 prompt 爆发阻塞每个人的 token 生成（head-of-line blocking），负载下 inter-token 延迟飙升。",
+        "**PD 分离**把两阶段放独立实例，各可自行定大小、并行化、调度。prefill-heavy 流量不再拖慢稳定 decode 流。",
+        "那个拆分引出第二个问题：如何把 256-expert MoE 分布到所有这些 GPU？tensor-parallel-only 布局分片和同步每层，对每 token 只激活少数专家的模型是浪费。**WideEP** 相反把专家摊到各 rank。每 GPU 持一片，只把每 token 路由到拥有其专家的 rank。加节点时 expert-parallel（EP）宽增长，在专家间 shuffle token 的 all-to-all 必须跨网络保持正确和快。那个传输正是 MoRI 提供的。",
+        "> 单节点并行背景（TP、DP、EP）、DP attention、何时 --enable-expert-parallel 有用，见 vLLM MoE Playbook。这篇从它停下的地方继续，跨节点扩展。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "架构：MoRI 上的 PD 分离 + WideEP",
+      "paras": [
+        "拓扑用 xPyD 记法：x 个 prefill 实例、y 个 decode 实例，每实例一个 8-GPU MI300X 节点。EP 宽 = 实例数 × 8，所以 1P/1D 是 EP8、2P/2D 是 EP16、加 decode 实例（2P/4D）把 decode 侧推到 EP32。",
+        "MoRI 库扛两种流量模式：",
+        "**MoRI-EP**：跨 EP rank 的 MoE dispatch 和 combine all-to-all。vLLM 为 prefill（大 token batch）选高吞吐 kernel、为 decode 选低延迟 kernel。",
+        "**MoRI-IO**：从 prefill 到 decode 的远程直接内存访问（RDMA）GPU-Direct KV-cache 传输。流量落在八个 GPU-local backend NIC 上，均匀平衡，两个 front-end NIC 不承载。KV 路径用该用的 fabric。",
+        "图 2（左）显示 PD-分离 WideEP serving 的请求路径（router 把每个请求的 prefill 和 decode 腿钉到稳定 DP rank）；图 3（右）显示 GLM-5.1 稀疏 attention 引入的额外 KV cache：工程一节详细讲。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig02.png",
+            "caption": "图 2：MoRI 上的 PD-分离 WideEP serving 请求流——router 把每请求 prefill/decode 腿钉到稳定 DP rank；MoRI-EP 扛各角色内 MoE all-to-all；MoRI-IO 经 RDMA 从 prefill 移 KV 到 decode。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig03.png",
+            "caption": "图 3：GLM-5.1 的 DSA 每层加第二套（indexer）KV cache。因为它写在 fused op 里，从不经 save_kv_layer，所以 MoRI-IO 从没传它、decode 等 KV 撞 crash。修复按层索引配对主和 indexer cache，全部 156 个一起传。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "模型：GLM-5.1-FP8 = MLA + DeepSeek Sparse Attention",
+      "paras": [
+        "GLM-5.1-FP8 是个大而稀疏的 MoE：78 层（3 dense、75 MoE）、256 routed experts（top-8）加一个 shared expert，FP8 量化 block-128 缩放。其架构 id GlmMoeDsaForCausalLM 是关键细节：它组合 **Multi-head Latent Attention（MLA）** 与 **DeepSeek Sparse Attention（DSA）**。",
+        "DSA 是让 GLM-5.1 值得服务、也是搞坏现有栈的东西。为决定每个 query 关注哪些 token，DSA 维护**每层第二套 KV cache**：一个稀疏「indexer」k-cache，DeepSeek-V3 没有的。那个额外 cache 在常规代码路径里不可见，结果成了下面分离崩溃的根因。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig04.png",
+            "caption": "图 4：GLM-5.1 DSA 双 KV cache——第二套 indexer cache 是分离缺陷根因，pair-and-ship 修复。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "两个要解决的工程问题",
+      "paras": [
+        "在分离和 WideEP 下 bring up 新 attention family 是工程问题，不是配置变更。两个缺陷阻塞生产；现在都修了。",
+        "**问题 1：长上下文准确率约 30k token 后崩溃。**\n**症状**：生成到约 30k token 前正确，然后产出错误输出（vLLM issue #47042）。\n**根因**：持久 work-stealing sparse-MLA kernel 把 attention 元数据 key 到**在 chunked prefill 下碰撞**的值上。两个在途请求可映射到同一 key，一个请求能复用另一个的 context。这正是只在真实 batching 下长上下文才现形的 bug。\n**修复**：vLLM #47766 把元数据缓存 key 到 per-request (context_len, query_len) 对上。这保持快速持久 kernel 开着且正确，而非早期 workaround（#47567）禁用 kernel 放弃性能。带 #47766，AITER persistent gqa64 fold 路径被使用，**stock ROCm 和 AITER 无 fork 工作**。",
+        "**问题 2：8k-prefill 分离崩溃。**\n**症状**：8k+ prefill 的分离运行崩溃 prefill EngineCore。\n**根因**：这是 DSA 第二套 KV cache 回来咬人。indexer cache 写在 *fused op 内部*，所以 indexer 模块的 forward() 实际是 no-op。它从不调用 save_kv_layer。MoRI-IO connector 传输任何经 save_kv_layer 注册的东西，所以那 78 个 indexer caches **从没被 ship 到 decode**。decode 然后等永不到达的 KV，撞 unmap MISS，60 秒 deferred-write timer 到期后 prefill EngineCore 崩溃。\n**修复**：按层索引配对每个主 cache 与其 indexer cache，**一起传输**（78 主 + 78 indexer = **156 caches**），加上 vLLM branch 携带的 DP-rank KV-notify 修复。8k 及以上的分离 serving 干净了。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "结果：长上下文检索处处成立",
+      "paras": [
+        "验证覆盖四种拓扑：1P/1D（EP8、2 节点、16 GPU）、2P/2D（EP16、4 节点、32 GPU）、2P/4D（EP16 prefill、EP32 decode、6 节点、48 GPU）、4P/4D（两侧 EP32、8 节点、64 GPU），用 needle-in-a-haystack（NIAH）检索验准确率、vllm bench serve 测吞吐和延迟。所有运行用同一 from-source 镜像。",
+        "NIAH 分数（每上下文长度 10 针中找到）：",
+        "这是头条正确性结果。带 #47766 修复和 DSA indexer 传输，GLM-5.1 在分离 serving 下跨整个 2k-35k 范围正确回答长上下文 needle 查询，包括之前塌到近零的 28k-35k 带。偶尔的 7-9/10 是单针方差，不是长度崩溃；修复前签名完全消失。"
+      ],
+      "fig_after": {},
+      "table": {
+        "head": [
+          "Topology",
+          "2k",
+          "8k",
+          "16k",
+          "20k",
+          "28k",
+          "35k"
+        ],
+        "rows": [
+          [
+            "1P/1D (EP8)",
+            "10",
+            "10",
+            "9",
+            "9",
+            "9",
+            "10"
+          ],
+          [
+            "2P/2D (EP16)",
+            "10",
+            "10",
+            "9",
+            "8",
+            "9",
+            "10"
+          ],
+          [
+            "2P/4D (EP32 decode)",
+            "10",
+            "10",
+            "9",
+            "9",
+            "8",
+            "10"
+          ],
+          [
+            "4P/4D (EP32 both)",
+            "10",
+            "10",
+            "8",
+            "9",
+            "7",
+            "10"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "结果：吞吐随并发干净扩展",
+      "paras": [
+        "如图 4 所示，1k 和 8k 输入下吞吐**近线性**随并发扩展。c8→c128 步在每拓扑增益 13.5-15.4×（理想 16×），所以 batching 高效、分离不加扩展惩罚。更长输入提高总 token 吞吐因为每请求带更多 prefill token；全矩阵峰值 **16,525 tokens/s**（2P/4D、28k 输入、并发 256）。",
+        "有趣形状是长输入。完整 28k/1k 表如下。看最后一列："
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig05.png",
+            "caption": "图 5：四种拓扑在 1k/1k、8k/1k、28k/1k 输入输出形状下的总 token 吞吐 vs 并发。"
+          }
+        ]
+      },
+      "table": {
+        "head": [
+          "Topology",
+          "c8",
+          "c16",
+          "c32",
+          "c64",
+          "c128",
+          "c256"
+        ],
+        "rows": [
+          [
+            "1P/1D",
+            "2,219",
+            "4,111",
+            "7,613",
+            "12,506",
+            "13,715",
+            "1,405"
+          ],
+          [
+            "2P/2D",
+            "2,170",
+            "4,043",
+            "7,414",
+            "13,166",
+            "15,353",
+            "15,429"
+          ],
+          [
+            "2P/4D",
+            "2,026",
+            "3,737",
+            "6,804",
+            "12,027",
+            "15,097",
+            "16,525"
+          ],
+          [
+            "4P/4D",
+            "2,023",
+            "3,745",
+            "6,676",
+            "11,912",
+            "14,470",
+            "15,337"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "决定性结果：容量悬崖",
+      "paras": [
+        "28k 输入 + 并发 256 时，**单 decode 实例（1P/1D）掉到 1,405 tokens/s，比最佳拓扑慢 11.8×**，而每个多 decode 拓扑保持全吞吐。",
+        "这不是温和回退。是 regime change。TTFT 说同样故事：1P/1D 的 28k × c256 TTFT 是 **382 s**（深抢占队列）对比更大拓扑的 290-340 s。关键地，TPOT 不升。Per-token decode 仍快；序列被**抢占**因为它们不再装进内存。下一节显示这墙正出现在简单容量模型说它必须出现的地方。",
+        "**延迟：decode 持平，TTFT 是可调旋钮。**关键延迟故事在 **TTFT**（图 5）：它随并发和输入长度上升，符合预期。28k 输入时随 prefill 队列加深陡增。那是操作员通过设并发限制对吞吐权衡的自然旋钮。",
+        "**TPOT**（稳态 per-output-token 延迟；图 6）随并发**惊人地平**：1P/1D 约 89 ms、2P/2D 约 91 ms、2P/4D 约 105-120 ms。那个平正是分离的全部意义：decode 在负载下保持稳定，因为 prefill 爆发落在独立实例、不能阻塞 token 生成。",
+        "**读拓扑。**1P/1D 和 2P/2D 是 GPU 最有效的：短中上下文下每 GPU 几个百分点内跟踪。2P/2D 是推到长上下文高并发前的最强平衡操作点。2P/4D 和 4P/4D（四个 decode 实例）在 1k/1k 带 +25-26% TPOT 惩罚（约 89 ms → 约 112 ms，token 循环里跨节点 decode EP32 all-to-all 的成本）。那惩罚买来长上下文关键的 decode KV headroom：2P/4D 恰在 1P/1D 剧跌处发布矩阵峰值（**16,525 tokens/s** at 28k × c256）。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig06.png",
+            "caption": "图 6：平均 TTFT vs 并发——28k 输入时随 prefill 队列加深陡增（可调旋钮）。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig07.png",
+            "caption": "图 7：平均 TPOT vs 并发——随并发惊人地平（分离的意义，decode 稳定）。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "正确性跨 Expert-Parallel 宽度扩展",
+      "paras": [
+        "GLM-5.1-FP8 在整个测试的 expert-parallel 范围正确检索，EP8 到 EP32，在 prefill 和 decode all-to-all **两条**路径上。这是强扩展信号：MoRI-EP dispatch/combine 和 MoRI-IO KV 传输在 EP 加宽时保持正确。1P/4D 只出现在这张表做准确率覆盖；它用 NIAH 验证正确性，但不属于表 2 的吞吐扫描。"
+      ],
+      "fig_after": {},
+      "table": {
+        "head": [
+          "Topology",
+          "Prefill EP",
+          "Decode EP",
+          "NIAH"
+        ],
+        "rows": [
+          [
+            "1P/1D",
+            "8",
+            "8",
+            "Pass"
+          ],
+          [
+            "2P/2D",
+            "16",
+            "16",
+            "Pass"
+          ],
+          [
+            "1P/4D",
+            "8",
+            "32",
+            "Pass"
+          ],
+          [
+            "2P/4D",
+            "16",
+            "32",
+            "Pass"
+          ],
+          [
+            "4P/4D",
+            "32",
+            "32",
+            "Pass"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "预测墙的容量模型",
+      "paras": [
+        "跌落不是谜。是算术。vLLM 报告**测得**的 per-rank KV pool（657,000 tokens/decode rank），GLM-5.1 的 per-token KV 成本固定：MLA latent（576 B）加 DSA indexer（128 B），跨 78 层，FP8 下 **53.6 KiB/token**。所以拓扑能让所有在途序列驻留的最长上下文可用闭式表达：",
+        "容量**对 decode 实例线性**、**对并发反比**。那个单一公式复现每个测量（图 7）：",
+        "__CODE__max_context = 657,000 x 8 x (decode instances) / concurrency      (tokens, full pool)\n            = 5.26M x (decode instances) / concurrency            (capped at the model's 202k limit)",
+        "预测与运行匹配。28k 输入 + 并发 256：1P/1D 天花板 **20k < 28k，所以饱和**（测 1,405 tokens/s、TTFT 382 s）；2P/2D 的 **41k > 28k，所以完成**（15,429 tokens/s）；四 decode 拓扑坐约 35% KV-pool 利用（16,525 和 15,337 tokens/s）。墙落在 pool 说它必须落的地方。",
+        "反过来，模型变成**定尺寸工具**。要在目标并发服务模型完整 202k 上下文：",
+        "在并发 256 维持满 202k 上下文需要约 **10 个 decode 实例（约 80 GPUs）**：一个纯从测得数导出的具体多节点目标，不是猜。这是 scale-out 的定量论证。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig08.png",
+            "caption": "图 8：KV-capacity envelope——每拓扑最大驻留上下文 vs 并发，从测得 657k-token/rank pool 推出。28k 基准线在 c=128 和 c=256 之间穿过 1P/1D 天花板，恰在测得跌落处。"
+          }
+        ]
+      },
+      "table": {
+        "head": [
+          "Topology",
+          "decode ranks",
+          "KV pool",
+          "max context @ c256"
+        ],
+        "rows": [
+          [
+            "1P/1D",
+            "8",
+            "5.26M tok",
+            "20k"
+          ],
+          [
+            "2P/2D",
+            "16",
+            "10.5M tok",
+            "41k"
+          ],
+          [
+            "2P/4D / 4P/4D",
+            "32",
+            "21.0M tok",
+            "82k"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "可复现性与总结",
+      "paras": [
+        "**PR**：ROCm/MAD #176：per-model Dockerfile（vllm_disagg_inference.glmv5.1）、models.yaml recipe、MODEL_NAME-gated DSA runtime patchers。DeepSeek-V3 镜像和代码路径未动（与 develop byte-identical）。",
+        "**镜像**：from-source vLLM（WideEP WRITE-mode branch、#47766）+ stock AITER e03fa6040 + MoRI post-1.2.1 42e895472b08 + vllm-router（DP-rank round-robin + KV-notify）。",
+        "**Serve flags**：--tool-call-parser glm47 --reasoning-parser glm45 --enable-auto-tool-choice --chat-template-content-format string，block size 1、FP8 KV、AITER MLA on。",
+        "**Harnesses**：niah_nothink.py（准确率，thinking-aware，NIAH_SEEDS 多 seed）、run_topo_bench.sh（per-topology NIAH + perf）、kv_envelope_sim.py（容量模型）。每拓扑记录精确 commits、节点、命令行。",
+        "**总结**：这篇把 **GLM-5.1-FP8** 带到 AMD Instinct MI300X 上 WideEP PD-分离 serving 的正确高吞吐 serving，跨 1P/1D、2P/2D、2P/4D、4P/4D，由完整 72-cell 基准矩阵支撑。到达那里意味着修两个只在分离和扩展下浮现的缺陷：长上下文准确率崩溃（经 vLLM #47766 保持持久 sparse-MLA kernel 开着且正确解决）和 8k-prefill 崩溃（经配对并传输 DSA 第二套 indexer KV cache 解决）。你看到长上下文检索在 prefill 和 decode all-to-all 路径从 EP8 到 EP32 都成立，decode 延迟负载下持平，以及单 decode 实例 28k 上下文超高并发的硬限制不是缺陷而是容量边界：由测得 KV pool 预测、加 decode 实例清除。"
+      ],
+      "fig_after": {},
+      "table": {
+        "head": [
+          "Concurrency",
+          "Decode instances",
+          "GPUs"
+        ],
+        "rows": [
+          [
+            "16",
+            "1",
+            "8"
+          ],
+          [
+            "64",
+            "3",
+            "24"
+          ],
+          [
+            "128",
+            "5",
+            "40"
+          ],
+          [
+            "256",
+            "10",
+            "80"
+          ]
+        ]
+      }
+    }
+  ],
+  "conclusion": [
+    "AMD ROCm DI 系列首篇：把 GLM-5.1-FP8 做成 MI300X 上的 PD 分离 WideEP serving（EP8→EP32）。最值得带走的是两个只在分离+scale-out 下现形的工程 bug——30k 崩溃（sparse-MLA 元数据 key 在 chunked prefill 碰撞）和 8k 崩溃（DSA 第二套 indexer KV 被通信层漏传，新 attention 族的隐形第二状态一旦被遗漏就是跨节点崩溃源）——以及一套可预测容量模型：per-token KV 53.6 KiB，max_context 是算术（28k+c256 需多 decode 实例、202k 需 ~80 GPU）。",
+    "做长上下文 MoE serving 的人，这是 PD 分离 + WideEP + KV 容量规划的完整参考。"
+  ],
+  "reference_url": "https://rocm.blogs.amd.com/software-tools-optimization/di-glm-wideep/README.html"
+}

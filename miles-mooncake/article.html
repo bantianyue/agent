@@ -1,0 +1,145 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心结果</strong>：Mooncake已集成进Miles作为rollout数据传输后端。在Miles捕获的rollout数据上，集成比现有Ray路径传输延迟显著更低：远程GET快约10-14×，PUT提升约1.2-1.6×。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">两大挑战</strong>：①异构数据类型+复杂语义：tokens/masks/logprobs是list[np.ndarray]，每样本一个数组，标量列表和元数据表示各异，trainer要精确重建dtype/shape/row order/null/metadata。②高度碎片化内存：每样本一个小分配，逐片段传输有重复registration/Store开销。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">方法</strong>：控制面/数据面分离：scheduler只传轻量transfer reference，Mooncake负责payload。按字段选布局（tensor保类型、ragged带边界元数据、Python值保留重建信息）；copy plan把小行直接打包进可复用BufferPool chunk变批量I/O；manifest最后发布保证读不到半写dict。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">大语言模型的强化学习结合两种截然不同的工作负载：<strong>rollout生成</strong>和<strong>模型训练</strong>。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在rollout阶段，推理worker在当前policy上运行一组prompt并生成响应。过程中它们产生学习算法所需的信息，包括生成的token、masks、log probabilities、奖励、序列长度、样本标识符和其他元数据。这些输出共同构成被下一步训练消费的<strong>rollout data</strong>。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">小规模下生成和训练可共享同一执行环境。大规模下，现代RL系统越来越多采用<strong>disaggregated架构</strong>，rollout生成和训练部署为独立worker组，常跨不同进程、GPU或机器。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两个阶段有根本不同的资源和执行特性。Rollout是推理密集工作负载，其吞吐取决于解码效率、batching和请求调度，而训练依赖大型高度同步的张量计算。分离它们允许每侧独立扩展和调度。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">分离还启用<strong>流水线级并发</strong>。Miles可以在rollout worker生成rollout N+1时训练rollout N。异步RL系统因此允许rollout和训练worker以不同速率推进。但disaggregation也引入新的系统边界：<strong>rollout worker产生的数据现在必须在训练消费前移动到一组不同worker</strong>。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">那个交接直接位于生成和下一次policy更新之间。慢的传输会让trainer等数据、让rollout worker上内存占用更久。对Miles这样的分布式RL系统，高效移动这些<strong>结构化rollout数据从推理侧到训练侧</strong>成为端到端RL流水线的重要部分。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Disaggregated RL中的Rollout数据</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">rollout batch通常是<strong>异构结构化对象</strong>，而非单一连续tensor。取决于框架和算法，它可能包含生成token、loss masks、log probabilities、奖励、序列长度、样本标识符、路由信息、元数据和其他辅助字段。这些值可以表示为tensors、NumPy arrays、Python标量列表、变长逐样本数组、bytes或任意Python对象。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">几个属性使这些数据难以高效移动。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>挑战1：异构数据类型和复杂语义。</strong>不同rollout字段有根本不同的表示和语义。稠密tensor和数值数组可作为typed buffer高效传输，ragged序列需要行边界信息，标量列表需要保留原始值，元数据或Python对象可能需要更通用的编码。同时trainer必须重建RL框架期望的精确结构，包括dtype、shape、行顺序、null状态和元数据。通用serializer能在功能上处理这些对象，但常以额外转换、拷贝和重建为代价。高效rollout传输因此需要理解每个字段的物理表示和逻辑结构。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>挑战2：高度碎片化的内存布局。</strong>Rollout数据可包含大量小内存分配。在捕获的Miles工作负载中，tokens、loss_masks和rollout_log_probs等主要字段表示为list[np.ndarray]，每个样本分配一个NumPy数组。随batch增长，逐个传输这些碎片引入重复内存注册和Store操作，而序列化整个Python对象需要遍历、拷贝和重建大对象图。挑战是把碎片化逻辑数据变成高效批量传输，不丢失其原始结构。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">共同地，这些挑战使rollout数据移动不止是带宽问题：系统必须高效移动碎片化异构数据，同时保留其结构。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">有效数据路径需要同时满足几个要求：<strong>效率</strong>（避免过度序列化、拷贝、对象重建和逐分配传输开销）、<strong>正确性</strong>（往返保留字段类型、形状、行边界、null状态、元数据和Python级值）、<strong>可扩展性</strong>（随样本数、对象碎片和总payload大小增加持续良好）、<strong>灵活性</strong>（支持异构字段而不强迫RL框架扁平化或重写其原生rollout表示）、<strong>可预测交接延迟</strong>（足够快交付batch让trainer不因等rollout数据而停滞）。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">用Mooncake驱动Miles Rollout数据传输</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Miles</strong>是面向大规模模型后训练的高性能强化学习框架。它结合<strong>SGLang做高吞吐rollout生成</strong>和<strong>Megatron-LM做可扩展训练</strong>，也为偏好直接训练Hugging Face模型实现的负载提供PyTorch FSDP2后端。Miles支持完全异步RL，rollout和训练worker解耦可独立推进，配合快速循环内权重更新、agentic rollout、低精度训练和大规模生产RL工作负载的容错。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这种disaggregated和异步设计使rollout-to-training数据路径成为RL流水线的关键部分。Rollout batch结构化且异构，常含碎片化逐样本数据和框架特定元数据，使高效传输和重建随工作负载规模增长越来越重要。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Mooncake</strong>为分布式AI工作负载提供高性能数据面。对RL rollout数据，它用结构化对象传输扩展数据面，允许异构碎片化rollout对象被移动、同时保留其原始结构和语义。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Mooncake现已作为rollout数据传输后端集成进Miles。在Miles捕获的rollout数据上，集成比现有Ray路径传输延迟显著更低：远程GET约<strong>10-14× 更快</strong>，PUT提升约<strong>1.2-1.6×</strong>。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">结果是在不改变RL编程模型的情况下更快的rollout-to-training交接，为Miles提供面向大型结构化rollout工作负载的更高效数据路径。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Rollout数据如何流经RL流水线</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Miles支持同步和异步训练循环。任一模式下，一旦rollout worker和trainer部署在独立进程或独立机器，每个完成的rollout batch必须在下一步训练消费前跨过边界。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1：Miles用同步put/get处理完成的rollout dict。reference经scheduler传递，Mooncake通过Store数据面移动payload。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个有用的设计原则是分离<strong>控制面</strong>和<strong>数据面</strong>。框架scheduler决定rollout batch去哪，但不应携带bulk payload本身。它传递一个轻量transfer reference，排除tensor payload和Store chunk布局，仍允许需要时的JSON-safe元数据。实际rollout payload走独立路径：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">框架scheduler传递transfer reference；Mooncake存储和传输payload；训练worker在跑训练步前重建原始对象；所有reader完成后框架移除短生命周期Store对象。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这个分离让调度决策保持轻量，同时允许bulk rollout payload通过专用数据路径移动。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Miles实际传输什么</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">从<strong>Miles</strong>捕获的rollout数据让这条数据路径具体化。对给定框架配置，字段契约稳定，但字段不共享一个方便的进程内表示。它们分三组：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第一组携带捕获数据的大部分字节。其他字段更小，但不能丢弃或规范化掉：它们携带样本身份、长度、奖励、特性状态和簿记信息。其精确大小取决于工作负载；基准节给出一个实测例子。</p>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">字段组</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">Miles表示</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">传输关注点</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Token、mask、log-probability行</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">逐样本数值行</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">许多独立行对象；长度可能逐样本不同</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">IDs、长度、奖励、flags</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Python标量列表</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">字节小但训练需要</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">可选和对象元数据</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Python值、tensor字典或嵌套对象</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">保留结构、null和启用特性语义</td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Miles使用Completed-Dict交接</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在<strong>Miles</strong>中，当前交接从完整rollout字典就绪后开始。生产者调用 `put(data, type="dict")`，scheduler携带返回的reference，trainer调用 `get` 重建原始字典。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">单个传输调用是同步的。生产者只在 `put` 完成后返回reference，trainer在消费对象前等 `get` 完成。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>这不阻止RL流水线本身异步。Miles可以在训练rollout N时生成rollout N+1。换句话说，并发位于传输操作之上：每个独立交接同步，而不同rollout和训练阶段可在流水线级重叠。</strong></p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Mooncake如何保留和传输Miles Rollout数据</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Mooncake在不同层处理两个挑战。它让结构可见足够久以选择每个字段的高效表示：tensor和数组保持typed，ragged行携带紧凑边界元数据，Python值保留GET重建它们所需的内容。然后它把碎片化内存变成批量I/O。一个copy plan把合格的小行直接打包进可复用的已注册BufferPool chunk，而大型连续tensor和数组可用原生Store路径。这避免两个极端：把整个dict序列化成单个不透明blob，或对每个小分配发一次Store操作。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2：Schema和叶展开暴露每个字段的类型与结构。字段特定编码产生typed payload members和重建元数据；Bundle Store最后发布其manifest。合格碎片传输用BufferPool支撑的staging，GET反向跟随同一结构。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">产生的payload成员作为bundle发布。其manifest记录成员住哪、如何拼合，只在payload就绪后才可见。GET反向跟随该描述取回并重建原始Miles dict。Miles仍用小的公共接口 `put(data, type="dict")` 和 `get(ref, type="dict")`；schema、字段布局、传输计划和重建保持在Mooncake内部。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为每个字段选择布局</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Mooncake先把dict展开成可高效编码的leaves。数组和tensor保持typed，ragged行携带紧凑边界元数据，受支持的Python值保留重建所需信息。框架提供的schema为模糊或性能敏感字段固定存储表示；无schema时Mooncake从观测值推断。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">同样的选择适用于多模态数据。处理的pixels和相关模型输入可留在tensor路径。PIL images、编码的PNG或JPEG bytes和变长媒体列表使用媒体感知布局，保留其边界和重建元数据，不强迫每个表示穿过同一serializer。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">把碎片化内存变成批量I/O</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每行单独发送创造数千个registration和Store请求。先拼接整个字段避免请求数，但增加全尺寸临时量。Mooncake改为构建copy plan，按需填充可复用的已注册BufferPool chunk。其原生路径直接把合格数值行拷进这些chunk，避免Python行循环和临时拼接。大型连续数组和tensor在Store支持时仍用直接或原生路径。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">发布完整Bundle并直接重建</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Mooncake只在所有payload和元数据就绪后发布bundle manifest，所以reader永看不到写了一半的Miles dict。GET时manifest识别要取回的members，结构化元数据描述如何重建每个字段。合格读取可瞄准BufferPool支撑的目的地，无需中间 `bytes` 对象，typed ragged行可直接查看结果缓冲。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：Miles rollout数据的两个主要挑战直接映射到Mooncake的结构化编码和批量传输优化。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">trainer用完后释放其本地BufferPool支撑结果。所有reader完成后，Miles移除短生命周期Store对象，Mooncake回收其payload chunk和manifest。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">性能结果：Benchmark Payload</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对固定框架配置，切换模型本身不改变字段契约。传输大小改而跟随样本数、prompt和响应长度，以及teacher log probabilities、路由信息或多模态输入等可选字段。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4：Qwen3-0.6B基准捕获中一个样本的实测组成。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Miles用Qwen3-0.6B在数学prompt上生成源数据（rollout_id=0，8个源样本）。捕获中每个响应有256 token。基准中三个大数值字段归一化为typed ndarray行，同时保留其值、行长、dtypes和逐样本碎片化。跨这些样本平均，逻辑payload分解如下：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">前三个字段约占3,386字节，即此样本布局的98.9%。更大基准payload重复八个捕获样本，保留字段类型和碎片化分配模式，同时增加逻辑样本数。这个计算描述该捕获；它不定于固定Miles样本大小。</p>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">一个捕获样本的部分</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">计算</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">逻辑字节</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><code>tokens</code></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">平均prompt+response token数x 4 B（int32）</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~1,338 B</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><code>loss_masks</code></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">256项x 4 B（int32）</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1,024 B</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><code>rollout_log_probs</code></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">256项x 4 B（float32）</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1,024 B</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">标量和对象字段</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">IDs、长度、奖励、flags和版本元数据</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">~36 B</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong>总计</strong></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong>~3,422 B</strong></td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">性能结果：传输结果</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">基准测量Miles使用的completed flat-dict交接，比较Miles Ray后端与Mooncake结构化对象传输。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5：对这个碎片化Miles rollout布局，Mooncake提供约10-14× 更快的GET。纵轴用对数刻度。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">PUT是生产者加载payload后的一次计时后端调用。GET是预热后三次远程消费者trial的平均。参考序列化和scheduler交接在计时区域外。这些数字覆盖payload传输和重建，不是端到端训练吞吐。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">跨测试payload大小，Mooncake让Miles GET比Ray后端快约<strong>10-14×</strong>。PUT提升约<strong>1.2-1.6×</strong>。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">PUT显示更小增益。其计时路径包括Python对象遍历、ragged行打包、元数据和manifest构造，以及payload传输。这个工作负载下GET改善更多，而trainer必须完成它才能开始训练步。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">下一步</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Miles集成建立了基本数据路径。下个优先级是与Miles社区在更广真实世界RL工作负载上验证它。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>验证更多模型和工作负载。</strong>我们将扩展验证到多模态和VLA工作负载、agentic RL、world-model训练，以及视频生成或diffusion模型的RL。因为这些工作负载以不同方式组合媒体、轨迹、动作、奖励和中间状态，每个工作负载将用真实rollout数据和端到端训练验证正确性、兼容性和传输性能。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>把rollout数据与KV cache工作负载隔离。</strong>Mooncake需要为短生命周期rollout数据和KV cache数据提供独立核算、配额和逐出策略，使rollout流量突发不能逐出延迟敏感的缓存项。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+这是Mooncake（KVCache.ai的分布式数据面）集成进Miles（RL后训练框架）做rollout数据传输的工程实录，值得抄作业的点很明确。<br  /><br  /><strong>问题</strong>：RL的rollout数据不是普通tensor：是list[np.ndarray] 逐样本碎片 + Python标量列表 + 元数据，每样本一个分配，batch一大就触发上千次registration/Store。纯序列化整dict或逐块Store都不可取。<br  /><br  /><strong>解法</strong>：控制面/数据面分离（scheduler只传轻量reference）；按字段选布局（typed tensor / ragged带边界 / Python值保重建信息）；<strong>copy plan把小行打包进可复用BufferPool chunk变批量I/O</strong>；manifest最后发布保证原子可见。<br  /><br  /><strong>结果</strong>：远程GET快<strong>10-14×</strong>、PUT快<strong>1.2-1.6×</strong>，且不改RL编程模型（put/get接口不变）。教训：<strong>碎片化结构化对象的传输优化，本质是「先按字段定布局，再按布局做批量移动」</strong>：这跟做数据布局优化的通用思路一致。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://www.lmsys.org/blog/2026-08-20-miles-mooncake-rollout-data-transfer</span></p>
+</section>

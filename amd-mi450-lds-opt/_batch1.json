@@ -1,0 +1,367 @@
+[
+ {
+  "idx": 0,
+  "tag": "h1",
+  "txt": "A Deep Dive into LDS Optimizations on AMD Instinct MI450 GPUs"
+ },
+ {
+  "idx": 1,
+  "tag": "p",
+  "txt": "The first two authors (Plavsic, Zaghen) contributed equally to this work."
+ },
+ {
+  "idx": 2,
+  "tag": "p",
+  "txt": "In GEMM kernels, operands travel from global memory through the Local Data Share (LDS) into registers, where the matrix cores consume them. How efficiently data moves through the LDS is frequently the primary determinant of overall performance."
+ },
+ {
+  "idx": 3,
+  "tag": "p",
+  "txt": "Two LDS characteristics can quietly cost a large fraction of the achievable throughput. The first arises when the in-memory layout doesn’t match the layout that the matrix cores expect for WMMA (Wave Matrix-Multiply-Accumulate), for example an N-contiguous B operand when the cores need a K-contiguous layout. A plain load from LDS cannot be vectorized in that case, but a transposed LDS load reorders the data on the fly and restores vectorized access. The second is contention on the physical LDS partitions, where warps"
+ },
+ {
+  "idx": 4,
+  "tag": "p",
+  "txt": "In this post you will learn:"
+ },
+ {
+  "idx": 5,
+  "tag": "li",
+  "txt": "Part I – Transposed LDS loads: how the ＠0＠ cooperative-transpose instruction works and how it’s used."
+ },
+ {
+  "idx": 7,
+  "tag": "li",
+  "txt": "Part II – Partition conflicts: what a partition conflict is, how to structure the WMMA ＠0＠ and ＠1＠ to avoid it, and how the compiler’s partition-aware allocator physically separates data across LDS partitions."
+ },
+ {
+  "idx": 9,
+  "tag": "p",
+  "txt": "This is a deep dive aimed at Gluon and Triton kernel writers who already know the basics of authoring GEMM kernels. If you are new to Gluon kernels, start with"
+ },
+ {
+  "idx": 10,
+  "tag": "h2",
+  "txt": "A Linear Layout Refresher"
+ },
+ {
+  "idx": 11,
+  "tag": "p",
+  "txt": "Both parts of this post lean heavily on Triton’s linear layouts, so we collect the essentials here before diving in. Linear layouts were introduced in"
+ },
+ {
+  "idx": 12,
+  "tag": "h3",
+  "txt": "The Basic Idea"
+ },
+ {
+  "idx": 13,
+  "tag": "p",
+  "txt": "A tensor layout is a mapping between logical tensor coordinates and the hardware resources that hold them, such as registers, lanes (the threads of a warp), warps, or shared-memory offsets. Historically each such mapping was a bespoke, hand-written attribute, and converting between any two of them needed case-by-case code – an approach whose complexity grows quadratically in the number of layouts."
+ },
+ {
+  "idx": 14,
+  "tag": "p",
+  "txt": "A linear layout replaces those bespoke layouts with one abstraction: a map that is linear over F₂"
+ },
+ {
+  "idx": 17,
+  "tag": "p",
+  "txt": "Throughout this post a layout is written as a list of output offsets, one per input basis. For instance ＠0＠ says the input basis ＠1＠ maps to ＠2＠ and ＠3＠ maps to ＠4＠, so ＠5＠ (= 1 XOR 2) maps to ＠6＠."
+ },
+ {
+  "idx": 18,
+  "tag": "h3",
+  "txt": "Dividing Layouts: How an Instruction Repeats Across a Tile"
+ },
+ {
+  "idx": 19,
+  "tag": "p",
+  "txt": "A single hardware instruction, be it a ＠0＠, a ＠1＠ or a vectorized load, has a small and fixed layout describing which lanes and registers of one instruction touch which elements of a small tile. A full operand tile is larger, so that instruction has to be repeated across it."
+ },
+ {
+  "idx": 20,
+  "tag": "p",
+  "txt": "Linear layouts express this cleanly with left division. Left division is a block-diagonal factorization of a layout’s matrix. Recall that a linear layout is just a binary matrix over F₂"
+ },
+ {
+  "idx": 26,
+  "tag": "p",
+  "txt": "If L is the layout of the whole tile and T is a layout factor, the quotient L {ℓ}} T is the layout that remains after factoring out T. When T models a complete instruction, the quotient enumerates copies of that instruction. In the ＠0＠ lowering below, however, T is only the contiguous base ＠1＠, so the quotient retains additional lane and register structure."
+ },
+ {
+  "idx": 33,
+  "tag": "p",
+  "txt": "In Triton these repetitions show up as the ＠0＠ (register) input bases of a distributed layout. That is exactly the ＠1＠ dimension we manipulate later: when a warp issues several instructions, its ＠2＠ bases stride across the tile, placing copy 0, copy 1, and so on."
+ },
+ {
+  "idx": 34,
+  "tag": "h2",
+  "txt": "Part I – Transposed LDS Loads"
+ },
+ {
+  "idx": 35,
+  "tag": "p",
+  "txt": "A ＠0＠ may lower to many narrow ＠1＠ instructions when the source LDS layout and destination register layout have different contiguity. This section explains how ＠2＠ handles this mismatch using wide per-lane reads and a fixed cross-lane data exchange."
+ },
+ {
+  "idx": 36,
+  "tag": "h3",
+  "txt": "Why Is It Important?"
+ },
+ {
+  "idx": 37,
+  "tag": "p",
+  "txt": "Without ＠0＠, a WMMA operand that has a different contiguity (say, an N-contiguous B operand) in HBM will be expensive in two ways:"
+ },
+ {
+  "idx": 38,
+  "tag": "li",
+  "txt": "If left with a different contiguity when written to LDS, a ＠0＠ that requires it to be K-contiguous cannot use the wide ＠1＠ vector load because the elements are strided in memory. The compiler will need to fall back to smaller loads, so each lane will issue multiple ＠2＠ instructions."
+ },
+ {
+  "idx": 39,
+  "tag": "p",
+  "txt": "If left with a different contiguity when written to LDS, a ＠0＠ that requires it to be K-contiguous cannot use the wide ＠1＠ vector load because the elements are strided in memory. The compiler will need to fall back to smaller loads, so each lane will issue multiple ＠2＠ instructions."
+ },
+ {
+  "idx": 40,
+  "tag": "li",
+  "txt": "If the shared layout has its contiguity set to K-contiguous instead so that the load vectorizes, neither ＠0＠ nor ＠1＠ can perform this reordering while copying from HBM to LDS. The operand must first be loaded into registers and then stored to LDS, shifting the overhead of changing contiguity to the store side. The compiler will need to fall back to smaller stores, so each lane will issue multiple ＠2＠ instructions in a strided K-contiguous pattern."
+ },
+ {
+  "idx": 41,
+  "tag": "p",
+  "txt": "If the shared layout has its contiguity set to K-contiguous instead so that the load vectorizes, neither ＠0＠ nor ＠1＠ can perform this reordering while copying from HBM to LDS. The operand must first be loaded into registers and then stored to LDS, shifting the overhead of changing contiguity to the store side. The compiler will need to fall back to smaller stores, so each lane will issue multiple ＠2＠ instructions in a strided K-contiguous pattern."
+ },
+ {
+  "idx": 42,
+  "tag": "p",
+  "txt": "Using ＠0＠ avoids both tradeoffs. Every lane can issue vectorized LDS reads (64 or 128 bits depending on the data type), then the hardware redistributes the data across the lane groups so that the loaded data matches the destination layout.\nThis gives a gain in terms of both instruction count and register pressure. A large number of small ＠1＠ instructions clustered together can also exhaust the ＠2＠ counter, forcing the hardware to wait before the ＠3＠ completes."
+ },
+ {
+  "idx": 43,
+  "tag": "p",
+  "txt": "For a concrete example, consider the fp16 forward attention kernel from Triton’s ＠0＠, compiled for gfx1250 without causal masking using ＠1＠, ＠2＠, ＠3＠, and eight warps. With transposed loads enabled, the generated assembly contains 128 ＠4＠ instructions. Disabling transposed loads replaces them with 1024 ＠5＠ instructions, increases VGPR usage from 308 to 512, and causes 233 VGPRs to spill."
+ },
+ {
+  "idx": 44,
+  "tag": "h3",
+  "txt": "What Does ＠0＠ Do?"
+ },
+ {
+  "idx": 45,
+  "tag": "p",
+  "txt": "MI450 provides several ＠0＠ variants. We focus on ＠1＠ and ＠2＠ as representative examples because they appear most often in practice; both perform a cooperative transposed load across a full 32-lane warp as 4 independent groups of 8 lanes.\nThe ＠3＠/＠4＠ suffix gives the number of bits read per lane, while ＠5＠/＠6＠ gives the element width. Figures 1a and 1b give the per-lane ownership of a 32x8 tensor before and after the redistribution for the two variants."
+ },
+ {
+  "idx": 46,
+  "tag": "figcaption",
+  "txt": "Figure 1a: Ownership diagram of a 32x8 tensor for ＠0＠. The left side shows the eight elements read by every source lane S; the right side shows the eight values held by every destination lane D after four independent 8x8 transposes."
+ },
+ {
+  "idx": 47,
+  "tag": "p",
+  "txt": "Figure 1a: Ownership diagram of a 32x8 tensor for ＠0＠. The left side shows the eight elements read by every source lane S; the right side shows the eight values held by every destination lane D after four independent 8x8 transposes."
+ },
+ {
+  "idx": 48,
+  "tag": "figcaption",
+  "txt": "Figure 1b: Ownership diagram of a 32x8 tensor for ＠0＠. Unlike the contiguous groups used by ＠1＠, each source group combines two runs of four lanes. In each map, color groups its ＠2＠ or ＠3＠ lane labels into blocks of eight."
+ },
+ {
+  "idx": 49,
+  "tag": "p",
+  "txt": "Figure 1b: Ownership diagram of a 32x8 tensor for ＠0＠. Unlike the contiguous groups used by ＠1＠, each source group combines two runs of four lanes. In each map, color groups its ＠2＠ or ＠3＠ lane labels into blocks of eight."
+ },
+ {
+  "idx": 50,
+  "tag": "p",
+  "txt": "The data loaded by this instruction is transposed in tiles of size ＠0＠, where ＠1＠ is the number of contiguous elements read by each lane and ＠2＠ is the number of lanes in a group. For both ＠3＠ and ＠4＠, this forms an 8x8 tile of 8/16-bit elements that the hardware transposes so destination lane ＠5＠ receives column ＠6＠."
+ },
+ {
+  "idx": 51,
+  "tag": "p",
+  "txt": "For example, within one 8-lane group (＠0＠…＠1＠ refer to source lanes 0…7):"
+ },
+ {
+  "idx": 52,
+  "tag": "li",
+  "txt": "Destination lane ＠0＠ receives column ＠1＠: ＠2＠, the first b16 element loaded by each source lane."
+ },
+ {
+  "idx": 53,
+  "tag": "p",
+  "txt": "Destination lane ＠0＠ receives column ＠1＠: ＠2＠, the first b16 element loaded by each source lane."
+ },
+ {
+  "idx": 54,
+  "tag": "li",
+  "txt": "Destination lane ＠0＠ receives column ＠1＠: ＠2＠, the second b16 element loaded by each source lane."
+ },
+ {
+  "idx": 55,
+  "tag": "p",
+  "txt": "Destination lane ＠0＠ receives column ＠1＠: ＠2＠, the second b16 element loaded by each source lane."
+ },
+ {
+  "idx": 56,
+  "tag": "li",
+  "txt": "Destination lane ＠0＠ receives column ＠1＠ of the next independent group: ＠2＠.\nBecause N equals the group size, every lane in a group draws from all 8 lanes of that group."
+ },
+ {
+  "idx": 57,
+  "tag": "p",
+  "txt": "Destination lane ＠0＠ receives column ＠1＠ of the next independent group: ＠2＠.\nBecause N equals the group size, every lane in a group draws from all 8 lanes of that group."
+ },
+ {
+  "idx": 58,
+  "tag": "p",
+  "txt": "The ＠0＠ variant uses a different lane distribution than the b16 version: each source group combines two runs of 4 lanes. For example, destination lanes ＠1＠ through ＠2＠ draw from source lanes ＠3＠ through ＠4＠ and ＠5＠ through ＠6＠. Figures 2a and 2b assemble these per-group 8x8 tiles into the full 16-bit and 8-bit WMMA B-operand tiles."
+ },
+ {
+  "idx": 59,
+  "tag": "figcaption",
+  "txt": "Figure 2a: gfx1250 lane ownership for a complete 16-bit WMMA B-operand tile. Each 16x16 panel corresponds to one ＠0＠ instruction."
+ },
+ {
+  "idx": 60,
+  "tag": "p",
+  "txt": "Figure 2a: gfx1250 lane ownership for a complete 16-bit WMMA B-operand tile. Each 16x16 panel corresponds to one ＠0＠ instruction."
+ },
+ {
+  "idx": 61,
+  "tag": "figcaption",
+  "txt": "Figure 2b: gfx1250 lane ownership for a complete 8-bit WMMA B-operand tile. Each 16x16 panel corresponds to one ＠0＠ instruction, with each source group split into two runs of four lanes."
+ },
+ {
+  "idx": 62,
+  "tag": "p",
+  "txt": "Figure 2b: gfx1250 lane ownership for a complete 8-bit WMMA B-operand tile. Each 16x16 panel corresponds to one ＠0＠ instruction, with each source group split into two runs of four lanes."
+ },
+ {
+  "idx": 63,
+  "tag": "p",
+  "txt": "The example above shows how the instruction behaves when the per-lane LDS addresses form an 8x8 slice of a WMMA operand. This is not a hardware restriction: each lane can read from an independent LDS address as long as its own 64/128-bit read is contiguous, and the hardware applies the same fixed redistribution regardless of the addresses or what the bits represent."
+ },
+ {
+  "idx": 64,
+  "tag": "p",
+  "txt": "Because the redistribution does not depend on the relationship between the addresses, “transpose” is only the mental model for one particular address pattern; the instruction can support more general data movement. Eligibility depends only on whether the requested ＠0＠ mapping fits the instruction’s fixed data-movement pattern. Representing both as linear layouts lets the compiler test that match directly instead of detecting a high-level transpose operation. Figure 3 illustrates this flexibility: each lane supplies an independent LDS address, and ＠1＠ applies the same fixed cross-lane redistribution to whatever vectors those addresses select."
+ },
+ {
+  "idx": 65,
+  "tag": "figcaption",
+  "txt": "Figure 3: ＠0＠ does not require the source addresses to describe rows of a geometric tile. Each lane supplies an independent LDS address, while the instruction applies the same fixed cross-lane redistribution to the selected vectors."
+ },
+ {
+  "idx": 66,
+  "tag": "p",
+  "txt": "Figure 3: ＠0＠ does not require the source addresses to describe rows of a geometric tile. Each lane supplies an independent LDS address, while the instruction applies the same fixed cross-lane redistribution to the selected vectors."
+ },
+ {
+  "idx": 67,
+  "tag": "p",
+  "txt": "From the perspective of LDS bank conflicts, ＠0＠ behaves like a regular ＠1＠. The hardware selects banks from the LDS addresses issued by the lanes; the cross-lane redistribution happens afterward. Bank conflicts should therefore be analyzed using the source LDS layout, not the destination register layout."
+ },
+ {
+  "idx": 68,
+  "tag": "h3",
+  "txt": "Lowering ＠0＠ to ＠1＠ in Triton"
+ },
+ {
+  "idx": 69,
+  "tag": "p",
+  "txt": "Triton implements this lowering in ＠0＠ as part of the conversion from TTGIR to LLVM IR. The lowering converts the shared and destination encodings into linear layouts, then computes ＠1＠, which maps each destination hardware position ＠2＠ to its source LDS offset."
+ },
+ {
+  "idx": 70,
+  "tag": "p",
+  "txt": "Consider a toy ＠0＠ example with a single warp, ＠1＠, ＠2＠, and 8 elements per lane:"
+ },
+ {
+  "idx": 71,
+  "tag": "p",
+  "txt": "We have that ＠0＠’s ＠1＠ makes dim 0 (＠2＠) the LDS-contiguous dimension, while ＠3＠ is already expressed as a linear layout (this is the “Identity” case a few paragraphs down). Composing them:"
+ },
+ {
+  "idx": 72,
+  "tag": "p",
+  "txt": "＠0＠ builds ＠1＠ by taking each ＠2＠ target ＠3＠ and matching it to each target of ＠4＠, then reading that basis’s offset – e.g. ＠5＠ has ＠6＠ which matches ＠7＠’s ＠8＠, so ＠9＠ will have ＠10＠. ＠11＠ has to be surjective onto ＠12＠ for this lookup to always succeed."
+ },
+ {
+  "idx": 73,
+  "tag": "p",
+  "txt": "The instruction is modeled in terms of the smallest layout factor it operates on, so we can avoid writing bespoke code that pattern-matches specific shapes like “this destination layout looks like a transpose of shared memory”. This is because an instruction is defined by how it moves data on the hardware and not by a map from ＠0＠ to tensor coordinates.\nA ＠1＠ is the contiguous factor required by the instruction, and a destination layout ＠2＠ can use that instruction only if ＠3＠ has a result. The quotient describes the remaining structure after ＠4＠ is factored out; ＠5＠ supplies the remaining lane and register mapping for one complete instruction."
+ },
+ {
+  "idx": 74,
+  "tag": "p",
+  "txt": "The lowering models ＠0＠ with two related layouts:"
+ },
+ {
+  "idx": 75,
+  "tag": "li",
+  "txt": "＠0＠ describes the contiguous part required for instruction selection. For a fixed destination register, destination lanes 0 through 7 request 8 consecutive LDS offsets."
+ },
+ {
+  "idx": 76,
+  "tag": "p",
+  "txt": "＠0＠ describes the contiguous part required for instruction selection. For a fixed destination register, destination lanes 0 through 7 request 8 consecutive LDS offsets."
+ },
+ {
+  "idx": 77,
+  "tag": "li",
+  "txt": "＠0＠ extends ＠1＠ across all the lanes and registers that participate in one instruction. Its ＠2＠ dimension identifies an element within the contiguous base ＠3＠, while its ＠4＠ dimension identifies which lane’s LDS read supplies that element. The order in which the remaining lane and register bases are assigned to ＠5＠ encodes the instruction’s data exchange pattern. The two instructions use the same base ＠6＠ but distribute it differently across the full instruction. Figures 4a and 4b sample one ownership panel of each variant, showing how those bases map from ＠7＠ to ＠8＠."
+ },
+ {
+  "idx": 78,
+  "tag": "p",
+  "txt": "＠0＠ extends ＠1＠ across all the lanes and registers that participate in one instruction. Its ＠2＠ dimension identifies an element within the contiguous base ＠3＠, while its ＠4＠ dimension identifies which lane’s LDS read supplies that element. The order in which the remaining lane and register bases are assigned to ＠5＠ encodes the instruction’s data exchange pattern. The two instructions use the same base ＠6＠ but distribute it differently across the full instruction. Figures 4a and 4b sample one ownership panel of each variant, showing how those bases map from ＠7＠ to ＠8＠."
+ },
+ {
+  "idx": 79,
+  "tag": "figcaption",
+  "txt": "Figure 4a: Reading the b16 ＠0＠ from one ＠1＠ ownership panel in Figure 2a. Each logical element pairs a destination ＠2＠ with its source ＠3＠, corresponding to the compiler dimensions ＠4＠ and ＠5＠. Sampling the five lane bases and three register bases is enough to define the layout, because every other position is an XOR of those bases."
+ },
+ {
+  "idx": 80,
+  "tag": "p",
+  "txt": "Figure 4a: Reading the b16 ＠0＠ from one ＠1＠ ownership panel in Figure 2a. Each logical element pairs a destination ＠2＠ with its source ＠3＠, corresponding to the compiler dimensions ＠4＠ and ＠5＠. Sampling the five lane bases and three register bases is enough to define the layout, because every other position is an XOR of those bases."
+ },
+ {
+  "idx": 81,
+  "tag": "figcaption",
+  "txt": "Figure 4b: The same sampling for one ＠0＠ ownership panel in Figure 2b. The lane and register bases are assigned to ＠1＠ in a different order, so only two of the eight images change: ＠2＠ now selects source lane S4 instead of S8, and ＠3＠ selects source lane S8 instead of S4. That is what splits each group into two runs of four source lanes, visible in the source panel as the color changing halfway across each eight-register region."
+ },
+ {
+  "idx": 82,
+  "tag": "p",
+  "txt": "Figure 4b: The same sampling for one ＠0＠ ownership panel in Figure 2b. The lane and register bases are assigned to ＠1＠ in a different order, so only two of the eight images change: ＠2＠ now selects source lane S4 instead of S8, and ＠3＠ selects source lane S8 instead of S4. That is what splits each group into two runs of four source lanes, visible in the source panel as the color changing halfway across each eight-register region."
+ },
+ {
+  "idx": 83,
+  "tag": "p",
+  "txt": "The two main lowering steps that follow are:"
+ },
+ {
+  "idx": 84,
+  "tag": "li",
+  "txt": "Eligibility check: Build the access mapping from destination hardware positions to LDS offsets, then check whether it contains the data movement pattern required by the instruction."
+ },
+ {
+  "idx": 85,
+  "tag": "p",
+  "txt": "Eligibility check: Build the access mapping from destination hardware positions to LDS offsets, then check whether it contains the data movement pattern required by the instruction."
+ },
+ {
+  "idx": 86,
+  "tag": "li",
+  "txt": "Instruction emission: Factor that pattern out of the access mapping, derive the LDS address read by each runtime lane and warp, and emit one instruction for each remaining repetition."
+ },
+ {
+  "idx": 87,
+  "tag": "p",
+  "txt": "Instruction emission: Factor that pattern out of the access mapping, derive the LDS address read by each runtime lane and warp, and emit one instruction for each remaining repetition."
+ }
+]

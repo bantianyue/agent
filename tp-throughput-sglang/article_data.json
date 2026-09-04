@@ -1,0 +1,192 @@
+{
+ "title": "更多并行、更少吞吐：实测 Tensor Parallelism 的成本（SGLang TP1 vs TP2）",
+ "lead": [
+  "**TL;DR**：Tensor Parallelism（TP）常被当作分布式 LLM 推理的默认扩展策略——工程师一有多余 GPU 就本能地提升 TP 度。但在高并发生产环境里，不加分析地增加 TP 会严重惩罚吞吐、引入昂贵通信同步、并触发灾难性的 prefill 队头阻塞！",
+  "本文对比 SGLang 分离式 TP1（4 Prefill + 4 Decode pod）与 TP2（2 Prefill + 2 Decode pod），在完全相同固定硬件预算上：8× NVIDIA H100 SXM5 集群，服务 Qwen/Qwen3.6-35B-A3B-FP8，全 131,072（~132K）context，静态 VRAM 0.85，zero-copy NIXL UCX RoCE RDMA 状态传输。用 AIPerf 扫全并发（c=1→128），定位 TP=1 反超 TP=2 的精确拐点：+31.0% 输出吞吐、8.2× 更快 TTFT（P95）。"
+ ],
+ "summary": [
+  {
+   "key": "为什么",
+   "body": "TP2 低并发(c≤32)赢：分片把每 GPU 读的权重减半(~17.5GB)，per-token 延迟 11.44ms→8.85ms(-22.6%)。但 c≥64 崩塌：prefill 入口成硬瓶颈——长 prompt(至32K)垄断 Tensor Cores 引发队头阻塞，P95 TTFT 在 c=64 飙 40× 到 842ms、c=128 到 12.52s，decode 饥饿空转。TP1 提供 4 个独立 prefill pod，队列减半、P95 TTFT 保持 1.53s。"
+  },
+  {
+   "key": "机制",
+   "body": "prefill 是 compute-heavy（大矩阵乘占满 Tensor Core），decode 是 memory-bandwidth-bound（每步读 35GB 权重）。TP2 每 transformer 层都要 NVLink all-reduce 同步（每 token 128 个同步屏障）；TP1 零通信、GPU 引擎 100% 占空。显存够时（35B FP8 权重~35GB、单 H100 80GB 还余 40GB+）TP 只是延迟优化器非吞吐加速。"
+  },
+  {
+   "key": "数据",
+   "body": "c=128 峰值：+31.0% 输出 token 吞吐（9,436 vs 7,202 tok/s）、+32.0% 请求吞吐（18.83 vs 14.26 req/s）、8.2× 更快 TTFT（P95 1.53s vs 12.52s）、22.2% 更快端到端延迟（12.60s vs 16.20s）。"
+  }
+ ],
+ "sections": [
+  {
+   "type": "h2",
+   "title": "The Goal：四个架构问题",
+   "paras": [
+    "评估**pod 内 Tensor Parallelism（TP2-2P2D）** vs **pod 间 replica parallel（TP1-4P4D）** 在 8× H100 集群服务 Qwen3.6-35B-A3B-FP8、并发缩放下的性能权衡。",
+    "这个实验回答四个架构问题：",
+    "**① 增加独立 prefill worker 如何影响排队延迟与 TTFT**（重载下）？",
+    "**② 在哪个并发阈值**，pod 内 TP 的时延收益会被 prefill 队头阻塞反超？",
+    "**③ 单流生成延迟与集群聚合吞吐**在峰值饱和下如何权衡？",
+    "**④ 对能装进单 GPU VRAM 的 dense/MoE 模型**，何时该选 TP 而非 replica scaling？"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "硬件与运行时规格",
+   "paras": [
+    "下表详述两拓扑共用的裸金属硬件、模型架构、互联配置与运行时参数（见原文图 1 规格表）。",
+    "高效服务 Qwen/Qwen3.6-35B-A3B-FP8 需针对其混合架构定制引擎。",
+    "35B 总参数里，每 token 仅约 3B 参数经其 Sparse MoE 层被激活路由，配 Gated DeltaNet 循环线性注意力状态（HybridLinearKVPool）。",
+    "原生 FP8 精度下模型权重约占 35GB VRAM——每块 H100 提供 80GB HBM3，单 GPU 轻松装下整个 35GB 权重且仍余 40GB+ 未分配 VRAM。",
+    "设 `--mem-fraction-static 0.85` 后，SGLang 把 85% VRAM（~68GB/GPU）预留给静态 KV cache 和 Mamba 线性循环状态池（扣除权重与 CUDA 执行 buffer），每 GPU 保有约 380,000–450,000 个活跃 context token 的 in-VRAM 容量！"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig01.png",
+      "caption": "图 1：硬件与运行时规格表。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "架构与并行设计",
+   "paras": [
+    "要理解两配置在负载下为何 behave 如此不同，先看它们跨 8-GPU 集群的拓扑布局与执行机制。",
+    "**Pod 内 TP vs Pod 间 Replica**：核心区别在 GPU 算力如何组织——pod 内同步 vs pod 间复制。",
+    "**TP2-2P2D**：每个 worker pod 绑定两块由高速 NVLink 相连的 H100。Attention 投影矩阵、前馈层、MoE 路由矩阵跨两设备分片。每层 transformer 中间激活张量都要经 NVLink all-reduce 跨 GPU 同步。分片降低了每 GPU 的算术负载、加速孤立单请求的前向，但全程叠加连续同步屏障。更关键：把 8 GPU 聚成 2-GPU pod 把集群 replica 数降到只有 2 个 prefill worker + 2 个 decode worker。",
+    "**TP1-4P4D**：每个 worker pod 完全在单块 H100 上运行、零 pod 内通信。Attention、线性状态更新、MoE 路由完全在本 GPU 寄存器和 HBM3 内执行——因为没有 all-reduce 屏障，GPU 计算引擎 100% 占空运行。最重要：TP=1 让集群并发容量翻倍——部署 4 个独立 prefill + 4 个独立 decode worker。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig02.png",
+      "caption": "图 2：TP2-2P2D 与 TP1-4P4D 的架构对比。"
+     },
+     {
+      "src": "fig03.png",
+      "caption": "图 3：两拓扑的执行流水线对比。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "生产 Manifests 与部署",
+   "paras": [
+    "完整部署 manifest 以可运行的 Kubernetes recipe 组织：",
+    "**TP1-4P4D Deployment Manifest**：deploy.yaml",
+    "**TP2-2P2D Deployment Manifest**：deploy.yaml",
+    "**AIPerf Benchmark Suite**：perf.yaml",
+    "集群部署工作流（TP1-4P4D 示例）——完整 bash 脚本见下方代码块：",
+    "__CODE__bash::# 1. Configure deployment environment variables\nexport NAMESPACE=qwen32-bench\nexport EXP_DIR=/ephemeral/shared/qwen3.6-35b-a3b/sglang/disagg/tp1-4p4d\nexport DEPLOYMENT=q36-sgl-pd-tp1-4p4d\nexport GRAPH_LABEL=\"nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT}\"\n\n# 2. Deploy TP1-4P4D serving graph (4 Prefill + 4 Decode across 8 GPUs)\nkubectl apply -n \"$NAMESPACE\" -f \"$EXP_DIR/deploy.yaml\"\n\n# 3. Monitor rollout & readiness across all 8 worker pods\nkubectl get pods -n \"$NAMESPACE\" -l \"$GRAPH_LABEL\" -o wide -w\n\n# 4. Teardown & release cluster resources when switching topologies\nkubectl delete dynamographdeployment.nvidia.com \"$DEPLOYMENT\" \\\n  -n \"$NAMESPACE\" --wait=true --ignore-not-found"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "基准测试与性能分析",
+   "paras": [
+    "为评估两拓扑从单用户到极端集群饱和的扩展，用 AIPerf 配置生产级混合序列分布执行基准：",
+    "**Model & Tokenizer**：Qwen/Qwen3.6-35B-A3B-FP8（官方 tokenizer 权重）",
+    "**Workload Ladder**：5 层混合序列分布（1K–32K context），建模真实 agentic 流量",
+    "**Prefix Reuse & Partitioning**：8 个 prefix 组、75% 目标 prefix token 复用",
+    "**Concurrency Ladder**：1, 4, 8, 16, 32, 64, 128",
+    "**Execution Controls**：确定性随机 seed（random_seed: 42）、16 个 warmup 请求、3,600 秒超时上限",
+    "混合序列分布专门设计来同时压集群的算力强度与内存足迹：把短高频请求（1K–4K）和重长上下文负载（8K–32K）混合——前缀缓存、prefill 计算排队、自回归生成并发发生，复刻生产 agentic 流量。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig04.png",
+      "caption": "图 4：混合序列工作负载分布与基准配置。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "峰值饱和分析：c=128 拆解",
+   "paras": [
+    "峰值多用户饱和（c=128）下，TP1-4P4D 与 TP2-2P2D 的性能分歧非常明显。",
+    "性能 dashboard 与经验计分卡汇总了聚合吞吐、排队延迟、per-token 生成速度（见 fig05/06）。",
+    "要理解 TP1 为何在规模下胜过 TP2，看 GPU 如何执行 prefill vs decode：",
+    "**1. Prefill 是 compute-heavy，Decode 是 memory-bandwidth-bound**：prefill 以大规模矩阵乘并行吞入整个 prompt，重度占用 H100 Tensor Cores；处理一个 prompt 时其计算引擎全占，后续请求只能排队。而自回归 decode 每流每步只生成一个 token（每 token 算术少），decode 被 HBM3 内存带宽限制——GPU 每步都从内存读 35GB 模型权重。",
+    "**2. 为什么低并发（c≤32）时 TP2 赢**：流量轻时 GPU 算力大量空闲。TP2 把模型分到两 GPU、每 GPU 读的权重减半（~17.5GB），per-token 生成延迟从 11.44ms 降到 8.85ms（-22.6%）。低到达率下 TP2 的两个 prefill pod 很少同时占用，队列延迟近零（P95 TTFT 16–21ms）。",
+    "**3. 高并发（c≥64）的交叉与崩塌**：并发升高后 prefill 入口容量成了硬瓶颈。TP2-2P2D 里整个入站流只能通过两个 prefill pod。长 prompt（至 32K token）垄断 Tensor Cores，短请求在其后排队、触发严重队头阻塞。c=64 时 TP2 P95 TTFT 飙升 40× 到 842ms，c=128 涨到 12.52s。",
+    "这个 prefill 排队触发 decode 饥饿悖论——prefill worker 来不及处理并交付 KV cache，decode worker 干完活只能空转等 RDMA 状态传输，把 TP2 吞吐封在 7,202 tok/s。而 TP1-4P4D 提供 4 个独立 prefill pod、队列深度减半——P95 TTFT 保持 1.53s（8.2× 更快）、4 个 decode worker 持续供食到 9,436 tok/s（+31.0%）。",
+    "而且，TP1 消除了 TP2 每 token 所需的 128 个 NVLink all-reduce 同步屏障，让每 GPU 以最大本地效率运行。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig05.png",
+      "caption": "图 5：c=128 峰值性能 dashboard（经验分数卡）。"
+     },
+     {
+      "src": "fig06.png",
+      "caption": "图 6：并发扩展扫描——吞吐与延迟随 c 的变化。"
+     },
+     {
+      "src": "fig07.png",
+      "caption": "图 7：prefill vs decode 执行特征分析。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "Takeaways 与决策指南",
+   "paras": [
+    "这个实验证明：**更高的 TP 并不天然对集群吞吐更好**。在架构生产 LLM serving 集群时，应套用以下决策框架：",
+    "**内存足迹把 TP 从物理硬件必需中解耦**。分布式 LLM serving 里我们常默认 TP，因为巨大模型权重（如 70B FP16）超出单 GPU 内存、多 GPU 分片是不可避免的容量约束。",
+    "但当权重能轻松装进单加速器时，TP 就不再是容量需求，而变成**每 token 计算延迟 vs 集群级 replica 吞吐**的显式架构权衡。",
+    "**选 TP=2**：把线性投影分到两块 NVLink GPU，每设备算术负载减半、加速孤立请求的单层前向——但代价是每层都有同步 all-reduce 屏障，且在固定 8-GPU 预算上把集群 replica 从 4 Prefill+4 Decode 砍到只有各自 2 个。",
+    "**反之，TP=1**：完全消除 GPU 间通信开销、计算引擎全本地效率运行、集群 prefill 调度容量翻倍。",
+    "**当 VRAM 不受限时，TP 纯粹是低占用环境的延迟优化器；而 Replica Parallelism（TP=1）在负载下最大化并发韧性和集群聚合吞吐**。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig08.png",
+      "caption": "图 8：部署 TP=1 replica scaling 的取舍图解。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "结论",
+   "paras": [
+    "本基准证明：**Disaggregated TP1（4P4D）是 Qwen3.6-35B-A3B-FP8 在 8× H100 集群服务并发多用户流量的更优生产架构**。通过消除 NVLink all-reduce 同步屏障、部署 4 个独立 prefill 与 decode worker，TP1 带来：",
+    "**+31.0% 更高输出 token 吞吐**：9,436 vs 7,202 tok/s（c=128）",
+    "**+32.0% 更高请求吞吐**：18.83 vs 14.26 req/s",
+    "**8.2× 更快 Time-to-First-Token**：P95 TTFT 1.53s vs 12.52s",
+    "**22.2% 更快端到端延迟**：12.60s vs 16.20s",
+    "设想一个权重只占 ~30–35GB（80GB H100）的模型。你每 GPU 已有 ~45–50GB 空闲 VRAM 可用于 KV cache！如果仅因有多块 GPU 就用 TP=2 分模型——那是糟糕的权衡——你把总 replica pod 减半、还加了几百个 NVLink all-reduce 同步停顿。",
+    "让每个 worker 保持 TP=1，你得到两倍 worker pod、零通信开销、以及服务高并发生产工作负载所需的最大吞吐。",
+    "**与分层内存层级联动**：如我们此前 Hierarchical CPU KV Offloading（HiCache）实验所示，把被逐出的 prefix 状态卸载到 host DDR5 解锁海量有效 context 容量、无需额外加速器硬件就能驱动更高持续吞吐。把 TP=1 replica 并行 + host RAM 卸载结合，最大化每瓦 token 效率：单 GPU worker 消除设备间同步停顿、保持 Tensor Cores 饱和，CPU 卸载避免冗余 prefill 重算，榨出全集群每瓦峰值 serving 吞吐！",
+    "下一篇我们将深入 profile NVIDIA NIXL 的 KV cache over RoCE v2 RDMA——展示如何在 Dynamo worker 上插桩 Prometheus 遥测、构建生产 Grafana dashboard 跟踪实时传输延迟、带宽与 CPU host 内存缓存。",
+    "感谢看到这里 🙏"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig09.png",
+      "caption": "图 9：文章结尾示意动图（Thanks for reading）。"
+     }
+    ],
+    "5": []
+   }
+  }
+ ],
+ "conclusion": [
+  "@jaga_prasanna 这篇《More Parallelism, Less Throughput》用实测数据点破了一个被默认忽视的真相：**TP 度越高 ≠ 集群吞吐越好**。在 8× H100 服务 Qwen3.6-35B-A3B-FP8（权重仅 35GB、单卡 80GB 装得下）的固定预算下，SGLang 分离式 TP1（4P4D）相对 TP2（2P2D）在 c=128 给出 +31% 输出吞吐、+32% 请求吞吐、8.2× 更快 P95 TTFT、-22.2% 端到端延迟。",
+  "机制上有说服力：prefill 是 compute-heavy、decode 是 memory-bound；TP2 每层 NVLink all-reduce（每 token 128 屏障）在低并发(c≤32)用 -22.6% per-token 延迟换吞吐优势，但 c≥64 时仅 2 个 prefill pod 成瓶颈、长 prompt 队头阻塞、decode 饥饿，TTFT 从 21ms 爆到 12.5s。TP1 用 4 个独立 prefill pod + 零通信把队列和延迟都压下来。",
+  "对做 LLM serving 架构的人，核心启发：**当权重装得进单卡时，TP 只是延迟优化器、不是吞吐加速器**——把 TP 留给显存真不够的模型，否则 replica parallelism + 单卡 worker + host KV 卸载才是并发场景的吞吐与能效最优解。"
+ ],
+ "reference_url": "https://x.com/jaga_prasanna/status/2094419634489549223"
+}

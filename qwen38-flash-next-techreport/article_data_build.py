@@ -1,0 +1,120 @@
+# -*- coding: utf-8 -*-
+"""Qwen3.8-Flash-Next 技术报告编译 build —— 详细扩充实测版"""
+import json
+
+DATA = {
+"title":"Qwen3.8-Flash-Next：125B 稀疏 MoE 架构设计、效率与训练稳定性（Qwen 团队 tech report 详解）",
+"lead":[
+ "Qwen 团队发布 28 页技术报告《On the Design of Qwen3.8-Next Architecture：Evaluation, Efficiency, and Training Stability》，完整记录 Qwen3.8-Flash-Next 的架构设计与逐项消融。",
+ "一句话结论：在 14 项预训练基准上领先前代 397B-A17B 旗舰 8 项、其余最多落后 2.6 分——只激活 **1/3** 参数、用 **1/3** 训练 token、约 **1/9** 训练 FLOPs。",
+]
+,
+"summary":[
+ {"key":"架构","body":"稀疏 MoE：125B 总参、6B 激活/token、另 51B n-gram 嵌入表放加速器外(host 预取)。token mixing= GDN 与全局注意力逐层混合(每4层1全注意力)；继续预训练时全注意力层换成 QSA。残差流加宽到4分支+逐元素门读(Gated Residual)。GDN 核优化 FlashQLA 2–3× forward / ~2× backward。"},
+ {"key":"三个关键设计","body":"① QSA 用压缩轻量索引器按微块评分上下文(非线性扫描外推)；长上下文(>256K)检索优于全注意力(Table 3 RULER/MRCR)。② Gated Residual 门控重缩放显著提升训练稳定性。③ n-gram 外置容量靠 host 内存预取取回，不占 GPU 显存/算力。"},
+ {"key":"稳定性","body":"架构+Muon 共同把最优 LR/batch 上移、让 batch warmup 不再必要、压力测试大幅更稳。核心洞见：loss、benchmark、效率、稳定性是耦合系统，联合求解得同时更高效更强更稳的 recipe。"}
+],
+"sections":[
+ {"type":"h2","title":"架构总览","paras":[
+   "Qwen3.8-Flash-Next 是稀疏 MoE：**125B 总参数、每 token 激活 6B**，外加放在加速器外的 **51B n-gram 嵌入表**（host 内存预取）。",
+   "**Token mixing** 用 Gated DeltaNet（GDN）与全局注意力**逐层混合**——每 4 层有 1 层全注意力；继续预训练时这些层被 QSA 取代。",
+   "**残差流加宽到四分支 + 逐元素门读**，称 **Gated Residual（GR）**——加宽注入表达力、门控提供重缩放并显著改善稳定性。",
+   "**n-gram 嵌入层**（Layer 2）在骨干之外加容量：表从 host 内存预取，把容量标度放到加速器外。",
+   "**MTP 模块**跨投机解码步复用 QSA 索引。"
+ ],"fig_after":{"0":[{"src":"fig01.png","caption":"图 1：Qwen3.8-Flash-Next 架构。每 4 层交替 3× GDN + 1× QSA/注意力层；每子层经 GR 读写；Layer 2 的 n-gram 嵌入层经 host 预取外置容量；MTP 复用 QSA 索引。"}]}},
+ {"type":"h2","title":"§2.1.1 GDN 混合架构：token mixer 与 FlashQLA 效率","paras":[
+   "GDN mixer 结构：查询/键/值流先过短因果卷积；查询与键在门控 delta 递归前做 L2 归一化（Zero-Centered RMSNorm）。衰减门 α_t 与写入门 β_t 参数化 Delta Rule——write strength 与 decay 来自门控。",
+   "每个子层读出经 GR、再进 MoE；归一化用 zero-centered RMSNorm。",
+   "**Kernel 效率**：用 **FlashQLA**（基于 TileLang 的融合线性注意力核库）优化 GDN 核——NVIDIA GPU 上相对 FLA Triton 核获得 **2–3× 前向**、约 **2× 反向**加速（实现见 github.com/QwenLM/FlashQLA）。",
+   "**架构消融**：28 层 25B-A3B MoE 上对比三种 checkpoint——全注意力、SWA 混合、GDN 混合（两者每 4 层 1 全注意力，SWA 窗 128）。用同一评测管线，三方案 9 基准平均成绩见下：",
+   {"type":"table","head":["架构","MMLU","MMLU-Pro","SuperGPQA","MATH","GSM8K","BBH","MMMLU","EvalPlus","MultiPL-E","Avg."],"rows":[
+     ["Full attention","62.65","37.59","21.76","49.40","75.13","63.78","47.74","51.01","39.73","49.87"],
+     ["SWA hybrid","66.30","40.67","22.45","45.48","74.22","65.88","51.33","52.12","41.93","51.15"],
+     ["**GDN hybrid**","66.26","42.82","23.45","53.98","77.07","68.72","54.83","49.71","47.48","**53.81**"]]}
+ ],"fig_after":{"0":[{"src":"fig02.png","caption":"图 2：Gated DeltaNet token mixer。查询/键/值经短因果卷积；查询与键 L2 归一化后进入门控 delta 递归；衰减门 α_t 与写入门 参数化。"}]}},
+ {"type":"h2","title":"§2.1.2 Qwen Sparse Attention：微块索引 + 长上下文外推","paras":[
+   "**动机**：选择性关注相关上下文。QSA 用**压缩轻量索引器**在**微块粒度**给上下文打分。",
+   "索引器流程：对 query 经线性+zero-centered RMSNorm+部分 RoPE 压缩，Sigmoid→Sparse Core Attention；对 key 做 MaxPool 对齐到块级索引分数，保 token 级显著信号；经 **Top-k Selector** 选出要关注的 key 块；用 AvgPool+Linear 产压缩注意力掩码（Compressed Attention Mask）。",
+   "**长上下文能力**：Table 3 里 QSA 在 >256K 的 RULER/MRCR 段反超全注意力——长上下文检索优势：",
+   {"type":"table","head":["方法","RULER ≤128K","128–256K","256–512K","512K–1M","MRCR 128K","256K","512K","1M","Avg."],"rows":[
+     ["Full Attn","99.84","99.81","97.65","90.08","97.14","94.20","30.66","20.71","78.76"],
+     ["**w/ QSA**","99.89","99.62","98.95","93.00","95.98","93.00","40.53","26.44","**80.93**"]]},
+   "**Table 2 泛化能力**：QSA 相对全注意力 8 项基准平均更高（Avg 76.8 vs 75.9），在 MMLU-Pro(73.7)、MATH(71.6)、GSM8K(92.2)、BBH(91.6)、EvalPlus(72.3)、MultiPL-E(79.8) 全面领先：",
+   {"type":"table","head":["方法","MMLU-Pro","SuperGPQA","MATH","GSM8K","BBH","MMMLU","EvalPlus","MultiPL-E","Avg."],"rows":[
+     ["Full Attn","72.9","51.7","69.8","91.0","90.4","81.8","70.8","78.4","75.9"],
+     ["**w/ QSA**","73.7","52.1","71.6","92.2","91.6","81.1","72.3","79.8","**76.8**"]]},
+   "**训练 loss gap**：QSA 与 full attention 的训练 loss 全程几乎无 gap（见 fig04）。",
+   "**推理效率**：QSA 相对 GQA 在 prefill/decode 延迟上有显著优势（indexer 3.8×–4.4×、attention 4.9×–7.6× latency 节省），见原报告 fig06。"
+ ],"fig_after":{"0":[{"src":"fig03.png","caption":"图 3：Qwen Sparse Attention 架构——压缩轻量索引器 + 微块稀疏注意掩码 + Top-k 选择器。"}],"3":[{"src":"fig04.png","caption":"图 4：训练 loss gap（QSA vs Full attention）——几乎无差距。"}]}},
+ {"type":"h2","title":"Gated Residual 与残差设计","paras":[
+   "GR 门控形式：`GatedNorm(u) = RMSNorm(u) ⊙ σ(W2·SiLU(W1·RMSNorm(u)))`——先独立归一化每个分支、再用门控加权组合（unvec σ(Wu·SiLU(...)) ⊙ Σ G_i·R_i）。",
+   "残差流加宽到 n_r=4 分支；关键消融（Table 5，25B-A3B、560B tokens）：**mHC（static）loss 1.596】**低于 pre-norm 的 1.617，且下游 8 项平均更高。",
+   "残差读写权重可从残差状态**预测**（XW/XW 形式）——只带来微小 loss 改善、却有明显 benchmark 增益（§2.2）。",
+   "但有限制：把每 block 限制到**两个最高门控的残差分支**在预训练 loss 上几乎免费、却随继续训练显著退化（§2.2）——所以 GR 保留全 4 分支。",
+   "从全注意力层移除位置编码：预训练中不可区分、但后期影响生成质量（§2.1.1）——保留。"
+ ],"fig_after":{}},
+ {"type":"h2","title":"n-gram 外置记忆与词汇表设计","paras":[
+   "单层 n-gram 嵌入层（放 Layer 2 附近）、51B 参数表**放在加速器外**，推理时从 host 内存预取相关 slot。",
+   "消融：**放大 n-gram 词表让 loss 单调下降、但下游准确率饱和**；在固定参数预算下 loss 最优点与 accuracy 最优点分歧（Tab 8/9）。",
+   "这体现报告的核心理念——**loss 与下游 bench 不总同向**，每个设计都沿三轴评估。"
+ ],"fig_after":{"0":[{"src":"fig06.png","caption":"图 6：n-gram 嵌入层放置与词表规模的消融。"}]}},
+ {"type":"h2","title":"优化器、超参标度与训练稳定性","paras":[
+   "**Muon 优化器 + Gated Residual**：Muon 相对 AdamW 需要正交化处理（Orthogonalization 需高效实现）。两者叠加把**最优学习率与 batch size 上移**、让 **batch-size warmup 不再必要**。",
+   "**优化器消融**：`AdamW, Qwen3.5 结构` vs `Muon, Qwen3.5 结构` vs `Muon + Gated Residual`，在梯度范数、max MLP 输出、残差激活 max 上，Muon+GR 明显更稳。压力测试把学习率固定在其最优值的倍数（2×、3×、4×），不走样的范围内不稳定在适中预算浮现——Muon+GR 最强。",
+   "**超参标度**：学习率预测在更大的 48× 运行上验证。`B=25.2M, η=5.39×10⁻³`（常量 batch）对比 ramped batch（6.3M→25.2M）——Muon+GR 下恒定 batch 即为最优，warmup 白耗优化步。",
+   "**综合稳定性**：Qwen3.8-Flash-Next 相对 Qwen3.5+Muon / Qwen3.5+GR+Muon，在 training loss、梯度范数、残差激活 max 全程更优。"
+ ],"fig_after":{"0":[{"src":"fig05.png","caption":"图 5：训练稳定性——批大小与学习率标度（常数 vs ramped batch）的曲线。"}]}},
+ {"type":"h2","title":"评测结果：14 基准 vs 前代","paras":[
+   "评估 Qwen3.8-Flash-Next-Base 对强 base 模型，覆盖通用/推理/数学/科学/代码/多语言 6 类 14 基准：",
+   "**通用**：MMLU(5-shot)、MMLU-Pro(5-shot CoT)、MMLU-Redux、BBH(3-shot CoT)、SuperGPQA(5-shot CoT)",
+   "**数学与 STEM**：GPQA(5-shot CoT)、GSM8K(4-shot CoT)、MATH(4-shot CoT)",
+   "**代码**：EvalPlus、MultiPL-E、SWEBench-Pretrain",
+   "**多语言**：MGSM、MMMLU、INCLUDE",
+   "核心结论：相比 397B-A17B 前代**领先 8 项、落后最多 2.6 分**，在 **1/3 激活参数、1/3 训练 token、约 1/9 训练 FLOPs** 前提下。"
+ ],"fig_after":{"0":[{"src":"fig07.png","caption":"图 7：FLASH-Next-Base 相对强势 base 模型的评估对比（多基准雷达/柱状）。"}]}},
+ {"type":"h2","title":"结论","paras":[
+   "设计信念：**架构、效率、优化是一套耦合系统**。GR 的重缩放显著改善训练稳定性，这稳定余量把最优 LR/batch 上移、同时改进吞吐与收敛。",
+   "逐阶段成本核算把稀疏注意力设计导向**索引器**、把门控残差表达力集中在**读侧**。移除任一轴会引入看似无害的捷径（稀疏写入后期退化、位置编码预训练中看似可省、batch warmup 白耗步）。",
+   "每个论断都在「完整评估预算仍可处理」的规模验证、设置专门暴露生产训练故障模式（压力测试固定 LR 最优倍数）。预训练指标同意与分歧之处都被记录——这正是 recipe 同时更高效、更强、更稳的原因。"
+ ],"fig_after":{}}
+],
+"conclusion":[
+ "这 28 页技术报告是「架构 + 效率 + 优化 = 耦合系统」的详实范例，且用**逐项消融数字**支撑每个决定（Table 1/2/3/5）。Qwen3.8-Flash-Next 用 1/3 激活参数、1/3 训练 token、约 1/9 FLOPs 追平甚至反超 397B-A17B 前代（领先 8/14 基准、最多落后 2.6 分）。",
+ "三大设计支柱：① **GDN+QSA 混合 mixing**——每 4 层 1 全注意力做全局对齐，GDN 靠 FlashQLA 2–3× forward 提速；继续预训练时切到微块索引的 QSA，>256K 长上下文检索反超全注意力(RULER/MRCR zavg 80.93 vs 78.76)。② **Gated Residual**——4 分支加宽 + 门控重缩放，显著提升稳定并上移最优 LR/batch。③ **51B n-gram 外置容量**——host 预取，不加显存/算力扩容量。",
+ "方法论启发：**loss 与下游 bench 不总同向**（n-gram 降 loss 但准确率饱和、残差读写权重 loss 增益小却 bench 增益大、两最高门控分支预训练免费却后期退化），所以每个设计沿三轴（loss+bench、训练/prefill/decode 成本、稳定性）在压力测试验证。对做 LLM 架构/训练的人，这是「效率-能力-稳定如何联合设计」的完整参考。"
+],
+"reference_url":"https://raw.githubusercontent.com/QwenLM/Qwen3.8-Flash-Next/main/tech_report.pdf"
+}
+
+
+
+
+# ---- 后处理：内联 table dict -> section 级 table 字段 (render 要求) ----
+def _extract_tables(sections):
+    new=[]
+    for s in sections:
+        paras=s['paras']
+        tbls=[p for p in paras if isinstance(p,dict) and p.get('type')=='table']
+        if not tbls:
+            new.append(s); continue
+        text_only=[p for p in paras if not isinstance(p,dict)]
+        if len(tbls)==1:
+            s=dict(s); s['paras']=text_only
+            s['table']={"head":tbls[0]['head'],"rows":tbls[0]['rows']}
+            new.append(s); continue
+        # 多表：拆节
+        p1=paras.index(tbls[0]); p2=paras.index(tbls[1])
+        secA=dict(s); secA['paras']=[p for p in paras[:p2] if not isinstance(p,dict)]
+        secA['table']={"head":tbls[0]['head'],"rows":tbls[0]['rows']}
+        secB=dict(s); secB['title']=(s.get('title','')+'（续：泛化）').replace('（续：泛化）（续：泛化）','（续：泛化）')
+        secB['paras']=[p for p in paras[p2+1:] if not isinstance(p,dict)]
+        secB['table']={"head":tbls[1]['head'],"rows":tbls[1]['rows']}
+        secB['fig_after']={}
+        new.append(secA); new.append(secB)
+    return new
+DATA['sections']=_extract_tables(DATA['sections'])
+DATA['_totals']={}
+
+with open("article_data.json","w",encoding="utf-8") as f:
+    json.dump(DATA,f,ensure_ascii=False,indent=1)
+print("OK dump", len(DATA["sections"]))

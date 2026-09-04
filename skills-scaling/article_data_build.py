@@ -1,0 +1,225 @@
+# -*- coding: utf-8 -*-
+"""Skills Scaling 编译 build"""
+import json, os, sys
+
+DATA = {
+ "title": "技能的计算最优缩放：知识 vs 推理——缩放定律是技能相关的",
+ "lead": [
+  "缩放定律是 LLM 开发流水线的关键组件，最著名的是作为预测训练决策的方式，例如「计算最优」地权衡参数量和数据集大小，此外还有一系列日益增长的其他关键决策。",
+  "在这项工作中，我们问：计算最优缩放行为是否可以随技能而变化？具体地，我们考察知识型和推理型技能，如基于知识的 QA 和代码生成，我们对这个问题给出肯定回答：**缩放定律是技能相关的**。",
+  "接着，为理解技能相关缩放是否是预训练 datamix 的伪影，我们做了不同 datamix 的广泛消融，发现即使在纠正 datamix 差异后，知识和代码在缩放行为上仍表现出根本性差异。",
+  "我们以一个分析收尾：我们的发现如何关联使用 validation set 的标准计算最优缩放。发现一个 misspecified validation set 可以影响计算最优参数计数近 **50%**，取决于其技能组成。"
+ ],
+ "summary": [
+  {
+   "key": "核心发现",
+   "body": "缩放定律是技能相关的：知识 QA 是容量饥饿（capacity-hungry，偏好更多参数），代码是数据饥饿（data-hungry，偏好更多数据）。这个差异在纠正 datamix 比例后依然存在，说明是技能的根本差异而非 datamix 伪影。"
+  },
+  {
+   "key": "datamix 消融",
+   "body": "改变技能相关数据比例会移动该技能的 CO：代码数据比例提升 → CO 转向参数饥饿；知识数据约 2.1 倍于代码时两技能 CO 对齐。知识比代码更难压缩（memorize facts 需更多容量）。"
+  },
+  {
+   "key": "实践影响",
+   "body": "misspecified validation set 可让最优参数计数偏差近 50%（最小计算规模），大尺度仍超 10%。选一个能代表最终模型应捕获技能的 validation set 对找对参数计数至关重要。"
+  }
+ ],
+ "sections": [
+  {
+   "type": "h2",
+   "title": "引言：缩放定律与技能",
+   "paras": [
+    "缩放定律既用于预测早期预训练决策的性能，也用于在给定计算预算下决定参数与预训练数据集大小的最优权衡，在 LLM 发展中扮演重要角色。",
+    "著名的是，Hoffmann et al. 2022 用不同数据/参数权衡的一系列实验表明先前的 LLM 都偏向参数过多，引发训练 token 量的转变。更近的 Dubey et al. 2024 不仅用缩放定律决定给定计算预算的最优参数计数，还用其预测数据选择决策对评估分数的影响。",
+    "在这些工作中，计算最优（CO）——描述最优参数计数和训练 token 数——基于聚合性能估计器（APE）选择，形式是对非预训练语料 validation set 的负对数似然（NLL）。",
+    "然而关于单个技能的 CO 是否与这些 APE CO 对齐，如数学推理、问答（QA）或编码，我们所知甚少。一些研究用缩放定律预测下游任务性能如何随规模改善，但没有覆盖 CO 本身是否可能技能相关。",
+    "是否可能有些技能更「数据饥饿」，而其他更受益于「额外参数」？如果是，那应如何影响模型训练和训练数据选择？",
+    "本文用跨 9 个不同计算规模、2 个技能、2 个 split 的 19 个数据集测量的广泛实验研究这一点。我们聚焦三个研究问题：",
+    "**R1. CO 是否技能相关？**先考虑给定规范 datamix，code 和 knowledge 技能的 IsoFLOP 曲线及对应 CO 与 APE CO 的比较。整体上我们发现这些技能 CO 之间的显著差异：知识 QA 任务容量饥饿，代码任务偏好数据。",
+    "**R2. 这是预训练 datamix 的伪影，还是代码和知识技能根本不同？**仅用最小计算规模，我们考察这些差异是实验预训练 datamix 中技能相关数据比例的结果，还是不同技能在数据/容量饥饿上确有差异。我们发现两者都对：改变技能相关数据比例会移动该技能的 CO，但即使技能特定数据比例相当，技能 CO 仍有差异。",
+    "**R3. 技能相关 CO 的存在如何影响 LLM 训练？**最后聚焦更实际的问题：这些发现应如何影响模型预训练。首先再次仅用最小计算规模，考察是否可能「对齐」两技能 CO。发现可以，但这是否应被认为对整体模型训练有利高度取决于 validation set 的选择。然后考察估计最优参数计数多大程度依赖 validation set 选择。发现最小规模实验（6×10¹⁸）中，同一技能的最优参数计数跨 datamix 变化近 50%、跨 validation set 变化超 30%。更大尺度差异更小，但三个最大计算规模仍超 10%。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "背景：缩放定律",
+   "paras": [
+    "计算缩放定律时，先前工作通常建模 validation set 上的损失，通常是来自与预训练数据集同分布的通用文本语料。该设置下损失有效是模型训练期间应学的所有东西的加权组合。相反，我们考虑技能相关缩放定律。",
+    "神经缩放定律旨在建模损失作为 FLOPs 计算规模的函数。FLOPs 常估计为 B≈6pt，包含训练集大小 t（token）和模型参数量 p 的贡献。通常建模这两个量与损失关系的缩放定律展现出参数量与计算规模之间的权衡。这些用 IsoFLOP 曲线描绘：x 轴参数量，y 轴训练或 validation 集损失。",
+    "Hoffmann et al. 2022 开创用 2D power law 模型，有参数和 token 计数的独立 power law 分量。我们发现 2D power law 对下游评估拟合差，归因于噪声和小数据集大小（对比 validation set）。我们改用 Dubey et al. 2024 的方法：对每个计算规模拟合独立的二次多项式，并扩展到对计算规模的最优点拟合 power law。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "计算预算与 CO",
+   "paras": [
+    "IsoFLOP 曲线的核心是 IsoFLOP groups——在固定计算规模下建模数据集和模型大小权衡。即一个 IsoFLOP group 是一组模型，其训练数据量 t 和模型大小 p 在固定近似计算预算 B≈6pt 下变化。",
+    "数据集大小与参数量的权衡可在每个计算规模优化，意味着给定计算预算存在最优参数量和数据集大小。通常 IsoFLOP 曲线（因此 CO）用训练集损失计算，或为灵活用 validation set。由于训练和 validation 集都包含可能不同影响缩放行为的混合数据，我们称这些损失为聚合性能估计器（APE）。此术语下，标准实践涉及基于 APE 选择 CO。",
+    "接下来定义我们的技能概念以及分析如何涉及基于技能而非 APE 的 CO。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "技能与技能相关 CO",
+   "paras": [
+    "沿用 Chen et al. 2023，我们从可量化技能的指标和数据集形式化「技能」概念。更精确地，若模型在数据集 D 上按指标 L 的性能与模型执行目标技能 s 的能力相关，则称数据集 D 量化技能 s。",
+    "该定义下，多个数据集可关联同一技能——实验中我们利用这点跨多个数据集验证结论——某些情况下一个数据集可量化多技能。难以精确标注不同数据集量化什么技能、其正确程度可争论，所以我们大体遵循评估数据集创建者的标注，但审慎对待。",
+    "为简洁，我们聚焦两个怀疑有不同缩放属性的技能：knowledge（基于知识的 QA）和 code。",
+    "**技能相关 CO**：给定定义，技能 s 在计算规模 B 的 CO 由 IsoFLOP group 中优化量化该技能的数据集 D_s 损失的参数量 p*_s 和训练 token 预算 t*_s 给出，而非 APE。如前述，我们工作的主要目标之一是确定 CO 是否技能相关。",
+    "为量化，我们考虑技能 CO 与用 APE 计算的最优比较。若技能以相对更多「数据」表现更好，称该技能数据饥饿；若偏好比 APE 最优更多参数，称容量饥饿。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "数据：技能数据与预训练数据",
+   "paras": [
+    "实验中我们聚焦两个总体技能：knowledge QA 和 code。对每个技能我们确定若干评估数据集，分成「hypothesis」和「held-out」split。分析中我们先在 hypothesis split 上形成假设而不访问 held-out split，然后在 held-out split 上验证假设。",
+    "hypothesis 和 held-out split 包含知识 QA split：Trivia QA、NQ、SQuAD、MMLU；代码 split：RepoBench、SWE-Bench、BigCodeBench、CAT-LM、CrossCodeEval、MultiPL-E、HumanEval、MBXP、MBPP。",
+    "一些数据集是跨多主题的复合数据集（如 MMLU）。我们分别分类这些子任务，各分配一半到 hypothesis 和 held-out split。若模型需先验知识才能准确回答问题，我们标注子任务为知识型，并移除所有非知识型子任务。",
+    "**预训练数据**：我们的规范预训练 datamix 约 58.4% 文档高事实知识、19.9% 代码、剩余 21.7% 不属于任一类别。对给定 token 预算 t，按各类别比例从更大数据池随机采样文档构建训练集。在第 4.2/4.3 节我们通过增加代码或知识比例改变这些比例。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "实验 4.1：CO 能否随技能不同？",
+   "paras": [
+    "首先考虑规范 datamix 下不同技能 CO 的差异。",
+    "**方法**：大致沿用 Dubey et al. 2024，我们训练计算预算在 6×10¹⁸ 到 3×10²¹ FLOPs 之间的模型。每个计算规模预训练 40M 到 8B 参数的模型。用这些模型，按第 2.1 节方法计算 APE（validation loss）和两个技能的 IsoFLOP 曲线及对应 CO（由目标答案的 NLL 度量）。为比较，先从 Dubey et al. 2024 的 power law 拟合获得每个计算规模的 APE CO 参数计数 p_c。然后对技能 s 的每个数据集 D，拟合每个计算规模的二次多项式并识别 p_s 的最优参数计数。把 APE CO 投影到 s 的多项式拟合上，对 APE CO 和技能依赖 CO 拟合 power law 曲线。所有实验中我们先分析 hypothesis split 结果，在 held-out split 确认发现。",
+    "**结果**：分别对 held-out code 和 knowledge QA 数据集显示平均结果（红色），叠加 Dubey et al. 2024 报告的 APE CO 曲线（黑色）。图清晰显示 knowledge QA 与 code 的差异：knowledge QA 相对 APE 曲线偏好容量——尤其较低计算规模——而 code 倾向更数据饥饿。该模式在 hypothesis split 的所有数据集和 held-out split 都存在。",
+    "为跨规模更显式展示模式，考虑参数量「残差」分布：APE 最优与每个技能技能最优之间 log 尺度差异。若计算规模 B 残差大于 0，称该技能在 B 容量饥饿；小于 0 则数据饥饿。结果分布确认先前观察：code 的参数量残差相对 knowledge QA 明显左移，指示后者更容量饥饿。同一模式在 hypothesis 和 held-out split 的所有数据集成立。这强有力支持知识 QA 与 code 的 CO 有差异，且是可泛化现象。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig01.png",
+      "caption": "图 1：图例——APE CO 曲线（黑）与技能 CO 曲线（红）对比。"
+     },
+     {
+      "src": "fig02.png",
+      "caption": "图 1(a)：Knowledge QA 的 IsoFLOP 平均结果（红）与 APE CO 曲线（黑）——知识偏好容量，尤其低计算规模。"
+     },
+     {
+      "src": "fig03.png",
+      "caption": "图 1(b)：Code 的 IsoFLOP 平均结果——代码倾向更数据饥饿。"
+     },
+     {
+      "src": "fig04.png",
+      "caption": "图 1(c)：参数量残差分布——code 残差明显左移，指示 code 更数据饥饿、知识更容量饥饿。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "实验 4.2：这是数据分布伪影吗？",
+   "paras": [
+    "规范 datamix 下我们看到知识 QA 和 code 数据集在其各自容量/数据饥饿上的清晰差异。但第一个实验不清楚的是：这些差异是技能根本差异的结果，还是规范 datamix 中这些技能数据量的差异。",
+    "**方法**：为开始回答，先考察是否可通过改变该技能相关数据比例「移动」技能 CO。从规范数据集比例出发，为 knowledge 创建四个额外数据集、为 code 创建五个额外数据集，上/下采样技能相关数据比例。具体地，knowledge 从原 58% 缩到 22%、增到 85%；code 从原 20% 缩到 11%、增到 84%。用这些新 datamix 训练 16 个模型，每个 6×10¹⁸ FLOPs 预算（IsoFLOP 曲线代表的最小计算规模），重算该计算规模的技能 CO。",
+    "**结果**：展示 code 和 knowledge held-out 数据集结果。不出意外，增加技能相关数据（图中更浅色）改善该技能性能。增加代码数据改善 code 数据集损失**超出规范 datamix 的下一个计算规模**。该模式对 code 比 knowledge 清晰得多。我们假设因为 code 数据点易识别且只含代码，而知识数据集通常更分散、更难自动标注。",
+    "与我们的研究问题更相关的是不仅损失、CO 也移动。再次对 code 尤其清晰，hypothesis 和 held-out 集都是：包含更多 code 数据，CO 越容量饥饿。这暗示 datamix 技能比例与 CO 的根本关系——对固定计算预算，若技能数据需求通过增加其 datamix 比例满足，我们可以用更少数据训练更大模型。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig05.png",
+      "caption": "图 2(a)：Code datamix 消融——更多 code 数据使 CO 转向参数饥饿。"
+     },
+     {
+      "src": "fig06.png",
+      "caption": "图 2(b)：Knowledge QA datamix 消融。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "技能比例对齐后仍是根本差异",
+   "paras": [
+    "然而我们想评估知识和代码的容量/数据饥饿是规范 datamix 的伪影还是更根本的现象。为此用相同数据考察知识 QA 和 code 的数据饥饿，独立于技能相关数据比例。做法是绘制每个技能的 CO 参数计数作为技能相关数据比例的函数。",
+    "同一图中展示 knowledge QA 和 code。坐标轴对齐到技能相关数据比例，而非 datamix 本身。对知识 QA 数据集（紫色线），x 值 0.4 对应 40% 知识的 datamix；对 code 数据集（绿色线），对应 40% code 的结果。",
+    "从图清晰可见即使纠正技能相关数据比例，knowledge 仍明显比 code 更容量饥饿，且随技能相关数据比例增加其容量饥饿增长更快。我们假设这一现象——**展示知识 QA 与 code 的根本差异**——与知识比代码更难压缩有关，memorize 事实需要更多容量。",
+    "与假设一致，仅考虑 Python 代码数据集时观察到知识/代码更大差异。我们假设此规模的模型可能无法成功压缩「低资源」编程语言，需进一步研究确认。",
+    "还看到量化 code 的数据集损失值整体低于知识 QA——尽管知识比例大——可能暗示 code 的「不可建模熵」比知识低。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig07.png",
+      "caption": "图 3：技能相关数据比例对齐后的最优参数计数——知识（紫）仍比代码（绿）更容量饥饿，且增长更快。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "实验 4.3：对 LLM 训练意味着什么？",
+   "paras": [
+    "经验上展示并考察了技能相关 CO 的存在后，我们探索这些发现对预训练 LLM 的实际影响。聚焦两个可在计算预算内可行测试的具体问题：",
+    "能否通过数据选择对齐技能 CO 以改善 validation loss？",
+    "validation set 测量错误技能时对参数计数的影响是什么？",
+    "**对齐技能 CO**：鉴于知识相关技能 CO 更容量饥饿而代码相关技能更受益于数据，我们问能否通过移动 datamix 使两技能 CO 对齐来改善模型整体聚合性能。",
+    "绘制 6×10¹⁸ 模型的最优参数计数。确实存在代码和知识最优参数计数大致匹配的点——即 code 数据约 2.1 倍于 knowledge 数据时。我们通过计算 hypothesis 集交叉点并叠加到 held-out split 获得 2.1。这与先前结果一致：加更多 code 数据，code CO 逐渐转向参数饥饿；减少 knowledge 数据量，knowledge CO 要求更少参数。",
+    "接着看该权衡如何影响 validation loss（聚合模型性能指标）。理想上用 Llama 3 validation set 做分析，但其细节未发布。作为替代从三个公开预训练数据集采样不同 validation 集：FineWeb、FineWeb-Edu（教育网页过滤）、The Stack（代码预训练）。各随机抽取 20K 样本。",
+    "显示所有 validation 集的 NLL。第一个惊人观察是所有选择的 validation 集都紧贴 knowledge QA 或 code 之一：FineWeb 和 FineWeb-Edu 的损失随 code 数据量单调增加，The Stack 相反。我们未看到 validation 集中知识 QA 和 code 混合的证据（本可能呈现 U 形曲线，而非我们观察的单调增减曲线）。因此这些 validation 集都不会产生与**两个**技能对齐的 CO。这个结果暗示对齐技能间 CO 是可能的，实践上应做以平衡期望技能。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig08.png",
+      "caption": "图 5(a)：技能 CO 对齐——code 数据约 2.1× 知识时最优参数计数大致匹配。"
+     },
+     {
+      "src": "fig09.png",
+      "caption": "图 5(b)：CO 对齐对知识 QA、code 与 validation 集的影响——所选 validation 集各紧贴单一技能。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "validation set 的影响",
+   "paras": [
+    "最后更显式研究预测 CO 的预期变化如何取决于 validation set 选择。",
+    "以 The Stack validation set 为「baseline」，某些 datamix 的最优参数计数偏差近 **50%**。最小计算规模、规范 datamix 下，不同 validation set 间最优参数计数差异超 **30%**。更高计算规模相对差异没那么悬殊，但三个最大计算规模仍超 **10%**。",
+    "这个实验说明：选择能充分代表最终模型应捕获混合内容的 validation set——或甚至更直接测量那些技能、如我们的工作的 validation set——对找到正确 CO 至关重要。差异在较小规模更明显，但在实验的最大计算规模仍持续存在。",
+    "另一方面，Dubey et al. 2024 指出高计算规模 IsoFLOP 曲线更平坦，模型容量与数据集大小的权衡可能没那么重要。他们另一结果用损失拟合 sigmoid 估计**准确率**。若把 sigmoid 应用到整个 IsoFLOP 曲线产生准确率而非 NLL 的 IsoFLOP 曲线，我们假设低计算规模在 sigmoid 平坦区、高计算规模在线性区时曲线可能看起来「不那么平坦」。我们把这个有趣问题留给未来工作。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig10.png",
+      "caption": "图 6：最优参数计数随 validation set 的变化——相对 The Stack baseline 偏差近 50%。"
+     },
+     {
+      "src": "fig11.png",
+      "caption": "图 6(c)：不同 validation set 间最优参数计数差异超 30%（最小计算规模）。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "结论",
+   "paras": [
+    "我们用 9 个计算规模、19 个数据集、两个 split 的广泛实验研究计算最优缩放是否技能相关，并给出肯定回答。",
+    "首先，规范 datamix 下技能 CO 明显不同：知识 QA 偏好容量，code 偏好数据。其次，用 datamix 比例消融，我们发现两者都对：改变技能相关数据比例移动该技能 CO，但即使技能特定数据比例相当，技能 CO 仍有差异——一个展示知识 QA 与 code 根本差异的发现。",
+    "最后，聚焦这些发现对模型预训练的影响。我们发现对齐技能 CO 是可能的，但价值高度取决于 validation set 选择；misspecified validation set 可让最优参数计数偏差近 50%，取决于其技能组成。选择能代表最终模型应捕获技能的 validation set 对找对参数计数至关重要。"
+   ],
+   "fig_after": {}
+  }
+ ],
+ "conclusion": [
+  "这是一篇扎实的实证研究：**缩放定律是技能相关的**。用 9 个计算规模、19 个数据集（2 个 split）、16 个 datamix 消融模型，作者证明知识 QA 是容量饥饿、代码是数据饥饿，且这个差异在纠正 datamix 比例后依然存在——根源被归为「知识比代码更难压缩，memorize 事实需要更多容量」。",
+  "最有实践价值的发现是 **validation set 的敏感性**：同一技能的最优参数计数跨 datamix 变化近 50%、跨 validation set 变化超 30%（最小规模），大尺度仍超 10%。对做 scaling 预算决策的团队，这意味着 validation set 的技能组成必须代表最终产品目标——否则你优化出一个「错误技能」的参数/数据配比。"
+ ],
+ "reference_url": "https://arxiv.org/html/2503.10061v3"
+}
+
+with open("article_data.json", "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=1)
+print(f"✅ 写入 article_data.json")

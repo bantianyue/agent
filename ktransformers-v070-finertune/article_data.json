@@ -1,0 +1,115 @@
+{
+  "title": "KTransformers v0.7.0 发布：原生 FP8 LoRA、AVX512 CPU、完整微调",
+  "lead": [
+    "越来越多超大规模 MoE 模型以 FP8 发布。能否顺滑微调，还取决于 CPU 指令集兼容性、系统内存容量、以及训练框架读模型原始 checkpoint 的能力。",
+    "KTransformers v0.7.0 聚焦微调：能直接加载原生 FP8 Expert 权重做 LoRA 训练；新增 AVX512 CPU 路径，让兼容 AMD/x86 平台用大宿主内存参与超大规模 MoE 微调；并改善完整微调、训练产物管理和配套 Cookbook。"
+  ],
+  "summary": [
+    {
+      "key": "原生 FP8 LoRA",
+      "body": "传统流程把 FP8 Expert 权重扩到 BF16、保留大副本。v0.7.0 支持 DeepSeek-V3.1 原生块状 FP8 LoRA：E4M3 FP8 权重+scale 直接从 checkpoint 加载、内存里保持 FP8；FP8 内核里直接加载进 BF16 寄存器计算（把反量化折进权重加载）。base 权重保 FP8、内存减半；激活/LoRA/梯度 BF16、优化器状态 FP32。官方配置 host 内存从 ~1.4TB 降到 ~800GB。"
+    },
+    {
+      "key": "AVX512 与双模式",
+      "body": "新增 AVX512 CPU 执行后端（此前仅 AMX）——CPU+大宿主内存处理 Routed Expert 权重驻留与计算、GPU 跑 Attention+Shared Expert，统一后端入口 auto。LoRA 适合作快速适配/资源受限，Full 支持更深更新（更高内存/成本）；Full 更新 CPU Expert 权重+普通可训练参数、BF16 主路径。"
+    },
+    {
+      "key": "激活复用与 Cookbook",
+      "body": "CPU Activation Reuse：checkpoint 重算时保留 CPU Expert activations（用额外 host 内存降重复计算）。配套 Cookbook 帮选 Expert 权重选项 + LoRA/Full——BF16 支持两者、Native FP8/INT8/AMXINT4 用于 LoRA+冻结 base；硬件检查/YAML 职责划分/启动/资源估计/排错。"
+    }
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "导语：v0.7.0 聚焦微调",
+      "paras": [
+        "越来越多超大规模 MoE 模型以 FP8 发布。能否顺滑微调，还取决于 CPU 指令集兼容性、系统内存容量、以及训练框架直接读模型原始 checkpoint 的能力。",
+        "KTransformers v0.7.0 聚焦微调：它可以直接加载原生 FP8 Expert 权重做 LoRA 训练；新增 AVX512 CPU 路径，让兼容的 AMD/x86 平台（带大宿主内存）参与超大规模 MoE 微调；并改善完整微调、训练产物管理和配套 Cookbook。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig01.png",
+            "caption": "图 1：KTransformers v0.7.0 MoE 微调总览。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "1. 直接加载原生 FP8 权重、Expert 权重内存减半",
+      "paras": [
+        "传统微调流程常先把 FP8 Expert 权重扩到 BF16 再训练，并在系统内存里保留更大的副本。",
+        "v0.7.0 支持 DeepSeek-V3.1 的原生块状（block）FP8 LoRA 微调。E4M3 FP8 Expert 权重和 scale 直接从 checkpoint 加载，并在内存中保持原始 FP8 格式。在 FP8 内核内部，权重被直接加载进 BF16 宽度的寄存器、用于 BF16 计算。这条路径把反量化（dequantization）折进权重加载，用额外寄存器宽度避免单独的反量化阶段。",
+        "base Expert 权重保持 FP8 存储，相对完整的 BF16 副本内存占用减半。激活、LoRA 参数和梯度保持 BF16，优化器状态保持 FP32。在官方 DeepSeek-V3.1 测试配置里，宿主内存需求从约 1.4TB 降到约 800GB。",
+        "**注意**：本版本的原生 FP8 面向「冻结 base Expert 权重」的 LoRA 微调；完整微调主要用 BF16。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "2. 支持兼容的 AMD/x86 CPU（AVX512）",
+      "paras": [
+        "KTransformers 的高性能 CPU Expert 微调路径此前聚焦 AMX 平台。v0.7.0 新增 AVX512 CPU 执行后端，让带所需 AVX512 扩展的兼容 AMD/x86 CPU 参与超大规模 MoE 微调。",
+        "在这种异构分工里，CPU 和大的宿主内存处理 Routed Expert 权重驻留与计算，而 GPU 运行 Attention 和 Shared Expert 模块。在 LlamaFactory 训练 YAML 里用推荐的统一后端入口：",
+        "__CODE__yaml::kt_config:\n  kt_backend: auto",
+        "auto 依据 CPU 能力和权重格式选择后端。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig02.png",
+            "caption": "图 2：LlamaFactory 与 KTransformers MoE 微调集成总览。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "3. 在 LoRA 和完整微调之间选择",
+      "paras": [
+        "LoRA 或 Full 在进入 KTransformers × LlamaFactory 后端之前在训练配置里选定。LoRA 适合作快速适配和资源受限的工作负载；完整微调支持更深层的模型更新，适用于能承受更高 host 内存、GPU 内存和 checkpoint 成本的工作负载。",
+        "完整微调同时更新 KTransformers 托管的 CPU Expert 权重和模型普通可训练参数。工作流覆盖梯度、优化器更新、多步训练和分布式执行；其主路径是 BF16。LoRA 和 Full 的训练产物都支持 checkpoint 保存、恢复、以及从 checkpoint 继续训练。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "4. CPU 激活复用：用宿主内存减少重算",
+      "paras": [
+        "v0.7.0 还提供 CPU Activation Reuse。启用后，CPU Expert 激活可在 checkpoint 重算（recomputation）期间保留。",
+        "__CODE__yaml::kt_cpu_activation: retain",
+        "该选项用额外宿主内存减少重复计算。未设置时，CPU 激活跟随整体 checkpoint 策略。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "5. 检查、配置与启动的完整 Cookbook",
+      "paras": [
+        "配套的 KTransformers × LlamaFactory MoE 微调 Cookbook 先帮用户选 Expert 权重选项，再在当前受支持组合里选 LoRA 或 Full。BF16 同时支持 LoRA 和完整微调；原生 FP8、转换 INT8 和 AMXINT4 用于「冻结 base Experts」的 LoRA。",
+        "Cookbook 还覆盖硬件检查、环境安装、训练 YAML 与 Accelerate YAML 的职责划分、基础配方、启动命令、资源估计和排错。所有用户可见的 KTransformers 设置都归训练 YAML；Accelerate YAML 只含分布式执行和 FSDP2 设置。",
+        "详见 KTransformers 微调 Cookbook：github.com/kvcache-ai/ktransformers/blob/main/doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.md"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "6. 安装与资源",
+      "paras": [
+        "KTransformers v0.7.0 现已可用。安装其微调依赖：",
+        "__CODE__yaml::pip install \"ktransformers[sft]==0.7.0\"",
+        "配套的 SFT 集成包：",
+        "transformers-kt==5.6.0.post2、accelerate-kt==1.14.0.post2。",
+        "了解更多：KTransformers v0.7.0 Release、KTransformers Fine-Tuning Cookbook、KTransformers 官网。",
+        "**相关**：KT-FT v0.6.1（从 MoE 微调到本地机闭环）；KTransformers + LLaMA-Factory + SGLang（低成本本地微调与推理）。"
+      ],
+      "fig_after": {}
+    }
+  ],
+  "conclusion": [
+    "KTransformers v0.7.0 这篇发布博客把「超大规模 MoE 本地微调落地」讲得很实用。最大亮点是**原生 FP8 LoRA**：传统流程要把 FP8 Expert 权重扩到 BF16、占 1.4TB 系统内存，现在 E4M3 FP8 权重+scale 直接加载、内核里折反量化进权重加载（BF16 寄存器计算），base 权重保 FP8、内存减半——官方配置从 ~1.4TB 降到 ~800GB。这是把「FP8 发布权重直接用」落到微调的关键。",
+    "覆盖面也广：AVX512 CPU 后端让非 AMX 的 AMD/x86 平台参与 Routed Expert 计算（CPU 管 Expert、GPU 管 Attention/Shared）；LoRA/Full 双选的取舍讲清（Full 更新 CPU Expert 权重、BF16 主路径）；CPU Activation Reuse 用宿主内存换重算；配套 Cookbook 管好 YAML 职责划分（用户设置全在训练 YAML、Accelerate 只管分布式/FSDP2）。对在本地/小集群微调超大规模 MoE 的人，这是「怎么不爆显存/宿主内存、把 FP8 模型训起来」的现成方案。"
+  ],
+  "reference_url": "https://kvcache.ai/blog/ktransformers-v0-7-0-fine-tuning/"
+}

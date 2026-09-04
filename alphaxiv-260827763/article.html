@@ -1,0 +1,130 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心洞察</strong>：递归序列建模 = 在线持续学习；读后写语义下训练对是「前缀特征→新观测」x(t)=ϕ(k(t−1))→v(t)。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">方法</strong>：Falcon归一化更新族：回归(1/2/3)+内积(1A/2A/3A)，覆盖标量/逐列/滑动窗口，可分块并行训练。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">结果</strong>：Falcon-1.3 PPL 17.10最优；变长加法外推Falcon-3A.3达87.2超基线。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">递归快速权重记忆与选择性状态空间模型（Mamba、RWKV、DeltaNet、Linear Attention）都把增长的上下文压缩进<strong>固定大小的递归状态</strong>，从而把状态转移视作一条<strong>在线学习规则</strong>。这篇论文从「读后写」自回归语义出发，把这整类规则统一重铸为<strong>在线持续学习</strong>，并导出一族显式的归一化更新规则（Falcon）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本文为论文深度解读（arXiv:2608.27763，ByteDance Seed × Princeton × 清华，含姚期智），<strong>11张原图全保留</strong>，关键技术（推导、更新方程、归一化）已按原文展开。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">核心设定：读后写的在线持续学习</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把递归状态S当作<strong>快速权重</strong>（fast weight）：这段固定大小的记忆在每一时间步读一次、写一次。读的是用它预测下一个latent，写的是根据预测误差去修正它：<strong>读后写（read-after-write）</strong>，先消费已写好的记忆，再改动记忆。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1：读后写语义与Falcon快速权重更新</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">统一设定：在步t，写特征x(t)=ϕ(k(t−1))（上一时间步的键经特征映射），新观测目标y(t)=v(t)；读出ot=S(t−1)⊤·ϕ(q(t))。<strong>全部变体共享这一因果对 (x(t), y(t)) = (ϕ(k(t−1)), v(t))</strong>，且边界初值x(1)=0、η(1)=0。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>「时间对齐」由此成为第一个要分离的因子</strong>：到底是把状态绑定到「同一步的 (ϕ(k(t)), v(t))」还是「前缀对齐的 (ϕ(k(t−1)), v(t))」：这正是DeltaNet与Falcon的分野，我们在后文展开。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">回归族：DeltaNet的在线学习推导</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">先把更新规则写成<strong>自回归的线性回归问题</strong>。设状态S(t−1)∈R(dx×dv) 是一个线性预测器，输入写特征x(t)=ϕ(k(t−1))，目标y(t)=v(t)。瞬时平方误差损失：f(t)(S)=½·‖S⊤·x(t) − y(t)‖²。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对<strong>更新前的状态</strong>求梯度：残差r(t)=y(t) − S(t−1)⊤·x(t)，则梯度 ∇f(t)(S(t−1)) = x(t)·(S(t−1)⊤·x(t) − y(t))⊤ = −x(t)·r(t)⊤。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">做一步<strong>在线梯度下降（OGD）</strong>、学习率 η(t)，就得到经典的Delta更新：S(t) = S(t−1) − η(t)·∇f(t) = S(t−1) + η(t)·x(t)·r(t)⊤ = (I − η(t)·x(t)·x(t)⊤)·S(t−1) + η(t)·x(t)·y(t)⊤。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2：状态转移 = 在线学习规则</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>关键：把k(t−1) 换回k(t)（即x(t)←ϕ(k(t))），就精确还原了Schlag等人的「无移位DeltaNet更新」</strong>。也就是说：<strong>标准DeltaNet就是「同一步」变体，而Falcon家族用「前缀对齐」的前一步写特征</strong>。差异只有一个时间索引，却直接决定了优化的内部目标。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">同一步vs前缀对齐：为什么后者才一致</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">同一步写「(ϕ(k(t)), v(t))」看起来因果自洽，像一个缓存式关联。但<strong>自回归预测的时刻是t−1</strong>：真正在那个时刻「可用的信息」是 ϕ(k(t−1))，而v(t) 是之后才观察到的目标。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把状态绑到当前写特征 ϕ(k(t)) 上，相当于<strong>用尚未到来（对本步解码）的信息去更新记忆</strong>：在快速记忆的「读后写」目标下，匹配的是欠对齐的内部目标。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：概念总览（同一步vs下次隐状态预测vs滑动窗口）</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Falcon则显式使用<strong>前缀对齐对</strong>：用旧特征预测新目标，与新观察真正共现。作者证明：在自回归读-写分离语义下，前缀对齐变体才与「读后写」学习一致。<strong>时间对齐（temporal alignment）因此是Falcon框架分离出的第一个持续学习因子</strong>。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Falcon家族：两种目标 × 三种动力学</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Falcon由「回归 / 内积」两种目标函数 与「标量 / 逐列 / 滑动窗口」三种可塑性动力学 交织成6个变体。<strong>下标1/2/3 = 标量、逐列、滑动窗口；后缀A = 内积目标。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>回归族（平方误差，DeltaNet风格）</strong>：
+· Falcon-1（标量NLMS）：S(t)=(1−ηλ)·S(t−1) + η·x(t)·r(t)⊤，步长 η=β/(‖x‖²+λ+ε)。
+· Falcon-2（逐列）：每个值通道一个独立步长：S(t)=S(t−1)·(I−λ·diag(η)) + x(t)·(η⊙r(t))⊤，η(j)=β(j)/(‖x‖²+λ+ε)，共享残差r(t)=v(t)−S(t−1)⊤x(t)。
+· Falcon-3（滑动窗口）：在活跃窗口I(t) 内做小批量回归S(t)=(1−ηλ)·S(t−1) + (η/|I|)·Σ(j∈I) x(j)·(v(j)−S(t−1)⊤x(j))⊤，步长 η=β/(μ(B)+λ+ε)。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4：归一化快速权重递归示意</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5：加性/内积写入的稳定性机制</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>内积族（负内积对齐，Linear Attention / Mamba-2风格）</strong>：把「残差回归写」换成「直接目标写」：
+· Falcon-1A：S(t)=(1−ηλ)·S(t−1) + η·x(t)·v(t)⊤，η=β/(E+λ+ε)。
+· Falcon-2A：S(t)=S(t−1)·(I−λ·diag(η)) + x(t)·(η⊙v(t))⊤。
+· Falcon-3A：S(t)=(1−ηλ)·S(t−1) + η·N̄(B)，用窗口平均目标写N̄(B)=B⁻¹·Σ x(j)·v(j)⊤，η=β/(Ē(B)+λ+ε)。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>内积族的步长要读作「能量归一化的写入增益」，不是曲率匹配的分母</strong>：因为 λ=0时目标在S上线性、没有有限极小，梯度下降直接退化为纯加性的Hebbian写入。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">归一化与稳定性：Falcon对线性注意力的关键修正</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">softmax注意力用缩放点积 ⟨q,k⟩/√d天然控制范数；<strong>快速权重递归则对查询/键范数直接敏感</strong>：(i) 点积读出随 ‖q‖·‖k‖ 增长，(ii) 加性（内积）写入随写特征范数增长。在长解码视野、混合精度（FP16/BF16）下，这两个来源都会让训练失稳。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图6：Falcon-2分块并行前向结构（Algorithm 1）</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">作者用<strong>RMSNorm</strong>对 (q(t), k(t)) 投影做归一化：RMSNorm(u)=u/√(‖u‖²/d+ε·rms)。RMSNorm让坐标量级保持 Θ(1)：‖RMSNorm(u)‖²≈d（在 ‖u‖²≫d·ε 时）。<strong>这比常见 ΔNet/Gated DeltaNet实现里的 ℓ2归一化在混合精度下明显更稳定</strong>。value归一化（VNorm）默认关闭。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>正衰减再归一化（positive-decay renormalization）</strong>：不再让衰减随步长任意游走，而是由参数结构推导出衰减分数 α(t)=η(t)·λ(t)，并钳制到 α(t)=min(ηλ, 1−ε_γ)、γ(t)=1−α(t) 以确保数值稳定的正衰减。<strong>遗忘（forgetting）由此成为Falcon显式分离的第二个持续学习因子。</strong></p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Falcon-3：滑动窗口小批量与有界回看</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Falcon-3把单步OGD升级为<strong>滑动窗口上的小批量更新</strong>：维护名义大小B的活动窗口I(t)（实际B(t)=|I(t)|≤B），一次对窗口内所有因果对 (x(j), v(j)) 做一步小批量回归（或内积）。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图7：Falcon-3滑动窗口小批量的窗口与目标对齐</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Falcon-3的步长用窗口平均统计归一化：回归族用 μ(B)=λ_max(B⁻¹·Σ x(j)x(j)⊤)（窗口内特征协方差的主特征值，即数据项局部平滑尺度）；内积族Falcon-3A用能量统计 Ē(B)=B⁻¹·Σ‖x(j)‖² 来控制写入量级。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>「有界回看」（bounded rehearsal）由此成为第三个持续学习因子</strong>：窗口大小B限制了模型能回看多远的「最近样例」，本质上是显式控制记忆对远近信息的权重，同时天然兼容分块并行训练。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">一个框架分离四个持续学习因子</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Falcon的核心方法论贡献，是把快速权重模型里纠缠在一起的因素<strong>显式拆开</strong>：
+·<strong>时间对齐（Temporal alignment）</strong>：用前缀对 (ϕ(k(t−1)), v(t)) 而非同一步对：决定快速记忆训练用的信息是否真实可用。
+·<strong>可塑性（Plasticity）</strong>：更新步长 η 与动力学选择（标量/逐列/窗口）。
+·<strong>遗忘（Forgetting）</strong>：衰减因子 α=ηλ 与 γ=1−α 的推导式控制。
+·<strong>有界回看（Bounded rehearsal）</strong>：Falcon-3窗口大小对「最近样例」的记忆范围。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图8：困惑度/下游任务对比</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">统一范式：<strong>无论回归还是内积，所有变体都提供递归、掩码并行、分块并行三种计算形式</strong>（recurrent / masked-parallel / chunk-parallel），并配数值稳定的正衰减再归一化：因此都能用标准训练循环高效地跑到语言模型规模。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">实验验证</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>语言建模（124M-130M，50B token，FineWeb-Edu）</strong>：FineWeb-Edu验证困惑度（Table 1）上<strong>Falcon-1.3综合最强、PPL 17.10</strong>；最强基线Gated DeltaNet 17.32；回归族Falcon-1.3内积族Falcon-1A.3最优（17.40）。下游评测（Table 2）Falcon-1A.2零样本均值最佳（49.30）、Falcon-1.3循环一次性均值最佳（49.54）。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig09.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图9：变长加法外推结果</figcaption></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">消融与变长算术加法</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">消融表明：QK-RMSNorm相对QK-ℓ2提升FineWeb-Edu困惑度；上下文条件化的步长 η（而非 β）在零/一次样本均值上更优：验证了「对齐 + 归一化」的更新能在保持语言质量的同时带来受控算术增益。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>变长算术加法</strong>（受控压力测试隔离因果存储与外推）：训练宽度1–32位、测试33–48位强迫教学，<strong>Falcon-3A.3外推最强、平均准确率87.2</strong>，Falcon-1A.3以85.9次之，均超基线（含RetNet / LightningAttn / Transformer）。在存储与进位传播主导时，「移位+归一化」的更新外推良好。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig10.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图10：Falcon系列在语言建模/算术外推的完整对比</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig11.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图11：额外消融与附录结果</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">关键贡献总结</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>① 统一视角</strong>：把大量快速权重 / DeltaNet / SSM更新规则统一重铸为「在线持续学习（带显式快速记忆目标）」，并指出常见「同步写入」优化的内部目标与「读后写」前缀预测不一致：<strong>标准DeltaNet是同一步版本，Falcon用前缀对齐修正之</strong>。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>② 归一化更新族</strong>：导出Falcon-1/2/3（回归）与1A/2A/3A（内积）的规范化首阶更新，含滑动窗口小批量变体，提供递归/掩码并行/分块并行三种形式，天然兼容chunk-parallel训练。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>③ 分离持续学习因子</strong>：显式分离时间对齐、可塑性、遗忘、有界回看；语言建模保持竞争力，内积族显著改善算术长度外推。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+Falcon给出统一的透镜：递归序列学习的瓶颈不在更新规则本身，而在让规则优化哪个内部目标。把训练对从「同步」改到「前缀对齐」，配合RMSNorm缩放与正衰减归一化，即可在不牺牲语言质量的前提下显著改善算术外推。<br  /><br  />分离时间对齐、可塑性、遗忘与有界回看，让持续学习中可解释的杠杆浮出水面；Falcon-3A.3在长度外推上的87.2分，是这套「规范化快速权重更新竟与chunk-parallel训练兼容」的有力注脚：也顺带把DeltaNet / Linear Attention收进了一个可对比的普适框架。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://www.alphaxiv.org/pdf/2608.27763</span></p>
+</section>

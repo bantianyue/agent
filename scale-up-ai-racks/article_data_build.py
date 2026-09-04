@@ -1,0 +1,222 @@
+# -*- coding: utf-8 -*-
+"""Scale-up AI Racks 编译 build"""
+import json, os, sys
+
+DATA = {
+ "title": "Scale-up AI 基础设施机架的系统级概览（第 1 部分：网络架构）",
+ "lead": [
+  "这篇文章为 AI 机架架构的高速互连提供系统上下文，为 Hot Interconnects 和 Hot Chips 2026 做准备。",
+  "在第 1 部分，我概述网络架构：前端与 Scale-Out——传统云计算的干活主力；为什么 Scale-up——张量并行的海量带宽；网络术语（物理硬件集成层级、交换机 Radix）；Fabric 复杂度的权衡（协同设计挑战、机架架构与信号完整性）。",
+  "计算并行和几个案例研究将在第 2 部分覆盖。这篇文章免费，大体基于 Hot Chips 2025 网站上可以找到完整内容的教程。另外，Hot Interconnects 本周举行，免费且仅限在线。如果你参加，我鼓励你把这篇文章传开，作为理解正在发生什么的参考指南。"
+ ],
+ "summary": [
+  {
+   "key": "核心概念",
+   "body": "Scale-up 域只有一个任务：让多个 GPU 像一个共享内存的巨大虚拟 GPU。延迟 ~100ns vs Scale-out ~1µs。传统 3-tier 前端（TOR/聚合/核心）+ leaf-spine scale-out 之上，新增 scale-up 网络层。"
+  },
+  {
+   "key": "关键数字",
+   "body": "Switch radix 288L 连 36 GPU（每 GPU 8 链路，最高 72 链路连 9 交换机）；GPU-SW 带宽 1.8 TB/s 标准；每 GPU 连 9 个交换机、每个 8 lane。"
+  },
+  {
+   "key": "权衡",
+   "body": "copper 物理限速限长推动光学；规则「能用铜则用铜、必须才用光」。增加交换机数或 radix 都有 shoreline 限制。L10 托盘/L11 机架/L12 集群三级集成。"
+  }
+ ],
+ "sections": [
+  {
+   "type": "h2",
+   "title": "为什么 Bottom-up 更全面",
+   "paras": [
+    "不同于大多数自上而下讲机架系统的人，我采取**自下而上**的方法：先写底层子系统，从芯片级到板级再到系统级。这些包括高速光/电通信、混合信号 IC、电源、先进封装、AI 加速器基础等深度文章。大多数底层技术对局外人是抽象的，因为它们在技术层级深处，不同专业领域的人并不总是互相交流。",
+    "然而，随着机架集成越来越紧密，**设计其中的组件和子系统需要**对跨抽象层级的整个机架架构有工作知识。这包括理解相邻技术领域的**历史背景**和**跨域权衡**，以有效地协同设计。",
+    "如果你读我的深度文章，你会注意到我总是谈权衡，这样你不仅知道架构「是什么」（比如电源 800→48→12→1V），还理解它「为什么」到达那里、以及「为什么不是」别的样子。这就是我认为所有工程师都应拥抱的协同设计工程本质。**我也认为，作为非工程师的投资者，理解工程权衡很重要，这样你能预测风往哪吹、相应地配置资本。**",
+    "我一直在找有工程背景、能深入覆盖这类子系统、把它们在全局中扮演的角色提升的作者。我发现这很有挑战性，因为似乎 AI 基础设施里决定资本流向的写作要么只有宏观、要么技术太深。",
+    "贯穿本文，我链接了几个深度文章，如果你想深入我讨论的话题。一如既往，如果你是专家并发现错误，请联系我，以便我修复。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "前端与 Scale-Out：传统云计算的干活主力",
+   "paras": [
+    "历史上，大多数服务器机架利用**scale-out** 和**前端**网络处理用户与服务器之间的数据流量。",
+    "**前端网络**连接数据中心里所有机架。它负责管理连接外部客户端、企业存储和管理系统到内部计算节点的南北向流量。",
+    "前端网络用**3 层分层网络模型**处理**南北向流量**，类似于邮政系统。当大多数网络流量是南北向（即用户到服务器）时这很好用，比如用户从服务器请求网页。",
+    "前端网络由以下三层组成：",
+    "**机架顶部（TOR）**——数据进入服务器的第一个入口点：数据经过**Tier 1 交换机**，它们直接连到 GPU。",
+    "**聚合（Aggregation）**——多个 TOR 交换机连接的区域枢纽：这些通常位于独立网络配线间或中央配电架。数据通过**Tier 2 交换机**聚合，在跨机架或集群 pod 扩展时连接多个 Tier 1 TOR 交换机。",
+    "**核心（Core）**——在主要网络块之间移动海量数据而不造成瓶颈：它优化最大数据流量吞吐，不运行可能拖慢流量的安全协议。",
+    "前端网络用 Ethernet 或 InfiniBand 交换机移动数据。AI 中使用的几个例子：",
+    "**InfiniBand**——NVIDIA Quantum-X800：最高性能、端到端 800 Gb/s 网络，为大规模 AI 设计。",
+    "**Ethernet**——Broadcom Tomahawk 5：51.2 TBps 高性能数据中心交换机芯片。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig01.png",
+      "caption": "图 1：传统 3-tier 网络架构。来源：D. Vallis《Scaling Fabric Technologies for AI Clusters》Hot Chips 2025"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "从前端到 Scale-Out",
+   "paras": [
+    "现代微服务如 Amazon 和 Netflix 把数据移动转向以东西向（服务器到服务器）为主，这需要高带宽 scale-out 架构。",
+    "**Scale-out 网络**本质是水平扩展——通过高带宽分布式交换 fabric 互连成百上千个独立计算节点来扩展数据中心容量。这样多个计算节点可以在单个工作负载上协同。",
+    "Scale-out 主要用扁平 leaf-spine 拓扑，通过网络接口卡（NIC）连到 GPU。这些 NIC 把 GPU 数据转换成网络数据包，发送到 scale-out 网络交换机。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "为什么 Scale-up：张量并行的海量带宽",
+   "paras": [
+    "AI 计算强烈偏好**并行**来计算海量 MAC 操作。计算并行需要大量数据移动：训练时分布每次反向传播后的更新权重，以及聚合中间结果。这些将在第 2 部分深入讨论。",
+    "Scale-out 中并行计算的问题是**数据移动对延迟高度敏感，GPU 不断彼此「广播」中间数学结果**。Scale-out 里的 SW 协议引入不必要的微秒级数据路由延迟和数据包丢失，让同一集群的 GPU A 和 B 通信。这对延迟敏感的推理工作负载很糟。",
+    "因此，scale-up 作为传统 3-tier 和 scale-out 层级之下的新高带宽网络「层」出现。",
+    "Scale-up 域只有一份工作，而且只有一份：",
+    "**让多个 GPU 像一个共享内存的巨大虚拟 GPU。**"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig02.png",
+      "caption": "图 2：Scale-up 与 Scale-out 网络的关系。来源：D. Vallis《Scaling Fabric Technologies for AI Clusters》Hot Chips 2025"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "Scale-up 延迟与市场术语",
+   "paras": [
+    "Scale-up 交换机**低延迟**，约 ~100 纳秒，相比 scale-out 的 ~1 微秒。没有专门的 scale-up，所有数据会堵住 scale-out 网络、花很长时间完成任务。",
+    "描述 scale-up fabric 技术有很多营销术语。几个例子：NVIDIA NVLink / NVLink Fusion、Celestial AI Photonic Fabric、Broadcom SUE（Scale-up Ethernet）、Ultra Accelerator Link（UALink）。",
+    "由于涉及海量计算并行，大多数新市场参与者和创新技术（如光学和 448Gbps）在 **scale-up 域**优化性能。大多数高带宽通信/计算希望尽可能被包含在 scale-up 域。一个新趋势，Mixture of Experts，因稀疏、不可预测的数据模式和专家分布式也想在 scale-out 域通信，进一步施压 scale-up。",
+    "理解和优化 scale-up 会成就或毁掉一个 AI 集群，因此值得特别关注。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig03.png",
+      "caption": "图 3：通过交换机的延迟。来源：N. Nedovic《Emerging Low-Latency Optical Connectivity》ISSCC 2026"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "网络术语：物理硬件集成层级",
+   "paras": [
+    "现在定义两个重要网络概念。",
+    "在服务器机架系统中，有一个用 L1-L12 命名方案组织服务器制造集成层级各组件的标准化方式。L1-5 指板卡和外箱组装中的层，L6-9 指板卡和组件贴装，L10-12 指系统、机架和集群层。",
+    "在 AI 机架的系统上下文中，我们关心三个最高层级：",
+    "**L10（系统/托盘级）**：包含 GPU 和本地板卡交换机的单个物理机箱或滑架。",
+    "**L11（机架级）**：容纳多个 L10 托盘的完全布线的机架框架。",
+    "**L12（集群/多机架级）**：通过 scale-out 光网络（InfiniBand / RoCE 交换机）跨数据中心地板连接多个 L11 机架。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig04.png",
+      "caption": "图 4：计算托盘中 GPU 阵列的通用示例，全部通过 scale-up 网络连到 switch tray 中的交换机。来源：D. Vallis《Scaling Fabric Technologies for AI Clusters》Hot Chips 2025"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "交换机 Radix",
+   "paras": [
+    "在 switch tray 中，**switch radix** 指集成到单个网络交换机芯片上的物理输入输出端口（或高速链路）总数。在现代 GPU 集群，这个 radix 是 288L 总量，用高密度 SerDes 交换机架构连接 36 个 GPU。每个连接通常有 8 条 lane，这是大多数高速网络接口和布线常用的。",
+    "Switch radix 极其重要，因为它影响系统能处理的并行量、进而影响数据带宽。Switch radix 给网络架构引入许多约束，包括：",
+    "**L1 域跨度**——并行 GPU 的总数。",
+    "**GPU-SW 带宽**——每个 GPU 能处理的 lane 数。1.8 TB/s（224 GB/s 聚合吞吐）是标准，但加更多 lane 可以增加。",
+    "交换机芯片的例子：NVIDIA NVSwitch 4 ASIC（传统 NVLink 5）、NVIDIA Quantum-X CPO Engine（InfiniBand/光子学）、Broadcom Tomahawk Ultra / Scale-Up Ethernet（SUE）ASIC、Baya Systems NeuraScale Fabric Chips。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig05.png",
+      "caption": "图 5：Switch Radix 使能连接多个 GPU。来源：D. Vallis《Scaling Fabric Technologies for AI Clusters》Hot Chips 2025"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "Fabric 复杂度的权衡",
+   "paras": [
+    "有几个基本约束决定能连接 GPU 的交换机数量。",
+    "Switch radix 支配域大小和可连接的 GPU 数。这里我们注意到 36 个 GPU、每个 8 lane、连到 288L 交换机。每个 GPU 最多 72 lane 连到 9 个交换机。",
+    "多交换机是因为 radix 跨度和 SerDes 的 shoreline 限制。你不能构建一个 2,592 端口连到每个 GPU 的单一 mega-switch ASIC。",
+    "用这个配置扩展性能有几个权衡，选项包括：",
+    "**增加交换机数量**——可以增加带宽，但加太多托盘会挤占计算托盘的数量。",
+    "**增加 switch radix**——可以支持更多 GPU，但这需要更多 SerDes，受 **shoreline 限制**约束。",
+    "结果，scale-up 集群限制交换机数量，接受在多少 GPU 同时互相通信上有带宽限制。",
+    "此外，scale-up 集群里因跨域交互还有几个协同设计挑战，包括：",
+    "**机械**——机架重量、可制造性、良率、多少 lane 能物理退出交换机和计算滑架。",
+    "**热/冷却**——更吃电的 GPU 挤在更紧的区域，需要把热移出机架，液冷需要失效保护机制。",
+    "**电源**——母线尺寸、安全。",
+    "**信号完整性**——受机械形式和线缆长度影响。长信号路径需要 retimer，增加额外电源、机械和热考虑。",
+    "为进一步增加并行，有几个方法用 L1 和 L2 交换机扩展多个「域」。由于每个 scale-up 交换机有 288L，并行四个 scale-up 域会**爆炸式**增加处理每个可能 GPU-GPU 组合所需的交换机复杂度。有几种替代拓扑如 L1.5，更多信息在幻灯片里。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig06.png",
+      "caption": "图 6：多交换机连接多 GPU、改善数据通信。来源：D. Vallis《Scaling Fabric Technologies for AI Clusters》Hot Chips 2025"
+     },
+     {
+      "src": "fig07.png",
+      "caption": "图 7：扩展 switch 和 compute 托盘的权衡。来源：D. Vallis《Scaling Fabric Technologies for AI Clusters》Hot Chips 2025"
+     },
+     {
+      "src": "fig08.png",
+      "caption": "图 8：连接多个 Scale-up 域。来源：D. Vallis《Scaling Fabric Technologies for AI Clusters》Hot Chips 2025"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "机架架构与信号完整性",
+   "paras": [
+    "所有这些交换机都必须放进机架，同时容纳交换和计算。",
+    "在传统 web 服务器机架，交换机位于机架顶部（ToR）。为最小化 AI 数据中心机架的铜缆距离，第 19-26 排预留给交换机，其余上下方放计算和电源/外设托盘。随着数据速率增加、铜缆在更长距离面临几个挑战，这改善信号完整性。",
+    "正如许多人注意到的，铜缆正到达物理速度和长度极限，这让光学成为高速低延迟互连如此有吸引力的选项。",
+    "设计 scale-up 网络时，经验法则是「能用铜则用铜，必须才用光」。可插拔光收发器（OSFP / QSFP-DD）用于 scale-up 昂贵且耗电，一般最小化使用，尽管投资者渴望更多。",
+    "随着数据速率增加，在 PCB 内部用铜缆越来越有挑战性，因此共封装光学（co-packaged optics）正成为潜在扩展方案。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig09.png",
+      "caption": "图 9：典型机架架构——switch tray 夹在 compute tray 之间，最小化最坏情况铜路由距离。来源：D. Vallis《Scaling Fabric Technologies for AI Clusters》Hot Chips 2025"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "结论",
+   "paras": [
+    "Scale-up 在 AI 计算性能中至关重要。一切——从数据带宽、延迟、机械、热——都是 AI 性能的因素。",
+    "在第 2 部分，我将讨论四种并行形式，包括 Mixture-of-Experts，以及几个机架和模型案例。敬请期待。"
+   ],
+   "fig_after": {}
+  }
+ ],
+ "conclusion": [
+  "这篇文章把 AI 机架的网络架构讲透了：传统 3-tier 前端 + leaf-spine scale-out 之上，诞生了只有一份工作的 scale-up 域——让多个 GPU 像一个共享内存的巨大虚拟 GPU（延迟 ~100ns vs scale-out ~1µs）。",
+  "最值钱的是它的**权衡框架**：switch radix 288L 连 36 GPU 但受 shoreline 限制建不了 2592 端口 mega-switch；加交换机数挤占 compute 托盘、加 radix 受 SerDes 限制；铜缆物理限速限长推动光学和 CPO；机械/热/电源/信号完整性跨域协同设计。「能用铜则用铜，必须才用光」——这是理解为什么 Scale-up 网络长这样的底层逻辑。"
+ ],
+ "reference_url": "https://www.siliconcodesign.com/p/a-system-level-overview-of-scale"
+}
+
+with open("article_data.json", "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=1)
+print(f"✅ 写入 article_data.json")

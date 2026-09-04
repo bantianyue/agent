@@ -1,0 +1,204 @@
+# -*- coding: utf-8 -*-
+"""torchtitan parallelize pipeline 格式保留完整版 build"""
+import json
+
+DATA = {
+ "title": "torchtitan 并行化管线与模型特定实现（完整版）",
+ "lead": [
+  "这个 DeepWiki 页面记录 torchtitan 使用的完整并行化管线，展示模型从原始 nn.Module 变换成完全并行化、优化好的可训练模块所经过的连续阶段（sequential stages）。它解释各阶段的顺序要求、每阶段实现细节、以及不同模型架构（Llama3、DeepSeek-V3、Qwen3、GPT-OSS）如何应用这些变换。按原文 100% 保留格式编译。"
+ ],
+ "summary": [
+  {
+   "key": "目的与严格顺序",
+   "body": "把原始 nn.Module 变换成完全并行化训练模块；确保 TP、CP、AC、FSDP 无功能冲突组合。顺序关键：后阶段依赖前阶段（权重分片/模块包装）。"
+  },
+  {
+   "key": "五阶段管线",
+   "body": "① TP/CP（full_dtensor 直接 parallelize 否则 apply_cp_to_forward + inner_attention）② Async TP（maybe_enable_async_tp，配 torch.compile）③ AC（apply_ac，TP/CP 后 compile 前，full/selective）④ torch.compile（TransformerBlock 级）⑤ FSDP2（apply_fsdp_to_decoder）。"
+  },
+  {
+   "key": "模型差异与配置",
+   "body": "各模型 parallelize_<model> 入口（标准化签名）；GPT-OSS/Llama 标准 TP 计划，Qwen3 skip_dp 供纯推理，HF 后端 apply_non_moe_tp。配置参数（spmd_backend、enable_async_tensor_parallel 等）直接控制管线。"
+  }
+ ],
+ "sections": [
+  {
+   "type": "h2",
+   "title": "目的与范围",
+   "paras": [
+    "本页记录 torchtitan 使用的完整并行化管线，展示模型从原始 nn.Module 变换成完全并行化、优化、可训练模块所经过的连续阶段。它解释各阶段的顺序要求、每阶段的实现细节、以及不同模型架构（Llama3、DeepSeek-V3、Qwen3、GPT-OSS）如何应用这些变换。",
+    "管线确保诸如张量并行（Tensor Parallelism, TP）、上下文并行（Context Parallelism, CP）、激活检查点（Activation Checkpointing, AC）和全分片数据并行（Fully Sharded Data Parallel, FSDP）等复杂分布式策略被正确组合、无功能冲突（without functional conflicts）。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "并行化管线总览",
+   "paras": [
+    "torchtitan 里每个模型都遵循严格顺序的并行化管线。顺序是关键的，因为后阶段依赖前阶段应用的变换（如权重分片或模块包装）。",
+    "**标准管线顺序（The Standard Pipeline Order）**",
+    "标准管线顺序的关键位置是 torch.compile（见下面第 4 阶段细节）。",
+    "**来源（Sources）**：torchtitan/models/llama3/parallelize.py 27-104、torchtitan/models/gpt_oss/parallelize.py 27-108、torchtitan/models/deepseek_v3/parallelize.py 28-112、torchtitan/models/qwen3/parallelize.py 31-123。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "主要并行化入口点（Main Parallelization Entry Points）",
+   "paras": [
+    "每个模型族提供一个 parallelize_<model> 函数来编排管线。这些函数在模型物化（materialization）后由 trainer 调用。",
+    "**入口点函数对照表**："
+   ],
+   "fig_after": {},
+   "table": {
+    "head": [
+     "Model",
+     "Entry Point Function",
+     "File Path"
+    ],
+    "rows": [
+     [
+      "Llama 3",
+      "parallelize_llama",
+      "llama3/parallelize.py 27"
+     ],
+     [
+      "DeepSeek-V3",
+      "parallelize_deepseekv3",
+      "deepseek_v3/parallelize.py 28"
+     ],
+     [
+      "Qwen 3",
+      "parallelize_qwen3",
+      "qwen3/parallelize.py 31"
+     ],
+     [
+      "GPT-OSS",
+      "parallelize_gptoss",
+      "gpt_oss/parallelize.py 27"
+     ],
+     [
+      "HF Transformers",
+      "parallelize_hf_transformers",
+      "experiments/transformers_modeling_backend/parallelize.py 39"
+     ]
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "标准化签名（Standardized Signature）",
+   "paras": [
+    "大多数实现遵循此签名来消耗全局配置（consume the global configuration）：",
+    "即 parallelize_<model>(model, parallel_dims, model_config, training_config) 形式的标准化签名。",
+    "**来源**：llama3/parallelize.py 27-36、gpt_oss/parallelize.py 27-36、qwen3/parallelize.py 31-41。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "管线各阶段详解（Pipeline Stage Details）",
+   "paras": [
+    "**1. 张量与上下文并行（Tensor and Context Parallelism）**",
+    "若后端选择 full_dtensor，则直接调用 model.parallelize(parallel_dims)（来源 gpt_oss/parallelize.py 50）。否则：",
+    "先应用 apply_cp_to_forward 处理 inner_attention 后备（fallback）环境，再调用 model.parallelize(parallel_dims)。",
+    "**2. Async TP（Async TP）**",
+    "Async TP 允许把一个线性层的 all-reduce 与下一个线性层的计算重叠。通过 maybe_enable_async_tp 启用，通常只有在 torch.compile 同时激活时才有效（来源 llama3/parallelize.py 63-64、config/configs.py 136-137）。",
+    "**3. 激活检查点（Activation Checkpointing, AC）**",
+    "AC 用 apply_ac 应用。它必须发生在 TP/CP 包装**之后**、torch.compile**之前**。支持模式：full（全量）、selective（选择性）。",
+    "**4. torch.compile**",
+    "编译应用在 TransformerBlock 级，而非整个模型。这利用模型的重复结构改善编译时间（来源 distributed/compile.py 35-39）。相关：FlexAttention、aot_eager。",
+    "**5. 数据并行（Data Parallelism, FSDP2）**",
+    "apply_fsdp_to_decoder 是最后一步。它处理：dp_replicate、fsdp 参数分片、param_dtype、reduce_dtype，由 TrainingConfig 控制。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "模型特定实现（Model-Specific Implementations）",
+   "paras": [
+    "虽然管线顺序严格，但具体层的分片方式依架构而异。",
+    "**GPT-OSS 和 Llama（GPT-OSS and Llama）**",
+    "这些模型用标准 TP 计划：tok_embeddings 行式分片（row-wise）、output 列式分片（column-wise）。TransformerBlock 内部切成 ColumnParallel（列并行，FFN gate/up、Attn QKV）和 RowParallel（行并行，FFN down、Attn out）。",
+    "**Qwen 3（Qwen 3）**",
+    "Qwen 3 的 parallelize_qwen3 里有 skip_dp 标志，允许管线在 AC/Compile 之后停下，用于纯推理（inference-only）用例——这时 FSDP hooks 可能与 torch.inference_mode() 冲突、须避开（来源 qwen3/parallelize.py 86-87）。",
+    "**HF Transformers（实验性，HF Transformers (Experimental)）**",
+    "transformers_modeling_backend 提供通用 apply_non_moe_tp 函数，把标准 HF 层名（如 q_proj、k_proj、v_proj）映射到 TP 分片风格（来源 experiments/transformers_modeling_backend/parallelize.py 111-150）。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "概念到代码：技术映射（Technical Mapping: Concept to Code）",
+   "paras": [
+    "下面这些图桥接高层并行化概念与 torchtitan 仓库中的具体代码实体（code entities）。",
+    "**并行化逻辑流（Parallelization Logic Flow）**",
+    "该图展示 ParallelismConfig 和 ParallelDims 如何驱动特定分布式函数的执行。来源：config/configs.py 85-156、llama3/parallelize.py 27-104、distributed/compile.py 35-40。",
+    "**TP 分片计划映射（TP Sharding Plan Mapping）**",
+    "该图展示模型层如何与 torch.distributed.tensor.parallel 风格关联。来源：experiments/transformers_modeling_backend/parallelize.py 111-150、llama3/parallelize.py 61-62。"
+   ],
+   "fig_after": {}
+  },
+  {
+   "type": "h2",
+   "title": "配置总结（Configuration Summary）",
+   "paras": [
+    "来自 ParallelismConfig 和 TrainingConfig 的以下配置参数直接控制管线行为。",
+    "**参数与管线影响对照表**："
+   ],
+   "fig_after": {},
+   "table": {
+    "head": [
+     "Parameter",
+     "Pipeline Impact",
+     "Code Reference"
+    ],
+    "rows": [
+     [
+      "spmd_backend",
+      "在 default 与 full_dtensor 逻辑间切换",
+      "configs.py 142-149"
+     ],
+     [
+      "enable_async_tensor_parallel",
+      "触发 maybe_enable_async_tp",
+      "configs.py 136-137"
+     ],
+     [
+      "mixed_precision_param",
+      "设置 FSDP 的 param_dtype",
+      "configs.py 58-64"
+     ],
+     [
+      "fsdp_reshard_after_forward",
+      "控制 FSDP 中内存 vs 通信的权衡",
+      "configs.py 109-122"
+     ],
+     [
+      "enable_fsdp_symm_mem",
+      "启用 FSDP2 硬件特定优化",
+      "configs.py 124-128"
+     ]
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "来源与模块索引（Sources）",
+   "paras": [
+    "相关配置与实现索引：config/configs.py 28-156、gpt_oss/parallelize.py 93-106。",
+    "**完整 inline 代码实体标识符**：nn.Module、parallelize_<model>（parallelize_llama、parallelize_deepseekv3、parallelize_qwen3、parallelize_gptoss、parallelize_hf_transformers）、full_dtensor、model.parallelize、parallel_dims、apply_cp_to_forward、inner_attention、maybe_enable_async_tp、apply_ac、TransformerBlock、apply_fsdp_to_decoder、dp_replicate、fsdp、param_dtype、reduce_dtype、TrainingConfig、tok_embeddings、output、ColumnParallel、RowParallel、skip_dp、torch.inference_mode()、transformers_modeling_backend、apply_non_moe_tp、q_proj、k_proj、v_proj、torch.distributed.tensor.parallel、ParallelismConfig、ParallelDims、spmd_backend、default、full_dtensor、enable_async_tensor_parallel、mixed_precision_param、fsdp_reshard_after_forward、enable_fsdp_symm_mem。"
+   ],
+   "fig_after": {}
+  }
+ ],
+ "conclusion": [
+  "torchtitan 并行化页面完整读完，核心是不可违反的管线顺序：TP/CP → Async TP → AC → torch.compile → FSDP2，后阶段依赖前阶段。各阶段细节：full_dtensor 直接 parallelize（否则 apply_cp_to_forward + inner_attention 后备）、async TP 配合 compile、AC 卡在 TP/CP 后 compile 前、compile 在 TransformerBlock 级（重复结构提速）、FSDP2 收尾（dp_replicate/param_dtype/reduce_dtype 由 TrainingConfig 控）。",
+  "各模型共享管线但分片不同：GPT-OSS/Llama 标准 TP 计划（tok_embeddings 行切/output 列切、FFN gate-up+Attn QKV 列并行、FFN down+Attn out 行并行）；Qwen3 skip_dp 专为纯推理（避开 FSDP hooks 与 torch.inference_mode() 冲突）；HF 后端 apply_non_moe_tp 把 q_proj/k_proj/v_proj 映射到分片。配置参数（spmd_backend、enable_async_tensor_parallel、mixed_precision_param、fsdp_reshard_after_forward、enable_fsdp_symm_mem）直接控制管线行为。对用 torchtitan 训/跑多模型的人，这是最全的并行化落地参考。"
+ ],
+ "reference_url": "https://deepwiki.com/pytorch/torchtitan/4.8-parallelization-pipeline-and-model-specific-implementation"
+}
+
+with open("article_data.json", "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=1)
+print(f"✅ 写入 article_data.json")

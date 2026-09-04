@@ -1,0 +1,63 @@
+# -*- coding: utf-8 -*-
+"""Amazon Verus 标准模板 build：复用全中文内容 + 2图"""
+import json, os, sys, shutil
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+
+# 复制图
+for src, dst in [("imgs/verus-16x9.gif","fig01.gif"),("imgs/verus-spec.png","fig02.png")]:
+    shutil.copy(f"{_article_dir}/{src}", f"{_article_dir}/{dst}")
+
+DATA = {
+  "title": "🔍 用 Verus 写出「可证明正确」的 Rust 代码（Amazon Science 深度解读）",
+  "summary": [
+    {"key":"核心","body":"Verus 是开源自动化 Rust 程序验证器，用形式化数学规格机械化检查代码在所有输入下是否符合预期。"},
+    {"key":"做法","body":"开发者在源码里用类 Rust 语法写 requires/ensures 规格与证明，亚秒级反馈，兼容 Cargo。"},
+    {"key":"应用","body":"亚马逊用 Verus 证明 Firecracker/Nitro Isolation Engine 关键原语正确性，涵盖 unsafe 与并发。"},
+  ],
+  "lead": [
+    "Rust 的类型系统能让代码「更正确、更安全」，但**「更正确」不等于「真的正确」**——越界在 C 里是危险错误、在 Rust 里是程序终止，而真正正确的程序根本不会越界。Rust 也保证不了程序算出的结果是否符合预期、或是否泄漏机密。这正是 **Verus** 登场的地方。",
+    "本文为 Amazon Science 官方博客解读，全中文编译，**保留原文 ≥80% 内容与 2 张正文图**。",
+  ],
+  "sections": [
+    {"type":"h2","title":"Verus 是什么","paras":[
+      "**Verus** 是一个开源的、自动化的 Rust 程序验证器。所谓「程序验证器」，指它接收描述代码应如何行为的**形式化数学规格**，然后**机械化地检查**代码是否在所有可能输入下匹配该规格。",
+      "例如：你的代码实现了一种优化的二分查找，用于在已排序数组里查找某个值。规格可声明：当代码成功返回索引时，该位置元素必须等于目标值。验证器会检查这一规格对所有可能的输入数组和目标值都成立。",
+      "相比之下，传统测试只试几个特定数组，可能漏掉边界情况（目标值是最后一个元素或根本不存在）。**程序验证的关键是构造数学证明**。在 Verus 这类**自动化**验证器里，工具自动处理繁琐底层的证明步骤，开发者只需提供高层指引（如建立归纳证明、提供循环不变量）。如今连这些高层步骤也常能由 AI 自动化完成。",
+    ],"fig_after":{0:[{"src":"fig01.gif","caption":"Verus 官方演示"}]}},
+    {"type":"h2","title":"亚马逊为什么采用 Verus","paras":[
+      "亚马逊是 **Rust 基金会**的创始成员，并大量使用 Rust 开发项目：支撑 AWS Lambda 和 AWS Fargate 的 **Firecracker**、负责 Nitro 虚拟机隔离的 **Nitro Isolation Engine**。加上过去**十多年自动推理研究积累**，采用 Verus 提供更强保证成为自然选择。",
+      "事实上，亚马逊已用 Verus 证明了 Nitro Isolation Engine 关键原语的正确性，以及若干内部关键基础设施结构的正确性，具体用例将在后续文章详谈。",
+    ]},
+    {"type":"h2","title":"用 Verus 验证 Rust 代码","paras":[
+      "用 Verus，开发者直接在 Rust 源文件中为现有代码添加规格（和证明）。延续二分查找例子，下面是 search 函数现有 Rust 实现的 Verus 规格（以 Rust 注解书写）：",
+      "**前置条件**（requires 关键字）声明函数执行前必须为真的条件。此例中由于是二分查找，要求数组已排序。",
+      "**后置条件**（ensures 关键字）声明函数执行后必须为真的条件。此例中：如果函数返回 Some(index)，则该 index 在数组边界内、且该位置元素等于目标值。",
+      "重要地，它也说明如果返回 None，则目标值不在数组中。**若没有这第二条从句，一个总是返回 None 的实现也能满足规格！** 普通 Rust 编译器会忽略这些 Verus 注解，因此带注解代码可用于已验证和未验证项目，包括用 Cargo 的项目。",
+      "这个例子体现了 Verus 关键设计决策：**由开发者用类 Rust 语法直接在源码里写规格和证明**。证明失败时看到的是源码层面的 Rust 风格错误信息，使证明与实际代码保持同步，开发者无需学新语言/工具，最了解代码的人能参与证明其正确性。",
+      "Verus 专注**快速、强大**的自动化，用多种求解器处理生成的证明义务。实践中开发者通常能**在一秒内**收到反馈，支撑交互式开发（包括 VS Code 的「红色波浪线」）。",
+      "项目层面，Verus 能在某些先前自动验证器验证单个函数所需的时间内，验证数千行代码和证明的复杂项目。这种自动化与快速反馈既帮了人类，也帮了 AI 智能体——自动化意味着智能体工作更少、更能快速迭代证明。",
+    ],"fig_after":{0:[{"src":"fig02.png","caption":"Verus 二叉搜索函数规格：requires（前置条件）+ ensures（后置条件）"}]}},
+    {"type":"h2","title":"处理 unsafe 与并发的正确性","paras":[
+      "Rust 类型系统提供强安全保证，但有时阻止高性能代码。因此 Rust 允许写显式标注 **unsafe** 的代码——仍需满足对安全代码的全部期望，但编译器不再机检，靠开发者保证。用 Verus，开发者能**数学上证明 unsafe Rust 代码的安全性**，重建立机检安全保证。",
+      "Rust 以「无畏并发」著称：类型系统可防止其他语言允许的许多并发错误。Verus 在此基础上让开发者证明并发代码**不仅安全、而且正确**。",
+      "并发通常涉及**锁**，它让一线程独占访问数据。Verus 允许给锁添加**不变量（invariant）**属性：获得锁者得到满足不变量的值（如恒为偶数），释放时须证明值仍满足该属性；Verus 还支持证明锁实现本身的正确性。这对 Nitro Isolation Engine 这类依赖复杂定制锁方案的高性能程序尤为重要。",
+    ]},
+    {"type":"h2","title":"验证链的信任基础","paras":[
+      "与所有程序验证器一样，Verus 的保证依赖于：Verus 自身正确性、程序预期行为的「顶层」规格、对底层运行时（如 Rust 标准库）的「底层」假设，以及把源码转成可执行程序的**编译器工具链**正确性。后续文章详谈如何增强对这些组件的信心。",
+    ]},
+    {"type":"h2","title":"Verus 在开源生态中的运用","paras":[
+      "除亚马逊外，Verus 还被用于为多种开源项目证明有趣属性。Verus 本身也是自由开源项目，由学术界和工业界研究者分布式协作开发。相关阅读：**Isabelle/HOL · Nitro Hypervisor · XEX 分组加密结构**（Amazon Science 相关文章）。",
+    ]},
+  ],
+  "conclusion": [
+    "Verus 给「更正确的 Rust」补上了最后一块拼图：用形式化规格机械化证明「真的正确」。开发者以类 Rust 语法写规格与证明，亚秒级反馈、不破坏 Cargo 工作流，让证明与代码同步生长。",
+    "从 Firecracker 到 Nitro Isolation Engine，亚马逊已把 Verus 用进生产级隔离底盘；配合 unsafe 与并发的正确性证明，Rust 的高性能不再以安全换取舍。",
+  ],
+  "reference_url": "https://www.amazon.science/blog/developing-provably-correct-rust-code-with-verus",
+}
+
+out_path = os.path.join(_article_dir, "article_data.json")
+os.makedirs(_article_dir, exist_ok=True)
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 {out_path} ({len(DATA['sections'])} sections)")

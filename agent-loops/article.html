@@ -1,0 +1,145 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">实验</strong>：两个agent（Claude Opus 4.5 + Codex/GPT-5.2）各用规划模式，30分钟内都做出了能跑通玩具数据的BPE tokenizer训练器；但都没能撑过完整生产数据集。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">循环</strong>：关键不是单次零样本能力而是「循环」：跑真实数据→撞墙→报症状→让agent诊断修复→再跑。Claude Opus 4.5经过多轮迭代最终跑完全部生产配置（几万亿tokens，单机数天），通过外部验证。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">两个教训</strong>：①为多领域专家指定目标：spec写结果和约束而非机制（短spec）；②对真实世界的约束验证：用外部harness（tiktoken/HF tokenizers）而非agent自己的测试。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">2025年底，我们做了一个实验来回答一个问题：「编码agent能否靠自己的力量从零解决一个生产级问题？」</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为此，我们用当时公开可用的最强编码模型驱动两个agent，给它们一个真实问题和真实截止日期。这个实验的产物是一个叫toktoktok的tokenizer训练器，现在已在GitHub上开源。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在这篇文章中，我们分享关于设计有效循环（loop）的所学：让agent能自主解决生产级问题：如何为多领域专家指定目标，以及如何搭建验证基础设施。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么测试自主性需要一个真实目标</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">作为我们关于词表大小对边缘LLM影响研究的一部分，我们需要一个字节对编码（BPE）tokenizer训练器，能在单台机器上跑几万亿tokens。但tokenizer训练领域很薄：sentencepiece为非BPE tokenizer优化且慢，Hugging Face的tokenizers在我们的语料上内存不足，tiktoken则完全没有训练能力。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">所以我们需要的正是<strong>构建一个生产级BPE tokenizer训练器</strong>。从使用现有库的经验，我们还知道<strong>内存大小才是真正的瓶颈</strong>，而且它们缺了我们需要的两个特性：从现有tokenizer的热启动（词表扩展）和按语言的词表预算。这给了我们一个具体任务、真实截止日期，以及回答「编码agent是否足够可靠、能自主解决任务」的有效方式，因为它满足以下标准：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>生产级。</strong> agent常见的自主解决问题方式回答不了这个问题。首先，它们常被用于原型设计，从不要求达到生产标准。其次，它们常重新实现别的语言里已存在的东西，比如「把SQLite移植到Rust」或「用Zig写个C编译器」：这是对模型预训练中很可能见过的内容的翻译。与两者都不同，我们的目标明确是上线到生产，而且因为BPE tokenizer训练足够新、公开参考实现很少，它成了理想的「测试分布」问题样本。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>多领域专长。</strong> 在Liquid AI，我们的专家深但各在一个领域。我们的ML研究员能从记忆里告诉你为什么OpenAI的cl100k给每个三位数保留rank，但他们从没写过一行Rust。我们的Rust工程师恰恰擅长写这种内存感知、多线程的系统代码，但他们从没训练过tokenizer。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这是两个不相交的人群，谁也无法独自解决这个问题。两种人类变通方案都有损：要么一人先学另一人的一半，要么我们按协作来配人、为协调开销买单。这就是我们把agent指向的缺口：「<strong>它能否覆盖我们任何一个工程师都不具备的专业跨度？</strong>」</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>外部可验证。</strong> 产物必须能在tiktoken和Hugging Face tokenizers中加载。由于与第三方软件的这种互操作性，工作可以由agent无法修改的代码检查。成功不是自报的，而是两个第三方库要么产生正确的token、要么不产生。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>虽然[必须构建的细节](https://github.com/Liquid4All/toktoktok)本身很有意思，但本文重要的是：一个真实生产级、对我们的单领域专家难、且外部可验证的任务，是回答「agent能否在没有人类监督下完成工作」的唯一诚实方式。</strong></p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">搭建实验</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对这个实验，我们选择Claude Opus 4.5和Codex with GPT-5.2：2025年底两个最强的公开可用编码模型：作为编码agent，让两者都在规划模式下工作。在任一agent写一行代码之前，我们在它周围建立了两样东西：一个瞄准的目标，以及一个验证它是否达到目标的方式。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1：实验设置：围绕agent建立目标（AGENTS.md spec）与验证（外部harness）。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>目标</strong>在规格文件里描述。这是一个由操作者写就的单一AGENTS.md / CLAUDE.md文档，描述结果及其约束，而非实现：主要架构约束是内存。设计把复杂度预算花在内存上，因此远超RAM的语料也能保持相当代表性。计算和I/O是次要的，用直接的方式处理：系统级编程语言（Rust）和多线程应该足够。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">验证：agent无法影响的两种东西</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">为<strong>验证</strong>agent是否达到指定目标，我们给了它两样它无法影响的东西：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>生产数据</strong>：我们给agent沙箱访问我们的生产训练数据集，以及一台能处理它的机器：具体是AMD EPYC 9755，128核、256线程、2 TB内存。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>外部验证harness</strong>：训练出的词表必须能被tiktoken和Hugging Face tokenizers加载，并检查编码和解码往返、以及两者之间的ID级一致：跨多种语言、数字、货币格式、制表符、CRLF换行符和源代码。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">有了这些组件，agent就能朝着指定目标工作了。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">运行时的实际发生</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们用两个编码agent运行实验。操作者从外部监控，只读harness、从不读一行代码。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">两者都零样本做出了玩具训练器</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>两个agent都在30分钟内产出了一个可工作的训练器。</strong>它们解析配置、遍历语料、应用硬编码的merges、运行BPE训练，并发出一个通过自己单元测试的有效 .tiktoken文件。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>两者都能在几兆字节上成功训练玩具tokenizer。</strong>产物在tiktoken中加载。所有测试通过。如果我们在这一点停止评估，结论会是两个运行都成功。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">没有循环，两者都无法扩展到生产</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">然而，两个训练器都没能撑过完整生产数据集。第一次运行中，每个阶段的每个单元测试都通过了：因为几兆字节的干净文本不会触发以下任何一项：</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">必须发现的问题表</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">然后，我们让agent对着真实数据循环：执行、撞墙、报告症状、让agent诊断修复、再运行。</p>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">必须发现的</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">它如何宣告自己</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">什么抓住了它</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">修复工作量</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">文件编码。Parquet对同一逻辑列允许多种编码。</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">测试中读得好的文件在语料里被静默错误处理</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">真实语料文件</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">数小时</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">内存感知。逐文档的Vec开销吞没负载</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">大约目标语料1% 处内存不足</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">全规模运行</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">两到三天：chunk批处理、哨兵、多段迭代</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">不正确的并行化。并行化关键路径的一部分让其余保持串行</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">每个核都忙，吞吐仍不可接受</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">全规模运行</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">一到两天</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">预分词速度。\s+(?!\S) 迫使回溯正则引擎</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">分析器显示预分词主导；对抗性空白变成二次方</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">全规模运行</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">数小时，加一个正确性判断</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Rank排序。tiktoken从rank顺序推导merge顺序，所以rank必须连续</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">词表无怨言地加载，编码却与预期不同</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">外部harness</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">数小时</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">重复merges。训练出的merge可能重复现有token并折叠词表</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">词表少N个，每个后面的rank都移位</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">外部harness</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">数小时</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">数字编码。Rust的regex crate把 {1,3}+ 重新解析为 ({1,3})+</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">tokenizers和tiktoken在除了数字外的一切上一致</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">外部harness</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">一行</td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">循环中的迭代</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">经过五次以上迭代、进展甚微，我们停止了Codex/GPT-5.2轨道：它仍在训练吞吐上挣扎。那是个资源配置决定：一个操作者、真实截止日期，而到那时Claude Opus 4.5轨道在相同轮数后走得更远。我们的判断是Claude的第一版起点更好：比GPT-5.2更可靠地抓住了规格的细微之处和约束背后的意图。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2：关闭循环：agent对着真实数据执行→撞墙→诊断→修复→再运行，直到收敛。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Claude Opus 4.5又经过几次迭代关掉了剩余问题，产出了一个能运行完整生产配置的训练器：几万亿tokens的多语言和代码数据、多阶段、单机、数天完成。输出干净地通过了外部harness。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么循环是必要的</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们运行这个实验是为了回答「编码agent能否靠自己的力量从零解决生产级问题？」。把「两个agent都没能零样本做到」读作一个关于模型能力的故事很诱人，但这是错误的结论。按我们开头设定的标准，<strong>实验成功了</strong>。然而让它成功的不是任何一次巧妙的回合，而是循环。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">仓库里的两千行不是零样本响应的产物，而是迭代过程的残迹。几乎每一行不显然的代码，一旦你知道它需要写就很容易写；昂贵的是知道它需要写。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>这意味着agent能否在没有人类监督的情况下成功达成目标，取决于拥有一个对真实环境约束收敛的迭代循环。这允许agent迭代地发现并体验真实世界的凌乱。</strong></p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">从运行自主循环中学到的教训</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>从这个实验我们学到编码agent能靠循环自主解决任务，但更重要的是，我们学到两个关于设计有效循环的宝贵教训，它们今天已成为我们工程团队的日常实践。</strong></p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为多领域专家指定目标</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">从实验我们学到，编码agent是多领域专家，覆盖我们任何工程师都不具备的专业跨度。原来它知道OpenAI的cl100k正则，也知道Rust的rayon。我们能配到这个问题上的没人两者都懂。这改变了我们指定目标的方式，因为感觉更像和另一个团队的、碰巧也懂你团队材料的同事交谈。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：为多领域专家指定目标：spec写结果和约束而非机制。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">考虑把这个问题交给一个没有tokenizer背景的强软件工程师实际需要什么。显而易见的答案是给他们写一份详细spec。这是专业知识迁移的经典困境：spec写太短，工程师必须以慢方式发现全部内容。写到足够长、真正可执行，你就写了伪代码：到那时你自己已经需要那份领域知识，几乎可以自己做这份工作了。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">LLM不在这个困境里，因为它带着背景知识到达。这改变了spec是什么。我们的是短的。它陈述结果和约束，而非机制。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">拿我们spec里的一个真实例子：「在训练开始前为所有两位数和三位数数字预留词表」。对没有背景的工程师，这是一个任意要求。他们可以照字面实现它却仍然做错，因为这个句子不携带自己的动机。它关乎给模型一致的数值表示，让算术不依赖哪些数字对恰好在这份语料里频繁：想想GPT-2的tokenizer，由于训练数据频率它有一个独特的2019 token但没有2029 token。不知道这一点，他们无法分辨指令的哪些部分是关键的、它属于流水线的哪个位置、或者它对自己的设计还暗示了什么。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">对真实世界的约束验证</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们的操作者从没读一行产出的代码。这之所以可接受，只因为成功标准是agent无法操纵的东西。我们在循环设计中看到的一个常见错误是弱验证：对着玩具规模数据跑，或对agent的影响开放，比如让它编辑自己的单元测试。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">主要的教训是设计一个对现实约束收敛的循环，包含以下组件：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">1.<strong>对规模化的真实生产数据迭代。</strong> 重要的失败在测试套件里是不可见的，只能在完整规模的生产数据里发现。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">2.<strong>用外部harness验证。</strong> 这才是让自主可接受的东西。操作者从不读代码，那之所以可容忍，只因为正确性由tiktoken和Hugging Face tokenizers定义：agent没有写也无法影响的软件。如果我们接受它自己的测试套件作为证据，我们会有两个通过自己测试、却安静地产生不同词表的实现。把问题结构化，让第三方能评判产物。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">今天已成常规，以及展望</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这些是我们2025年底运行的实验的结果和教训：是的，编码agent能靠自己的力量从零解决生产级问题、无需任何人类监督：但只有当它们在循环里运行时。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们学到的教训今天已成为我们工程团队的日常实践。半年过去，指定目标是我们最花心思的部分，而用真实数据和外部验证构建循环已成为标准实践。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">今天我们运行的循环远超像tokenizer训练器这样的一次性构建：它有清晰、可验证、循环向其收敛的最终目标。我们现在运行的很多循环反而是开放式的，朝着没有唯一正确答案的目标爬山：调内核、盯持续集成、分流进来的pull request、或扫描生产日志找异常。每一个里，我们检查的是指标而不是代码。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">今天的模型明显更好，但让这成为常规的是它们已经可靠到能把整个循环交给它们。<strong>如果这能泛化，它对ML和软件工程如何被完成的方式改变，将超过任何原始编码能力的变化。</strong></p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">可用性</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">toktoktok在Apache 2.0下开源，位于https://github.com/Liquid4All/toktoktok。它能从零训练tiktoken兼容的BPE词表或扩展现有词表，读取 .txt和 .parquet，通过多阶段训练跨语言和领域分配词表预算，并保持在你声明的内存预算内。Hugging Face的转换脚本双向工作，并在写任何东西之前验证等价性。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">它的每一行都由agent写出，没有一行被我们读过。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">致谢与引用</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">由Mathias Lechner撰写，Leonie Monigatti贡献。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们感谢AMD的伙伴关系，让这个实验的硬件可用。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">引用本文：Liquid AI, "Designing Loops for Production-Grade Work", Liquid AI Blog, Aug 2026。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">引用代码</h2>
+<pre style="background:#f5f5f5;padding:12px 16px;border-radius:4px;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #e0e0e0;"><code>@article{liquidAI2026loops,
+  author  = {Liquid AI},
+  title   = {Designing Loops for Production-Grade Work},
+  journal = {Liquid AI Blog},
+  year    = {2026},
+  note    = {www.liquid.ai/blog/agent-loops},
+}</code></pre>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+这篇文章的价值在于它把「agent自主性」从炒作还原成了可测量的工程设计问题：不是「agent有多强」，而是「你有没有搭好让agent收敛的循环」。两个agent都能零样本做出玩具训练器，但都死在完整生产数据上：重要的失败在测试套件里根本看不见。<br  /><br  />两个最可迁移的原则：<strong>目标写结果和约束而非机制</strong>（因为agent是多领域专家，短spec就够，它自带背景知识）；<strong>用agent无法影响的第三方软件做外部验证</strong>（否则你会得到两个通过自己测试、却安静产生不同词表的实现）。「如果这能泛化，它改变ML和软件工程被完成的方式，将超过任何原始编码能力的变化。」</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OqtF6ZaWQNu3o-VAWLfqbg" target="_blank" data-linktype="2">榨干GPU性能：流水线解码消除GPU气泡，推理吞吐提升35%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://www.liquid.ai/blog/agent-loops</span></p>
+</section>

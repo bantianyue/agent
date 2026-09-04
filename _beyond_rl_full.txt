@@ -1,0 +1,169 @@
+[P0] Reinforcement learning (RL) has become a dominant paradigm for optimizing modern machine learning systems, from AlphaGo to large language models (LLMs). Given an evaluable objective, the recipe is simple: treat the (negative) objective as a reward, sample solutions from a policy, and optimize the expected reward.
+
+[P1] This naturally raises a question:
+
+[P2] Is reinforcement learning the only way to optimize an objective?
+
+[P3] The answer is clearly no .
+
+[P4] Many methods approach the same problem from very different perspectives. In this series, I want to collect some of these ideas, including some of my own work, into a small gallery of methods beyond RL, and highlight connections between approaches that may initially look quite unrelated.
+
+[P5] Suppose a neural model defines a distribution $p_\theta(x)$ over solutions. Given an objective $g(x)$ that we want to minimize, our goal is to find a distribution that achieves a low expected objective:
+
+[P6] A natural approach is reinforcement learning. If we parameterize the distribution as $p_\theta$, REINFORCE gives the gradient estimator
+
+[P7] But REINFORCE is only one way to make use of $g(x)$. Different perspectives on the same problem lead to very different families of methods.
+
+[P8] Directly solving for the optimal distribution $p(x)$ can be difficult, as doing so is essentially equivalent to solving $\min_x g(x)$. Instead, consider a softer perspective: rather than concentrating exclusively on the optimal solutions, we seek a distribution that assigns higher probability to better solutions . This turns the optimization problem into a sampling problem by defining an energy-based model (EBM) .
+
+[P9] where $Z_\beta$ is the normalization constant and $\beta>0$ controls how strongly the distribution concentrates on low-objective solutions.
+
+[P10] As $\beta \rightarrow 0$, probability mass increasingly concentrates on the minimizers of $g(x)$, recovering the original optimization problem in the low-temperature limit.
+
+[P11] The distribution above implicitly assumes a uniform prior over solutions. More generally, suppose we want good solutions while remaining close to some prior distribution $p_0$. We can consider
+
+[P12] The first term favors better solutions, while the second keeps the new distribution close to $p_0$. This optimization problem has a closed-form solution:
+
+[P13] When $p_0$ is uniform, we recover the EBM above.
+
+[P14] If you are familiar with LLM alignment, this formulation should look familiar. Equation (1) has the same KL-regularized structure commonly used in RLHF , while the corresponding exponential tilting in Equation (2) is closely related to the distributional view underlying DPO . In reinforcement learning, this type of KL-regularized objective is also closely related to entropy-regularized or soft RL .
+
+[P15] We have now turned an optimization problem into a generation problem . Instead of directly searching for the minimizer of $g(x)$, we seek to generate samples from a distribution that concentrates on good solutions.
+
+[P16] If sampling from this soft distribution is possible, many simple strategies become possible to tackle the original optimization problem:
+
+[P17] But all of these strategies leave us with a fundamental question:
+
+[P18] How do we actually sample from the target distribution?
+
+[P19] Our target distribution is
+
+[P20] In general, sampling from it directly is difficult due to the intractable normalization factor $Z_{\beta}$. Fortunately, this is exactly the kind of problem that classical sampling methods were designed to solve.
+
+[P21] Perhaps the simplest approach is importance sampling (IS) .
+
+[P22] Given
+
+[P23] we instead draw candidates $x^1,\ldots,x^n$ from an easier proposal distribution $q(x)$ and assign each candidate an importance weight
+
+[P24] We then normalize the weights,
+
+[P25] The unknown normalization constant $Z_\beta$ conveniently cancels during the normalization, so it never needs to be computed. We can therefore resample an index according to the categorical distribution
+
+[P26] making $x$ approximately the sample from the target distribution. When $n\to\infty$, the above categorical distribution would converge to the target distribution. This give us a tractable Monte Carlo way to sample from the target distribution approximately, with approximation error guaranteed to reduce as $n$ increases .
+
+[P27] A related idea appears in reward-weighted majority voting for LLM reasoning: generate multiple candidate solutions, score them, and allow higher-scoring candidates to contribute more strongly to the final answer.
+
+[P28] If we use the base model itself as the proposal, $q(x)=p_0(x)$, the importance weight simplifies to
+
+[P29] which depends only on the objective value of the solution.
+
+[P30] Importance sampling has a fundamental weakness: when the proposal and target distributions are far apart, almost all samples receive negligible weight .
+
+[P31] As a result, a huge number of samples may be required before we obtain meaningful coverage of the high-probability regions of the target distribution.
+
+[P32] This problem becomes particularly severe for long reasoning trajectories. Even if the proposal differs only slightly from the target at each step, these discrepancies can accumulate over a long sequence, eventually making the two trajectory distributions very different.
+
+[P33] A natural idea is therefore to correct the distribution along the way rather than waiting until the end .
+
+[P34] This leads us to Twisted Sequential Monte Carlo (TSMC) , which I explored for LLM reasoning in my prior work .
+
+[P35] Suppose a complete solution consists of $T$ steps,
+
+[P36] Our target distribution over complete solutions is
+
+[P37] But what should the target distribution look like after only $t$ steps?
+
+[P38] We can obtain it by marginalizing over all possible future continuations:
+
+[P39] Here,
+
+[P40] is a soft value function . It measures how promising a partial solution is by averaging over its possible future completions.
+
+[P41] In practice, we can train a value network to approximate this quantity. Because the expectation is taken over continuations sampled from the base policy $p_0$, standard Monte Carlo regression is sufficient.
+
+[P42] This reveals an important structure: the intermediate target has the same reward-tilted form as the final target , except that the final reward is replaced by the soft value $V(x_{1:t})$.
+
+[P43] TSMC then follows naturally. Suppose that at step $t$ we have $n$ particles approximately distributed according to $p(x_{1:t})$.
+
+[P44] Extend each particle using the base model:
+
+[P45] Reweight the resulting particles:
+
+[P46] Resample $n$ particles according to their normalized weights.
+
+[P47] Then repeat.
+
+[P48] Importantly, TSMC maintains a fixed batch of $n$ sequences throughout sampling, with no variation in batch width , making the procedure naturally amenable to efficient parallelization, in contrast to Monte Carlo Tree Search (MCTS).
+
+[P49] Instead of generating an entire solution and asking only at the end whether it was good, TSMC repeatedly asks:
+
+[P50] Which partial solutions still have promising futures?
+
+[P51] Unpromising trajectories can be discarded early, while promising ones receive more computation.
+
+[P52] This highlights the key difference from importance sampling. Both methods can target the same distribution, but TSMC performs corrections throughout the trajectory rather than only after a complete solution has been generated. This can dramatically reduce variance for long-horizon problems such as mathematical reasoning.
+
+[P53] Another classical approach for sampling from an EBM is Markov chain Monte Carlo (MCMC) .
+
+[P54] The core idea is simple. Instead of generating independent samples from scratch — which is hard when the target distribution is complex — MCMC constructs a chain of states that wanders through the space, spending more time in high-probability regions. Each state is obtained by randomly modifying the previous one, so the chain evolves gradually rather than making large random jumps.
+
+[P55] Concretely, starting from a current state $x$, we propose a nearby state
+
+[P56] and then decide whether to accept or reject the proposal. If the new state has higher probability than the current one, we always accept it. If it has lower probability, we accept it only with some chance — this randomness prevents the chain from getting stuck in a local mode. Over many steps, this accept/reject rule ensures the chain visits states in proportion to their probability under the target distribution.
+
+[P57] The most classical version is Metropolis-Hastings, which accepts $x’$ with probability
+
+[P58] A key convenience: the normalization constant cancels in the ratio, so we can run MCMC even when we only know $p(x)$ up to normalization — which is exactly our situation with the EBM.
+
+[P59] Interestingly, this classical idea has recently reappeared in LLM reasoning. Karan & Du (2025) ask whether some of the benefits of RL post-training can instead be obtained purely through sampling .
+
+[P60] Prior studies such as Yue et al. (2025) suggest a provocative interpretation of RL for reasoning: part of its benefit may come from reshaping the model’s output distribution so that successful reasoning trajectories become much more likely under a single sample, rather than creating entirely new capabilities.
+
+[P61] From this perspective, RL can be thought of as sharpening the distribution over reasoning trajectories.
+
+[P62] Motivated by this view, given a base model distribution $p_0(x)$, they consider a sharpened target distribution
+
+[P63] which places relatively more probability mass on sequences that the base model itself considers likely.
+
+[P64] Importantly, this is not equivalent to simply lowering the token-level sampling temperature.
+
+[P65] Standard temperature sampling locally sharpens each conditional distribution
+
+[P66] whereas the distribution above sharpens the probability of the entire sequence $p_0(x_{1:T})$.
+
+[P67] We now have exactly the MCMC problem described above: $p_\alpha(x)$ is easy to evaluate (with the base model $p_0$) up to normalization but difficult to sample from directly.
+
+[P68] The remaining question is therefore:
+
+[P69] What should the proposal $q(x’\mid x)$ look like for a language model?
+
+[P70] Their answer is particularly simple. Given a current sequence $x$, randomly pick a position in it, keep everything before that position unchanged (the prefix ), and let the base language model freely regenerate everything from that position onward (the suffix ):
+
+[P71] Formally, after sampling a random cut point $t \sim \text{Uniform}({1,\ldots,T})$, the proposal is:
+
+[P72] In other words, the proposal is simply the base model conditioned on the shared prefix. This is easy to compute — it requires no extra training, just running the language model forward from the cut point.
+
+[P73] Then apply the same Metropolis-Hastings accept/reject rule introduced above:
+
+[P74] The accepted sequence becomes the starting point for the next MCMC step. Repeating this process allows the model to continually revise its own reasoning trajectory, while the accept/reject step biases the samples toward the sharpened target distribution $p_0(x)^\alpha$.
+
+[P75] There is still one difficulty: reasoning trajectories can be very long, making MCMC over the entire sequence difficult to mix.
+
+[P76] Instead of immediately sampling a full trajectory, the authors therefore progressively increase the sequence length. Schematically,
+
+[P77] At each stage, they first extend the current sequence by another block of tokens and then perform several rounds of resample → accept/reject before moving to the next stage. The sample from one stage therefore provides a useful initialization for sampling the longer sequence at the next.
+
+[P78] This practice is actually very similar to TSMC, except that they have multiple refinement at each step, turning SMC into Sequential MCMC .
+
+[P79] The resulting procedure has a very different interpretation from RL. RL spends computation changing the model parameters so that desirable trajectories become more likely. Here, the model parameters never change. Instead, computation is spent iteratively revising and selecting samples from the base model itself.
+
+[P80] Remarkably, the paper shows that this training-free procedure can achieve reasoning performance comparable to RL post-training on several benchmarks.
+
+[P81] At first glance, the sampling methods above may seem largely independent of neural network training. But in an RL-like setting, learning can often be viewed as two intertwined components: sampling and optimization .
+
+[P82] If we can already obtain samples from, or sufficiently close to, a desired target distribution, the remaining problem can potentially be reduced to supervised learning: train the model to imitate these samples. This opens up a very different learning paradigm from directly optimizing the model with RL.
+
+[P83] Importantly, this is also what distinguishes principled sampling methods from heuristic decoding strategies. Their outputs are not merely candidates that happen to score well; under appropriate assumptions, they can be justified as approximating a well-defined target distribution, making them potentially useful as supervised training signals .
+
+[P84] How to tightly integrate advanced sampling methods with neural network training therefore remains an exciting direction to explore.

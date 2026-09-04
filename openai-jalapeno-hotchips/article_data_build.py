@@ -1,0 +1,76 @@
+# -*- coding: utf-8 -*-
+"""OpenAI Jalapeño 标准模板 build：全中文原文版 + 13图"""
+import json, os, sys
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+
+def fig(n, cap=""):
+    return None  # 图用 fig_after 挂
+
+DATA = {
+  "title": "🌶️ Hot Chips：OpenAI「Jalapeño」芯片演讲全要点（全中文）",
+  "summary": [
+    {"key":"核心","body":"OpenAI 自研 Jalapeño 芯片已上路，9 个月完成全部 RTL，实现从模型到硅片的全栈优化。"},
+    {"key":"性能","body":"OSS 每用户近 1500 token/s、DeepSeek 700 token/s、Kimi 几小时搞定，SRAM 级延迟。"},
+    {"key":"架构","body":"内存分片（memory-sliced）+ 专用集合网络，端到端每瓦性能为核心设计目标。"},
+  ],
+  "lead": [
+    "OpenAI 在 Hot Chips 2026 正式公布了自研芯片 **Jalapeño**。硬件副总裁 Richard Ho 与团队带来完整展示：九个月从白纸到 RTL、内存分片架构、面向 LLM 推理的全栈优化。",
+    "本文编译自 Tae Kim（Key Context）对本次演讲的要点摘录，全中文呈现，**含 Q&A 完整问答**。",
+  ],
+  "sections": [
+    {"type":"h2","title":"演讲背景","paras":[
+      "**演讲人**：Richard Ho（OpenAI 硬件副总裁）、Ravi Narayanaswami（技术成员）、Chris Leary（技术成员）。周二（2026年8月25日）在 Hot Chips 大会发表。",
+      "Richard 领导 OpenAI 硬件团队，曾参与 Google TPU 团队；Ravi 在 Cruise 工作十年，也曾任职 Google；Chris 曾任 Google TPU 软件负责人。",
+    ]},
+    {"type":"h2","title":"第一位演讲人：Richard","paras":[
+      "**「Jalapeño 芯片来了，它是真的，我们实验室里已经跑起来了。**这颗芯片让 OpenAI 能实现从模型、软件、编译器一路到硅片的全栈优化。我们基本上在九个月内完成了全部 RTL 实现。」",
+      "之所以能这么快，是因为他们从一张白纸起步、全新设计，无需兼容任何旧架构或旧芯片。他们把精力集中在加速 OpenAI 的工作负载上——而这些工作负载正是大语言模型，因此所有 LLM 都因此受益。",
+    ],"fig_after":{0:[{"src":"fig01.png","caption":""},{"src":"fig02.png","caption":""}]}},
+    {"type":"h3","title":"第二位演讲人：Ravi","paras":[
+      "**「只有两件事真正重要：用户等待多长时间，以及每个请求消耗多少能量。」**",
+      "**OSS 性能**：**「每个用户接近每秒 1500 token。**这曾是 SRAM 加速器的领域，但 HBM 根本不是瓶颈。右侧是我们今天以 4 倍更低延迟提供的最高吞吐。」",
+      "世界需要又快又便宜。Jalapeño 两者兼备。",
+      "**DeepSeek 性能**：**「每个用户每秒 700 token，这明显是 SRAM 级别的领域。**对当前最高吞吐有 5 倍更低的延迟。故事是相同的，只是优势变大了——模型越大，优势越大。」",
+      "**Kimi 性能**：**「我们几乎没有花时间优化 Kimi，我想只花了几天的功夫。」**",
+      "**设计理念**：**「项目启动时我们必须决定：是做一颗重度解码、超优化的芯片，还是一颗既擅长解码、也擅长 pre-fill 的芯片。**我们选择了后者。选择单芯片方案的另一个理由是保持数据局部性。」",
+    ],"fig_after":{1:[{"src":"fig03.png","caption":""}],3:[{"src":"fig04.png","caption":""}],4:[{"src":"fig05.png","caption":""}],5:[{"src":"fig06.png","caption":""}]}},
+    {"type":"h2","title":"第三位演讲人：Chris","paras":[
+      "**「纸面上的 FLOPS 并不重要，重要的是你在实际工作负载中真正交付给用户的 FLOPS。」**",
+      "**「这就引出了 Jalapeño 架构——一种内存分片（memory-sliced）架构。每个核心都对自己的 HBM 分片拥有本地视图。」**",
+      "**「这意味着全局内存子系统上不存在争用，但也意味着你必须仔细思考自己的工作负载该如何映射到这台机器上。」**",
+      "Jalapeño 的设计目标是通过把数据放在需要的地方、并在需要时到达，来降低等待时间。架构最小化了芯片空闲时间和数据移动，让数据贴近计算。它是针对 LLM 推理优化的。",
+      "**「我们实际构建的是一个专用的集合网络，让各核心能以高性能互相通信。**同样，你必须规划好如何映射到机器上。但好处是它经过精心编排，能在你恰好需要时把那些值放进寄存器。」",
+    ],"fig_after":{1:[{"src":"fig07.png","caption":""}],3:[{"src":"fig08.png","caption":""}],4:[{"src":"fig09.png","caption":""}]}},
+    {"type":"h2","title":"团队（The Team）","paras":[
+      "**「想造世界上最好的芯片、又想推进得飞快，只有两种选择：建一支很大的团队，或一支很小的团队。**我们选了后者。我们项目过程中发现让这行得通的诀窍——也就是让你在开场看到的超快节奏的真正关键：能运转这套循环。你可以叫它敏捷，也可以叫它协同设计。」",
+      "该团队引入了一种全新的硬件编程环境，OpenAI 的 AI 模型在这个环境里编写程序达到了极高的熟练度。",
+      "**「但借助 Sol、Astra 这类现代前沿大模型，它在为这种空间架构编写 kernel 上非常擅长。**即便是我们专家调优过的 kernel，AI 也常常能再榨出一些额外性能。」",
+      "**「我们想解锁的能力，是真正让它们服务于各种工作负载、交付性能和每瓦性能。**因为归根结底，对端到端工作负载而言，唯一重要的事就是如何获得交付出来的每瓦性能。」",
+    ],"fig_after":{0:[{"src":"fig10.png","caption":""}],2:[{"src":"fig11.png","caption":""}],3:[{"src":"fig12.png","caption":""}]}},
+    {"type":"h2","title":"回到 Richard","paras":[
+      "**「这是多代路线图的第一步。第二代已经在顺利开发中，我们正朝着在数个月内流片（tapeout）推进。**整个重点在于这一切都会降低基础设施成本，正如我开场时所说。我真心为团队感到骄傲。我还要特别感谢我们的合作伙伴 Broadcom 和 Celestica，他们是我们能在这里交付这一能力的关键伙伴。」",
+    ],"fig_after":{0:[{"src":"fig13.png","caption":""}]}},
+    {"type":"h2","title":"问答（Q&A）","paras":[
+      "**问：关于九个月流片，这里面有多少是现成的 Broadcom IP、多少是你们从零设计的？**\n答：芯片大部分是从零设计的。计算 die 上只有一些接口 IP，还有一个 IO 芯片。正如图中所示，很多接口是现成 IP，其余全部是用 XLS plus 和 Verilog 重新写的 RTL。",
+      "**问：Michael，来自 NVIDIA。想请你详细说说你们的组网方案：scale-up 网络用的是 ESUN 协议还是自定义的？链路是 200 吉比特还是 100 吉比特？**\n答：我们用的是 scale-up 以太网协议，200 吉比特。谢谢。",
+      "**问：你们用了什么专用单元、专用存储器之类的专门电路或硅片工艺技巧吗？**\n答：用的是标准单元（standard cell）方法学。",
+      "**问：你们的目标频率是多少？**\n答：我们实验室里现有的芯片跑到 1.7 GHz，但 POR（计划运行点）应该能到 1.8。所以留了一点余量。这是持续性能。",
+    ]},
+  ],
+  "conclusion": [
+    "Jalapeño 传达的核心理念是「纸面 FLOPS 不重要，交付给用户的 FLOPS 才重要」——用内存分片架构贴近数据、用专用集合网络低延迟通信，换取端到端每瓦性能。",
+    "九个月从白纸到 RTL、第二代路线图推进在即，叠加 Broadcom 与 Celestica 协作，OpenAI 的全栈自主硅片正从展示走向落地。",
+  ],
+  "reference_url": "https://taekim.substack.com/p/hot-chips-openai-jalapeno-presentation",
+}
+
+# 复制 13 图：imgs/imgNN.png -> figNN.png
+import shutil
+for n in range(1,14):
+    shutil.copy(f"{_article_dir}/imgs/img{n:02d}.png", f"{_article_dir}/fig{n:02d}.png")
+
+out_path = os.path.join(_article_dir, "article_data.json")
+os.makedirs(_article_dir, exist_ok=True)
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print(f"✅ 写入 {out_path} ({len(DATA['sections'])} sections)")

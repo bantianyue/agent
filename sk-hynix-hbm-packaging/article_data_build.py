@@ -1,0 +1,235 @@
+# -*- coding: utf-8 -*-
+"""SK hynix HBM packaging 编译 build"""
+import json
+
+DATA = {
+ "title": "SK 海力士 Hot Chips 2026：HBM 封装成为 co-design 难题",
+ "lead": [
+  "SK 海力士在 Hot Chips 2026 演讲聚焦高带宽内存（HBM）和先进封装：3D 堆叠、键合、系统集成选择。ServeTheHome 现场报道全文。",
+  "核心立场：HBM 封装正拧紧成 co-design 问题——键合、热、中介层应力相互作用。从 HBM2E 的 460GB/s 到 HBM4 的 2048GB/s，热管理正成为 20+ die 堆叠的绑定约束，混合键合被视为通往更高堆叠的路径。"
+ ],
+ "summary": [
+  {
+   "key": "演进与规格",
+   "body": "HBM2E 460→HBM3 717→HBM3E 1024→HBM4 2048GB/s（2048 IO）。HBM4：20K+ TSV、16148 micro-bumps、12.8×11mm、>2TB/s、40%+能效、48GB（12-high 量产）。HBM3E 16-high 48GB 是封装里程碑。"
+  },
+  {
+   "key": "键合与热管理",
+   "body": "TC+NCF vs MR+MUF 权衡（生产率 vs 翘曲/热阻）；20+ die 时热成绑定约束；混合键合（SiO2/Cu、室温 PnP+>200°C 退火、bump pitch<18um）通更高堆叠。i-HBM 内嵌高导热组件热阻降 >30%。"
+  },
+  {
+   "key": "未来方向",
+   "body": "两杠杆：带宽（更多 IO + 更快 IO 率）＋能效（逻辑 base die + 更多 TSV，PDN 75% 提升）。HBM 从最后装配变最先装配（可靠性压力），CoWoS-S/L/EMIB 决定应力，封装三档 tier。"
+  }
+ ],
+ "sections": [
+  {
+   "type": "h2",
+   "title": "SK 海力士 HBM 封装演讲概览",
+   "paras": [
+    "SK 海力士 Hot Chips 2026 演讲围绕 HBM 和先进封装。从 slide 翻页看，涵盖 3D 堆叠、键合、以及 HBM 背后的系统集成选择。现场报道。",
+    "SK 海力士开场解释：HBM 是 3D 堆叠结构，由 base die 和核心 die 堆叠构成，共最多 16 片。GPU 和 HBM 一起坐在硅中介层上的 2.5D 封装里，经 1024 个 IO、16 通道通信——每 rank 四片、16 高堆叠里四个 rank。把中介层连接做对很关键，因为那是 HBM 与加速器的交汇点。",
+    "更高带宽、更高容量、更高能效是推进 HBM 的初衷。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig02.png",
+      "caption": "图 1：SK 海力士 HBM——3D 堆叠结构（base die + 核心 die）。"
+     }
+    ],
+    "1": [
+     {
+      "src": "fig03.png",
+      "caption": "图 2：内存需求——更高带宽/容量/能效。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "采用动机与容量带宽演进",
+   "paras": [
+    "尽管 HBM 每 GB 成本更高，SK 海力士主张更广泛的 HBM 采用节省空间、功耗和运营成本。一个有趣对比：显示 12 个 GDDR6 点 vs 4 个 HBM3E 点——更省空间同时提供更多带宽和容量。（ServeTheHome 觉得这对比点略奇，因为消费级 RTX 5090 有 32GB GDDR7。）",
+    "容量和带宽随每一代 HBM 攀升：HBM2E 460GB/s、HBM3 717GB/s、HBM3E 1024GB/s、HBM4 翻倍到 2048GB/s（2048 IO）。封装尺寸也从 10×11mm base 长到 HBM4 的 12.4×11mm。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig04.png",
+      "caption": "图 3：HBM 采用节省空间/功耗/运营成本（vs GDDR）。"
+     }
+    ],
+    "1": [
+     {
+      "src": "fig05.png",
+      "caption": "图 4：HBM 容量与带宽随世代增长。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "HBM4：更多 TSV 与 micro-bumps",
+   "paras": [
+    "HBM4 有更多 TSV 和 micro-bumps。SK 海力士列出超 20K TSV 和 16148 个 base micro-bumps（12.8×11mm part、775um Z-height），目标超 2TB/s 带宽、40%+ 能效提升和改善的热阻。容量升至 48GB，12-high 量产、16-high 认证中。",
+    "die-to-die 堆叠有两种主要键合选择，SK 海力士摆出热压键合+非导电膜（TC+NCF）vs 质量回流+模压底部填充（MR+MUF）的权衡。TC+NCF 高生产率、低热阻但易受芯片翘曲影响；MR+MUF 更好处理薄 die 翘曲，但热阻更高、gap-fill 窗口更窄。选择影响下游良率和热行为。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig06.png",
+      "caption": "图 5：HBM4——更大封装高度/尺寸、更多 TSV 和 micro-bumps。"
+     }
+    ],
+    "1": [
+     {
+      "src": "fig07.png",
+      "caption": "图 6：TC+NCF vs MR+MUF 两种键合方案权衡。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "晶圆级流程与 16-high 里程碑",
+   "paras": [
+    "SK 海力士在 HBM 组装前后运行完整晶圆级流程——从硅刻蚀和 TSV 铜填充、经 BEOL 金属化、晶圆减薄、背面加工、单片化和测试。known-good stacked die（KGSD）晶圆步骤让 SK 海力士在每个 cube 进入系统级封装前测试，防止坏件消耗昂贵的中介层面积。",
+    "TSV 形成、micro-bumping、晶圆减薄和芯片堆叠承担 HBM 封装的大多数挑战。SK 海力士把工艺均匀性、良率和铜污染标为 TSV/bump 侧的担忧，然后指向减薄和带底部填充的堆叠组装里的薄 die 处理和翘曲控制。",
+    "HBM3E 16-high（每 cube 48GB）标记封装里程碑——在早期 12-high 堆叠上再加两 die，迫使封装保持在相同 Z-height 预算内。SK 海力士不得不把芯片厚度、间隙高度和 bump pitch 大致减半以适应更高堆叠，同时保持 gap-fill 质量完好。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig08.png",
+      "caption": "图 7：晶圆级流程——WT、KGSD 到系统级封装。"
+     }
+    ],
+    "1": [
+     {
+      "src": "fig09.png",
+      "caption": "图 8：TSV 形成、micro-bumping、晶圆减薄、芯片堆叠与挑战。"
+     }
+    ],
+    "2": [
+     {
+      "src": "fig10.png",
+      "caption": "图 9：HBM3E 16Hi——封装里程碑，Z-height 预算内。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "热管理与混合键合",
+   "paras": [
+    "堆叠高度升到 20+ die 时，热管理成为绑定约束。该图对比键合和材料堆叠选项的相对热阻——从普通模压底部填充经过先进 MR-MUF 到混合键合，每步降低热阻、支持更多层。",
+    "混合键合改变堆叠组装方式。室温下 pick-and-place，超 200°C 退火形成 SiO2-to-SiO2 和 Cu-to-Cu 键合——这正是让堆叠摆脱旧方案的 bumps 和 gap-fill 的机制。",
+    "SK 海力士把混合键合定位为通往 20+ high 堆叠、更窄 bump pitch 带来的更宽性能、以及更高电导更好热效率的路径。固定 Z-height 下，混合键合让 die 用更厚的 core，并把 bump pitch 推到 18um 以下——MR-MUF 做不到。",
+    "SK 海力士对比自身方案与竞品冷却。它的 i-HBM 在热的 die-to-die PHY 区内嵌高导热电绝缘冷却组件、创造专用热路径，目标热阻降超 30%。三星 HPB 用铜均热板把 DRAM 移到处理器旁，美光精进 base-die 电路设计提升效率。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig12.png",
+      "caption": "图 10：20+ die 时的热管理——各键合/材料方案热阻对比。"
+     }
+    ],
+    "1": [
+     {
+      "src": "fig13.png",
+      "caption": "图 11：混合键合——室温 PnP + >200°C 退火形成 SiO2/Cu 键合。"
+     }
+    ],
+    "2": [
+     {
+      "src": "fig14.png",
+      "caption": "图 12：混合键合——通往 ≥20Hi、更窄 bump pitch 之路。"
+     }
+    ],
+    "3": [
+     {
+      "src": "fig15.png",
+      "caption": "图 13：i-HBM——内嵌冷却组件、热阻降 >30%（vs 三星 HPB、美光）。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "展望 HBM4：带宽与能效两杠杆",
+   "paras": [
+    "往 HBM4 之后看，SK 海力士把剩余工作框为两杠杆。一杠通过扩展数据 IO 和提升每 IO 速度加带宽，另一杠用逻辑 base die 和更多 TSV 提升能效。两杠杆都在接下来几张图出现。",
+    "带宽增长来自推进更多数据 IO 和更快 IO 率，逻辑工艺集成也在画面中。SK 海力士显示每单元带宽从 HBM2E 的 0.5TB/s 爬到 HBM4 的 2.0TB/s，HBM3E 到 HBM4 步进 IO 速度翻倍、数据 IO 数超过 1K。",
+    "能效侧，SK 海力士靠优化的逻辑代工工艺和分布整个 part 的电源 TSV 改善电源供电网络（PDN）。跨近期 HBM 世代突出 75% 的 PDN 提升，低功耗逻辑方法持续缩放。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig16.png",
+      "caption": "图 14：i-HBM——展望 HBM4 后的带宽/能效探索。"
+     }
+    ],
+    "1": [
+     {
+      "src": "fig17.png",
+      "caption": "图 15：更多数据 IO + 双倍 TSV 提升带宽。"
+     }
+    ],
+    "2": [
+     {
+      "src": "fig18.png",
+      "caption": "图 16：优化的逻辑代工工艺带来戏剧性能效提升。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "系统级影响与封装方向",
+   "paras": [
+    "SK 海力士转向系统级影响：内存过去在系统集成流程里最后才组装。AI 先进封装里，HBM 现在最先组装——在包的其余部分建好前，cube 和中介层承受强得多的可靠性压力。（那张照片是很老的主板，好玩。）",
+    "SK 海力士对比主要先进封装方案：CoWoS-S、CoWoS-L、EMIB，以及各自把应力放在哪里。封装选择改变 HBM 堆叠必须吸收多少机械和热应力。",
+    "最后有三档封装方向：die-on-die、中介层上的 die-to-die、板上的 package-to-package。把 HBM 放进该层级，解释了它为何落在最严苛那档、以及 SK 海力士为何在堆叠和键合上这么用力。"
+   ],
+   "fig_after": {
+    "0": [
+     {
+      "src": "fig19.png",
+      "caption": "图 17：系统级影响——HBM 当前最先组装、可靠性压力更大。"
+     }
+    ],
+    "1": [
+     {
+      "src": "fig20.png",
+      "caption": "图 18：对比 CoWoS-S/L 与 EMIB 的应力分布。"
+     }
+    ],
+    "2": [
+     {
+      "src": "fig21.png",
+      "caption": "图 19：三档封装方向层级——HBM 落在最严苛档。"
+     }
+    ]
+   }
+  },
+  {
+   "type": "h2",
+   "title": "结语",
+   "paras": [
+    "感觉相比 Hot Chips 其他 HBM 演讲，SK 海力士这里非常聚焦封装。",
+    "**ServeTheHome 看法**：SK 海力士演讲讲清：HBM 封装正拧紧成 co-design 问题——键合、热、中介层应力都相互作用。作者希望公司多讲些定制 HBM 方案或 HBM5，但这就是所给的。希望很快有更多信息。"
+   ],
+   "fig_after": {}
+  }
+ ],
+ "conclusion": [
+  "SK 海力士这篇把 HBM 封装的底层物理讲透：堆叠高度、键合选择、热与中介层应力互相纠缠，正成为 co-design 问题。HBM4 用 20K+ TSV/16148 micro-bumps/775um Z-height 冲 2048GB/s + 40% 能效；从 TC+NCF/MR+MUF 的权衡到混合键合（室温 PnP+>200°C 退火、bump pitch<18um）通往 20+ high 堆叠；i-HBM 内嵌冷却组件热阻降 >30%。",
+  "未来两杠杆：更多 IO×更快 IO 率（带宽）+ 逻辑 base die×更多 TSV（能效，PDN 75% 提升）。系统级看：HBM 从「最后装」变「最先装」（可靠性压力前置），CoWoS-S/L/EMIB 决定应力，封装三档里 HBM 在最严苛档。对做 HBM/AI 加速器/先进封装的人，这是 SK 海力士对封装如何卡住 HBM 演进的权威视角。"
+ ],
+ "reference_url": "https://www.servethehome.com/sk-hynix-hbm-packaging-at-hot-chips-2026/"
+}
+
+with open("article_data.json", "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=1)
+print(f"✅ 写入 article_data.json")

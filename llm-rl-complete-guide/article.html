@@ -1,0 +1,132 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">统一结构</strong>：LLM RL算法都是「log概率梯度 × 学习信号」，差异在 ψ 与更新约束。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">算法路线</strong>：VPG → REINFORCE(baseline) → PPO(actor-critic+clip) → GRPO(去critic、组内相对优势) → GSPO/DAPO/Dr.GRPO/TIS/CISPO。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">PPO vs GRPO</strong>：PPO训critic(4模型)省内存换来复杂；GRPO去critic但多采样completion。细节（loss聚合/归一化/clip边界/引擎mismatch）决定scale稳定性。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">RL在LLM研究史上一直扮演关键角色：造出早期指令跟随模型、推进对齐与安全、让LLM解复杂推理题。但RL仍是AI研究里演进最快的领域之一。这篇单篇指南从第一性原理爬升到RL研究前沿：覆盖RL基础、当前用于训练LLM的策略梯度算法的完整演化、以及几个新兴研究领域。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">RL基础：框架与目标</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">RL训练里我们有一个<strong>agent</strong>在某种<strong>环境</strong> 里迭代取<strong>动作</strong>。每一步用一个时间步t标记，t时刻的动作记为a(t)。动作由<strong>策略</strong>（可用作agent的大脑）预测，参数为 θ（训练LLM时策略就是LLM本身）。策略可确定或随机，对LLM我们假设随机：随机策略 π(θ) 输出可能动作集上的概率分布、动作a(t) 从这里采样。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1：RL基础问题设定：agent、action、环境、reward。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">策略输出动作后，环境的状态按<strong>transition function</strong>（环境的一部分）更新，状态记为s(t)。动作后环境给奖励r(t)（可正可负可零）刻画状态/动作的期望度。RL本质是试错：agent在环境中行动，训练过程通过奖励强化（正或负）被观察行为：故名「reinforcement」learning。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">从初始状态s(0) 开始，agent重复：采样动作 → 转到新状态 → 获奖励，直到终态s(T)（因是终态或达最大步数）。这些步骤的序列构成<strong>trajectory（轨迹）</strong>。RL反复从agent采样轨迹，让它探索状态-动作空间、最终发现高奖励行为模式。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">轨迹概率 = 动作分布 π(θ)(a(t)|s(t)) 和状态转移P(s(t+1)|a(t),s(t)) 的链式乘积。<strong>累计回报（return）</strong>= 轨迹所有r(t) 的和，可带折扣因子 γ（∈[0,1]）指数衰减未来奖励、鼓励模型尽早获得奖励。对LLM post-training常有限T且 γ=1（主要用轨迹/完成级别的奖励而非逐状态）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>RL目标</strong>：最大化当前策略的期望回报。实践中枚举所有轨迹不可行，用<strong>Monte Carlo估计</strong>（对随机采样轨迹的回报取均值）。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">价值与优势函数</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>价值函数</strong>V(s)：从状态s按当前策略 π(θ) 行动得到的期望累计回报。<strong>动作价值 / Q函数</strong>Q(s,a)：从s取动作a后按策略的期望累计回报。<strong>优势函数</strong>A(s,a)=Q(s,a)-V(s)：动作a相对策略在当前状态s的期望表现的相对优劣。优势为正 = 取a后期望回报比该状态的期望高，反之亦然。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2：价值函数与优势函数定义。</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：RL目标：期望回报。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">直觉：RL里我们不总需要绝对描述一个动作多好，而只需它比其它平均好多少：这就是优势函数。价值、动作价值、优势函数作为期望通常无法精确算，需用当前策略采样的真实轨迹信息估计。观测回报G(t) 是Q(s(t),a(t)) 的Monte Carlo估计；价值函数V(s(t)) 需用OPE或critic估计。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为LLM制定RL + KL正则</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>为LLM制定RL</strong>：LLM自回归生成token。一个常见公式是<strong>bandit（完成级）</strong>：整段completion视为一个动作、获得单一outcome reward（由奖励模型评分）。替代是token级MDP：每token是一个状态/动作。两种都是常用设定（outcome-reward因简单常用），RL目标常用带KL正则的形式。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>KL散度</strong>：RL的目标是最大化期望回报，但为使模型不偏离初始行为过远（维持流畅度/语义），在reward上加KL惩罚：鼓励新策略接近某参照策略。KL正则策略通常是参照模型（RL开始前的checkpoint）或旧策略（采样数据的策略）。KL惩罚对生成模型尤其重要，防止过度优化单一奖励导致的模式坍塌。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>重要性采样</strong>：评估策略 π(θ) 的目标时用旧策略 π_old采样的rollout，通过重要性比 π(θ)(a|s)/π_old(a|s) 校正概率差异。这是PPO/GRPO等几乎所有现代LLM RL算法的基础组块。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Vanilla Policy Gradient (VPG)</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">策略梯度算法计算RL目标对策略参数的梯度：<strong>策略梯度</strong>。该梯度有两部分：① 动作a(t) 对数概率对 θ 的梯度（参数空间中增加a(t) 似然的方向）；② 标量 ψ_t（per-action分数）基于动作质量控制梯度的大小和方向：坏动作给大负值降其概率、中性动作给接近0。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4：策略梯度结构：log概率梯度 × 学习信号。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">VPG推导用两条恒等式：连续的期望定义、log-derivative trick（∇_θ log p_θ(x) = p_θ(x)·∇_θ log p_θ(x)）。结果是<strong>动作级对数概率梯度按回报/优势信号加权之和</strong>：这一结构出现在本文几乎每个策略梯度算法里。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>VPG实现</strong>：用完成级bandit公式，整段completion视为一个动作得单一outcome reward。把每token的对数概率求和得sequence级对数概率，乘completion级回报得VPG loss（取负因PyTorch默认梯度下降）。现代算法（PPO/GRPO）很多是loss而非梯度表达式。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>降方差</strong>：VPG问题①梯度高方差（用相对小的rollout集估计回报）、②对大而不稳定更新无保护。大多数策略梯度算法通过降方差或对更新设trust region解决。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">REINFORCE：baseline降方差</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">REINFORCE是VPG的Monte Carlo实例：采样rollout、对策略梯度表达式取平均。高方差可通过<strong>动作无关的baseline</strong>（如平均回报）从采样回报中减去来降。LLM设outcome-reward时baseline = 平均reward。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">给策略梯度加baseline不引入偏置（EGLP lemma保证：baseline不依赖动作a(t) 时E[b(s(t))·∇logπ]=0）。注：batch mean若含当前completion，则不是动作无关（每样本贡献到它自己baseline）→ 引入轻微偏置。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>RLOO</strong>恰好修这个问题：从baseline中<strong>排除当前completion自身</strong>的reward，保留动作无关性质。之后看到GRPO也用这思路（组内多completion对比）。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">PPO：actor-critic + clipping</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">REINFORCE的Monte Carlo高方差导致训练不稳。用更有信息量的baseline：<strong>价值函数</strong>V(s(t))：得到优势估计A(s(t),a(t))=G(t)-V(s(t))。这自然引出<strong>actor-critic</strong>框架：同时训练策略（actor）和值模型（critic）。critic用LLM backbone + 标量value head，预测每个token位置的期望未来回报。价值函数是on-policy的（依赖策略当前参数）须持续更新，通常用预测值与观测回报的回归损失训练。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5：actor-critic框架高层示意。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>TRPO</strong>（PPO前身）：把目标设成带硬约束的surrogate objective（期望KL发散< δ），理论上单调改进策略。但约束目标难优化（需二阶近似、共轭梯度、线搜索）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>PPO</strong>是更简单的替代：去掉KL硬约束、保留近似目标，但引入<strong>clipping</strong>惩罚把策略比限制在 [1-ε, 1+ε]。PPO目标 = 最小(clipped, unclipped)：对未裁剪目标是悲观下界。Clipping只在目标会改进过于激进时生效（单向），防止策略比把目标无限推高，鼓励保守更新。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>PPO里的多个策略</strong>：旧策略 π_old（生成当前batch rollout，重要性比用它）频繁刷新；参照策略 π_ref（RL全程冻结、KL正则用）。二者协同：重要性比校正旧rollout与当前策略的不匹配、相对 π_ref的KL抑制过度漂移。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">PPO实现采用token级MDP：每token单独计算return和advantage。关键组件：① 采样KL惩罚（rollout策略vs参照模型）直接从per-token reward减去，rollout时算一次、多次PPO update中保持固定；② 学到critic算advantage并MSE训练；③ 策略比相对old model、同rollout做多次更新（num_ppo_epochs）；④ clipped PPO loss；⑤ batch聚合方式对性能有不可忽视影响。数值技巧：用log概率而非原始概率比。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">GAE与RL内存开销</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>GAE（广义优势估计）</strong>：上述简单优势=return减预测价值。实践中大多用GAE。基于TD residual的单步优势（V(s(t)) vs r(t)+V(s(t+1))）偏差高。GAE用所有N步优势估计的指数加权组合，权重 λ∈[0,1] 控偏差-方差权衡（常用 λ=0.95；训练不稳时降 λ 得低方差更新）。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图6：训练vs推理的内存消耗对比。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>RL内存开销</strong>：PPO训策略 + critic两个模型，还要跑参照策略和奖励模型：最多管理4个模型、其中2个在训练。半精度推理每1B参数约2GB（Qwen-3-32B全上下文131K会从 ~70GB涨到 ~400GB）；训练每1B参数约16GB（含优化器状态和梯度）。backprop需cache前向激活、反向梯度、Adam梯度历史：可到推理的12× 内存。GRPO因不训critic（只训一个模型）大幅省内存。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">GRPO：去掉critic，组内相对优势</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">PPO实际缺点：需训值模型（critic）增加内存、计算、复杂度。<strong>GRPO</strong>提出更简单的优势估计：为每个prompt采样多个completion（一组），用这些completion的reward构造baseline：组内相对优势。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图7：GRPO组内优势估计（来自GRPO原论文）。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>优势估计</strong>：completion i的优势 = (r(i) - 组平均reward) / 组reward标准差。这与RLOO类似均为免值函数、对比同prompt的多completion；Dr.GRPO变体可证与RLOO的优势估计差常数缩放。因优势完全从组内reward估计，每prompt常需采样较多样本（PPO/REINFORCE可1样本，GRPO需多样本稳梯度）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Surrogate loss</strong>：GRPO用与PPO几乎相同的surrogate loss（同重要性比、PPO式clipping、多update）。区别：KL罚直接进（可微）loss而非reward：GRPO优化中重算KL、梯度可流经它；PPO是在reward里采样KL、detach保持固定。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>内存</strong>：GRPO不训critic（只训一个模型vs PPO两个），省计算并大幅省内存：消除一个可训练模型比移除只推理的模型（reward/ref）影响大得多。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GRPO实现：每prompt采样G个completion，组内reward归一化（(r-mean)/std）得advantage，token级objective广播sequence优势到所有token，做多次GRPO update。也支持process reward（按组内所有process reward归一化、每token优势=后续步骤reward-to-go）。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">GRPO++：让RL真正有效的技巧</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">DeepSeek-R1后GRPO爆火，但复现训练管线不平凡，催生大量修改。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>GSPO（序列级比）</strong>：GRPO目标有misalignment：advantage在sequence级、策略比/loss在token级。per-token比在长序列/大稀疏MoE中高方差、单token可主导loss。GSPO用序列级重要性比（log几何均值、按序列长归一化），稳定训练、提升采样效率和性能，被Qwen3采用。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>DAPO（训练配方）</strong>：解决vanilla GRPO的熵坍塌（高概率token被强调、低概率探索token被罚）。decoupled clip用 [1-ε下限, 1+ε上限]（ε下限0.2、ε上限0.28）：提高 ε上限 防熵坍塌。动态采样过滤全同reward的prompt组、继续采样到batch满。token级loss平均防序列长偏置；overlong filtering去掉被截断响应的不稳定reward、加长度惩罚。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Dr. GRPO</strong>：指出GRPO两偏置。① response级长度偏置：GRPO按序列token数归一化loss，按固定常数MAX_TOKENS归一化可去掉长度影响；② 问题级难度偏置：advantage分母标准差让太易/太难问题的advantage过大，去掉标准差项修复。提升稳定性、token效率。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>TIS（截断重要性采样）</strong>：现代RL用分离引擎（vLLM/SGLang采样rollout + FSDP/DeepSpeed算更新），引擎间token概率不一致无法简单标准化。TIS在策略梯度里加引擎间重要性比校正mismatch。与PPO比的重要区别：直接截断比（min(r(t),ρ) 单侧上界）而非两段最小。token级TIS常用、但token级比引入偏置，sequence级方差高：bias-variance权衡。被verl、OpenInstruct采用。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>CISPO</strong>：注意力里重要的「fork」token（如「aha」「wait」）初始概率低、首个更新后概率暴涨 → PPO会clip掉它们从后续off-policy更新消失。MiniMax-M1每batch 16次更新，关键token被遮掉严重伤效率。CISPO用REINFORCE式loss + stop-gradient到clipped比：比作为权重控token贡献、而非clip后置零：所有token都贡献梯度。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">高级研究主题</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Online vs Offline</strong>：在线（PPO/GRPO持续生成on-policy completion）vs离线（DPO固定数据集）。在线更难编排，但研究一致显示on-policy数据对性能有积极影响：尤其在困难设定里高奖励响应初始不易出现时需要主动探索。semi-online（周期刷新on-policy样本）可恢复部分收益；异步基础设施须处理部分off-policy的stale数据。新鲜on-policy数据是RL结果好的关键。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图8：RL scaling或agentic RL示意。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Continual Learning</strong>：历史上面临灾难性遗忘。但on-policy RL天然对遗忘鲁棒：训练用模型自身采样的on-policy data，更新贴近当前模型已合理的行为，策略分布偏移小（KL测），与遗忘强相关。SFT学新任务好但渐进忘旧。Nemotron-Cascade用序列RL管线。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Rubric-based rewards</strong>：可验证领域（math/code用确定性verifier）适合RL，但开放任务（创意写作/科研）不可验证。rubric奖励：先派生出prompt特定的质量标准checklist，用LLM judge逐条评估并聚合。对开放任务提供informative、可控的奖励信号、降reward hacking风险。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>RL Scaling Laws</strong>：RL性能确实随compute可预测扩展，但比预训练messy：用下游reward/accuracy度量、应用特定、依赖评估设置；RL compute分rollout生成和策略更新两半难一致测。有用发现：早期阶段可外推到更大规模预测表现、测试配方可扩展性；除增训练步数还有多方式扩展（大batch、data reuse、采样更多completion/prompt）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Agentic RL</strong>：单轮任务vs agentic系统（长时间推理、调工具、交互外部环境）。agentic rollout含多轮生成和环境交互（tool calls、observations、rewards、状态变化）：需更复杂基础设施。设计模式：模块化工具/环境接口、mask目标只含agent生成token（非环境输出）、支持中间process rewards改进长轨迹credit assignment、探索环境感知的advantage归一化、异步基础设施处理大幅变化完成时间、扩展环境编排支撑数千并发环境无中心瓶颈。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">从策略梯度到前沿RL：总结</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>策略梯度</strong>：VPG提供几乎所有算法的核心思想：增好动作概率、减坏动作，数学上 = log概率梯度 × 学习信号。现代算法更复杂但都基于此结构。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>REINFORCE具体实例化VPG</strong>：对期望取Monte Carlo（采样rollout平均）。高方差可用动作无关baseline降（RLOO排除当前样本造prompt特定baseline）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>PPO = 强大的优势估计 + 保守更新</strong>：actor-critic用学到值模型估计价值函数构造优势 + 重要性比和clipping允许多次更新而防破坏性更新。价值函数、重要性采样、优势估计、KL发散在此汇聚。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>GRPO去critic简化PPO</strong>：免训值模型、采样多completion组内比较：更简单轻量的优化过程，牺牲采样rollout的计算换复杂度，因reasoning模型大规模RL训练而极流行。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Beyond vanilla GRPO</strong>：DAPO、Dr.GRPO、GSPO、TIS、CISPO不重造轮子，而是精修看似小的细节（loss聚合方式、reward归一化、batch组成、clip应用、per-token/per-sequence比、引擎mismatch处理）：这些对scale重要。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Looking forward</strong>：RL仍充满关于数据、奖励、缩放、持续学习、长视界推理、agents的开放问题。本文提供贡献这一前沿所需的概念基础。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+这篇是LLM RL完整指南：RL基础（value/advantage、KL、重要性采样）→ 算法演化（VPG→REINFORCE→PPO→GRPO）→ GRPO变体（GSPO/DAPO/Dr.GRPO/TIS/CISPO）→ 前沿（online/offline、continual、rubric、scaling、agentic）。<br  /><br  />核心：几乎所有LLM RL算法都是「log概率梯度 × 学习信号」；PPO训critic代价高、GRPO去critic换多采样；scale的成败在loss聚合、reward归一化、clip边界、引擎mismatch等细节。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/23SRrRBWY4D9fWbk2PN30g" target="_blank" data-linktype="2">【Agent for AI Infra三】摩尔线程MusaCoder国产算子生成超过Opus4.7：数据合成-SFT-RL全栈拆解</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/6BtVexCy0SNiRWBkf58Z4Q" target="_blank" data-linktype="2">腾讯混元hy3大模型技术之TurnOPD：回合感知的在线策略蒸馏，长程Agent提速2.29倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/EStFTcdTm2WolN0-VYxDpA" target="_blank" data-linktype="2">智谱GLM 5.2 RL: 单Rollout异步优化SAO稳定训练1000步全面超越GRPO</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2eWh5jZJPHsv0wi9km2nVg" target="_blank" data-linktype="2">NVIDIA TriAttention解读: KV Cache压缩最大的问题不是算法而是两个Infra问题</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FTsibdpbEjvoPWtxGqgxkQ" target="_blank" data-linktype="2">小米MiMo罗福莉后训练新范式MOPD: 多教师同策略蒸馏，多领域无损集成</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://cameronrwolfe.substack.com/p/llm-rl</span></p>
+</section>

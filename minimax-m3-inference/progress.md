@@ -12,7 +12,7 @@
 | Step 4d-i: 写传送门 | completed |
 | Step 4e: 写参考区 | completed |
 | Step 5: 预发布检查 | completed |
-| Step 6: 推送草稿 | pending |
+| Step 6: 推送草稿 | completed |
 
 创建时间: 2026-08-11
 来源: https://rocm.blogs.amd.com/software-tools-optimization/minimax-m3-mi355/README.html

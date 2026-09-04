@@ -1,0 +1,3 @@
+def forward(self, x, use_cache=False):
+    # ...
+    self.att(x, use_cache=use_cache)

@@ -1,0 +1,135 @@
+# -*- coding: utf-8 -*-
+"""vLLM AMD 上 speculative decoding 编译 build（原样保留）"""
+import json, os
+
+BASE = os.getcwd()
+def code(fn):
+    return "__CODE__text::" + open(os.path.join(BASE, fn + ".txt"), encoding="utf-8").read().rstrip("\n")
+
+DATA = {
+  "title": "在 AMD GPU 上探索 vLLM 的投机解码（Speculative Decoding）",
+  "lead": [
+    "大型语言模型支撑着广泛的应用，但规模化服务需要精细优化。标准自回归解码是大多数 LLM serving 系统的基线：模型生成一个 token、append 到序列、再用更新后的序列生成下一个。简单可靠，但服务循环一次只推进一个已提交 token。",
+    "投机解码（speculative decoding）通过 draft-and-verify 机制在此基线上构建效率：轻量 draft 组件提出候选未来 token，target 模型在提交前验证它们。多个 draft token 被接受时，单个 target 验证步可提交多个输出 token、且保持 target 的输出行为。",
+    "本文探索 vLLM 里的投机解码，实测 AMD Instinct™ MI300X/MI355X + ROCm™ 平台。本文为 GitHub README 格式，命令摘录作说明用途。"
+  ],
+  "summary": [
+    {"key":"核心机制","body":"投机解码不替换原模型：保留原模型为 target，前面加更快 proposal 阶段。Draft 提候选 → target 单 pass 验证 → 从左到右接受、首个被拒后丢弃后续。draft 方法分三类：native MTP（架构内建、顺序）、独立 MTP drafter（用 target 激活+共享 KV cache、顺序）、专用 target-conditioned 网络（EAGLE-3 自回归/D-Flash 并行块/DSpark 并行+轻量顺序修正）。"},
+    {"key":"启用与调参","body":"vLLM 用 --speculative-config 配置（method=native mtp/gemma4 mtp/eagle3/dflash/dspark + num_speculative_tokens）。D-Flash 用固定 block size（如 16→max N=15，锚点+15 候选）。监控：吞吐/平均接受长度/整体接受率/逐位置接受率。N 非越大越好——依模型/工作负载扫描（常 N=4-7）。"},
+    {"key":"实测结果","body":"AMD MI300X/MI355X + ROCm。吞吐比因模型/方法/工作负载差异大：gemma-4-26B-A4B D-Flash 最高 2.87×、Gemma 4 MTP 2.83×、Kimi-K2.5 D-Flash 2.68×、Qwen3.5-122B native MTP 2.20×、Qwen3.6-35B D-Flash 1.77-2.06×；部分配置低于基线。"}
+  ],
+  "sections": [
+    {"type":"h2","title":"引言与自回归基线","paras":[
+      "标准自回归解码中，每个 decode 步产生并提交一个新 token。生成四个输出 token 需要四个顺序 decode 步：context→model→T1；context+T1→model→T2；context+T1T2→model→T3；context+T1T2T3→model→T4。",
+      "每步生成的 token append 到序列、成为下一步输入。解码循环简单，但每个输出 token 都要一次模型 decode 步。长生成时，这个逐 token 循环可能主导延迟、限制服务吞吐。",
+      "投机解码的关键问题：**能否在保持原模型输出行为的同时，减少「一次只前进一个 token」的频率？**",
+      "投机解码把 proposal 与 verification 分离：draft 组件先提几个候选 token，原模型（target）在提交前验证它们。"
+    ],"fig_after":{"0":[{"src":"fig01.png","caption":"图 1：投机解码 draft-and-verify 总览。"}]}},
+    {"type":"h2","title":"投机解码的核心思想","paras":[
+      "投机解码不替换原模型：保留原模型为 target（负责最终输出），在它前面加更快 proposal 阶段。每轮：draft 提一个或多个候选 token（未立即提交）；target 在**一次验证 pass** 里评估候选序列。",
+      "验证从左到右：每个 draft token 用 target 对应位置结果检查；被接受的提交到输出序列；一个被拒时，同一 proposal 后续候选不再接受。被拒时 target 提供下一个 token，其余 draft token 丢弃，从更新后的序列继续生成。",
+      "概念上，标准自回归：target→T1；target→T2；target→T3；target→T4。投机解码让多个候选位置一起评估：draft 提 T1T2T3T4 → model 验证 ✓✓✗停 → 提交 T1T2 + 替换 token。",
+      "**简单接受/拒绝例子**：假设当前 prompt 是「The weather today is」；draft 提「sunny and warm outside」；target 左到右验证：第一个 token sunny 接受、and 接受，第三个位置 draft 提 warm 但 target 选 clear，剩余 outside 丢弃。下一轮从「The weather today is sunny and clear」继续。绿色框=存活 draft token、红框=首个被拒、灰框=被丢弃、蓝色=target 输出（非 draft）。"
+    ],"fig_after":{"0":[{"src":"fig02.png","caption":"图 2：一轮投机解码的接受/拒绝例子。"}]}},
+    {"type":"h2","title":"五种起草方法：三分类","paras":[
+      "所有投机解码方法遵循相同 draft-and-verify 总流程，但 draft 组件设计不同。主要差异：① 从 target 收到的信息类型；② 这些信息如何纳入起草；③ 候选 token 顺序生成还是并行。",
+      "据此分三类：",
+      "**Native MTP 模块**：直接内建进 target 架构；用模型原生辅助预测路径；顺序生成候选 token。",
+      "**独立 MTP drafter**：用与特定 target 配对的独立 checkpoint；推理时用 target 激活和共享 KV-cache 信息；顺序生成。",
+      "**专用 target-conditioned 草稿网络**：为特定 target 训练的独立 speculator，包括 EAGLE-3（从 target 隐藏态自回归起草）、D-Flash（并行块起草）、DSpark（加轻量因果修正 + 置信度前缀选择）。",
+      "draft 组件不是完全独立操作：可能收到 target 的隐藏表示、若干选中层的隐藏态、target 的 KV cache、或多个 target 表示的组合特征。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"Native MTP","paras":[
+      "多 token 预测（MTP）指模型原生机制族——预测超出紧邻下一个 token 的 token。vLLM 里，当 target 模型含兼容辅助预测组件时可用 native MTP（vLLM 文档引用 [2]）。",
+      "首个投机步：MTP 组件把 target 的隐藏表示与当前 token 信息组合预测第一个 draft token。后续步：用新 draft token 和上一步 MTP 产生的隐藏态预测下一候选。配置的候选数提出后，target 一次验证 pass 一起评估。",
+      "流程：target 隐藏表示 + 交错输入/最新 draft token 嵌入 → 模型特定融合/投影 → 辅助预测层 → draft token logits。两个输入用途不同：(1) 隐藏表示承载前序序列信息；(2) token 嵌入标识起草从哪个 token 继续。常见实现沿隐藏维组合后进辅助预测层。",
+      "**物理 MTP 层数与配置的投机长度是不同概念**。当 num_speculative_tokens 超过 checkpoint 直接提供的预测深度时，vLLM 可经额外前向 pass 重用 MTP 路径。更大的值提出更多候选但引入更多顺序起草工作。MTP 与 target 架构紧密耦合，部分 MTP 路径共享组件使额外内存开销相对适中，但生成多个投机 token 仍需验证前顺序起草。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"Gemma 4 MTP","paras":[
+      "Gemma 4 用与特定 target 配对的**独立打包 MTP 草稿组件**（Google Developers Blog《Gemma 4 的 MTP》[3]）。草稿组件有自己 checkpoint，推理时与 target 紧密连接。",
+      "它用 target 产生的激活、共享 target 的 KV cache——重用 target 已算的上下文信息，而非独立处理接受前缀。草稿组件层数同样与配置的投机长度分离：请求多个候选时顺序生成它们（Draft1→Draft2→Draft3→...→配置完成→target 验证）。",
+      "注意：Gemma 4 assistant checkpoint 即使经 model 字段提供、也走 MTP 路径。vLLM 把 assistant 组件连到 target 并允许共享 target KV cache。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"EAGLE-3","paras":[
+      "EAGLE-3 用为特定 target 训练的专用草稿网络。草稿组件有自己的执行路径，但紧密受 target 产生的信息制约（EAGLE-3 论文 [4]）。",
+      "target 前向 pass 期间，EAGLE-3 从 target Transformer 三个阶段的隐藏态录制：起始附近、中段附近、末端附近——同一接受序列在 target 处理不同阶段的上文表示。",
+      "三个隐藏态被拼接+投影成单个融合 target 特征；该融合表示再与采样 token 的嵌入组合、进入 EAGLE-3 草稿解码器。两个输入用途不同：融合 target 特征用 target 前向多阶段信息总结接受序列；采样 token 嵌入标识起草从哪个 token 继续。",
+      "EAGLE-3 **自回归生成 draft token**。首个 draft token 用接受序列算的融合 target 特征 + 采样 token 嵌入；产出 draft token 后其嵌入喂进下一起草阶段。因 target 尚未处理后面的投机位置，EAGLE-3 用上一个草稿组件输出继续。",
+      "这种顺序反馈给后面的 draft token 对前面草稿 token 的直接依赖。但生成更多投机 token 也要更多顺序起草工作。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"D-Flash：并行块起草","paras":[
+      "D-Flash 用为特定 target 训练的专用草稿网络。不同于 MTP/EAGLE-3 顺序生成，**D-Flash 用一次前向并行预测整块未来位置**（Z-Lab DFlash [5]）。",
+      "每块以**锚点 token（anchor）**开头——target 已知/确认的 token，D-Flash 不用预测它，只提供掩码位置后已知起点。后续轮通常是上一验证 pass 返回的额外 target token。",
+      "块布局：位置 0 输入 anchor、位置 1-6 掩码；一次 D-Flash 前向输入掩码位置、输出 draft1-draft6 并行。",
+      "像 EAGLE-3，D-Flash 先把若干 target 层隐藏态拼成融合表示；关键区别在用法：EAGLE-3 在自回归草稿网络输入处组合它，**D-Flash 把融合 target 上下文转成草稿网络每层都可用的额外 Key/Value**。掩码 draft 位置的 query 可同时注意：来自 target 的 K/V + draft 块自己产生的 K/V——target 上下文贯穿草稿网络、非仅在输入供一次。",
+      "草稿块生成后 target 一次验证。接受从左到右：接受直到首个拒绝、其余丢弃。",
+      "**主要特征**：所有掩码位置一起在单次草稿网络前向预测（draft1 draft2 draft3 draft4 一起），不同于顺序（draft1→draft2→...）。因一起预测，后位置不同一 pass 里早位置采样的输出；去掉自回归的逐 token 反馈，后位置效果依赖训练的 checkpoint 和工作负载，尤其长草稿块。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"DSpark：并行 + 轻量顺序修正","paras":[
+      "DSpark 用两个额外机制扩展并行起草：**① 引入块内 token 依赖的轻量顺序头；② 提交给 target 验证的前缀做基于置信度的选择**（DSpark 论文 [6]）。",
+      "DSpark 用修改版 D-Flash 作并行骨干。骨干一次前向为所有位置算主 draft 计算，产出每位置的隐藏态和一组 base logits。继承 D-Flash 的 target 上下文制约。",
+      "全并行草稿组件预测每位置时没先看到同块较早位置的 token——多个延续都合理时可能产生不一致组合（如「of course」和「no problem」都对、但独立逐位置预测可能得「of problem」）。",
+      "DSpark 在并行骨干后加**轻量 Markov 顺序头**解决：骨干仍一起算所有位置 base logits；顺序头从左到右选 token、用之前选中的 draft token 调整每位置——对上位置用紧邻前一个选中 token 产生小 bias 调整 base logits。主草稿网络一起处理所有候选位置一次前向，之后只跑轻量顺序头做逐位置调整。这让后面 draft token 依赖块内已选 token、无需对每位置重跑整个网络。",
+      "DSpark 也含置信度头可选更短 draft 前缀验证，但此特性在本实验用的 vLLM 路径未激活——基准只反映并行草稿网络 + 轻量 Markov 修正。target 一次验证、左到右提交直到首个拒绝。"
+    ],"fig_after":{"0":[{"src":"fig03.png","caption":"图 3：五种起草方法并排对比（草稿组件、所用 target 信息、顺序/并行）。"}]}},
+    {"type":"h2","title":"五种方法对比","paras":[
+      "五种方法共同点：target 仍在一次验证 pass 评估提议序列、接受决策左到右直到首个拒 token。差异小结：",
+      "**Native MTP**：模型原生辅助 MTP 路径；用 target 或上一 MTP 隐藏表示 + 当前 draft token 信息；经反复用 MTP 路径顺序生成。",
+      "**Gemma 4 MTP**：与 target 配对的独立 MTP 草稿组件；用 target 激活 + 共享 target KV cache；经配对 MTP 组件顺序生成。",
+      "**EAGLE-3**：专用自回归草稿网络；用 target 前向后段/中段/末段捕获的隐藏态融合表示；顺序生成、每 draft token 影响下一个。",
+      "**D-Flash**：专用并行草稿网络；融合 target 隐藏态作为每层额外 K/V；所有候选位置一次并行前向。",
+      "**DSpark**：D-Flash 风格并行网络 + 轻量 Markov 头；用并行草稿网络同样的 target 制约信息；一次并行前向 + 轻量顺序调整 token 选择。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"在 vLLM 中启用投机解码","paras":[
+      "vLLM 用 `--speculative-config` 配置。主要差异是方法名、是否需要独立 draft checkpoint、以及请求的候选 token 数。当前 vLLM 支持 mtp、eagle3、dflash、dspark 作为 method 值。配置：native MTP 无独立 checkpoint（model 省略）；Gemma 4 MTP/EAGLE-3/D-Flash/DSpark 需独立 checkpoint（model 指向为 target 训练的）。",
+      "启用前检查：装的 vLLM 版本支持该方法和模型架构；draft checkpoint 与 target/method 兼容；num_speculative_tokens 与 checkpoint 兼容；model card 支持目标硬件和推理后端。",
+      "**内存考虑**：native MTP 不加载独立 checkpoint、可能共享 embedding 表/输出头；Gemma 4 MTP/EAGLE-3/D-Flash/DSpark 加载额外 draft 权重，需预留足够 GPU 内存余量。实际开销取决于草稿组件大小、数值精度、张量并行配置和运行时缓冲。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"预训练 draft 模型在哪找","paras":[
+      "多个组织在 Hugging Face 发布预训练 draft 模型：Google 提供 Gemma 4 的 MTP assistant；Z-Lab 维护 D-Flash checkpoint 集合；Red Hat AI 提供 EAGLE-3/D-Flash/DSpark 三方法草案模型；DeepSeek 的 DeepSpec 集合为三方法提供匹配 checkpoint；LightSeek 专注 Kimi 的 EAGLE 草案；Inferact 发布 MiniMax 和 Kimi 的草案模型。",
+      "典型：Google（Gemma 4 MTP，E2B/E4B/12B/26B-A4B/31B）、LightSeek（EAGLE-3/3.1，K2.5/K2.6/K2.7-Coder）、Red Hat AI（EAGLE-3/D-Flash/DSpark，-speculator.eagle3/.dflash/.dspark 后缀）、Z-Lab（D-Flash，Qwen3/3.5/3.6/Gemma4/Kimi/MiniMax/GPT-OSS/Llama）、DeepSeek（DeepSpec，Qwen3-4B/8B/14B + Gemma4 12B，如 eagle3_qwen3_8b_ttt7）、Inferact（MiniMax-M3-EAGLE3/Kimi-K3-DSpark）。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"实验设置与主要观测","paras":[
+      "启用后实际问题：额外起草工作是否提升端到端服务性能。候选不必每位置都对——target 提交前评估。性能取决于多少提议 token 被接受、省下的 target 解码工作是否超过起草+验证成本。用任务的基准而非随机 token 序列评估。主要指标：输出 token 吞吐 + 相对基线加速比；平均接受长度和 draft token 接受率（可用时）；相对基线的模型质量。",
+      "**覆盖**：五种方法 × 多 target 家族（Gemma/Qwen/MiniMax/Kimi），在 AMD Instinct MI300X、MI355X 用 ROCm。",
+      "**主要观测**（吞吐比，随模型/方法/工作负载/N 变化）：",
+      "**gemma-4-26B-A4B-it**：Gemma 4 MTP 最高 2.74×（GSM8K）/2.62×（MBPP），D-Flash 最高 2.87×（MATH500）/2.79×（HumanEval），EAGLE-3 2.11-2.27×。",
+      "**gemma-4-31B-it**：Gemma 4 MTP 2.00×（GSM8K）/1.99×（MBPP），D-Flash 2.34×（MATH500）/2.05×（HumanEval）；EAGLE-3/DSpark 均超基线。",
+      "**Qwen3-8B**：DSpark 1.15×-1.63×（MATH500 最小/GSM8K 最大）、D-Flash 1.08-1.27×；EAGLE-3 在 GSM8K/HumanEval/MBPP 超基线、MATH500 低于基线。",
+      "**Qwen3.5-27B/122B-A10B/Qwen3.6-27B**：Native MTP 最高值高于对应 D-Flash；本组最大 2.20×（Qwen3.5-122B-A10B on MATH500）；native MTP 最高吞吐的 N=4-7 因模型/数据集而异。",
+      "**Qwen3.6-35B-A3B**：D-Flash 1.77-2.06×（每数据集 N=7 最大）、native MTP 1.28-1.49×（N=6 最大）——同家族模型结果也不同。",
+      "**MiniMax-M3-MXFP8**：EAGLE-3 达 2.09×（HumanEval、N=4）；**Kimi-K2.5**：EAGLE-3 达 2.33×、D-Flash 达 2.68×（EAGLE-3 最高常在 N=4、D-Flash 在 N=7）。",
+      "跨实验，最高吞吐对应的 N 不恒定：顺序方法吞吐常在前几个 N 递增后走平；D-Flash/DSpark 的 N=7 常是高吞吐设置、更大值不持续增。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"调参考虑","paras":[
+      "投机解码应视为**运行时优化**而非对每种工作负载都等好的固定设置。最高吞吐的 num_speculative_tokens 取决于多少提议 token 被接受、避免的 target decode 工作是否超过起草+验证成本。",
+      "**可观测性重要**。model card 推荐/示例配置是起点，最终用代表性工作负载和端到端测量选设置。有用信号：吞吐、平均接受长度、整体接受率、逐位置接受率。",
+      "更大 proposal 窗口给系统更多一次提交多 token 的机会；但后面位置接受可能下降——额外候选贡献小却仍加起草+验证工作，导致吞吐走平或倒退。",
+      "**起点**：native MTP 用 N=1 保守起点（最少额外顺序起草工作），确认正确性/稳定性后扫描 2,3,4,5,6,7。D-Flash 从 checkpoint 推荐/支持的 proposal 长度开始：许多 checkpoint 用固定 block size（如 block_size=16 → 最大 num_speculative_tokens=15，首位置是确认锚点、其余 15 是候选）；实际测 N=3,7,11,15，跨实验 N=7 常高吞吐、部分工作负载 N=11 最大。DSpark 的 num_speculative_tokens 设每轮候选数，实验里全配置 proposal 都提交验证，N=3 和 N=7 用端到端吞吐比较。",
+      "**匹配工作负载**：GSM8K/MATH500 中，中深 proposal 长度常对应高吞吐（native MTP Qwen3.5-122B 到 N=7、D-Flash 到 N=7/11）；HumanEval/MBPP 里中等 proposal 常更高吞吐（代码局部结构可预测、但格式/标识符/实现会使看似合理延续分歧）。",
+      "**示例工作流**：① 从 checkpoint 支持/推荐配置开始；② 用代表性 prompt 和生成设置基准；③ 记录吞吐/平均接受长度/接受率；④ 扫描几个更小更大的 proposal 长度；⑤ 按与目标工作负载最相关指标选设置（本实验以端到端服务吞吐为主）。所选配置不必然有最长 proposal、最高接受率或最大平均接受长度——要考虑起草成本/验证成本/接受 token/目标指标间的权衡。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"为新 target 模型训练 speculator","paras":[
+      "本指南不深覆 speculator 训练。典型工作流：① 准备代表性 prompts；② 用 target 生成响应；③ 选隐藏态生成模式；④ 收集所需 target 隐藏态；⑤ 训练 speculator；⑥ 测接受和服务吞吐。",
+      "**准备代表性 prompts**：反映预期工作负载（聊天/数学/代码/工具/多语言）；训练用响应必须由 speculator 将支持的**确切 target 模型**生成，tokenizer/chat template/thinking mode/生成配置匹配预期部署。vLLM 文档强调：对现有响应套 target 的 tokenizer/template 不使数据 target 特定——响应本身需来自 target 模型。",
+      "**隐藏态模式**：在线（运行时 vLLM server 现算现弃，省磁盘缓存但要同时跑 target 推理+训练算力）；离线（训练前算好存盘，之后释放全部 GPU 但需大量存储）；混合（首 epoch 生成+缓存、后续复用，付一次生成成本无需单独预处理阶段）。",
+      "**收集 target 信息**：vLLM server 可跑 target 并暴露所选草案方法需要的层隐藏态；选自定义 target 层时，speculator 训练配置必须用相同层选择。按方法收集：EAGLE-3 用选中层隐藏态自回归起草；D-Flash 用 target 特征训并行块预测网络；DSpark 在 D-Flash 风格上加强量顺序和置信度头；MTP 训练微调 target 自己的 MTP 组件（需 target 已含兼容 MTP 层）。",
+      "**训练与测试**：speculator 配置须匹配 target 隐藏尺寸/词表/tokenizer/选中层；方法特定设置（草案深度/块大小/序列长/lr）也要选。训后检查 checkpoint、与 target 一起在 vLLM 服务。训练 loss 不足评判——重要测量是接受长度/接受率/draft 延迟/GPU 内存/端到端吞吐。接受弱时调整 prompt 混合或训练配置重来。原则：用 speculator 预期支持的同一 target、同一生成模式、同一代表性工作负载。"
+    ],"fig_after":{}},
+    {"type":"h2","title":"Summary 与 Future Work","paras":[
+      "**Summary**：本文探了 vLLM 投机解码作为 LLM serving 的 draft-and-verify。examined 五种起草方法——native MTP、Gemma 4 MTP、EAGLE-3、D-Flash、DSpark——主要在如何用 target 信息、候选 token 顺序/并行/并行+轻量修正。实验覆盖选定 Gemma/Qwen/MiniMax/Kimi 模型 on AMD MI300X/MI355X + ROCm。",
+      "吞吐因 target/草稿/工作负载/proposal 长度/服务配置而异。跨测试配置，有些设置变化小或低于非投机基线，几个模型-工作负载组合吞吐比超 2×——上端示例：D-Flash on gemma-4-26B-A4B-it 2.87×、Gemma 4 MTP on 同 target 2.83×、D-Flash on Kimi-K2.5 2.68×。",
+      "Proposal 长度是重要实验变量：增大 num_speculative_tokens 有时在前几个设置增吞吐、更大值可走平或降；checkpoint 推荐给起点、但部署配置需代表性工作负载测量+接受指标。",
+      "**Future work**：加入非学习方法（n-gram speculation、suffix decoding），尤其 code editing/agentic loops 这类重复 token 模式；跨并发级、prompt/输出长度、batch size、采样设置的更广评估；研究 speculator 训练数据如何影响跨代码/数学/聊天/多语言/工具/结构化输出的接受；对 draft 生成、target 验证、KV-cache、graph 执行、调度做更深 profiling。"
+    ],"fig_after":{}}
+  ],
+  "conclusion": [
+    "vLLM + AMD + Embedded LLM 合著的这篇技术博客，把 AMD GPU 上投机解码讲得极系统：**核心是 draft-and-verify**——draft 提候选、target 单 pass 验证、左到右接受。五种起草方法按「如何用 target 信息 + 顺序/并行」分三类：native MTP（架构内建、顺序）、Gemma 4 MTP（独立 checkpoint + 共享 KV cache、顺序）、EAGLE-3（三阶段隐藏态融合、自回归顺序）、D-Flash（融合 target 上下文作每层额外 K/V、并行块）、DSpark（D-Flash 并行骨干 + 轻量 Markov 顺序头修正不一致组合）。",
+    "实验覆盖 AMD MI300X/MI355X + ROCm：吞吐比高度依赖模型/方法/工作负载/N，几个组合超 2×（D-Flash on gemma-4-26B 2.87×、Gemma 4 MTP 2.83×、Kimi-K2.5 D-Flash 2.68×），部分配置低于基线——**没有万能配置**。调参要点：N 非越大越好（常 N=4-7 峰值、D-Flash 受固定 block size 锚点约束 max N=block-1）；监控逐位置接受率比只看整体接受率更透。训练 speculator 的铁则是用**确切 target 模型 + 匹配 tokenizer/template/生成模式**生成训练数据，隐藏态可用 online/offline/hybrid 三模式收集。对做 LLM serving/推理加速、或想给特定模型配投机草案的人，这篇是「怎么选方法、怎么配、怎么测、怎么训」的完整实操手册。"
+  ],
+  "reference_url": "https://vllm.ai/blog/2026-08-23-speculative-decoding-amd-gpus"
+}
+
+with open("article_data.json", "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=1)
+print("✅ 写入 article_data.json")
