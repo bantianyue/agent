@@ -1,0 +1,146 @@
+Featured Projects
+
+TorchSpec
+
+Releasing Kimi K3 Draft Collection: Efficient Draft Training in TorchSpec
+
+🎉 We would like to happily announce the release of the Kimi k3 draft bundles that includes:
+
+kimi-k3-eagle3-mla
+
+kimi-k3-dflash2
+
+kimi-k3-dspark
+
+All the models are trained with TorchSpec in disaggreated training mode using 40 GB200s. See training config recipes. Along with the release of draft model collections, we would also like to share our learnings and optimizations we had throughout the process.
+
+Due to resource limitation, our DSpark checkpoint trained with less epoch compared to DFlash2
+
+Benchmark Results
+​
+
+Acceptance length
+​
+
+We compared the three draft checkpoint across 10 commonly used benchmarks including math, code, retrieval/QA, Chinese and dialogue. All benchmarks are done with sampling parameters: temperature 1.0, top_p 0.95, max reasoning effort. EAGLE3 runs at draft/verify depth 3/4; DFlash2 and DSpark runs at draft/verify depth 7/8.
+
+Figure 1: Acceptance length across 10 benchmarks.
+
+End-to-end throughput
+​
+
+To understand the actual performance of each draft model beyond acceptance rate measurement, we benchmarked throughput with end to end integration with engine. We used SPEED-Bench as stable engine TPS with a mixed low, mid, high entropy workloads under the same sampling defaults as above (temperature 1.0, top_p 0.95). We believe SPEED-Bench is a close enough representation of real production traffic.
+
+Figure 2: Kimi K3 SPEED-Bench throughput sweep.
+
+In summary, DFlash2 performs better than EAGLE3 at lower concurrency and gap gets closer as the concurrency increases. To claim, our DSpark benchmark is done without dynamic verification, which helps reducing the overhead of drafting incorrect tokens. We believe with further training and more optimizations in the engine. The performance will be close to DFlash2. DFlash2 have an advantage over EAGLE3 at lower batch size because they generate more draft tokens in one block, so a longer accepted prefix cuts serial target steps. Beyond a batch size of 32, the higher acceptance length does not compensate for verifying additional tokens. Under production sampling, temperature 1.0 leads to higher entropy in the target output distribution, so later positions have lower chances of being accepted and most of the extra verify work is wasted; EAGLE3's shorter 3/4 window wastes less of that tail. Two other properties of K3 make additional token verifications more expensive:
+
+K3 is a sparse MoE. Extra verify tokens scale expert FLOPs and dispatch with verify width, not just with tokens that survive rejection.
+
+K3 is a 3:1 hybrid of KDA and gated MLA. KDA must advance and rewind recurrent state per speculative token, which means more states and larger graph replays as draft width grows. Full-MLA models such as Kimi K2.6 can reuse compressed KV across extra query tokens, so additional verify positions have more gains from attention computation.
+
+Draft Architechtures
+​
+
+TorchSpec now supports training both DSpark and DFlash2 draft models for Kimi K3. These two new training paths are verified with actual training and generated performant draft models. The support is general and allows users to train with draft architectures that fit their deployment and experimentations.
+
+All draft models are with Multi-Latent Attention because it saves KV cache space during inference and can be easily integrated into PD disaggregation and unfifed KV cache layout and management. During benchmark, we found one of the bottleneck for DSpark draft is the attention in long context scenarios. We decided to train first 4 layers with Sliding Window Attention.
+
+Figure 3: Draft MLA kernel-time comparison.
+
+DFlash2 is trained with four SWA layers and one full-MLA layer; DSpark is trained with five full-MLA layers.
+
+Training Efficiency Improvements
+​
+
+We removing bottlenecks from both the training loop and data preprocessing. On 4xGB200 with a batch size of 2, the combined training optimizations improved throughput by 2.5x.
+
+Pipeline Parallel Support
+​
+
+Kimi K3 does not fit on 8 GB200s. Thus, we need to use 16 GPUs to shard the model weights. Pipeline parallel provides high inference throughput than other sharding strategy as all-reduce overhead is reduced to p2p hidden states transfer on the boundary of pp ranks. We have added the support general pipeline parallel with vLLM as inference engine in TorchSpec. To achieve the best performance, each pipeline parallel has to collect hidden states and write to mooncake asynchronously to maximize computation and reduce bubbles.
+
+Figure 4: Pipeline-parallel prefill throughput scales with the outstanding producer queue while Mooncake decouples inference from training.
+
+Anchored EAGLE
+​
+
+Traditionally, EAGLE-3 trains with TTT rollout on every token. This is expensive in terms of memory and runtime, especially for longer sequences, since we do TTT prediction for every token.
+
+Figure 5: KV cache mask visualization for the EAGLE's TTT training.
+
+On the other hand, DFlash has a different training method, it randomly samples "anchor tokens" and predicts N block continuations from each token. It achieves this by creating a bidirectional attention mask for each block prediction. This technique helps DFlash train stabily on longer sequences, since anchor token count doesn't change for longer sequences, they contribute equally instead of dominating the run.
+
+Figure 6: KV cache mask visualization for DFlash training.
+
+We have combined both approaches on EAGLE training, instead of doing TTT rollout on every token, we sample random anchor tokens. Each token unsampled contributes through KV cache contributes anyway, so we don't need the full coverage to get similar results.
+
+Figure 7: KV cache mask visualization for anchored EAGLE training.
+
+This means we sample tokens equally from inputs with different input lengths. This technique allows model to absorb more data with the same drafter size while making the training much faster by cutting down the unnecessary computation + HBM usage on the attention side significantly.
+
+Table 1: Speedup of attention computation for anchored EAGLE for MLA drafter.
+
+Grouping sequences by length
+​
+
+Speculative decoding training can scale by increasing the number of data-parallel workers or by increasing the batch size. Larger batches work well because training is largely memory-bandwidth-bound by the EAGLE TTT calculations. However, naive batch-size scaling does not produce a linear speedup.
+
+The main source of wasted work was padding. Sequences of different lengths must be padded to a common shape within a batch and across workers, causing the model to process tokens that do not contribute to training.
+
+Figure 8: Initial training sequences. Yellow squares represent wasted padding.
+
+We now sort sequences by length and group similarly sized sequences into the same batches. This reduces padding and increases the amount of useful work performed by each training step.
+
+Figure 9: Length-sorted sequences. Yellow squares are remaining padding; white squares are padding that can be skipped.
+
+Figure 10: Training batches after length-based grouping.
+
+Removing CPU synchronization
+​
+
+Calls to .item() on the main thread forced the CPU to wait for pending GPU operations. Some values, such as training metrics, eventually need to reach the CPU, but they do not need to block the current step. We therefore defer metric reporting by one step.
+
+We also switched to the fused Adam optimizer and replaced Python loops with torch._foreach_ operations. Together, these changes keep the CPU from unnecessarily stalling GPU execution.
+
+Figure 11: Torch Profiler trace before removing main-thread synchronization.
+
+Figure 12: Torch Profiler trace after removing main-thread synchronization.
+
+4.5x Faster Preprocessing
+​
+
+Before training begins, TorchSpec converts raw conversations into token IDs. The result is cached, but preprocessing remains on the critical path for every new dataset. At the scale of one million conversations, two multiprocessing behaviors made this stage unnecessarily expensive.
+
+Workers returned PyTorch tensors to the parent process. PyTorch transfers tensors between processes through shared memory, with each tensor consuming a file descriptor. This works well for a small number of large tensors, but one million small results can exhaust the parent's file descriptors. Returning NumPy arrays as bytes and converting them with torch.from_numpy reduced result collection from 498 seconds to 23 seconds.
+
+We also create worker pools before loading the dataset lets workers inherit an empty list and receive only the assigned inputs through the work queue. This reduced tokenization time for one million rows from 1,436 seconds to 319 seconds.
+
+Offline training for experiments
+​
+
+TorchSpec also supports offline training workflow now. Normally, the target model and draft trainer run at the same time: the target generates hidden states, sends them through Mooncake, and the trainer consumes them. Whichever side is slower throttles the other, and both workloads compete for available GPUs.
+
+Offline training separates the workflow into two phases. The target model first materializes hidden states to disk. The draft model then trains against those files without keeping the target model online. This is useful when GPUs are constrained, when repeatedly experimenting on a fixed dataset, or when inference and training need different cluster layouts.
+
+Figure 13: Final training-speed improvement on 4xGB200 with batch size 2.
+
+Nightly CI and Docker Image
+​
+
+Model support can still be difficult to use when it depends on a collection of local patches. Every user must discover the correct revisions, apply the same changes, build the environment, and repeat correctness checks. Small differences in any of those steps can make failures difficult to reproduce.
+
+Thus, we have added docker builds with vLLM patches and distributed through Docker builds. We also setup nightly CI that checks that the TorchSpec training workflow finishes with expected convergence behaviour.
+
+As a result, users can start from a docker image instead of reapplying patches and rerunning local correctness verification. This reduces setup time, catches compatibility regressions earlier, and gives both developers and users a common baseline when debugging.
+
+References
+​
+
+Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. EAGLE-3: Scaling up Inference Acceleration of Large Language Models via Training-Time Test. NeurIPS 2025.
+
+Jian Chen, Yesheng Liang, and Zhijian Liu. DFlash: Block Diffusion for Flash Speculative Decoding. ICML 2026.
+
+Inco AI. DFlash 2: Keep Drafting Parallel. 2026.
+
+Xin Cheng et al. DSpark: Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation. 2026.
