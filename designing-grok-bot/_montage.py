@@ -2,14 +2,14 @@
 from PIL import Image, ImageDraw, ImageFont
 import os
 os.makedirs('_a', exist_ok=True)
-rows1 = [('line', ['line-1','line-3','line-5']),
-         ('mix', ['mix-2','mix-4','mix-6']),
-         ('new3d', ['new3d-1','new3d-3','new3d-5']),
-         ('s32', ['s32-2','s32-4','s32-6'])]
-rows2 = [('base', ['base-1','base-3','base-5']),
-         ('blob', ['blob-2','blob-4','blob-6']),
-         ('emoji', ['emoji-1','emoji-3','emoji-5']),
-         ('initials', ['initials-1','initials-3','initials-5'])]
+rows1 = [('line', ['line-1','line-2','line-3']),
+         ('mix', ['mix-1','mix-2','mix-3']),
+         ('new3d', ['new3d-1','new3d-2','new3d-3']),
+         ('s32', ['s32-1','s32-2','s32-3'])]
+rows2 = [('base', ['base-1','base-2','base-3']),
+         ('blob', ['blob-1','blob-2','blob-3']),
+         ('emoji', ['emoji-1','emoji-2','emoji-3']),
+         ('initials', ['initials-1','initials-2','initials-3'])]
 cell, pad, lab = 260, 14, 40
 def font(sz):
     for c in ['C:/Windows/Fonts/msyh.ttc','C:/Windows/Fonts/arial.ttf']:
@@ -39,16 +39,21 @@ def sheet(rows, out):
     im.save(out, quality=92, optimize=True)
     print(out, im.size, os.path.getsize(out))
 sheet(rows1,'fig01.png'); sheet(rows2,'fig02.png')
-# wallpaper time-of-day trio (1 hscroll)
-wp=[('wallpaper-light-noon','morning-light'),('wallpaper-gray','mid'),('wallpaper-dark-night','night')]
-arts=[]
+# wallpaper time-of-day trio (uniform height)
+wp=[('wallpaper-light-noon','noon'),('wallpaper-gray','gray'),('wallpaper-dark-night','night')]
+th=430; arts=[]
 for name,label in wp:
     a=Image.open(f"_a/{name}.png").convert('RGB')
-    w=max(int((840/len(wp))),1); sch=(420*w)/a.width   # keep its H via scale to each ~ width 300
-    sc=300/a.width; a=a.resize((int(a.width*sc),int(a.height*sc)))
-    arts.append(a)
-h=arts[0].height+30; W=sum(x.width for x in arts)+ (len(arts)+1)*10
-im=Image.new('RGB',(W,h),(15,16,34)); d=ImageDraw.Draw(im); x0=10
-for a in arts:
-    im.paste(a,(x0,10)); x0+=a.width+10
-im.save('fig03.png',quality=90,optimize=True); print('fig03',im.size,os.path.getsize('fig03.png'))
+    sc=th/a.height; a=a.resize((int(a.width*sc),th))
+    arts.append((a,label))
+gap=12
+W=sum(a.width for a,l in arts)+gap*len(arts)+gap
+H=th+46
+im=Image.new('RGB',(W,H),(18,19,34)); d=ImageDraw.Draw(im)
+x=gap
+for a,label in arts:
+    d.rectangle([x,14,x+a.width-1,th+14],outline=(70,72,90)); 
+    im.paste(a,(x,14))
+    d.text((x+8, th+18), label, font=font(20), fill=(170,172,190))
+    x+=a.width+gap
+im.save('fig03.png',quality=92,optimize=True); print('fig03',im.size,os.path.getsize('fig03.png'))
