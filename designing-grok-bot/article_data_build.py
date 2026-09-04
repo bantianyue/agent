@@ -1,90 +1,74 @@
-#!/usr/bin/env python3
-"""
-article_data_build.py 模板
-=====================
-写新文章时：cp 到文章目录下，填入 DATA 字典内容，然后：
-    python write-article-data.py <文章目录>
-    python render-article.py <文章目录>
-    python add-portal.py <文章目录>
-
-字段说明：
-  - summary: 要点速览，列表格式 [{key, body}]。每条 key 是一两个词的标题，body 是一条结论（≤50字）。
-            ⚠️ 必须为 [{key, body}] 列表，不能是字符串！template.html 用 {% for item in summary %} 遍历。
-  - lead: 导语段落列表，每段用 **加粗** 标核心句
-  - sections: 正文章节。type 为 'h2'（大标题）或 'h3'（子标题）。
-              figs 可选，每个 {src: 文件名, caption: 图注文字}
-  - conclusion: 结语段落列表。**铁律**：① 不出现"本文""这篇""本博客"等自称/元引用前缀——直接陈述结论，读者知道在说谁。② 每段不超过180 token。③ 不出现"独立观点""我的看法""个人见解"等废话标记——结语本身就是观点。④ 每段首句直接是结论，不是"本文提出了…"。
-  - reference_url: 原文出处 URL
-"""
-
+# -*- coding: utf-8 -*-
+"""xAI: Designing Grok Bot for a world of persistent agents — 中文编译"""
 import json, os, sys
-
-# 获取文章目录（兼容 write-article-data.py 的 exec 调用）
-_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
 
 DATA = {
-    # ⚠️ 要点速览：必须为 [{key, body}] 列表，不可为字符串。**必须恰好 3 条**（write-article-data.py 三重校验要求 len(summary) == 3）
-    "summary": [
-        {"key": "核心观点", "body": "一句话说清论文/文章最关键的结论"},
-        {"key": "关键数据", "body": "支撑核心结论的具体数字或对比"},
-        {"key": "方法创新", "body": "区别于已有工作的核心创新点"},
-    ],
-
-    "lead": [
-        "引导段第一句。介绍背景和问题定位。",
-        "引导段第二句。点明本文核心内容。",
-    ],
-
-    "sections": [
-        {
-            "type": "h2",
-            "title": "第一节标题",
-            "paras": [
-                "段落一正文。**加粗** 标核心结论。",
-                "段落二正文。",
-            ],
-            # ⚠️ ⚠️ ⚠️ 图必须放在 section 内部，绝不能放在 DATA 顶层！
-            #    模板只遍历 sec.figs / sec.fig_after，顶层 figs 被静默忽略。
-            #    推送前务必 grep -c '<img' article.html 确认 > 0。
-            # 可选：图嵌入。src 是文件名（相对文章目录），caption 是图注文字
-            # ⚠️ 铁律：正文中引用的每个"图 N"都必须有对应的 fig 条目，不能少。
-            #    blocks.jsonl 中标记 hero=true 的图只用作封面，不会嵌入正文。
-            #    如果正文引用该图，必须同时 embed 一份（不能只做封面）。
-            "figs": [
-                {"src": "fig01.png", "caption": "图 1：说明文字"},
-            ],
-            # 进阶：使用 fig_after 实现段落级内联（比 figs 更精确，图挂在指定段落之后）
-            # 格式：{"para_index": [{"src": "figN.png", "caption": "图注"}]}
-            # 推荐 5 图以上的文章使用 fig_after，render-article.py 自动内联
-        },
-        {
-            "type": "h3",
-            "title": "子节标题",
-            "paras": [
-                "子节段落。",
-            ],
-        },
-        {
-            "type": "h2",
-            "title": "第二节标题",
-            "paras": [
-                "段落正文。",
-            ],
-        },
-    ],
-
-    "conclusion": [
-        "结语第一段。直接陈述结论，不出现「本文」「这篇」等前缀。不超过180 token。",
-        "结语第二段。行业影响或展望。不超过180 token。",
-    ],
-
-    "reference_url": "https://arxiv.org/html/XXXX.XXXXXv1",
-    # ⚠️ 必须设置！push-draft.py 从此字段读取公众号标题
-    "title": "公众号文章标题",
+ "title": "为一个「一直存在的 agent」而设计：xAI 从零公开 Grok Bot 的交互范式",
+ "lead": [
+   "大多数 AI 界面都围绕「用户操作的一次性会话」组织：开场setup、展开、聊完就结束。xAI 团队做 Grok Bot 时的中心问题却是——当对一个会在一次会话之外一直存在、并且能自己扛住责任走远的 agent 做设计，界面该长什么样？",
+   "答案是把产品从「会话历史的列表」改造成一串有姓名、有状态、有自己电脑的角色名单：Bot 的主对象不是聊天，而是你自己可以随时回来找它、它还能被你自己派活。这篇把背后的 design 推演和取舍完整讲了一遍，值得做 agent/产品的人精读。",
+ ],
+ "summary": [
+   {"key":"核心抉择","body":"组织产品的物体是 Bot 而非会话。Bot 有自己的身份、记忆、运行时与工具；Chats/Prompts/Tools/Artifacts 各司其职，其余全部藏进接口深处。"},
+   {"key":"Presence 即界面","body":"头像既回答「这是谁」也显示「在干什么」；(idle→thinking→working→waiting/blocked→done)；想看细节就抬手看当前动作，而非一堆状态图标。"},
+   {"key":"能力共享、上下文归角色","body":"Tools/Skills 放账号级(可共享广)；Memory/Routines 归 Bot(属各自角色)；跨角色用 Group chat，业务依靠 chief-of-staff 式去中心化协调，而不是把用户变成调度员。"},
+ ],
+ "sections": [
+  {"type":"h2","title":"为会一直存在的 agent 重新考虑「原语」","paras":[
+    "开头要思考的是界面如何塑造用户与 agent 的关系。过去界面以用户操作为中心的聊天 session 居多：每个 session 从 setup 开始、在用户眼皮底下一段段展开、会话结束就终止。Grok Bot 的目标是设计一个「在一次会话之外仍持续、并能自己承担责任」的 agent，这要求重想界面里的一些基本对象和信号——哪些该留在侧栏、agent 如何展示进度、它的工作在什么时候变得可见。",
+    "AI 产品一两年攒下了一大堆词：chat、session、model、context window、memory、system prompt、project、skill、connector、agent、tool、sandbox、permission、automation……每个都描述系统真实的一部分。可若把每一个都当成独立的产品概念去暴露，等于要求用户理解超出所需的东西。团队于是反着问：一个人和 agent 协作，到底最少需要哪几个概念？",
+    "反复收敛到五个：**Bot**——带自己身份、记忆、运行时和工具的持久 agent；**Chats**——与 Bot 协作的对话界面；**Prompts**——给 Bot 上下文或指令（一次性、存成 Skills、或按 Routine 自动触发）；**Tools**——让 Bot 通过软件/API/connector/shell/computer use 获取信息或采取行动；**Artifacts**——Bot 创建或改写的文档、设计稿、代码、数据等持久产出。除此之外的全可以藏在接口背后，直到用户有理由关心它。下一个问题才是：这五个对象里，该用哪个来组织产品。",
+  ]},
+  {"type":"h2","title":"从「聊天历史」到一个 Bot 名单","paras":[
+    "聊天是「用完即弃」的：为解某个问题开一场对话，推下去，一周后又起新的；很少有人回头看最近五次之外的对话。当交互单位只是一次提问时这很合理；但当对话另一端应该认识你、记得之前的活、并且长期替你负责任时，这种形态就怪了。",
+    "所以在 Grok Bot 里，主对象是 Bot 而不是会话。它有名字、头像、头衔；记得和你聊过什么；有自己的一台电脑和工具。明天你回来，回来找的是同一个 Bot。一个典型侧面：用户可能对某个 Bot 这样布置与追问：“Project Acme：Draft a follow-up after Friday’s call / Rewrite the pricing one-pager / What should I ask in the security review? / Build a champion map from my call notes / 练 demo 时模拟刁难 / 帮我横向比这三张竞争对手 deck……” —— 这些是持续的责任，不是一场问答。",
+  ]},
+  {"type":"h2","title":"Presence 即界面：头像一个就答三问","paras":[
+    "一旦 Bot 是「长期维护的对象」而非「临时起的会话」，它在产品里怎么出现就要一次回答三个问题：**这是谁？此刻在做什么？我需要知道多少？**",
+    "「这是谁」——名单只有在能扫读时才成立。名单越长，越不该让用户每次开产品都读一遍名字，要能余光从头像认出是谁。同时又要保持avatar足够一致的「一个系统感」。团队横跨插画、动画、游戏与界面系统的角色体系做了大范围探索——从字母 initials、emoji，到像素画、水彩、黏土(claymorphism)、Noritake 风线条、剪影、identicon。大多数方案只偏科一边：水彩/黏土给单个 Bot 很足的性格，却在侧栏小尺寸下细节过载；更朴素的体系放得进界面，却让各 Bot 显得可替换。",
+    "最终收口的体系：基础构造保持一致（简洁形状 + 会表达情绪的眼睛），靠受控的差异与配件制造区分度——单个 Bot 一眼可辨，又不至于像来自不同视觉世界的杂交。下面的两张表格图就是不同风格族(line / mix / 3D / pixel-s32，以及 base / blob / emoji / initials)各自的探索成片。",
+  ], "fig_after":{"2":[{"src":"fig01.png","caption":"头像风格探索之一：line 线条 · mix 混合 · 3D · s32 像素（每行一种风格族的 3 个变体，原文素材组）"}]}},
+  {"type":"h2","title":"头像自己会「干活」：静止到收工的状态机","paras":[
+    "头像成了 Bot 的身份后，顺理成章也是显示状态最自然的地方。Bot 可能 idle、thinking、working、waiting/blocked、done。若每种状态都配一个独立指示灯，就又多一层 UI 要用户理解。于是团队探索让头像自己扛多少生命周期：静止时 calm 且略带好奇；有活来了先「接单」；开工就进入状态、动起来；等别人或需要帮助时动作再变；完工后归于平静。",
+    "「我需要知道多少」是平行的问题：是只播“三个点动画”，还是一步步全展开？“三个点”信息太稀，用户分不清是在干活还是卡死。可一旦展示「一步短描述」，人看完第一步就会想看后面的每一步——用户研究显示他们其实是为「确认它还活着、走在正道上」而要这些细节。最终设计让头像的动效先说“我在忙”，要准话就 hover 看它当前动作：`Environment ready 387ms · Edited math.ts +14 −10 · Ran focused tests npm test · Ran type-check npm run · Searched code “toFixed” · Read AGENTS.md · Edited math.test.ts +6 −2 · Ran full suite 212 passed · Committed fix: clamp NaN`。",
+  ], "fig_after":{"1":[{"src":"fig02.png","caption":"头像风格探索之二：base / blob / emoji / initials 族（基础构造一致、用配件区分身份）"}]}},
+  {"type":"h2","title":"它的电脑，不是你的电脑","paras":[
+    "每个 Bot 都有一台自己的电脑：能上网、碰文件、跑软件。这又带来界面问题——那台电脑要多「可见」、用户什么时候该能接管？团队试了四种摆法：**浮动窗**(好够到但盖住对话)、**并排**(工作一直可见、让人想一直看)、**Modal**(检查方便但把 Bot 的工作空间当临时打断)、**全屏**(给电脑最多地方却把对话整个挤走)。电脑越抢眼，产品就越像在怂恿用户盯着它。",
+    "结论是三档进入权，让人能「进入它的工作空间」而不至于被拽进去替它操作：**状态**——电脑在干活时标题栏图标变紫；**预览**——点开侧边钉住的 panel，边聊边围观不离开对话；**接管**——Bot 需要帮忙时，可全屏打开、由你接手、再交还。",
+    "每个 Bot 电脑还配了随一天时间变色的壁纸：清晨亮、夜里暗，让它自己有“时间感”，感觉上是独立于你桌面的另一个空间。下面的横条就是同一套壁纸在不同时段的档位。",
+  ], "fig_after":{"2":[{"src":"fig03.png","caption":"Bot 电脑壁纸随一天时序变化：noon / gray / night（横条为原文壁纸素材并排）"}]}},
+  {"type":"h2","title":"信息的形状：prose 不够时就用卡片和小部件","paras":[
+    "早期版本的 Grok Bot 几乎每问必答一大段 prose：讲五天预报不如直接给预报、把一组任务口述出来而不是铺成看板。用户自己还得重建结构。于是他们把「回应的形式」也当成答案的一部分：该用文字就用文字，文字装不下信息结构时就用嵌入的卡片与 widget(New email 等)。对动作也一样——当 Bot 新建 Routine、改设置、或给另一个 Bot 发消息时，事件可以直接出现在 transcript 里，想细看再展开。",
+    "结果是一条「异构 transcript」：对话、系统事件、可交互对象与可视化共享同一条时间线。这是它跟“聊天记录”在人眼中最大的区别——它记录的不止是你说了什么，还有当时机器实际替你做了什么。",
+  ]},
+  {"type":"h2","title":"组织「智能」：能力可以共享，上下文只归角色","paras":[
+    "当用户造了好几个 Bot，产品还得组织它们怎么协作——哪个角色的上下文是什么、工作重叠时怎么共享上下文、怎么协调又不把用户变成总调派。随着有人真的创建更多 Bot，一个模式浮现：有人建一个 chief-of-staff Bot 去协调一群 specialist——只要对那一个发话，不必逐个查岗再给自己排活。",
+    "角色化还逼他们定「每个角色该知道多少」：法律 Bot 需要的是某个争端完整的历史，而财务 Bot 要的是多年的财务记录。把这些并进一个大 memory 反而更难给各 Bot 喂到与它工作相关的信息。",
+    "所以他们分开规定：**能力(Tools/Skills)放账号级**——很多 Bot 都可能要上网、碰文档、发邮件；**记忆与 Routines 放 Bot 级**——因为那是某特定角色长期知道并做了什么。用一句话：能力可以被广泛共享，上下文只跟着需要它的那个角色走。跨角色那些活由 **Group chat** 承载——为项目/团队提供共享上下文，同时每个 Bot 保留自己的专精记忆；设计师、工程师、PM、数据科学家可以在同一场对话里互相交接工作并共享项目所需。",
+    "协调手段他们也都权衡过：dashboard、assignment board、显式 handoff 控件——每一样都在给用户加协调的活。最终用的是「协调型 Bot」处理例行路由、遇到要判断的决策才把用户拉进来。",
+  ]},
+  {"type":"h2","title":"不被 prompt 牵着走：Routine、事件与自我触发的活","paras":[
+    "大多 agent 会话是由用户发 prompt 才开始，这让再持久的 Bot 也只在有人激活时才动。Routine 解决的问题正是这个：用户把「一件长期该做的事」交给 Bot，让它按计划或响应事件自动跑——盯一个行业、每天早上准备 briefing。用户只需定义一次，之后由 Routine 在合适的时刻启动 Bot。",
+    "团队最初把 Routine 当次要配置；随着它越来越成为自主工作的核心，就把它搬进 Bot 的主界面：transcript 里能看到这条 routine 跑了什么、在哪看结果或处理异常。时间触发器(每天8点、工作日8点、每周一9点、每月1号8点、每30分钟……)和事件触发器(issue 创建/事件、incident 触发、PR 打开/合并/关闭、推 main、检查失败、加 bug 标签、含 /fix 的评论、review approved、thread 结、deploy workflow 失败、webhook POST、新消息、reaction、channel 建了 dev/design、issue 状态进入 In Review/Done、周期结束……)都会成为启动点。",
+    "这反过来改变了 conversation 的角色：一条 prompt 能起会话，一个 schedule、一个事件、甚至另一个 Bot 也能。时间一长，越来越多的活会在用户根本不在场时就开工。",
+  ]},
+  {"type":"h2","title":"消失的界面：复杂留给系统，简单留给人","paras":[
+    "收尾阶段，大部分设计工作其实是“拿掉东西”：删除窗口与面板控件、computer-view 选项、agent 元数据；并给产品设了很实际的量级边——约每账号 50 个 Bot、每组对话最多 6 个。每个决定都回到同一个问题：**这到底是在帮人分派，还是给人又多添一样要管的？**",
+    "“操作一个 AI”和“委托给一个同事”之间的界线会随模型变强一直移动。Grok Bot 反映的是 xAI 认为它今天所处的位置——这也是从最初探索到发布整条线一直在找的那条分界线，以及让界面能跟着它一起变：当 agent 接过越来越多责任，界面应该问这个人要得越来越少。",
+  ]},
+ ],
+ "conclusion": [
+   "这是一篇很「干净」的 agent UI 论文稿。它没有在秀模型多强，而是在回答一个更难的问题：当交互的主体是「会一直存在的 agent」而非「一次性窗口」，产品的组织结构要翻成什么样。三个最该记住的设计判断：**①「Bot 名录」胜过「聊天历史」**——把“明天回来找同一个人”当成默认关系；**② Presence 长在对象上**——用一个不停在动、能告诉你它在干嘛的头像，替掉一整套状态灯与 Loading 动画；**③ 能力与上下文分界开**——工具技能可共享、记忆与常驻任务跟着具体角色走，靠 chief-of-staff & 群聊去中心化协调，永远别把用户变成总调派员。",
+   "给你的启发是它那句贯穿全文的问句——**“这东西是在帮你委派，还是只是又多了一样要你管理的东西？”** 用它去判断任何一个 agent/自动化产品上新增的控件、面板、仪表盘该不该存在，往往比任何原则都好使。对做 agent 或 AI 产品的人，这篇值得照着它把「如何呈现状态 / 何时接管 / 谁来触发工作」这三章重读一遍，它几乎是你搭 Agent 客户端的极佳范式参照。",
+ ],
+ "reference_url": "https://x.ai/news/designing-grok-bot",
 }
 
-# ── 写入 article_data.json ──
-out_path = os.path.join(_article_dir, "article_data.json")
-with open(out_path, "w", encoding="utf-8") as f:
-    json.dump(DATA, f, ensure_ascii=False, indent=2)
-print(f"✅ 写入 {out_path} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA.get('sections', []))} sections)")
+out = os.path.join(_dir, "article_data.json")
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=1)
+print("ok sections", len(DATA["sections"]), "paras", sum(len(s['paras']) for s in DATA['sections']))
+for s in DATA['sections']:
+    for k in s.get('fig_after', {}):
+        if int(k) >= len(s['paras']): print('越界', s['title'][:12], k)
