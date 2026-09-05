@@ -1,0 +1,83 @@
+Astra & Reasoning Effeciency
+
+There's a lot of speculation that Astra is using looped transformers or something similar like recirculation. I highly doubt that's the case for reasons we'll get into later, but Yakub did explicitly state this is not the case in a tweet. The more likely explanation is that there is immense overhang in the effective computation depth of modern transformers, and that synthetic CoT pretraining is the easiest way to recover it. For evidence of this we'll look at Astra's characteristics and get into some theory about how deep learning actually works.
+
+Pretraining is inefficient
+
+The core of why deep learning works is how spurious correlations interact with scale. When you have a lot of parameters, and an optimizer that modifies every parameter or orthogonalizes the gradient or whatever it does, every sample imparts many sometimes redundant, often spurious correlations into the momentum buffer and parameters.
+
+What defines a "spurious correlation" is its consistency across other samples and other knowledge. Eliminating spurious correlations with already learned knowledge is too complex to do in pretraining atleast for now (though many have tried). But the half way solution is to have a momentum buffer. What this allows is to average away the parts of the gradient that don't generalize over more samples, essentially effectively increasing your batch size.
+
+However, we can't just increase the momentum coeffecient to get more generalizing circuits, the transformer works by composing low level, mostly spurious circuits it learns from single samples into higher level circuits. So for example, the transformer first learns naive next token prediction, stuff like "[subject] [verb] [object]". In the process of learning that, it learns incidental things, like many (mostly wrong) ways of understanding a single sentence. The reason for this is that the model has way more parameters than it needs and not enough data, and so it's weights fill up with spurious circuits.
+
+But, some assemblages of those spurious correlations do actually work or are useful, and the gradient will flow to assemble them into higher level circuits like sentence level understanding, which it can then use to improve the NTP objective.
+
+Really redundant residual streams
+
+However, where the model learns those low level circuits is completely random. Remember, in the beginning the model is randomly initialized, and mostly empty of useful circuitry. So when the first few samples cross the model, every single layer participates in naive next token prediction. So a lot of the actually useful circuits only get learned way too deep in the model to be assembled into deeper circuits.
+
+This is ~fine, because by chance, and enough training, the lower levels of the model will rediscover better algorithms too, and because the higher level circuits themselves are also going through this kind of selection process. So if a higher level circuit is too deep in the model, it will eventually be replaced when an even higher level circuit plugs into a similar, but lower depth version of the same circuit.
+
+And this is where scale comes in, this is dependent on the number of parameters a model has. The actual ability for a model to turn it's huge parameter count into higher and higher level algorithms is actually really poor. All of these things are incidental and is why it takes trillions of tokens to learn anything resembling long context understanding. This is in addition to architectural limitations but that's out of scope for now.
+
+Low effective depth
+
+As alluded to earlier, this problem does not stop at naive next token prediction, but the placement of every single kind of circuit. A massive increase in scale only slightly improves this placement efficiency. Also, if the model runs out of scale or settles in on the placement of critical circuits too early, then the model will be limited on the depth of the circuits it can learn.
+
+You can think of this as the "there's no local minima in high dimensional spaces" analogy but for circuits. With enough model scale, even a massive circuit can be relearned shifted down a few layers and then assembled into high level circuits again, but this process is incredibly inefficient. The entire circuit must be relearned from scratch. Maybe, just by chance, the model redundantly learned all the ingredient circuits earlier too, but the larger the circuit becomes the less likely this is. This means that for a constant increase in scale, we get very little extra actual depth.
+
+Empirical evidence
+
+There are studies showing that you can drop the middle layers of transformers and they still work just fine, implying that the models aren't really using their depth to the fullest. You can also reorder layers and it still works, showing that a lot of circuits could be moved earlier into the model without much issue.
+
+What to do about it
+
+So what to do about it? There's a few options.
+
+Layer sharing & looping
+
+The first is to simply tie the weights across all the layers, and interestingly in Yakub's tweet he never explicitly says that there's no layer looping. What he says is "The depth of the computation graph [...] is within a factor of two of GPT-4." That would align with there being simply one set of shared layers that are looped a fixed number of times. (Universal Transformer / MoEUT)
+
+The way this solves the problem is that now since every layer shares the same weights, any circuit can be recomposed later just fine. The position of the layer is no longer important. However, this is not the only way of doing it. You could instead simply loop the layers once. That way, even if an important circuit was only learned in the latter half of the model, the second loop around could then use those circuits again.
+
+I'm not sure either of these ideas are good ones though. The problem with layer looping is that for a fixed amount of flops, looping is always worse than simply doubling the number of parameters. I doubt this changes with scale either. It might change with something like attention residuals or better residual architectures in general but I'm not confident.
+
+MoEUT is also probably not a good idea because it sounds like a nightmare to load balance, as the task set for earlier layers is very different than for later layers. Maybe blockwise would work though. I do think they've probably found some kind of solution like this though, hence the vaugeness in the original tweet.
+
+Optimization dynamics
+
+Another trick that might work is to change the parameterization of the model to allow the optimization dynamics to transfer circuits between layers. Naively you could imagine each layer has a set of logits that are softmaxed and determine how much of each layer's weights to move to itself. This is probably not that smart because naively adding the weights together like this probably doesn't work, it likely requires more fancy math but it's a good starting point.
+
+Distillation
+
+Before getting into what I think OpenAI actually did with Astra, let's start with distillation. The advantage of distillation is that the training signal is much richer than just naive NTP. It's so rich that the student model will essentially rederive the same circuits and layouts that the teacher has. Not exactly the same, since there are limits, but pretty close.
+
+If we wanted to significantly improve depth efficiency, we could start with a very depth inefficient process and try to distill it into a lower depth model. However, I don't think Astra is a distill. They'd need to pretrain an even larger model first, which supposedly they have done, but there are other issues with distillation.
+
+Synthetic Models
+
+What if we could artificially create a higher depth distillation target but in aggregate? What would that look like? Well, the model depth is what allows CoT efficiency. The more depth the model has to process input, the more sequential operations it can do before needing to spit out a token. Ultimately, this CoT efficiency is why we are after model depth in the first place. So the net effect should just be a model that takes fewer steps before taking actions.
+
+So what if we just... deleted parts of our previous generation model's CoT and distilled on that?
+
+That would probably work! We could even synthetically rephrase our CoTs in many other ways, like making them shorter, caveman speak like or overlapping different rewriters. Ideally, we have a big variety of rewriters, not just one and we'd need an enormous amount of this data, not simply enough for finetuning. The reason is the same as what we discussed before, deep learning is very sample inefficient and to generalize the missing parts of the CoT into high depth in the weight circuitry would take a lot of data.
+
+The advantage here is that this is also significantly more informative than RL. You get far more information per episode and I imagine the updates are also much higher rank because it's off policy and dense supervision (SFT/pretraining).
+
+Then, even if the dropping is random, and the rephrasing isn't really transformer optimal, during RL the model will learn to heal itself and compactify it's reasoning. However, you do need to be careful, if we train from a weaker teacher, although we can artificially increase it's effective depth we can't artificially improve it's knowledge recall. A smaller model knows fewer things, and if our larger student knows more stuff and the CoTs never recall it, the teacher may be incentivized to never recall it as well in order to maximize the NTP objective.
+
+For this, we could probably turn to metadata conditioning, if we tell the student model which model the CoTs come from and their model size, the model will learn a sense as to how knowledge changes with scale. It's sense of this would be pretty poor, but enough to introduce uncertainty when prompted with it's own out of distribution model size, which would then allow that knowledge to be elicited in RL.
+
+Another way you think think of this process is that we take our original CoT, which is emergent of some data generating process (CoT + RL) and then we drop some of the observations, essentially creating hidden variables in our markov chain. Then, when we train on the model on the dropped CoTs, the model has to reconstruct the hidden variables, but instead of in it's CoT, it needs to do it within the weights.
+
+In theory you could also context distill from the undropped to the dropped CoT, and this would make it more efficient but that would complicate training so you'd need to be careful.
+
+Evidence
+
+The evidence of this is that Astra can perform complex tasks without thinking at all. This is actually not that hard to achieve in theory, just train a model with CoT, and then remove all the thinking between the tool calls. If you have enough data and train it enough, the model will learn to perform all the necessary reasoning internally. Then with RL, the model can figure out what things really do need to be said out loud.
+
+I'm not confident that RL, with how weak the signal is from that, is capable of achieving something like this. Instead, huge amounts of synthetic data of back to back tool calling is almost certainly sufficient and the signal is much richer. It's also very easy to do, and true breakthroughs are rare.
+
+Help
+
+Also I'm looking for a job so if you've gotten this far DM me
