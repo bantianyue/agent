@@ -15,8 +15,8 @@
 | Step 4e: 写参考区 | completed |
 | Step 4f: Humanizer 润色 | completed |
 | Step 4g: 文本格式修复 | completed |
-| Step 5: 预发布检查 | in_progress |
-| Step 6: 推送草稿 | pending |
+| Step 5: 预发布检查 | completed |
+| Step 6: 推送草稿 | completed (media_id: TIqnnVEu6Oy3-wtKttGa0UycwG4EDIQt__yoajmqDuRu0K27VBGybbmGg5cKNzzN) |
 
 创建时间: 2026-09-06
 来源: https://www.primeintellect.ai/blog/nixl-modelexpress-weight-transfer
