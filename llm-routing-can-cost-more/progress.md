@@ -16,7 +16,7 @@
 | Step 4f: Humanizer 润色 | completed |
 | Step 4g: 文本格式修复 | completed |
 | Step 5: 预发布检查 | completed |
-| Step 6: 推送草稿 | in_progress |
+| Step 6: 推送草稿 | completed (media_id: TIqnnVEu6Oy3-wtKttGa0ZcQ18j0SXkfxhyecFEAgOkgVkgDYKt7VjGQrnhnn1qS) |
 
 创建时间: 2026-09-06
 来源: https://x.com/akshay_pachaar/status/2096601734072402054
