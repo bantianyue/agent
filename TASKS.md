@@ -1117,3 +1117,4 @@
 |--------|------|------|
 | 2026-09-06 23:47 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-09-06 23:50 | ✅ 已推送 | Akshay Uber/LLM路由烧钱 X Article→中文，media_id: TIqnnVEu6Oy3-wtKttGa0ZcQ18j0SXkfxhyecFEAgOkgVkgDYKt7VjGQrnhnn1qS，无正文图仅封面 |
+| 2026-09-07 00:07 | 🔄 覆盖重推 | 用户判定图片缺失；全量重建按原文保留10图+1代码块+算式后覆盖重推同draft.id，verify 10/10 |

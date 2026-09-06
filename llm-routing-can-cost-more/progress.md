@@ -2,23 +2,21 @@
 
 | Step | 状态 |
 |------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | completed (X Article - @akshay_pachaar) |
-| Step 1: 内容提取（全文） | completed |
-| Step 2: 全部图片下载 | completed (无正文图,封面取原文banner) |
-| Step 3: 封面生成（900×383 + 500×500） | completed |
-| Step 4a: 列出关键素材清单 | completed |
-| Step 4a-i: 写要点速览 | completed |
-| Step 4c: 写正文 | completed |
+| Step 1: 提取（X Article Draft.js 全量，含 10 图 + 1 代码块）| completed |
+| Step 2: 下载全部 10 张正文图 + 封面 | completed |
+| Step 3: 封面生成（900×383 + 500×500，源=原文 banner）| completed |
+| Step 4c: 写正文（100%保留 图/代码/算式 → 中文）| completed |
+| Step 4a-i: 要点速览 | completed |
 | Step 4d: 写结语 | completed |
-| Step 4e: 写参考区 | completed |
-| Step 4f: Humanizer 润色 | completed |
-| Step 4g: 文本格式修复 | completed |
+| Step 4e: 参考区 + 标题 | completed |
 | Step 5: 预发布检查 | completed |
-| Step 6: 推送草稿 | completed (media_id: TIqnnVEu6Oy3-wtKttGa0ZcQ18j0SXkfxhyecFEAgOkgVkgDYKt7VjGQrnhnn1qS) |
+| Step 6: 推送草稿 | completed |
 
-创建时间: 2026-09-06
+- draft.id: TIqnnVEu6Oy3-wtKttGa0ZcQ18j0SXkfxhyecFEAgOkgVkgDYKt7VjGQrnhnn1qS
+- body 图 10/10（verify-draft-images 通过）
+- 代码块 1 段原样嵌入（bash curl X-Model-Affinity）
+- 中文正文；preflight ALL PASS
+
+创建: 2026-09-06
 来源: https://x.com/akshay_pachaar/status/2096601734072402054
-模式: 新建(NEW) 英文X Article走中文编译
-| Step 4d-i: 传送门 | completed |
+说明: 初版(0图)被用户判定图片缺失，已全量重建按原文保留10图+代码+算式后覆盖重推
