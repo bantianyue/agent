@@ -1,0 +1,24 @@
+# 进度追踪 - nixl-modelexpress-weight-transfer
+
+| Step | 状态 |
+|------|------|
+| Step 0: 目录创建与TASKS.md | completed |
+| Step 0a: 语言类型判断（中/英） | completed (en) |
+| Step 0b: 来源类型确认 | completed (Blog) |
+| Step 1: 内容提取（全文） | completed |
+| Step 2: 全部图片下载 | completed |
+| Step 3: 封面生成（900×383 + 500×500） | completed |
+| Step 4a: 列出关键素材清单 | completed |
+| Step 4a-i: 写要点速览 | completed |
+| Step 4c: 写正文 | completed |
+| Step 4d: 写结语 | completed |
+| Step 4e: 写参考区 | completed |
+| Step 4f: Humanizer 润色 | completed |
+| Step 4g: 文本格式修复 | completed |
+| Step 5: 预发布检查 | in_progress |
+| Step 6: 推送草稿 | pending |
+
+创建时间: 2026-09-06
+来源: https://www.primeintellect.ai/blog/nixl-modelexpress-weight-transfer
+模式: 新建(NEW) - 英文源 Prime Intellect blog 走中文详细编译
+本流程状态字: completed 判定用
