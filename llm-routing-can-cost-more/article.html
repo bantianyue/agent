@@ -10,61 +10,96 @@
 <strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
--<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心现象</strong>：一个编码agent会话里有难易悬殊的多种任务，固定单一模型就让简单任务也按贵模型计价<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">真实代价</strong>：Uber约5000名工程师用Claude Code，不到半年烧光全年AI预算<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">关键结论</strong>：路由能省85% 成本，但agent回合内切模型会击穿前缀缓存：会话必须固定在同一模型</div>
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心现象</strong>：编码agent一场会话里的任务难易悬殊，却因写死单模型而全按同一个费率计价<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">真实代价</strong>：Uber约5000工程师自2025-12用Claude Code，到2026-04即花光全年AI预算<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">关键结论</strong>：路由可省约85% 成本；但agent每轮换模型会摧毁前缀缓存，必须做会话固定</div>
 </div>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一次编码agent会话通常会做五类事：分析代码库、写新函数、根据测试输出修bug、解释方法、查文档。这些任务难度天差地别，但在一个写死模型的系统里，它们却按同一个费率计费。换句话讲，一个只需要查docstring的请求，和一个重构分布式系统的请求，叫价是一样的。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本文借Uber与Claude Code的真实账本，讲清楚“固定单一模型”为什么在不知不觉中烧钱，再对比自己DIY路由层与把路由下沉到基础设施两种做法，最后落到一个常被忽视的关键点：agent循环里的会话固定（session pinning），才让路由真正省下钱。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">很多团队给路由画的图很简单：拿一个小模型当分类器、读一下请求就把单子分派给便宜或贵的模型。这个直觉没有错，一旦真塞进agent循环，很多朴素实现反而比不路由更烧钱。这是全文最想拆穿的一个表面正确。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">问题的起点来自编码agent：它们一场会话里常常要混合处理代码阅读、函数编写、按测试修bug、解释方法、检索文档这五类难度不等的任务。谁把他们放上同一条账单模型、并按同一个单价计价，谁就会在月账单上先尝到教训。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">本文会沿一条清晰的因果链讲下去：先看单一模型让账单膨胀的真实案例（Uber），再看DIY路由的四类翻车姿势，然后走入把路由做成基础设施（Plano/两阶段）的做法，最终落到agent必须靠会话固定（session pinning）守住前缀缓存红利这个关键结论。文章所有图片与代码块均按原文完整保留。</p>
 
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Uber的账本：单一模型包打天下</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Uber在2025年12月把Claude Code推广给了大约5000名工程师。到2026年4月，整个年度AI预算就花光了。重度用户一个月要烧500到2000美元，有位高管在一次两小时会话里就花掉1200美元。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这不是用错了工具：工程师们就是在用Claude Code处理它设计来对付的那些负载，一切都没坏。Uber的对策是给每款工具设一个每月1500美元的上限，这能压制成本，却是在用“节流产能”换“省钱”，只治了症状。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">真正的问题在于：查docstring和重构分布式系统被按同样的价格计费。一个轻负载请求本该走便宜模型，却和重负载请求一起被塞给最贵的模型。</p>
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">路由才是没人想建的修复</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">直觉上的修复是路由：把每个请求发给能把它办好、且最便宜的那个模型。分类、抽取、格式化、短摘要这些任务，用成本低一个量级（约十分之一价格）的模型，产出几乎一致；而前沿模型应当只留给真正需要它的活。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这方面的研究其实已经成熟。RouteLLM发表在ICLR 2025，用Chatbot Arena的人类偏好数据训练路由器，再在标准benchmark上测试。它的矩阵分解路由器在MT Bench上能达到GPT-4 Turbo约95% 的质量，同时只把14% 的查询发给了强模型，对应约85% 的成本下降。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这些路由器还能泛化到它们没训练过的模型配对，说明这套技术并没有过拟合到某一种配置。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把账算到自己的流量上也成立：把70% 的请求发给0.10美元/百万token的模型，30% 发给3美元/百万token的模型，混合成本大约是0.97美元/百万，比统一用3美元的模型省得多。2026年一篇arXiv动态路由综述也指出：设计良好的路由系统甚至能通过利用各家模型的专长，胜过单一最强模型。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>技术已被证明可行，团队之所以仍写死单一模型，是因为路由层本身才是难啃的部分。</strong></p>
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">自己DIY路由，四种会崩的姿势</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">路由的概念很直白：分类意图，转发到对应模型。但真落地到生产中，实现层面的失败模式会不断叠加。原文逐一拆了四种。</p>
-<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">每个请求要为两次推理买单</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最直觉的做法是在前面放一个小LLM当分类器，于是每个请求都变成一次分类调用加一次真实推理调用。即便分类器再便宜，也是在给每个请求叠加一笔固定税。想真正省钱，分类器必须明显比你的模型层级差便宜，而且准到误导路由不会吞掉差价。</p>
-<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">通用模型不擅长当路由器</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">像“fix this”“make it faster”这样的指令本身几乎不带任何信号，意图藏在整段对话历史里。通用大模型从没有被优化来解决“对照一组路由定义判定意图”这件事，现在却要它们去做训练时没练过的活；而编码负载恰恰是它们最容易翻车的地方。</p>
-<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">路由逻辑会烂掉</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">新增一个模型、重命名一个任务、改一次价格档位，你就是在没有任何评估工具接护城河的情况下手改路由代码。没有任何信号会提示你某次路由改动悄悄降低了质量，直到有人报bug你才察觉。</p>
-<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">翻模型会毁掉你的缓存</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这一条专门针对agent，也是最容易被忽略的失败模式。提供商会对重复的prompt前缀缓存注意力状态：当同样的token序列再次命中同一模型，缓存被复用，这部分token只按正常价格的一小部分计费。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">若在一次会话中途切换模型，新模型对这段对话没有任何缓存状态，于是每条token都会按全价重新计算。一个写死单模型的系统虽然贵，但至少缓存是生效的；一个在回合间乱切模型的自制路由器，却可能比不路由更烧钱。</p>
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">把路由下沉到基础设施</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这四种问题其实源于同一个根因：<strong>路由逻辑长在你的应用里</strong>，于是分类器、判定逻辑、日常维护、缓存行为全都归你管。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">DigitalOcean的Inference Router思路正相反：把这些全挪进基础设施。你只需描述自己的任务、以及允许服务每个任务的模型池，剩下的每一次路由决策都由平台来做。</p>
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">两阶段路由引擎：Plano</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>驱动它的核心是Plano，一个开源的、面向AI的原生代理。每一次路由决策都分两个阶段。</strong></p>
-<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">阶段一：解析意图</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个小模型读取整段对话，把它对你的自然语言任务描述做匹配，返回一个路由决策。如果你觉得这听起来像前面说的“双重推理”问题，区别就在于：这次做分类的，是专门为此训练的模型。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Katanemo的第一代路由模型Arch-Router只有1.5B参数，唯一任务就是读对话、对照路由描述、输出JSON。在准确率上它赢过了Claude 3.7 Sonnet，运行还快了28倍。路由不需要散文生成、不用调用工具、也不做多步推理，所以能力面够小，小模型就能完全覆盖。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">它跑在代理内部，而不是作为第二笔独立API调用跟你计费，代价只是约200毫秒的额外延迟，而不是账单上多出来的一行。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">现在生产环境用的是Plano-Orchestrator，专门针对更刁钻的对话模式训练，比如含糊的追问、对话中途跑题、以及根本不该被路由的消息。它在整体路由准确率上略胜GPT-5.1与Claude Sonnet 4.5，在编码这类意图最含糊的任务上领先最多。“Fix this”“try again”，只有对照它们之前的对话才有意义，而这种读法正是用它训练过的模态来读，胜过拿通用模型硬顶。</p>
-<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">阶段二：给候选模型池排序</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">判定任务后，候选池收窄到至多三个模型，第二阶段就是在它们之间做选择。你可以在配置里排一次序然后永远取队首，但这种做法迟早失效：不同时段提供商的延迟会随负载波动2到3倍，凌晨2点最快的模型到了下午2点往往变成最慢的；价格、延迟、速率限制都在漂移，上个月写的配置描述的是已经不再存在的条件。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这个排序引擎从DigitalOcean的定价API拉成本、从Prometheus拉延迟，再按任务对应的策略给候选池排序：Cost Efficiency按token成本排，Speed Optimization按首token时间排，Manual Ranking完全按你给定的顺序不做重排，Optimal用DigitalOcean的基准排序。后台一个循环不断刷新这些指标并写进内存缓存，因此请求时的读取几乎零成本。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每个路由器还带一份fallback清单：如果被选中的模型宕了、被限流或不可用，就按策略切到下一个候选，再不行才落到你配置的fallback模型。</p>
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">模型亲和：为什么agent需要不同的路由</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">上面两个阶段都把每个请求当成独立的来对待。但agent循环并不是这样工作的，而且现在几乎没有什么严肃应用还在跑单轮。编码agent要读文件、调工具、推理结果、写代码、再检查自己的输出，每一步都需要之前的一切，这正是循环能成立的原因。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这会把路由的计算方式整个改掉，值得仔细走一遍。</p>
-<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">前缀缓存的账</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每次LLM API调用都是无状态的，提供商不记得你的上一轮，于是agent每一轮都得把整段对话历史重新发一遍。提供商靠基于前缀的KV缓存来兜底：当一个请求以模型处理过的token序列开头，就复用缓存的注意力状态而非重新计算。命中缓存的输入token，大约只按正常输入价格的10% 计费。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>agent循环本质上是“重复的前缀”：一次15轮的编码会话会不断积累系统提示、工具schema、文件内容、前面轮的推理。到后面的轮次，你发送的内容约90% 都是模型已经处理过的文本。这本来是前缀缓存最理想的场景，几乎全部输入都应该命中缓存。</strong></p>
-<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">逐轮路由如何毁掉这一切</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如果路由在每一轮都评估意图：第3轮是代码生成任务跑去模型A，第4轮变成修bug又切到模型B：这个模型B从没见过这段对话，堆在A上的缓存前缀全部作废，于是那5万个token每轮都会按全价输入重新算一遍。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一次会同时坏掉三样东西。成本：在一条约90% 输入都命中缓存前缀的15轮会话里，保持模型亲和能在输入token上省45% 到80%；一旦切换模型，每轮都是0缓存命中、全价计费。行为一致性：不同模型的输出风格与工具调用格式不同，中途切换会破坏agent的解析。连贯性：推理思路被交给一个思考方式都不同、format也不一样的模型。</p>
-<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">解法是会话固定</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">路由器对某次会话的第一个请求做一次全新路由决策，然后把这个会话里后续的所有请求都钉在同一个模型上。DigitalOcean用X-Model-Affinity加一个会话ID来实现：第二次带同一affinity ID的调用会跳过路由，直接返回pinned:true和同一个模型。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">于是你只为那次路由决策付一次钱，往后的每一轮都能持续吃到缓存红利。没有这一层，agent循环里的路由真的会让你比不路由花得更多。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">一场编码会话，为什么账单会悄悄失控</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一次编码agent会话通常在同一个场子里做五类难度悬殊的事：分析代码库、写新函数、针对测试输出修bug、解释一段代码、检索文档。它们面临的算力要求完全不同，可一旦把整个会话固定到一个模型上，任何请求都会按同一个费率开出账单。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">原文配图：分类器把请求按难度分派给便宜/贵的模型</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Uber在2025年12月把Claude Code铺到大约5000名工程师手里；到2026年4月底，全年的AI预算就已见底。重度用户一个月要烧500到2000美元，有位高管在单场两小时的会话里花掉1200美元。值得注意的是没有任何环节坏了：工具正被用在我本该帮大多数人提速的地方。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Uber的对策是给每个工具设1500美元/月的封顶，用“削产能”的方法去换“省钱”：这只是把症状压住，远没触碰到病根：让一段查docstring的请求和一次分布式重构按同一个价钱的，本身就是扭曲的计价模型。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">同一场会话的账单之所以会暴涨，恰恰因为agent把不同难度揉进同一条对话：朴素版路由会在这条会话里一次又一次地切模型，结果每切一次都推倒上一版缓存。文章的主体，就在讲为什么会这样以及怎样修。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">原文配图：单场agent会话五类任务、同一个计费率的示意</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">路由是对症的解法，难点在路由自身</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对症的思路很简单：把相同任务交给做得好、又最便宜的那个模型去扛。分类、抽取、排版、短摘要这类偏规则化的任务，用便宜约10倍的模型即可交回几乎一致的结果，让真正的推理负载集中在最不可缺少它的模型身上。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这个做法背后是有研究背书的。RouteLLM（ICLR 2025）用Chatbot Arena的人类偏好数据训练路由器、再在标准benchmark上验证；其打低秩/矩阵分解那一版路由器，在MT Bench上保住GPT-4 Turbo大约95% 的质量，却只把14% 的查询实际上送给了强模型：换算出来是约85% 的成本压减。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>更重要的它还泛化：路由器能在根本没训练过的模型配对之间迁移，说明它不是过拟合到某一对组合。自己流量上也成立：让70% 的请求走0.10美元/百万token的廉价档，另30% 走3美元/百万token，混合单价约为0.97美元/百万：降幅明显。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>用户付给成本与质量的权衡，本身是合理的取舍；做不好路由的从来不是“该不该路由”，而是路由层要承担起分派与维护的全部责任，多数团队因此宁可写死一个模型。</strong></p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">原文配图：路由的价值/成本账示意（研究级证据）</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">自建路由，四种最容易在线上翻车的姿态</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">若还是想自己动手把路由器做进应用，原文的提醒很实在，四个点几乎是你必会踩中的：</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">1. 你会为一个请求付两次推理的钱</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最直白的做法是前面挂一个小LLM做意图分类。于是一次正常请求要先为分类付一次、再为真实生成付一次。分类器再便宜，也是每个请求上多出来的一笔固定税：只有当分类器的价格远低于模型里的档次价差、且它足够准，你才有望买到这个“便宜”。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">2. 通用大模型并不擅长判意图</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">用户说得越短，越考验上下文。像 “fix this”、“make it faster” 这类指令离开会话历史根本没法判断意图。通用模型没有被训练成“对照一组路由定义去判意图”的角色，让它临场扮演分类器，在编码这类意图最含糊的负载上尤其脆弱。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">3. 路由规则会慢慢烂掉</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每次加一个新模型、给一个任务改名或调一次价，就是在没有任何评估护栏的情况下动手改路由代码。而路由改动会不会悄悄让结果变差，常常要等用户真在线上提交一个bug才看得出来：没有信号能提前拉住你。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">4. 切一次模型 = 亲手烧掉一段前缀缓存</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这是专属agent、也最容易被忽略的一处。各家provider会对高度重叠的prompt前缀做KV缓存，同样一段token序列再命中同一模型时直接复用，只按极低折扣计费。可一旦中途换到另一个模型，它对当前会话毫无缓存，于是这部分重复前缀每次都掉到全价重算的水平。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这四点有个共同的根：路由逻辑长在你的应用里，你就得把所有判断、维护和缓存责任都压在自家背上。把它收进基础设施，正是下一节的解法方向。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">原文配图：缓存与切模型的关系示意</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">基础设施化：Inference Router与两阶段代理Plano</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">DigitalOcean的Inference Router把以上根治做在另一个层次：你不必亲自维护分类器与所有分支，只需要用自然语言写清“你有哪些任务、每类任务允许由哪几个模型来服务”，剩下每个真实请求该落在哪个模型上，全部交平台决定。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">承担判定的是Plano，一个开源、面向AI的原生代理。每次路由决策分成两个阶段：先是意图解析（把请求归使命题的一项任务），再是对候选模型做排序。下面配图为整条链路的概览。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">原文配图：Inference Router把路由收进基础设施、两阶段决策的概览</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Phase-1意图解析：把判别做得足够小且足够好</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第一阶段由一个小模型读完整个对话、匹配到我们对任务的自然语言描述、并返回一条路由结论。若觉得“这不凭空多付了一次分类”，注意这里的分水岭在谁在做这件事。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Katanemo的第一代路由模型Arch-Router方向非常收敛：只有1.5B，唯一要做的是读对话、拿它跟路由描述比对、输出JSON。结果却是：它在路由准确率上压过Claude 3.7 Sonnet，同时跑得快28倍：因为路由本身不要求作者模式、不调用工具、不需要长链推理，小模型已能cover整件事。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这段在代理内部完成，而非外挂在每次API调用旁的单独阶梯计费：带来的代价仅是多约200ms延迟，而不是账单上又多个独立条目。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">原文配图：1.5B专做意图判定的Arch-Router与前沿模型对比</figcaption></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">今天的生产主力：Plano-Orchestrator</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>现在线上跑的是Plano-Orchestrator，它专攻更难的会话形态：含糊的追问、会话中途的跑题、以及某些本就不该被路由的消息。在对整体路由质量的对比上，它小幅超过GPT-5.1与Claude Sonnet 4.5，领先最大的一段在编码：也就是意图最含糊的地方。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">“修这个”“再试一把”，若离开它们背后的那串对话，任何一条都是哑谜。在编码这类场景，让一个针对该模式训练过的小模型来读，比把一个通用模型当成临时法官要可靠得多。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Phase-2排序：让“选哪个”跟上现实的漂移</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把任务收窄到候选池（通常最多3个模型）还不够，你还得在池里挑出队首。如果只是把配置排一遍序后永远取第一条，多半撑不久：同一家provider的延迟一天之内能按负载抖2到3倍，凌晨最快的那块到了下午往往变最慢；价格在变、延迟在漂、配额也在挪，上个月的config描述的已经不存在的世界。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因此每一次都在实时算：路由引擎从DigitalOcean定价API拉当前成本、从Prometheus拉延迟，再按这只router绑定的策略做排序。Cost Efficiency按token单价、Speed Optimization按首token时间、Manual Ranking原样保留手工顺序、Optimal直接采用DO跑基准得出的默认。这些指标写进内存缓存并不断由后台循环刷新，让真实请求那一刻几乎零延迟。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每条router还配了fallback：当被选中的模型不可用/被限流/掉线，就按策略让到一个候选；都不行才落到你自己配置的兜底清单。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">模型亲和：agent需要的不是“每轮都变”</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">以上把每笔请求当作并行的独立探询来讨论：偏偏agent不这样转。如今几乎不再有正经业务跑单轮：一名编码agent要读文件、调工具、对部分结果做推理、接着写码并自查，每一步都压在前面所有步骤之上。这就是agent循环的全部存在意义。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这种结构给路由画了一条新分隔线：它在便宜与质量之间找平衡，可一旦把它做成“每轮意图一变就换模型”，就亲手把前缀缓存逐条值回全价。以下两个小节把“为什么普通路由在agent里打不过不路由”讲清楚。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">原文配图：agent循环与路由频率的关系示意</figcaption></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">前缀缓存：唯一能让agent省下钱的一环</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每一次LLM API调用都是无状态的，provider不记得你的上一轮，所以agent每回合都得把整段历史重新翻译一遍。它的物理救星是prefix KV cache：只要本次请求以provider已经处理过的一段token开头，就直接复用缓存里的attention，而不重新算。命中缓存的部分只按正常输入价约10% 计费。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">回头看15轮编码回来攒下的session：系统提示、schema、文件与这段推理逐次累积，到后面几轮，你实际送出去的内容里有差不多90% 都是provider早就见过的字符串。而这正是前缀缓存眼里最理想的场景：几乎整块输入都能只付一成钱。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">在session中途换模型 = 亲手把5万token打回全价</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>把路由做成“每回合逐意裁决后可能切人”，就会被前缀缓存反向惩罚：第3轮是写码，被分到模型A；走到第4轮又遇上一个new bug fix，router想把你切到模型B：可B对这段对话完全是第一次见，A身上那一串已经累积好的缓存前缀全部作废，于是那约5万个token又会重新走到按全价输入计算的排队里。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">结果是一口气折三处：<strong>成本</strong>：15轮里有90% 是命中缓存前缀，本可省45% 到80% 的input token费用，切一次模型这些优惠归零并每轮全价；<strong>行为一致性</strong>：不同模型输出风格、工具调用格式不同，中途换人可能直接打破agent的解析；<strong>连贯性</strong>：推理脉络交给一个思考与格式都不同的模型，一段好思路也可能因此被削掉棱角。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">会话固定（session pinning）：先把整场会话钉在一个模型上</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">解法把两件事分开：一次会话只在最开头做一次真正的路由决定，然后把这场会话里所有后续请求都固定到所选的同一个模型上。DigitalOcean落地方便是X-Model-Affinity头配合一个会话ID：router仅于首请求做一次判定，此后的请求带上同一affinity ID就直接给出pinned:true并返回同一个模型；于是你只为这一次路由少付一次钱，后续每轮却继续享用它应得的缓存红利。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">照上面这条因果，就不难理解为什么这篇文章题目会写“做不好路由的agent，可能比不路由更烧钱”：不是路由原理错了，而是把路由频率设成每回合都裁决的agent，等于在缓存这条线上自己把自己逼回全价。下面贴一段原文就是这么调用一个router的样子。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">贴一小段原文：向一个router发带亲和带的请求</h2>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code>curl<span style="color: #F8F8F2">&nbsp;</span>--location<span style="color: #F8F8F2">&nbsp;</span><span style="color: #E6DB74">&#39;https://inference.do-ai.run/v1/chat/completions&#39;</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>-H<span style="color: #F8F8F2">&nbsp;</span><span style="color: #E6DB74">&quot;Authorization:&nbsp;Bearer&nbsp;</span><span style="color: #F8F8F2">$MODEL_ACCESS_KEY</span><span style="color: #E6DB74">&quot;</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>-H<span style="color: #F8F8F2">&nbsp;</span><span style="color: #E6DB74">&quot;X-Model-Affinity:&nbsp;session-001&quot;</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>-d<span style="color: #F8F8F2">&nbsp;</span><span style="color: #E6DB74">&#39;{</span><br/><span style="color: #E6DB74">&nbsp;&nbsp;&nbsp;&nbsp;&quot;model&quot;:&nbsp;&quot;router:test-router&quot;,</span><br/><span style="color: #E6DB74">&nbsp;&nbsp;&nbsp;&nbsp;&quot;messages&quot;:&nbsp;[</span><br/><span style="color: #E6DB74">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{&quot;role&quot;:&nbsp;&quot;user&quot;,&nbsp;&quot;content&quot;:&nbsp;&quot;Write&nbsp;a&nbsp;Python&nbsp;function&nbsp;for&nbsp;binary&nbsp;search&quot;}</span><br/><span style="color: #E6DB74">&nbsp;&nbsp;&nbsp;&nbsp;]</span><br/><span style="color: #E6DB74">&nbsp;&nbsp;}&#39;</span></code></pre>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">从预置到自定义：5分钟把router建起来</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">生产要真用起来，DigitalOcean还造了一层很轻的体验：预设router（Preset routers）覆盖Software-Engineering / General、Writing以及长文档 / RAG四组，是上手最快的方式。每一步几乎都有一张SDK/UI界面在铺底。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">起名并给一段描述是第一步，但其实：那行description会被当成它的路由prompt用，是模型判“这条请求该划给哪一类任务”的关键输入，给得越具体、越靠近名词，路由越稳。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">原文配图：DigitalOcean预置/自定义router时新增任务的界面</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>下一步是“加任务”：一部router本质上是一台“任务集 + fallback”。每一任务都由一段描述 + 一组允许服务它的模型池构成。预制组里有Coding & Development（Bug Fixing / Code Generation / Performance Optimization / System Architecture & Design），还有General（summarization / extraction / translation / classification）以及面向长文档问答、RAG评测的Knowledge-Base组；也可以完全自定义。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">自定义更自由：给名字、给路由描述、给模型池与所绑策略（Cost Efficiency / Speed Optimization / Manual Ranking）。描述需要时时修，因为路由模型就是拿着它去匹配意图的。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig09.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">原文配图：新增任务/模型池与描述填写界面两例</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">真正选模型时，界面上会直接列出现价，把“差多少”摊在眼前：目录同一侧最低的是DeepSeek V4 Flash的 $0.08 / 百万input token，最贵的是Claude Opus 5的 $5.00 ：差了62倍，而这个裂口本身就是路由能回本的来源。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">与你的路由做一次真实评测</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Playground把router编好线时，主打的不是背benchmark，而是把你的路由与单个模型并排丢给同一条真实prompt看差距。原文给的一题是“为一个Postgres + Kafka的配置设计事务型outbox模式，要给出schema、轮询发布者与幂等”。右手的coding-router把这道题匹配到System Architecture & Design后转给glm-5.2；两路的答案都完整又正确。结账时它比一路直接调Opus 5便宜94%、首字节快77%。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">流量起来后还要盯两个面板：Analyze页给match rate / fallback rate，fallback一旦高企，多半是你任务：描述还是写糊了；Router Evaluation则让你把router丢给一份自己上传的数据集，用LLM-as-judge按“完整性 / 正确性”打分，是上线前给路由配置背书的正规做法。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig10.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">原文配图：上线前Router Evaluation评估界面/结论示例</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">结论：账单不该是一刀切的封顶或价差</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">做完路由这一整套，文章在最后一节收线：token单价在降，被agent消耗的token却涨得更快，Gartner估agentic工作流单任务的token是普通聊天的5到30倍。用封顶去控，削的是能力；用路由去控，是把每笔请求配到既够用又不至于让它坐到它坐不动的椅子上：从而既不丢能力、也不乱花钱。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">而真正能一直自建的，不是做路由本身，而是它的三个零件：能胜过前沿模型的意图路由模型、能反映当下条件而非上个月配置的排序、以及让agent整场钉在同一模型上的会话固定。最后那句最值得带走：别再问“路由到底有没有用”，问自己手里还有多高比例的流量，这些年其实一直在替一个过贵的模型垫账。</p>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
@@ -73,7 +108,7 @@
 <strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-固定单一模型省心却烧钱，真正的问题不是“要不要路由”，而是“在哪个粒度路由”。把每个请求都当独立单元来切分的朴素路由，在agent场景里会因为击穿前缀缓存而比不路由更贵；只有把路由决策绑定到会话、让agent的整条推理链始终固定在同一模型上，缓存的账才重新划算。<br  /><br  />对做agent基建与成本治理的人，这是最值得带走的一条工程判断：省token的关键不在模型选得有多聪明，而在别打断provider端已被缓存覆盖的对话前缀。定价数据（同目录里最便宜的模型和Opus 5差62倍）、延迟波动2到3倍这类事实也在提醒，路由排序必须基于实时指标而非写死配置，才会持续成立。</div>
+固定单一模型不会在缓存上出错，但代价是把一场会话里九成可以走廉价档的token也按贵档付了钱；反过来，把路由做得太细、做成每个回合都重新裁决，又会亲手毁掉provider为这场对话攒下的前缀缓存，把便宜全价重新拾回来。对做agent基建的人，这是最该带走的一课：路由的频率要与会话的生命周期对齐，而不是与每个单次提问对齐。<br  /><br  />省钱的真正支点不是“挑得比谁都聪明”的模型选择器，而是忍住不打断provider已为你的对话缓存好的那串前缀：会话固定让决策只发生一次，让后续每轮都持续享受缓存给出的折扣。剩下的账（从 $0.08到 $5.00的62倍价差、一天2-3倍的延迟波动），不过是告诉你路由的排序必须建立在实实在在的实时指标上，而不是你对上周配置的想象。</div>
 </div>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
@@ -81,27 +116,27 @@
 <div style="text-align:center;">
 <span class="portal-title">【传送门】</span>
 <div style="text-align:left;display:inline-block;" class="portal-links">
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HPaDwcT_4Rw5ty7LwDG4Ng" target="_blank" data-linktype="2">Torch Profiler在Trace里分析性能瓶颈: 剖析SGLang LLM推理</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/42s6fk-xdo23L-vtLj6Q8Q" target="_blank" data-linktype="2">vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/i-NZ-4oCXs48XpDfdcBfPw" target="_blank" data-linktype="2">在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HPaDwcT_4Rw5ty7LwDG4Ng" target="_blank" data-linktype="2">Torch Profiler在Trace里分析性能瓶颈: 剖析SGLang LLM推理</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4aEYa-5J2Ir82V_1_9anDA" target="_blank" data-linktype="2">AI芯片架构全景: 从NVIDIA到Groq的六条设计路线</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/i-NZ-4oCXs48XpDfdcBfPw" target="_blank" data-linktype="2">在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/YHmkt8EHFGm-HeflWCsB2w" target="_blank" data-linktype="2">英伟达Kernel Agent: 编译器与算子调优Agent的协同设计</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/42s6fk-xdo23L-vtLj6Q8Q" target="_blank" data-linktype="2">vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
 </div>
 </div>
 
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://x.com/akshay_pachaar/status/2096601734072402054</span></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：</span></p>
 </section>
