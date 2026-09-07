@@ -1,6 +1,6 @@
 <section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
 <style>
-/* 传送门统一样式（add-portal.py 动态注入时引用此 class） */
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
 .portal-title { font-size:12px; color:#888; }
 .portal-links { font-size:12px; color:#888; }
 .portal-links a { color:#888; text-decoration:none; }
@@ -10,30 +10,80 @@
 <strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">要点关键词1</strong>：核心内容。替换本占位。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">要点关键词2</strong>：核心内容。替换本占位。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">要点关键词3</strong>：核心内容。替换本占位。</div>
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">数据并行</strong>：把模型复制到多张GPU上各自喂不同微批，反向时用all-reduce把梯度同步起来，海量提升吞吐。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">三个提速优化</strong>：梯度同步与反向重叠、把梯度装箱做单次集合通信、用no_sync配合梯度累积，三者让DP不再空等通信。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">ZeRO三阶段</strong>：把优化器状态、梯度、甚至参数沿数据并行维度分片，配合reduce-scatter与all-gather，把冗余显存一路压下去。</div>
 </div>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">上一篇认识了单张GPU上显存被谁吃光，也看到梯度累积几乎可以无限放全局batch却要付出串行次数变多的代价。一个自然的念头随即升起：既然每个micro-batch的前后向彼此独立，为什么不干脆把它们放到多张GPU上同时跑？这一篇就从数据并行讲起，依次把能做好的三个关键优化拆开，再回到全局batch重新算一次账，最后进入把显存冗余逐层削平的ZeRO三阶段：优化器状态、梯度、参数一路分片下去。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">和上一篇一致，文中所有交互式图表与动画我们会用文字讲清它们想表达的结论，地图式速查图依旧用作本篇封面。公式与数字尽量保留原样，方便对照原文与后续篇目。</p>
 
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">正文第一章标题</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第一段正文文字。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第二段正文文字。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">数据并行：多张卡各练一份微批</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">数据并行（Data Parallelism，DP）的思路是在若干张GPU上各放一份完整模型副本，这些副本称作模型实例model instances，反过来又把副本喂给不同的一份micro-batch数据前向与反向并行推进，因此得名数据并行。这张图把基本格局画得很清楚：多份模型副本排列开来，每份吃不同的微批。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因为每张GPU吃的是不同的micro-batch，各自算出的梯度必然不同。为了让各模型副本保持同步，需要在优化步骤之前、也就是在反向传播途中，把这些梯度用名为all-reduce的操作求平均。这正是本文遇到的第一个分布式通信原语：all-reduce负责处理GPU之间、以及节点之间的同步和通信。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
-<img style="display: block;width: 100%;margin: 0 auto;" src="fig1.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图片说明文字</figcaption></figure>
-<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">子标题示例</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">子标题下的段落。</p>
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">含表格的章节</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下面是一张示例表格。</p>
-<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
-<thead style="font-weight: bold;color: #3f3f3f;">
-<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">列1</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">列2</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">列3</th></tr>
-</thead>
-<tbody>
-<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">A</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">B</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">C</td></tr>
-<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">D</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong style="color:#0F4C81;">E</strong></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">F</td></tr>
-</tbody>
-</table>
+<img style="display: block;width: 100%;margin: 0 auto;" src="dp_diagram.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">数据并行示意图：模型在多张GPU上各持完整副本，分别处理不同的微批，反向结束后用all-reduce同步梯度</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如果对广播、聚集、all-reduce这类分布式通信模式还不熟，书里附录A0专门准备了一小份并行编程速成说明，稍后遇到时可以去补。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">最朴素的做法是辆刹车：先算完再通信</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个没有经过打磨的数据并行实现，会先傻等反向整个结束，确定所有梯度到齐后，再对所有DP进程触发一次all-reduce同步这些梯度。这样计算与通信串成一条线，GPU在通信期间只能空转，等于一脚油门一脚刹车，图中那条时间轴上清晰的空洞正是闲置的证据。作者给这个做法直接盖了章：这是绝对不行的大忌，因为谁都不想让GPU在通信发生的当口闲下来。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">正确方向是尽可能让通信与计算重叠，让两者尽量在同一时间段里同时进行。接下来的三个优化，就是沿着这个方向把这份朴素的初版越改越好。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">第一版优化：让梯度同步与反向重叠</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>朴素做法最大的弱点在于次序：反向做完计算，还得等梯度同步的通信完成才能更参数。能不能把这段通信跟计算重叠起来？答案是可以。下图说明关键在于一个反直觉的事实：某一层梯度一旦算出即可立刻收集求和，无需等更早各层（图左侧的红块）的梯度也算完。举个例子，最末层（最右侧的红块）的反向一结束，它的梯度就能立刻进入收集求和流程，而同期间更早各层仍在上层深处继续算梯度，一路朝左推进。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在PyTorch里可用给每个参数挂一个all-reduce钩子来达成：一旦该参数的梯度就绪就触发一次all-reduce，而别的参数的梯度仍在计算中，从而让绝大多数all-reduce与梯度计算重叠，效率因此显著提升。典型的钩子注册函数如下，遍历所有需要梯度的参数，逐个注册post-accumulate-grad钩子。把通信和计算重叠之后，整份模型等待梯度同步的时间被压缩，梯度同步至少能部分与反向并行发生，数据并行也就明显变快。这也是全书反复强调的一种核心手法：把计算与通信重叠，是让规模化训练效率拉到极限的基本功。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">第二版优化：梯度装箱再做集合通信</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GPU上的计算通常在处理大张量时更有效率，而不是让一大批小张量跑来跑去很碎的操作；这句同样适用于通信操作。于是可以顺手给梯度分桶：把同一桶里的梯度合并，一次只发一次all-reduce，而不是为每个梯度各发一次独立的all-reduce，整体通信开销因此大幅下降。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">可以把它想象成寄包裹：打包后大箱子比一堆小箱子更省事，一发大的总比反复发很多小的强。给每一个桶做一次all-reduce，能显著压低通信负担、加快通信本身。作者还贴出了在Picotron里带装箱的实现。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">第三版优化：与梯度累积的搭配细节</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">梯度累积前面见过：参数更新前先连续做多次前向与反向，最后才调用优化器。当把梯度累积和数据并行叠加时，同步梯度的时机要格外小心。最粗糙的版本会在每次累积反向之后都自动触发一次all-reduce，这显然是次优的，因为等累积全部结束后只做一次汇总还能有同样的效果、却省掉中间多次开销。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">PyTorch里通常用model.no_sync() 装饰器解决：给那些不需要做归约的反向跳梯度过同步，真正最后一次反向再去真正reduce。顺带有个易漏的细节被单独标出来：执行通信操作时，张量内存必须连续，避免冗余的复制。为了达到最优，工程上常常为通信预分配一块和激活或模型参数等大的连续缓冲；这块缓冲虽然在提速通信，却也部分推高训练期间的峰值显存，前面记忆账本里那块杂项因此变得不那么小。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">全局batch的账要重算一次</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">现在batch的大小公式可以把新增的数据并行和梯度累积参数都纳入进来：全局batch gbs等于微批mbs乘以梯度累积步数、再乘以数据并行的副本数dp，写出来即gbs=mbs×grad_acc×dp，其中grad_acc是梯度累积步数，dp是数据并行用的实例数目。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">给定一个目标全局batch，就能在梯度累积步数与数据并行进程数之间做交换以加速训练。实践里人们倾向尽可能多用数据并行、少用梯度累积步数，因为DP天生可以并行，而梯度累积是串行的；当数据并行一路扩到把GPU都用完还凑不满目标batch时，才在其之上补梯度累积凑数。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这样分发不同样本的训练给了我们第一个并行维度，是一维并行；全书还将在后几篇逐步铺满另外四个维度。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">一串务实清单：把四份配置一次配齐</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">到这里可以停下来总结第一次把一维并行训练跑起来的配方，作者给了一份走向最优数据并行配置的草稿步骤。第一步先定下以token计的全局batch：要么翻文献，要么自己跑实验看收敛定夺。第二步挑训练序列长度：同样参考文献或做实验；一般而言2到8k token在今天这套测评体系下都能稳定好用，各团队通常把长序列挪到训练末尾再掺进一些长下文样本，把当前应用的超长上下文补齐，而训练主体阶段并不用很长。第三步既然知道了目标全局batch，就该在一张GPU上憋出本地能装下的最大微批mbs，做法是把本地batch一路调大直到把显存耗尽为止。最后第四步，确认可用的GPU总数并定下数据并行副本数，用gbs对dp的比值去换算还需要补多少步梯度累积才能凑成理想的全局batch。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这个比值若算出来小于1，也就是GPU多到用不完、俗称显卡充裕的土豪场景，可以选它们之一：不用满全部GPU、改探更大的全局batch、或试试更小的mbs会不会反而更快。最后一条其实是舍弃单块GPU的极致利用率去换全局吞吐，用比可能值更小的mbs换取更快的训练。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">举一个具体的贯穿例子：想练一个近期的大模型，目标全局batch是4M token，序列长度4k，则batch折合1024个样本，取最近的2的幂。若单卡只能装下mbs=2，而手里有128块GPU，那么做4次梯度累积恰恰凑到每步1024个样本也就是4M token。可要是眼下突然有了512块GPU，就能在保持mbs=2的情况下、把梯度累积步数降到1，照样得到完全相同的一个4M token全局batch，而且练得更快。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">作者给DeepSeek与Llama的训练做法做了背书：它们的主预训练阶段都采用4k token的序列长度。2到8k之所以好使，是因为网络上真正比这更长的文档本来就稀有，训练语料的天然分布决定了这个甜蜜区。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">扩到512+ 卡，DP的优势开始松动</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">有个标记为提醒的注记值得细看：一旦扩到512块卡以上，具体还要看所用网络，其通信操作会开始被环形延迟也就是环时延限制住，即信号绕环形网络一圈所需的时间；此时没法再把DP的通信与计算完全重叠，算力效率会被拖累、吞吐随之下降。这时就该转向探索其他可并行的维度。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">数据并行把一次次的all-reduce梯度同步跟反向计算重叠得很漂亮来省时间，可这种好处蔓延到大规模时就开始失效：因为当GPU从几百张涨到几千张，协调彼此的开销被显著放大，对网络的需求也日益超出收益。于是每多挂进一块GPU，这套设置的效率反而越来越低了。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">书里放了一张实测基准来说明这件事的走向：越过某个上限之后，吞吐开始明显往下掉，而每张GPU的显存占用却纹丝不动、并不受DP进程数增减的影响。总结成一句：数据并行是我们把训练扩展到更多GPU上的第一个简单策略，它和梯度累积原理一致，却把微批上的前向与反向真正并行化，从而换来吞吐的大幅提升。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">岔路出现：模型放不进单卡怎么办</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">眼尖的读者大概早就发现，前面整套推理都暗含一个前提：至少能塞进mbs=1的前向，也就是最小一个样本要能进得了显存。可现实不总是这样，尤其大模型即便开着激活重算也塞不进一张卡。作者给了一条快速眼估参数最低显存的心法：参数规模乘以2大概就是参数本体所需，比如70B约到140GB，已远超一张H100的80GB显存。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">数据并行扩到一定程度也开始有了难以忽略的通信开销。面对这些更大的模型或更大的batch，庆幸还有办法：要么把部分张量挪到CPU，要么把权重、梯度和优化器状态这些张量拆到多张GPU上。把后者再细分，有两类主流思路：一类是切分，包括张量并行、上下文并行或流水并行；另一类是共享，也就是DeepSpeed ZeRO或PyTorch FSDP。这两类某种程度上彼此正交，而且可以联合使用。共享这套范式和数据并行走得很近，所以先顺着它往下看，也就是紧邻的ZeRO。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">ZeRO：专门削掉冗余的那一味药</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">ZeRO是Zero Redundancy Optimizer的缩写，DeepSpeed为缩减大模型训练里的显存冗余而提出的内存优化技术。数据并行是扩展训练的得力手段，可它把优化器状态、梯度、参数一字排开在各DP副本上各自复制一份，这种繁冗的复制带来了可观的显存冗余。ZeRO的做法是把这些对象沿数据并行这个维度切分成片，却仍然用完整参数集去做计算。代价是DP进程之间有时要收发更多通信，能不能被完全重叠因工况而异，下文会看到。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">它按削除冗余的程度组织成三个可叠加的阶段：第一阶段ZeRO-1只分片优化器状态，第二阶段ZeRO-2分片优化器状态加梯度，第三阶段ZeRO-3则再把参数一并分片，它在PyTorch原生实现里也叫全分片数据并行即FSDP。所谓沿DP轴分片，是因为ZeRO本质属数据并行家族；后面还会看到能按别的轴分片。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">有个东西明明该分却没法分，那就是激活。因为每份DP副本拿到的是不同的micro-batch，激活天然各自不同，不会被跨副本重复，自然谈不上重复，也无从分片削减。真正的主角还是参数与梯度这几样。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">先把标准训练的显存账本翻出来</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">沿用此前篇章的标准训练显存构成，这里把参数个数记为符号 ψ，沿用ZeRO论文原记号，上一章里用N。在混合精度训练结合Adam优化器的设定下，每样需要保存的东西分别占用：半精度即bf16/fp16的模型参数占2ψ，半精度的模型梯度占2ψ，fp32的模型参数加上优化器状态占4ψ 加两份4ψ；而fp32的模型梯度占4ψ，只有我们想用fp32累积梯度时才会计这一项。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">若不把梯度在fp32累积，总显存就是2ψ+2ψ+12ψ；一旦累积则变成2ψ+6ψ+12ψ。先聚焦不做fp32梯度累积的情形更清爽，需要时再把相应字节补进受ZeRO-2和3影响的梯度项即可。ZeRO的主意就是把这几样沿DP维度切成片，每个节点只存其中一段、用的时候现场重建，于是显存开销被数据并行度N_d整体除下来。那个记忆图随后用逐阶段的分片情况逐一解释了公式里每一项从哪来的。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">ZeRO-1：先分片优化器状态</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">朴素数据并行的毛病一眼可辨：所有进程在反向之后拿到的是相同梯度，接着同时执行完全一样的优化步骤，这在直觉上简直是一地重复劳动。能不能既躲开重复、又顺手把显存降下来？ZeRO-1给出的方案是把优化器状态均分成N_d等份，N_d即数据并行度。于是每块DP副本上分布的每份模型只负责其中N_d分之一的优化器状态，优化那次也只更新N_d分之一的fp32权重。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">然而前向时每份副本都要用全部的参数，于是在优化步骤之后必须多加一次全书遇到的第二种集合通信原语all-gather，把缺失的权重片段补齐，让每份副本握有完整的最新权重。于是图里ZeRO-1的记忆公式就是参数2ψ 加梯度2ψ 加kψ 除以N_d，其中k是优化器状态的内存倍数，Adam刚算过即k=12。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">ZeRO-1一次训练步的完整奏鸣</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">端到端走一遍单步的次序更有画面感。前向：每份副本都拿同一套完整的bf16参数，但喂给彼此不同的微批。反向：每份副本同样基于各自的微批得到一套完整梯度。接着对梯度做一次reduce-scatter，也就是全书遇到的第三种集合通信原语，它一石二鸟：既把来自各副本的梯度求平均归约，又按分片把每份只该负责的那N_d分之一留在本地。随后各副本只以自己那N_d分之一的优化器状态本地做一次优化步骤，产出本次该更新的N_d分之一fp32参数，再顺势截成占全套bf16参数N_d分之一的最新片段。最后对这些bf16参数做一次all-gather，把缺的切片送回各自的副本。这最后一步all-gather是ZeRO新引入的动作，朴素DP里并不存在。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">作者顺手塞了个喜人的知识点：reduce-scatter比all-reduce快整整一倍。用通信的心算账对比一下朴素DP：ZeRO-1把原来对梯度的那次all-reduce通信拆成reduce-scatter，再在优化步骤后对全部参数加一次all-gather；整体看它并没有比朴素DP多多少通信量，这正是ZeRO-1性价比的来源。配套的多卡时间轴图则是演示这套reduce-scatter与all-gather怎么在反向与优化之间落位。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">把新加的all-gather也叠起来</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">跟上文数据并行一样，ZeRO-1里也能研究如何把新加的bf16参数all-gather高效重叠，主要有两招。第一招在优化期间用：对部分参数更新完毕后立刻发起它的all-gather，让这段通信与其余参数的更新并行。第二招在前向中用：把每一层参数的all-gather与该层前向叠在一起。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">坦率讲，这两招实现起来并不容易，要动用相当精巧的钩子与装箱手段。作者坦白实际工程里直接采用PyTorch原生ZeRO-3也就是FSDP实现，把切片单元设为整个模型即可，细节后文再讲。ZeRO-1里优化器状态已经分片，每份副本只更新N_d分之一的优化器状态；敏锐的读者会发现，其实根本没有必要在各DP副本手里都留全套梯度，因为优化那一小步只需要与本地优化器分片对应的那一段梯度，于是顺理成章进入ZeRO-2。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">ZeRO-2：梯度也跟着分片</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">既然每份副本只需要与自身优化器分片对齐的那一段梯度，那么梯度自然也可以像优化器状态一样被切分。关键差别落在反向里：这里不再对梯度做all-reduce，而是只做一次reduce-scatter，只把本地真正需要的那N_d分之一梯度落在内存，比ZeRO-1更省显存。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">落到fp32梯度累积这种情形，也只需要本地留存那N_d分之一份的fp32梯度累积缓冲，把reduce-scatter送进来的bf16逐项加进去，优化步骤时就用这份本地fp32片段。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">现在的账顺理成章变成参数2ψ 加N_d分之（2ψ 加kψ），把梯度与优化器状态都摊进分母。随着N_d一路加大，相对基线最高能省下约8倍的显存。通信口径则和ZeRO-1完全一致，唯一区别是边收边发、随到随放：ZeRO-2本质上把reduce-scatter换成一种轻量的reduce-scatter，其通信总量与朴素DP持平。就通信量而言ZeRO-2与ZeRO-1相同，二者都需要对梯度做一次reduce-scatter、再对全部参数做一次all-gather。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">作者忍不住点破一句：用ZeRO-2相比ZeRO-1几乎没有多余的显存或通信代价，通常ZeRO-2才是那个最划算的选择。可既然连梯度都分完了，是不是就可以收工了？并不尽然，真正的重头戏还压在最后：ZeRO-3把参数也一并给分了。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">ZeRO-3：参数也拆，按需取用</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">到第三阶段，分片的名单扩展到模型参数本身。这个名字也叫在PyTorch原生实现里的FSDP全分片数据并行，本文统称ZeRO-3，你在别处见到FSDP就当同一回事。既然整套模型参数都散落在各副本，那前向与反向该怎么跑？答案出乎意料的朴素：谁要用谁就现场按需收集。前向里，它一层层往下走，按需取回本层参数、用完立刻从显存里清掉；反向则路径倒转般地同样运作，边算边吐梯度分片。整个过程干净利落，绝不把整套参数久留。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">ZeRO-3的花销：一串不断的小all-gather</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">代价不再是内存，而是通信频次。ZeRO-3往前向和反向整段路上都要持续不断地做all-gather，与ZeRO-2相比，一个训练步里整整多出2倍的层数再减一次这么多个all-gather，即2乘层数减1次，而每次all-gather都带着一笔很小的固定时延，图上那串细碎的锯齿就是这些通信的累计痕迹。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">粗略用通信量来度量：前向里每当需要某参数就收一次，攒下一份约为 ψ 的通信开销；由于用完参数立刻丢弃，反向还得再补一次同样的all-gather，又添一份 ψ；最后梯度那次reduce-scatter同ZeRO-2也带来约ψ的通信。合计约3ψ，而对ZeRO-2只有2ψ。听起来像是很大一笔，但实际相当可以承受，因为可以用预取把手里的通信和计算叠加：前向中跑当前层n的同时，就预取下一层n+1的权重做all-gather；反向里同理，算本层n的梯度时预先收集更早一层n-1的权重。只要不把DP扩得过凶，这套重叠就一直成立，经验法则是以512块为上限别超。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">ZeRO-3的显存终式与它管不到的那块</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">记忆公式在此定型为N_d分之（2ψ 加2ψ 加kψ）。这份模型的参数相关部分，显存可以随着DP副本数的增大被近乎无限地压下去。但也务必看清它帮不到什么：剪不断中间激活这一块，而它恰恰随序列长度与batch线性或平方地膨胀，上一章的记忆账本已经展开过。要对付它仍得靠激活检查点与梯度累积那些手段。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把数据并行与ZeRO的旅程先打个结：数据并行通过不断添置模型副本，显著拉升了训练的吞吐；ZeRO则靠把参数、梯度与优化器状态沿数据并行维度切分，连原本单卡根本塞不下的大模型也能开练，只额外付一小笔通信钱。想再多读FSDP1、FSDP2及实现层面复杂性的人，书里指引了一篇不错的长文。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">两条边界：DP与ZeRO都够不到的角落</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一路下来必须承认两条现实边界。其一，数据并行只在一个正面的前提下方能成立：模型的每一层都能塞进一张GPU；ZeRO也只能切参数、梯度与优化器状态这些模型相关的量，却动不了激活那份随序列长度和batch疯长的显存。文件里反复强调，我们并不想因为硬件限制而被迫只能拿很短的序列去训练。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">要跨过这两道坎，就该去探索一条与数据并行正交的新轴：张量并行。与ZeRO-3靠大量参数通信不同，张量并行把参数、梯度、优化器状态连同伴随它们的激活一起切到各设备上，并且GPU之间完全不需要收发任何模型参数。听起来近乎魔术，而这正是下一篇的主角。</p>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
@@ -42,12 +92,35 @@
 <strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-结语分析内容1。<br  /><br  />结语分析内容2。</div>
+这一篇从最朴素的念头起飞：既然梯度累积里每个micro-batch的前后向互相独立，就把它们铺到多张GPU上同时算。数据并行由此而来，而它的效率密码藏在三处细节里：让梯度同步与反向计算重叠、给梯度装箱做少量集中的all-reduce、以及结合梯度累积时用no_sync只做最后一次归约。三招联手，把遍布在反向尾端的空等全部挤成了并行吞吐。<br  /><br  />可当模型大到塞不进单卡，或GPU多到512块以上，数据并行自己也逼近了天花板。ZeRO正是为这一点而生，它把优化器状态、梯度、参数这一层层冗余沿DP轴切分下去，显存从2ψ+2ψ+12ψ 一路被N_d除成越来越小的碎片，配合reduce-scatter与all-gather及预取的通信重叠，单卡原本放不下的大模型也能开练。剩下一块谁都切不动的激活显存，则引出下一条与DP正交的轴，也就是张量并行。</div>
 </div>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4aEYa-5J2Ir82V_1_9anDA" target="_blank" data-linktype="2">AI芯片架构全景: 从NVIDIA到Groq的六条设计路线</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/i-NZ-4oCXs48XpDfdcBfPw" target="_blank" data-linktype="2">在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HPaDwcT_4Rw5ty7LwDG4Ng" target="_blank" data-linktype="2">Torch Profiler在Trace里分析性能瓶颈: 剖析SGLang LLM推理</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/YHmkt8EHFGm-HeflWCsB2w" target="_blank" data-linktype="2">英伟达Kernel Agent: 编译器与算子调优Agent的协同设计</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/42s6fk-xdo23L-vtLj6Q8Q" target="_blank" data-linktype="2">vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%</a><br>
+</div>
+</div>
+
+
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://arxiv.org/html/XXXX.XXXXX</span></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://huggingface.co/spaces/nanotron/ultrascale-playbook</span></p>
 </section>
