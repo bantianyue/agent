@@ -29,6 +29,7 @@ for it in allsec:
     typ=it.get("type")
     if typ in ("h2","h3"):
         sec={"type":typ,"title":it.get("title",""),"paras":list(it.get("paras",[]))}
+        if it.get("fig_after"): sec["fig_after"]=it.get("fig_after")
         sections.append(sec); cur=sec
     elif cur is not None and ("head" in it and "rows" in it):
         cur["table"]={"head":it["head"],"rows":it["rows"]}
