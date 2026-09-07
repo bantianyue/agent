@@ -1,25 +1,7 @@
-# 进度追踪 - spectrum-x-ethernet
-
-| Step | 状态 |
-|------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
-| Step 6: 推送草稿 | pending |
-
-创建时间: 2026-09-07
-来源: https://developer.nvidia.com/blog/giga-scale-ai-ethernet-evolution-spectrum-x-ethernet-rewrites-rules/
-| Step 4d-i: 传送门 | completed |
+✅ 完成 (spectrum-x-ethernet)
+- 源: developer.nvidia.com/blog/giga-scale-ai-ethernet-evolution-spectrum-x-ethernet-rewrites-rules/  (作者 Scot Schultz;厂商技术长文)
+- 正文 18.4k 字符清洗后 / 中文 8 节(含深层机制与全数据: ECMP hash、AR/JSQ、ECN CC、PLB、multiplane 拓扑、2.68ms vs 1.08s、10%-11%/7%、128k endpoints…)
+- 图: 正文 5 张(fig01-05, featured 转 cover) FIG LAYOUT PASS; preflight ALL PASS
+- 附 AI-Generated Summary 与 AI-摘要免责提醒、原页 References 提示
+- push OK draft=TIqnnVEu6Oy3-wtKttGa0XyfM2oLJeJAiFHGQZcSLlPjalnodkEcQ9kPJVTSZG7b verify 5/5
+source: https://developer.nvidia.com/blog/giga-scale-ai-ethernet-evolution-spectrum-x-ethernet-rewrites-rules/
