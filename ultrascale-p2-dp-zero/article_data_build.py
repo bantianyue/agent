@@ -1,0 +1,55 @@
+# P2 builder: Data Parallelism + ZeRO-1/2/3 (Ultra-Scale Playbook part 2/6)
+import json,os
+D=os.path.dirname(os.path.abspath(__file__))
+S=[]
+def h2(t): o={"type":"h2","title":t,"paras":[]};S.append(o);return o
+def t(o,*p): o["paras"]+=list(p)
+
+s=h2("先一句话给定性")
+t(s,"data parallelism(DP)：把同一份模型复制到多张卡(每个副本叫一个 model instance)，每卡跑不同的 micro-batch 的前/反向，所以各卡梯度不同；为让副本保持一致，反向时(optimizer step 之前)对这些梯度做一次 all-reduce 取平均。这是遇到的第一个分布式原语：all-reduce，负责 GPU/node 间的同步通信。若不了解 broadcast/gather/all-reduce，原文给过 A0 并行编程速查。")
+
+s=h2("三段把朴素的 DP 变快")
+t(s,"朴素 DP 是等反向算完、拿到全部梯度，再在所有 DP rank 上做一次全量 all-reduce 同步——计算与通信串行，GPU 会空等。这很糟；正确思路是尽量把通信与计算重叠。优化一：让梯度同步与反向重叠——某层反向一结束、其梯度立即可 gathered/summed，而更早层仍在反向(向左推进)。PyTorch 实现：给每个 parameter 挂 all-reduce hook，该参数梯度一出即触发归约，与其余参数还在计算的梯度并行，从而重叠大部分通信。这是本博首个、也是反复强调的『重叠计算与通信』技巧。")
+t(s,"优化二：把梯度装桶(bucket)。GPU(与通信)操作在『大张量』上远高效于一堆小张量。于是把若干梯度先分桶、同桶共享一次 all-reduce，而不各自独立归约——如同打包成几个大盒一次性发，显著降通信开销。")
+t(s,"优化三：DP 与梯度累积的配合。朴素实现里每个 backward 都自动触发一次 all-reduce，其实只要最终那一次就够，中间步骤重了。PyTorch 用 model.no_sync() 装饰器在无需归约的反向路上关掉梯度同步即可。")
+t(s,"补充：通信对张量要求内存连续，否则冗余拷贝；所以常为通信预分配与激活或参数等大的连续缓冲——能加速通信，但也推高训练峰值内存。")
+
+s=h2("global batch 重算 + 怎么配 recipe")
+t(s,"合成方程随 DP/显存累积更新：gbs = mbs × grad_acc × dp(grad_acc 为梯度累积步数，dp 为数据并行副本数)。给定目标 gbs，就可在 grad_acc 与 dp 间互换：倾向尽可能往大 dp 方向摊(它天然并行)，梯度累积本质串行、只在 GPU 不够把 dp 堆到目标时才叠加。这带来第一个并行维度，即所谓 1D parallelism(全书共要再覆盖 4 维)。")
+t(s,"还给了配一套『最优 DP 菜谱』的路径：①先定 token 单位的 best global batch(查文献或仿收敛实验定 GBST)；②定 seq，通常主预训练 2-8k tokens(web 上更长文档稀有),DeepSeek/LLaMA 主训用 4k；③测单卡最大 local mbs(一直加 MBS 到 OOM)；④目标 GBS÷(DP×已知) 得还缺多少梯度累积步。例：GBS=4M tokens、seq=4k → 1024 samples；单卡只能 MBS=2、有 128 卡 → grad_acc=4。若突然有 512 卡：MBS=2、grad_acc=1，更快且训练等价。")
+t(s,"注意拐点：512+ 卡时依网络，通信受 ring latency 限制，DP 通信不再能完全重叠 → 计算效率下降、吞吐掉 → 该转想其它并行维度。DP 在几百到几千卡时，协调开销与网络需求随卡数猛增，加卡的边际收益下降(图见 benchmark：吞吐到了某个上限后反降，而每卡内存恒定不受 DP 影响)。DP 的隐含假设是至少 mbs=1 能塞进单卡；更大的模型即便加激活重算也放不进——就需要不完整复制的路。这引出两条主要路线：并行(tensor/context/pipeline)与分享(DeepSpeed ZeRO / PyTorch FSDP)。两条正交、可组合。分享与 DP 最接近,先看它。")
+
+s=h2("ZeRO：同一维上消除『复制』")
+t(s,"DeepSpeed ZeRO(Zero Redundancy Optimizer)：DP 把优化器状态/梯度/参数在各 rank 上整份复制 → 大量冗余。ZeRO 沿 DP 维把这三种对象各自分片(N_d 份)，仍按整套参数计算；代价是 rank 间更多通信(可能不总能重叠)。三阶段：ZeRO-1 分优化器态；ZeRO-2 +分梯度；ZeRO-3(=PyTorch FSDP, Fully-Sharded Data Parallelism)+ 参数也分。'分'均沿 DP 轴(ZeRO 隶属 data parallelism)；激活没法分：每个 DP 副本喂的 micro-batch 不同、激活本就不重复,无法 shard。")
+
+s=h2("先量化：混精 Adam 下存的账")
+t(s,"沿用 ZeRO 论文记号，参数数记 Ψ(<前文 N)。BF16 混精+Adam：参数(半精)2Ψ；梯度(半精)2Ψ；fp32 参数 4Ψ 与优化器态(4Ψ+4Ψ)；可选堆积 FP32 梯度 4Ψ。不堆 FP32 梯度 → 总量 2Ψ+2Ψ+12Ψ=16Ψ'/卡满;堆则 2Ψ+6Ψ+12Ψ。ZeRO 把这些沿 DP 均分:每 rank 只存一片,用到时再重建 → 每项除以 DP 度 N_d。基础比例图(zero_memory.svg 交互)把该账画清;目标=把三类分掉,内存往 N_d 上加码。")
+
+s=h2("ZeRO-1：先把优化器态分片")
+t(s,"朴素 DP 每 rank 反向拿到全套梯度,同时做一模一样的优化步骤——重复劳动又可省内存。ZeRO-1 把优化器态均分 N_d 份:每个 DP rank 仅留 1/N_d;优化步只更新 1/N_d 的 fp32 权重。但前向需要全部参数,故 optimizer step 后要加一次 all-gather(遇到的第二个原语)让每 replica 拿回完整更新权重——这正是 vanilla DP 没有的新操作。内存变 2Ψ+2Ψ+kΨ/N_d(k=Adam 的 12)。")
+t(s,"单步操作序列:全量 bf16 参数上前向(各 replica 用不同 microbatch)→全套梯度上反向→对梯度做 reduce-scatter(第三个原语,且它比 all-reduce 快 2 倍!)→每 rank 只对其 1/N_d 优化器态做优化、得到 1/N_d fp32 参数→转 1/N_d bf16→对其余切片 all-gather 补全。相较 DP 只是把梯度通信从 all-reduce 换成 reduce-scatter、并在优化步后对参数加 all-gather。两种重叠策略:优化步时分片早已更新就开始发 all-gather(与其余参数更新重叠)，或把每层参数的 all-gather 与前向重叠。实践里不必手搓,直接用 PyTorch 原生 ZeRO-3/FSDP、把 FSDPUnit 设成整模型即可。")
+
+s=h2("ZeRO-2：梯度也分片")
+t(s,"优化只需与优化器态分片对应的那一片梯度，于是反向时不再做全量 all-reduce、只做 reduce-scatter——分发并只保留 1/N_d 所需梯度,因此比 Z1 再省内存(也省 fp32 梯度的累积缓冲)。内存到 2Ψ+(2Ψ+kΨ)/N_d;DP 度大时相对 baseline 省到 8×。通信套路同 Z1(reduce-scatter + 全参数 all-gather),即 Z2 相比 Z1 没有实质额外开销,Z2 常是更优选。")
+
+s=h2("ZeRO-3(=FSDP)：把参数也分掉")
+t(s,"前向/反向因参数本身分布,做法是『按需临时聚齐』:前向逐层推进时,取到所需参数、用完立刻从内存清掉;反向同法反向流动、产出梯度片。相比 Z2,一个训练步要多 2·num_layers-1 次 all-gather,每次有 base latency 小开销;且每处参数前向要用、反向要再用,加梯度共 3Ψ 通信(zero-2 为 2Ψ)。看起来很多,但用 prefetching 能重叠:前向做第 n 层时就 all-gather 第 n+1 层权重;反向做第 n 层时预取第 n-1 层——只要别把 DP 拉到过大(经验 DP ≤512)。内存终式 (2Ψ+2Ψ+kΨ)/N_d——理论上靠拉高 DP 即可把模型参数相关内存压到任意低;但对中间激活无效,激活仍要靠重算/梯度积压(前文)。")
+
+s=h2("小结那一块")
+t(s,"DP 用多副本简单地把吞吐拉上去;ZeRO 再把本会塞不进单卡的模型,靠把参数/梯度/优化器态沿 DP 分片而训出来,代价只是少量通信。不过 DP 要求至少『一整层』能放进一张卡,ZeRO 也只能分和模型相关的三类对象、动不了与 seq/bs 一起涨的激活。想绕开这堵墙,该探索正交的第二条轴——Tensor Parallelism(把激活也一起分、且不需要在 GPU 间通信模型参数)。下一篇进入它。")
+d={"title":"把训练副本从 1 份拆到 N_d 份：Data Parallelism 与 ZeRO 的省钱之道 — Ultra-Scale Playbook (2/6)",
+ "reference_url":"https://huggingface.co/spaces/nanotron/ultrascale-playbook",
+ "summary":[
+  {"key":"这期","body":"Ultra-Scale 第 2 篇：数据并行=每卡整份模型副本跑不同 microbatch+反向 all-reduce 平均梯度; 三个优化(梯度 hook 重叠/装桶/与 grad-acc 配合 no_sync)让通信与计算重叠。global batch=gbs=mbs×grad_acc×dp。再进 ZeRO-1/2/3(=FSDP)沿 DP 轴把优化器态/梯度/参数分片, 内存各降以 DP 度 N_d, 通信代价各代(2Ψ→3Ψ, 但 prefetch 可重叠)。"},
+  {"key":"可背数字","body":"BF16+Adam 满复制 16Ψ(copy), 无 fp32 梯度堆积; Adam k=12。ZeRO-1:  2Ψ+2Ψ+kΨ/N_d; ZeRO-1用 reduce-scatter(比 all-reduce 快2×)+优化步后 all-gather。ZeRO-2: 2Ψ+(2Ψ+kΨ)/N_d,省到8×; 通信=Z1。ZeRO-3: (2Ψ+2Ψ+kΨ)/N_d(激活除外), 每步多 2L-1 次 all-gather, 通信 3Ψ vs 2Ψ, prefetch 重叠; DP 上限经验 ≈512。gbs=mbs×grad_acc×dp。"},
+  {"key":"提醒","body":"nanotron 官方 Playbook；交互图(svg/gif)以文字转述其结论;数值依其 4000+ 试验前提。激活不可按 DP 分,要靠重算/累积。"}],
+ "lead":[
+  "训练要多快,数据并行是最顺手的起手式:整份模型复到每张卡、各吃不同数据——顺,坑在反向时要全局同步梯度,往往让 GPU 空等通信。第 2 篇就把这三道坑(重叠/装桶/与累积配合)讲透,再进到『单模型塞不进一张卡时』的 ZeRO:把参数/梯度/优化器态沿 DP 分片到 N_d 份,拿最小通信换无限扩容。",
+  "对应 Ultra-Scale Playbook 的 DP 与 ZeRO 章;原文内嵌 svg/gif 交互与可点击代码,公众号无法承载的以文字转述结论,不做静态造假;PPT 式列表已化为行文。"],
+ "sections":S,
+ "conclusion":[
+  "DP 是三两句话说清、但真正把它跑快需要满手重叠技巧的方向: 梯度一出来就 hook 起来归约、把梯度装大桶少开几次、与 gradient accumulation 搭配时只在最后一步做真正同步(no_sync)。这四个对象(参数/梯度/优化器态/激活)里, 激活因为本来就在各副本前独有的、无法共享——这解释了 DP/ZeRO 后为何还要继续往 TP 那维去。",
+  "ZeRO 把『模型放不进一张卡』的问题拆成三步递进:先分最好分的优化器态, 再连梯度一起, 最后参数也给分掉(FSDP)。每进一步内存都除以更多份, 而代价不过是逐步加多的 all-gather 与 reduce-scatter——用 prefetch 重叠后, 经验上 DP 别超 ~512 就划算。下一篇将用 Tensor Parallelism 处理 ZeRO 管不到的激活与单层都放不下的巨层, 才是真正跨出『一个权重都不传』的另一维。"]
+ }
+json.dump(d,open(os.path.join(D,"article_data.json"),"w",encoding="utf-8"),ensure_ascii=False,indent=2)
+print("sections",len(S),"chars",sum(len(x) for s in S for x in s["paras"]))
