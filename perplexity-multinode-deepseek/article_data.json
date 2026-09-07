@@ -1,70 +1,187 @@
 {
+  "title": "MoE 的反常识：DeepSeek 671B 多节点部署让延迟与吞吐同时变好 — Perplexity 部署复盘",
+  "reference_url": "https://www.perplexity.ai/hub/blog/lower-latency-and-higher-throughput-with-multi-node-deepseek-deployment",
   "summary": [
     {
-      "key": "要点关键词1",
-      "body": "核心内容。替换本占位。"
+      "key": "核心结论",
+      "body": "DeepSeek-V3/R1(671B 总参、每 token 激活 37B、256 routed+1 shared expert)在多节点(更多 GPU)下通常可同时提吞吐与降延迟：把 expert 摊到越多卡、每卡需要读的权重越少、显存带宽压力越小。EP128 在相同输出速度下比单节点(EP8/8×H200)吞吐高到 5×;Pareto frontier 随 EP 升高整体向右上移。大 batch(每卡64)时单节点反而略高(因 NVLink>IB+实现限制)。"
     },
     {
-      "key": "要点关键词2",
-      "body": "核心内容。替换本占位。"
+      "key": "怎么叠",
+      "body": "MLA 用 DP(每 DP group 整份 MLA、不同输入)+可选 TP(MLA 的 latent 共享无法 TP 切,各 rank 都存 kv 参数与 KVCache 副本);MoE 用 EP(每卡管 256/EP 个 routed + 1 shared)。EP=DP×TP(如 16 机 EP128=DP32×TP4)。"
     },
     {
-      "key": "要点关键词3",
-      "body": "核心内容。替换本占位。"
+      "key": "关键技术",
+      "body": "Dispatch/Combine 两个自研 NVSHMEM AllToAll kernel(已开源 pplx-kernels)取代 torch.all_to_all_single(省去跨 DP group 整型 batch 的 allreduce+padding);Dispatch Overlap(shared expert 放本地免通信)+microbatching(层拆 5 段、两 micro 错 3 段交替)实测 MicroBatch 把单 MoE 层从 2667→1896μs(-29%)但 batch<32 可能为负;DeepGEMM/Triton+Split-K、SiLU/CUDA graph、MLA 的 qkv fusion(30.2μs→16.7μs)+FlashInfer;future=Prefill Disaggregation/EAGLE/GB200。"
     }
+  ],
+  "lead": [
+    "Latency 与 throughput 常被当作不可兼得：加 batch 抬吞吐却加延迟，加张量并行降延迟却削副本、把吞吐带下去。Perplexity 的这份工程总结给出一个反直觉却好用的结论：对 DeepSeek-V3/R1 这种 MoE，只要把 expert 摊开到更多 GPU/多节点，大多数场景能同时拿到更高的吞吐和更低的延迟，因为每 token 只激活 37B/671B，『摊得越宽、单卡显存带宽压力越低』。",
+    "本文是其对 DeepSeek 671B 部署的完整技术拆解：DP/TP/EP 怎么组合、单节点(8×H200)对多节点(至多 16×H100)在 Pareto frontier 上的实测差异(EP128 在同等输出速度下吞吐可达 5×)，再到 Dispatch/Microbatch 重叠、Roofline 分析与量化/FlashInfer/CUDA-Graph/MoE-router 一系列落地斟酌。"
   ],
   "sections": [
     {
       "type": "h2",
-      "title": "正文第一章标题",
+      "title": "这篇一句话能带走什么",
       "paras": [
-        "第一段正文文字。",
-        "第二段正文文字。"
+        "换到多数系统，延迟与吞吐是打架的两难(加 batch 涨吞吐也涨延迟;把张量并行加大会降延迟却减副本、掉了吞吐)。但 Perplexity 用自家部署证明：对 DeepSeek-V3/R1 这类 MoE，大多数场景里『上更多 GPU、多节点部署』能同时拿到更高吞吐与更低延迟。核心原因不是玄学，而是 MoE 的每个 token 只激活 37B 参数(全文 671B)，专家天然可以摊到多块卡上，摊得越开、每卡的显存带宽压力越低。"
       ],
-      "figs": [
-        {
-          "src": "fig1.png",
-          "caption": "图片说明文字"
-        }
-      ]
-    },
-    {
-      "type": "h3",
-      "title": "子标题示例",
-      "paras": [
-        "子标题下的段落。"
-      ]
+      "fig_after": {}
     },
     {
       "type": "h2",
-      "title": "含表格的章节",
+      "title": "两种部署形态：单节点 8×H200 对比多点 8×H100",
       "paras": [
-        "下面是一张示例表格。"
+        "",
+        "因为 expert 数量很多(expert 256 个、各自很小)，模型必须摊在多设备上。文章比较两种：单节点 8×H200 与最高 16 台机器共 8×H100 的多节点。二者的实现都基于 Data Parallelism(自家请求调度器驱动)：起多个相互独立的推理 engine 实例，各自维护请求;调度器经 GRPC 与引擎交互、尽量均匀派发请求，并做 KV reuse：把带部分相同前缀的请求送到缓存里已有该前缀的机器。引擎实例不跨节点，可选 TP 把 attention 分到设备。单节点内用 NVLink、多节点用 InfiniBand 来派发与回收专家。",
+        "单节点形态在小 batch 下延迟最好，负载一高性能就掉得快。部署上每个 node 一个 pod、跑多 engine 实例;分布式通信由 PyTorch 建立、NVSHMEM 初始化，通信走自定义 CUDA kernel(之前博客讲过、已开源 pplx-kernels)，两形态代码几乎一致、按当前 fabric 选 kernel。"
       ],
-      "table": {
-        "head": [
-          "列1",
-          "列2",
-          "列3"
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig01.png",
+            "caption": "图 · 部署架构概览(上：单节点 8×H200;下：跨多机器/节点经 InfiniBand)。"
+          }
         ],
-        "rows": [
-          [
-            "A",
-            "B",
-            "C"
-          ],
-          [
-            "D",
-            "<strong style=\"color:#0F4C81;\">E</strong>",
-            "F"
-          ]
+        "1": [
+          {
+            "src": "fig02.png",
+            "caption": "图 · 四种并行策略组合示意(TP/EP/DP 在 MLA+MoE 上如何组合)。(注：题图/架构说明)"
+          }
         ]
       }
+    },
+    {
+      "type": "h2",
+      "title": "三种并行怎么配：TP / EP / DP",
+      "paras": [
+        "张量并行(TP)：通常用于降每卡显存与计算、从而降延迟。沿行/列切 QKV/O 等投影、按 head 切 attention。LLaMA 式架构（attention+MLP 线性都可用 TP 无重复计算）很理想,但 DeepSeek 的 MLA 用不到这一好处:MLA 先把 q/kv 压到潜向量(kv_a_proj)，再 kv_b_proj 为每个 head 展开;所有 head 共享同一个 latent → latent 无法 TP 切,每个 TP rank 都要复制 kv_a_proj/kv_b_proj 的参数与计算、KV cache 也各存一份。TP 依旧在需要高输出速度时省一部分计算,仍值得。",
+        "专家并行(EP)：DeepSeek MoE 层有 256 个 routed expert + 1 个共享 expert;每个 token 被派到 8 个 routed expert 加权求和，外加一定算一遍 shared expert。EP 是切 MoE 层的常规做法:每张卡管 256/EP 个 routed expert、并保留一份 shared expert。相比 TP，EP 能把计算铺到更多 GPU、降每卡计算与内存。计算前所有 GPU 要一次 AllToAll 把 token 派到对应专家所在卡;算完再一次 AllToAll 收回结果并加权求和：作者用 NVSHMEM 写了优化的 Dispatch 与 Combine 两个 AllToAll kernel(已开源)。",
+        "数据并行(DP)：EP 能把计算铺到 128+ 卡，但 MLA 算不了;这时上 DP：每个 DP group 持整份 MLA、吃不同输入独立算。MLA 的 DP 与 TP 可组合(一个 DP group 再拆成多个 TP rank)；MoE 层的 EP 再与 MLA 的 DP/TP 组合，且 EP=DP×TP。例：16 机上 EP128 DP32 TP4 = routed expert 摊 128 卡、每 4 卡一组 DP、共 32 个独立 DP group。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "单节点 vs 多节点：谁的 Pareto 面更靠右上",
+      "paras": [
+        "",
+        "671B 放不进单台 8×H100(80G×8)，但 8×H200(141G×8)能整机装下。EP8 DP8 TP1 下每卡内存约 100GB、留约 40GB 给 KV 与中间结果。每个 token 占 70,272 字节 KV;按每请求 5k token 估，每卡能塞约 100 个请求。实验用 H200 单机对最多 16 台 H100，扫 TP∈{1,2,4,8}×每卡 batch∈{1..128}，KV 长 5000、按 MTP 每请求 query 长 2、保守接受率 60%。",
+        "图上横轴单请求输出速度 tokens/s、纵轴对数刻度每机吞吐。极需高输出速度时，单节点 EP8 DP1 TP8 + batch=1 能 >100 tok/s 但吞吐极低(等同输出速度;批里只有 2 个 token、最多派 16 个 expert、激活≤57B)。80-40 tok/s 区间，随吞吐涨输出速度明显掉;同一输出速度下 EP128 比单节点最高约 5× 吞吐。",
+        "背后机制：单节点 batch 涨→激活 expert 涨(batch=1 时每卡平均 2×8/8=2 个;batch 大到时 256/8=32 个) → 每卡要读更多参数 → 显存带宽压力大增。decode 本就带宽瓶颈，故单节点加 batch 显著掉输出速度。四种多节点配置(EP16/32/64/128)对比显示：EP 越高，Pareto frontier 同时向吞吐与输出速度双升方向移。EP128 每卡只 2 个 expert，带宽压力小 = 用更大 EP 等于变相买到更多带宽;每卡 batch<64 时加 batch 对专家计算速度影响不大，故 EP128 下加 batch 不明显掉速。",
+        "有趣的是每卡 64 请求的大 batch 下单节点吞吐反而略高：一是 NVLink 带宽高于 InfiniBand，另一是作者实现限制。另因显存，EP8 DP8 TP1 到不了每卡 128 batch，所以追求高吞吐时多节点仍更优。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig03.png",
+            "caption": "图 · 不同 EP 下吞吐(纵轴)与单请求输出速度/token 每秒(横轴)的 Pareto frontier;越高 EP 越靠右上。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "算与通的重叠：Dispatch Overlap 与 microbatch",
+      "paras": [
+        "",
+        "专家并行里 MoE 通信时 GPU 会空转;要拿与数据无关的计算去填。作者把 shared expert 放每张卡上 → 它不需要 AllToAll，可在 Dispatch-Send 之后立刻算、再等 Dispatch-Recv，叫 Dispatch Overlap，实现直接、适用范围广，能把 shared expert 时间藏掉。",
+        "为进一步叠，用了 DeepSeek 论文的 micro-batch:把单 Transformer 层拆 5 段：(1) InputNorm/QKVProj/AppendKV/BMM (2) BMM/Attn/OProj/PostNorm/Gate (3) Dispatch-Send+Shared Expert (4) Dispatch-Recv+MoE+Combine-Send (5) Combine-Recv。前 3 个 dense 层用整个 batch;后面 58 个 MoE 层把 batch 均分两 micro-batch、错开 3 段交替跑(两 micro-batch 无依赖，Dispatch-Send 后与 Combine-Send 后即可切去另一个 batch)。",
+        "效果以 H100、TP1、每卡 batch 128、query 2、KV 5000 实测单 MoE 层总时及各类 kernel 占比:NoOverlap 2667μs;DispatchOverlap 2651μs 只省 0.6%;MicroBatch 1896μs、提速 29%。其中 Dispatch 593→367μs、Combine 1012→237μs。但算的 kernel 因把 128 拆两 64 总执行时间变长，于是通信省下 1001μs、总时长只降了 771μs：所以 microbatch 不一定总是赚:batch<32 时 MicroBatch 反而掉 5-40%，batch≥32 才提升 10-35%。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig04.png",
+            "caption": "图 · 单 Transformer 层计算流的重叠调度(上：把 shared expert 排在 Dispatch-Send 后;下：microbatching 5 阶段流水)。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "EP8 vs EP128 在同 batch 下的微观账",
+      "paras": [
+        "",
+        "同 TP1 batch128 query2 下：EP8 MicroBatch 总 1802μs、略少于 EP128 的 1896μs。除了 microbatch 带来的 kernel 变慢，主差在 GroupGEMM 与 Dispatch/Combine：EP8 的 GroupGEMM 555μs vs EP128 的 270μs(减半,这是多节点的核心优势)；但 EP128 通信多了 213μs、把优势吃回去不少：作者测通信 kernel 只到 InfiniBand 带宽一半，是继续优化点。GEMM 亦因 microbatch 多 95μs，未到最优。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig05.png",
+            "caption": "图 · 单层耗时拆解：对比 EP8 / EP128(NoOverlap、DispatchOverlap、MicroBatch 三档)。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Roofline 解释为什么 GroupGEMM/GEMM/microbatch 如此",
+      "paras": [
+        "",
+        "Roofline 模型横轴算术强度(FLOP/内存字节)、纵轴实现性能;H100 FPGA? 上界 FP8 1979 TFLOP/s(水平线)、显存带宽 3.35TB/s(过原点斜率);两线夹出 compute/memory-bound 上限。GroupGEMM:g 组、第 i 组 m_i 个 token 做 [m_i,k]×[k,n];m 相等时 FLOP=2·g·m·k·n、IO=g(mk+nk+mn)。DeepSeek 每 token 到 8 专家;batch128 query2 EP128 DP128 时每 expert 平均收 128*2*8*128/256=1024 token。不同 EP 的 roofline(用 DeepGEMM 测 EP{8..128}×batch1..128)几乎重合 → GroupGEMM 取决于总 token 数 g·m。star 对应每卡 batch128:EP 越高(EP128 DP128) 每 expert token m 越大(EP8 m=128→EP128 m=2048)→ 算术强度升 → 多数情形 memory-bound 下 m 越大越强。",
+        "GEMM(指 QKV/O 等线性):FLOP=2mkn、IO=mk+nk+mn;随 batch 涨 m→算术强度涨→更优;microbatch 把 m 变 m/2 → 两个小 GEMM 之和反而比一个大的用时更久：这正是 microbatch 不是免费的原因。MTP:把 query 长从 1 提到 2 = m×2,抬 GEMM/MLA 效率;MLA 的 roofline 若画出来会发现 query 长显著提 MLA 效率。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig06.png",
+            "caption": "图 · Roofline：单层 MoE 相关时间随对比(recompute 曲线示意)。(说明：microbatch 对 batch<32 负收益)"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig07.png",
+            "caption": "图 · GroupGEMM 在多种 EP/batch 下的 Roofline 表现(m 越大越靠近 compute-bound)。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "落地实现的几个硬折腾",
+      "paras": [
+        "",
+        "量化:DeepSeek 原生 FP8 per-block 训练。权重静态量化、激活动态量化：scale 不按每通道/每矩阵静态算，而沿激活的 128 向量 / 矩阵 128×128 tile 算，抑制精度损失。Perplexity CUDA+Triton 混拼：性能敏感又少改的(attention/GEMM)用 CUDA;少数如 activation/normalization/utils 用 Triton 便于快速适配 block 量化。对 Linear/MoE 混用 DeepSeek 的 DeepGEMM 与自己 Triton GEMM(Split-K 在低 batch 更低延迟)。激活 scale 只沿 K 聚合、不沿 M → kernel 只需小幅改动。",
+        "SiLU：为支持 CUDA graph + block 量化 + 动态路由 token 数做了大改;block 量化引入水平归约,但 kernel 已把 hidden 切成 1024 块再细分 128 算最大绝对值,Triton 生高效 cross-warp max 开销小。MoE 在 CUDA graph 下不能按 buffer 上限调度，须读路由信息要知道每专家多少 token;固定起若干 persistent kernel、动态分派。MLA:用 FlashInfer;把 q_a_proj+kv_a_proj 融合成 qkv_a_proj(延迟 30.2μs→16.7μs);kv_b_proj 拆 k_b/v_b、写 FP8 block-quant BMM。CUDA Graph 每 batch 建一个图;开发 AllToAll kernel 前用 torch.all_to_all_single 需要各 DP group 同 batch → 模型运行前 allreduce 取最大 batch 再全体 padding，有三个缺点;换成自研 AllToAll kernel 后无需同 batch。MoE router 在 Triton 实现(带索引的 modified sort)，Mixtral 是 DeepSeek 路由的特例(Top-K 组=全专家组)。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig08.png",
+            "caption": "图 · kernel 性能(Roofline / 不同 EP)汇总。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "展望与结语",
+      "paras": [
+        "",
+        "未来:最重要的是 Prefill Disaggregation：prefill 与 decode 计算特征很不同。MLA 在 decode 用 Matrix Absorption 降 FLOP;prefill 先把 latent 投到 K/V 再走标准 MHA 更佳;同卡跑时用 chunked prefill 减对 decode 输出速度影响。MoE 层 decode 要 EP/DP 尽量大以抬每专家输入 token 从而提 GroupGEMM;prefill token 已经够多、GroupGEMM 已 compute-bound、可用较小 EP/DP。再有 AllToAll 只达 IB 带宽 1/3(待续优化);树状 EAGLE 类 speculative 提接受长度;GEMM 距极限仍远;GB200 NVL72 是 MoE 的大机会与挑战。",
+        "结论:多节点 MoE 部署做到密集模型做不到的事：同时把吞吐与延迟都往上推。跨更多 GPU 摊开 experts→降低每卡显存带宽压力→更快且更高吞吐。EP128 在同等输出速度比单节点高可达 5×;microbatching 这类重叠让多节点通信开销最多减 40%;自研 AllToAll + 自优化 kernel 让 671B 参数能高效 n 部署。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig09.png",
+            "caption": "图 · 结尾一览(author 风格示意 / 结语横幅)。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "参考与几处提示",
+      "paras": [
+        "本文为 Perplexity 工程/研究部门博客(官网内容即译文蓝本,交互图以静态贴出),引用 DeepSeek-V3 报告、DeepSeek 推断系统概览、Megatron 论文、EAGLE 等原文,数字以文中给出为准;图注为解读性示意,非逐字原文 caption。(对部署系统/MLA/EP 并行调度与通信 kernel 感兴趣的可跟进其开源 pplx-kernels 与上方 refs。)"
+      ],
+      "fig_after": {}
     }
   ],
   "conclusion": [
-    "结语分析内容1。",
-    "结语分析内容2。"
-  ],
-  "reference_url": "https://arxiv.org/html/XXXX.XXXXX"
+    "被 dense 模型锁死的『低延迟与高吞吐二选一』，在 MoE 里其实有一根杠杆可撬：显存带宽。decode 阶段被带宽而非算力卡住，而专家铺得越开、每卡要读的专家权重越少、等效可用的带宽越大。于是文中几乎每一组数字：EP128 的 GroupGEMM 比 EP8 少一半(555→270μs)、同一输出速度吞吐 5×、microbatch 把 Combine 从 1012→237μs：都指向同一件事：把每卡工作量铺开,别让一两张卡成为带宽短板。",
+    "回到工程提醒：这些数字成立在『他们自己的通信 kernel 只到 IB 一半、GEMM 亦未到 roofline 上限』的前提下,真实收益仍要看你的网络与 kernel;microbatch 在 batch<32 会亏、Dispatch Overlap 才省 0.6%,都不是免费。多节点的 5× 优势建立在把 AllToAll 写对、把显存预算留给 40GB KV、Cache 的前提下：对想叠到 GB200 NVL72 的人来说,EP/DP 与预填充分离的选择会再变。"
+  ]
 }
