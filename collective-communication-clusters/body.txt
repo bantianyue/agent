@@ -1,0 +1,193 @@
+Inside TPU and GPU Clusters: The Anatomy of Collective Communication
+## A deep dive into All-Gather, Reduce-Scatter, All-Reduce, and All-to-All across TPU and GPU clusters.
+## July 14, 2026
+In this post, I'll do a deep dive into TPU and GPU cluster topologies, and cover the core collective operations used during transformer training and inference.
+Why should we care?
+In 2026, training and serving transformers is a massively distributed systems problem.
+To shard models across a cluster, we rely on techniques such as data parallelism, tensor/model parallelism, FSDP, and expert parallelism. Under the hood, these techniques are built on a small set of core collective operations:
+Data parallel training requires gradient synchronization during backprop, this is typically implemented with all-reduce. As we'll see later in this post, all-reduce itself can be decomposed into reduce-scatter followed by all-gather.
+Tensor parallelism and FSDP rely heavily on all-gather and reduce-scatter in the forward and backward passes.
+Expert parallelism, used in MoE models, rely on the all-to-all primitive.
+These are just a few important examples, but they're enough to show why understanding collective communication is useful -> if you want to reason about the performance of modern transformer systems, you eventually have to reason about how data moves through the cluster.
+We'll start from the hardware, with the TPU and GPU cluster topologies. Understanding the physical layout of the cluster makes the collective algorithms much more grounded and easier to reason about.
+From there, we'll dive into the most common implementations of the core collective operations.
+I'll focus primarily on ring-style algorithms, since they are the natural starting point for large-message communication.
+For smaller payloads, latency starts to dominate, and tree-style algorithms can be a better fit (as they require only log2 steps).
+This post is structured into seven parts:
+TPU cluster topology: Superpods, Slices, DCN, PCIe, ICI
+Inside All-Gather: 1D/2D Rings, and Chains
+Reduce-Scatter (and All-Reduce): The Dual of All-Gather
+All-to-All: A Sharded Transpose
+NVIDIA GPU cluster topology: Nodes, Scalable Units, Fat Tree
+GPU Collectives Within the Node: Rings, Trees, and SHARP
+GPU Collectives Across Nodes: Hierarchical Algorithms over InfiniBand
+TPU cluster topology
+## I'll start with TPUs because their topology is more uniform, and therefore arguably easier to reason about, than GPU cluster topology.
+The key difference between TPU and GPU clusters is the nearest-neighbor connectivity. TPU chips are connected directly to neighboring TPU chips, and each chip has either 4 or 6 nearest neighbors, depending on the TPU generation:
+TPU v2, v3, v5e, and v6e use a 2D torus topology, with 4 nearest neighbors.
+TPU v4p, v5p, TPU7x (Ironwood), and 8t use a 3D torus topology, with 6 nearest neighbors.
+Figure 1: TPU connectivity classes💡Boardfly topology:Notably, Google's new inference TPU chip [1] 8i deviates from the 2D/3D torus, and instead uses boardfly, a hierarchical high-radix topology. In this post I'll ignore it.Here is one way to build intuition for the 4-neighbor, 2D torus pattern. A 2D torus can be represented as a grid with wraparound/periodic boundaries: moving off the left edge brings you back on the right edge (and vice versa), and moving off the top edge brings you back on the bottom edge (and vice versa). Bear in mind that the TPU torus is a discrete grid; imagine it overlaid on this donut. The visualization is just for intuition:
+Figure 2: 2D torus intuition: a grid with wraparound boundariesSimilarly, here is the 6-neighbor, 3D torus connectivity pattern:
+Figure 3: 3D torus connectivityThis looks a bit messy, but the idea is simple -> each chip has neighbors along ±x, ±y, and ±z, and the edges wrap around in all three dimensions.
+💡Interactive Visualization Tool:Here is a neat little visualization tool [2] I used to generate the above image, you can use it to interact with these more complex topologies.We'll use v5e as the running example in this post, since 2D connectivity is easier to visualize.
+TPU chips communicate with their neighbors over ICI, short for inter-chip interconnect.
+The largest ICI-connected island of TPU chips is called a TPU Pod. You'll also sometimes hear people refer to this as a "superpod"; I'll use the terms interchangeably here.
+For example, a v4 pod contains 16 × 16 × 16 chips, for a total of 4096 TPUs. A v5p pod contains 16 × 20 × 28 chips, or 8960 TPUs!
+💡GPUs scale-up domains:Contrast this with GPUs, where the scale-up domain has traditionally been much smaller: commonly 8 GPUs in a single NVLink domain, and more recently 72 GPUs in an NVLink domain with NVIDIA GB200 NVL72. We'll analyze GPUs in much more depth a bit later.For TPU pods whose chips have 6 neighbors,the smallest full 3D torus is a 4×4×4 cube. If you request a smaller topology, for example 2×2×2, you lose the wraparound links, so the slice stops being a torus and becomes a mesh.
+💡Terminology:A TPU slice is a collection of chips within a single TPU Pod connected through ICIs (an "ICI-island"). For v5e those can be: 2×2, 2×4, 8×8, etc. The largest such slice is the (super)pod itself.This can roughly double the time of ring-style collectives along that axis, as we'll soon see. So this is something to be aware of - if your application is communication-heavy, you may want to request slice shapes that preserve the torus structure, for example 4×4×8.
+v5e, on the other hand, has a 16×16 2D torus pod. The wraparound exists at size 16, so if you take a smaller slice, such as 8×16, you lose the wraparound along the shorter axis (again, collective ops along that axis pay roughly a 2× penalty).
+To scale beyond a single pod, TPUs use DCN, short for data center networking. DCN has much lower throughput than ICI, so you have to be careful: if too much communication crosses pod boundaries, it can easily become the bottleneck during training.
+Putting all of that together, let's visualize the topology of a 16×16 v5e pod. Spend some time analyzing this (zoom in if needed):
+Figure 4: Topology of a v5e TPU 16x16 superpodWe can connect multiple pods into an even larger compute cluster through a shared DCN fabric (maybe this is what we should call a superpod, heh):
+Figure 5: Multiple pods connected through a DCN backboneA few more details are worth knowing.
+As can be seen in the figure above, within the pod the 0th row connects back to the 15th row, and the 0th column connects back to the 15th column. This is what makes the topology a torus/donut instead of a regular mesh. The torus geometry constrains path lengths, because data often has to flow through intermediate TPUs to get from the source chip to the target chip.
+For example, if TPU (15, 15) wants to send data to TPU (2, 15), the shortest path goes through the wraparound link:
+(15, 15) → (0, 15) →(1, 15) → (2, 15)
+instead of going the long way through (14, 15), (13, 15), and so on.
+💡Extra info:TPUs also support “twisted torus” configurations, which alter the wraparound connectivity to reduce hop counts for communication patterns such as All-to-All. This is an implementation detail that improves efficiency, but we don't need it for the purposes of this post.Each TPU chip is also connected to a "dedicated" CPU host through PCIe. In the case of v5e, one host is connected to a 2×4 block of TPU chips, giving us 8 PCIe connections between the host and those 8 chips.
+Importantly, notice that to reach the DCN backbone, data has to flow through PCIe first, which means DCN communication is even slower than PCIe.
+Concretely, cross-pod data flows from the source TPU chip's HBM, over PCIe to the source host, then egresses over the DCN fabric, ingresses into the target host, and finally goes back over PCIe into the target TPU chip's HBM.
+This gives us a natural bandwidth hierarchy. The closer we are to the compute die on the TPU chip, the faster the data movement is; the farther we move out into the cluster, the slower it gets.
+Let's put the relevant v5e cluster bandwidths on one picture:
+Figure 6: Bandwidth hierarchy in a v5e TPU clusterNow that we have the topology and bandwidth hierarchy in mind, let's look at a few concrete examples of how data actually flows through a TPU slice.
+💡Book recommendation:A few of the examples in this blog, as well as the broader motivation for this post, were inspired by the excellent Scaling Book [3], which I highly recommend.Suppose we request a 4×4 v5e slice from GCP. Since both axes are smaller than 16, we don't get any wraparound links. So this slice is not a torus, it is a regular 2D grid, and some paths between chips are longer than they would be with wraparound links.
+Let's pose the following question: how long does it take to move a (2048, 2048) bf16 matrix from TPU chip (3, 3) to TPU chip (0, 0)?
+Figure 7: Moving an 8 MiB bf16 matrix across a 4×4 v5e mesh using two ICI pathsNote that we ignored link latency in the calculation above. In practice, ICI links have roughly 1 μs of latency per hop.
+In our example, each path is 6 hops long. Since the two paths run in parallel, this adds roughly 6 μs of latency to the transfer, which is negligible here, but may not be negligible for smaller messages.
+This is why it's important to understand whether we are in a latency-bound or throughput-bound regime.
+A simple way to estimate this is to ask: assuming we saturate the unidirectional ICI bandwidth of 45 GB/s, how much data can flow through one link in 1 μs?
+The answer is:
+45 GB/s × 1 μs = 45 KB
+So if our message chunks are around this size, latency matters a lot. Ignoring a 1 μs per-hop latency could make the estimate off by a large factor, so the simple bandwidth-only approximation is no longer valid.
+Let's do one more example, this time using PCIe, ICI, and HBM → VMEM links as well.
+💡what is VMEM?VMEM is fast on-chip SRAM, roughly equivalent to programmer-managed shared memory on GPUs. It feeds directly into the matmul units; the systolic array, in the case of a TPU chip.
+The details of the TPU chip are not important for understanding the main topic of this post, so we won't spend more time on VMEM here.
+Assume we have a (128 * 1024, 128 * 1024) bf16 matrix sharded over a 4 × 4 TPU slice. Each chip therefore owns a (32 * 1024, 32 * 1024) submatrix (128/4=32).
+Also assume these submatrices have been offloaded to host DRAM.
+How long does it take to move all of this data to TPU (0, 0) and do a matmul with a (128 * 1024, 128) bf16 matrix?
+Figure 8: Gathering a sharded matrix onto TPU(0,0) for matmulWith the TPU topology and bandwidth hierarchy in mind, we're ready to jump into collective operations.
+Let's start with All-Gather.
+Inside All-Gather: 1D/2D Rings, and Chains
+## Let's start with a motivating example.
+Figure 9: All-Gather motivation: gathering shards of A so each chip can run the matmul locallySo how do we efficiently implement All-Gather?
+A common approach is to use a ring algorithm. Before looking at the algorithm itself, let's first understand where this "ring" comes from:
+Figure 10: 1D bidirectional rings naturally appear along both axes of a 16×16 v5e torusFor easier visualization, let's use a smaller ring of 8 TPU chips. In real v5e pods, the wraparound happens at size 16, but for the next few diagrams we'll pretend that an 8-chip row also wraps around:
+Figure 11: Simplified representation of an 8-chip ringHere is All-Gather over a bidirectional 1D ring. It's worth spending a bit of time on this diagram, zoom in and follow one shard as it moves around the ring:
+Figure 12: All-Gather over a bidirectional 1D ringAs an exercise, what would the algorithm look like if the ICI links were not full-duplex?
+In that case, we could run All-Gather over a unidirectional ring. To keep the diagram small, let's use a hypothetical ring of size N = 4, so the algorithm completes in only N - 1 = 3 steps:
+Figure 13: All-Gather over a unidirectional 1D ringMore realistically, if we take a TPU slice without wraparound links - for example, a 4 × 4 v5e slice - then we no longer have a ring along that axis. Instead, the topology becomes a 1D path, so we fall back to All-Gather over a path (or chain):
+Figure 14: All Gather - chain/pathFinally, sometimes we have an array that is sharded across both axes of the TPU slice, and we want to perform a 2D All-Gather.
+In that case, we can use all 4 neighboring ICI links, which gives us a 2× speedup compared to using only a single axis!
+Let's build intuition for why. Assume a hypothetical 4 × 4 slice with wraparound links along both axes, so both rows and columns form rings:
+Figure 15: All Gather over a bidirectional 2D ringThat's a wrap for All-Gather.
+Next, let's look at its dual, Reduce-Scatter, and then use it to build All-Reduce.
+Reduce-Scatter (and All-Reduce): The Dual of All-Gather
+## As before, let's start with a motivating example:
+Figure 16: Reduce-Scatter motivationSo how do we efficiently implement Reduce-Scatter?
+It turns out to be very similar to All-Gather. In fact, you can think of it as All-Gather's dual: the communication schedule is very similar, but instead of copying shards as they move, we reduce them as they move.
+Because the communication pattern is almost identical, the throughput-bound time complexity is the same:
+Figure 17: Reduce-Scatter over a bidirectional 1D ring💡Side note: All-Gather/Reduce-Scatter duality:There is a useful duality between All-Gather and Reduce-Scatter. For many sharding patterns, if the forward pass uses All-Gather, the backward pass uses Reduce-Scatter. Conversely, if the forward pass uses Reduce-Scatter, the backward pass uses All-Gather. This is worth being aware of, but since the focus of this post is the mechanics of collective operations, I won't expand on it further here.Continuing the motivating example above, we can now see how to build All-Reduce from Reduce-Scatter followed by All-Gather:
+Figure 18: All-Reduce over a bidirectional 1D ringFor consistency's sake let's also cover Reduce-Scatter over a hypothetical (because we'd need 16 TPUs not 4 to get a ring on v5e) unidirectional 1D ring:
+Figure 19: Reduce-Scatter over a unidirectional 1D ringFinally, if we take a TPU slice without wraparound links, for example, a 4 × 4 v5e slice, then there is no ring structure along that axis. In that case, we fall back to Reduce-Scatter over a 1D path / chain:
+Figure 20: Reduce-Scatter - chain/pathAs with All-Gather, if the data is sharded across multiple topology axes, we can use more ICI links in parallel. In the throughput-bound regime, the total time scales roughly inversely with the number of topology axes we use.
+That wraps up Reduce-Scatter and All-Reduce!
+All-to-All: A Sharded Transpose
+## Let's now look at the final primitive: All-to-All.
+A canonical place where All-to-All shows up is in MoE (Mixture-of-Experts) models.
+💡MoE simplified:For simplicity, assume top-1 routing and one expert per chip.In an MoE layer, each token is assigned to one expert by the router. You can think of the router as attaching a destination expert ID to each token.
+Assume that the Expert 0 lives on TPU 0, Expert 1 lives on TPU 1, and so on. Then the expert ID tells us which TPU chip the token needs to be sent to.
+So each chip starts with a local batch of tokens, but those tokens may be destined for many different experts on many different chips.
+All-to-All is the collective that performs this exchange: every chip sends its tokens for Expert 0 to TPU 0, the tokens for Expert 1 to TPU 1, and so on.
+In other words, All-to-All is a kind of distributed transpose: we start grouped by source chip, and after the collective we are grouped by destination expert.
+For the diagrams below, we'll assume a perfectly balanced routing pattern: each chip has the same amount of data destined for every other chip. Real MoE routing can be imbalanced, but the balanced case gives us the cleanest mental model for understanding the All-to-All primitive.
+Here is how we do All-to-All over a bidirectional 1D ring:
+Figure 21: All-to-all over a bidirectional 1D ringHere is All-to-All over a unidirectional 1D ring:
+Figure 22: All-to-All over a unidirectional 1D ringSame story as before: without wraparound links, the ring becomes a path. So on a 4 × 4 v5e slice, All-to-All falls back to a 1D path / chain algorithm:
+Figure 23: All-to-all - chain/pathTo wrap up the TPU part of the blog, let's summarize the throughput-bound communication-time results:
+Figure 24: Summary of TPU collective communication costsNext up, NVIDIA GPUs!
+NVIDIA GPU cluster topology: Nodes, Scalable-Units, Fat Tree
+## In contrast to TPU clusters, which use nearest-neighbor torus connectivity, GPU clusters are usually organized as hierarchical switching networks.
+In this post, I'll focus on the NVIDIA DGX H100 SuperPod reference architecture -> a 1024-GPU cluster organized as a "fat tree". I'll explain what "fat tree" means in a moment.
+I'll focus solely on the compute fabric: the network used for GPU-to-GPU communication during distributed training. I'll ignore the storage fabric used for checkpoints, weights, logs, and datasets; UFM for InfiniBand monitoring/management; and the in-band / out-of-band management fabrics used for cluster operations. i.e. the other subsystems that make up a functional NVIDIA cluster.
+Here are the basics.
+The first organizing unit is the node. In this section, I'll use "node" to mean the local NVLink / NVSwitch scale-up domain. For example, a DGX H100 node has 8 H100 GPUs connected through NVLink fabric (and e.g. GB200 NVL72 has 72 GPUs).
+💡Terminology note:NVSwitch / NVLink fabric is just NVIDIA's terminology for high bandwidth switches / interconnects that connect the GPUs.Inside the node, GPUs are effectively connected all-to-all through the NVSwitch fabric: every GPU can reach every other GPU in one NVSwitch hop.
+Nodes are then connected together through InfiniBand (IB), which forms the scale-out network. In the DGX H100 SuperPod reference architecture, 32 nodes form a Scalable Unit (SU), connected through InfiniBand leaf switches. Multiple SUs are then connected through higher-level spine switches.
+This hierarchy forms a fat tree.
+This architecture is called a "fat tree" because the tree gets "fatter" toward the root: upper levels have more aggregate bandwidth, so traffic from many nodes does not collapse into a narrow bottleneck.
+A full fat tree is the non-oversubscribed / special version of this idea. At each level, the uplink bandwidth matches the downstream injection bandwidth (this will become much clearer in the figure below).
+💡Terminology note:Oversubscription means the downstream devices can inject more traffic than the upstream links can carry. For example, if a group of nodes can inject 12.8 TB/s into the leaf layer, but the leaf switches only have 6.4 TB/s of uplink bandwidth to the spine layer, then the fabric is 2:1 oversubscribed. A full fat tree is non-oversubscribed: at each level, upstream bandwidth matches downstream injection bandwidth.The key consequence of having a full fat tree is full bisection bandwidth.
+Bisection bandwidth is the bandwidth available across an equal split of the cluster. So if we split a 128-node cluster into two groups of 64 nodes, each side can communicate with the other at its full aggregate injection bandwidth!
+More generally, for any partition, the cross-partition bandwidth is limited by the number of nodes on the smaller side of the split.
+For example, each DGX H100 node has 8 × 50 GB/s links into the IB compute fabric, giving it 400 GB/s of unidirectional injection bandwidth. In a full fat tree, any group of N nodes can communicate across a partition at N × 400 GB/s in one direction, assuming N is the smaller side of the split.
+Inside a node, the same idea applies to the local NVLink/NVSwitch fabric. If we split the 8 GPUs into two groups of 4, one side can send to the other at:
+4 × 450 GB/s = 1.8 TB/s (which is the max bandwidth for those 4 GPUs!)
+Since the fabric is full-duplex, the bidirectional bisection bandwidth is:
+2 × 1.8 TB/s = 3.6 TB/s
+At the Scalable Unit level, we have 32 nodes. For a true bisection, we split the SU into two groups of 16 nodes. One side can send to the other at:
+16 × 400 GB/s = 6.4 TB/s (bidirectional bisection bw -> 12.8 TB/s)
+Finally, if we split the cluster into 64 nodes and 64 nodes, one side can send to the other at:
+64 × 400 GB/s = 25.6 TB/s (bidirectional bisection bw -> 51.2 TB/s)
+For an uneven partition, say 88 nodes on one side and 40 nodes on the other, the cross-partition bandwidth is limited by the smaller side:
+40 × 400 GB/s = 16 TB/s
+With that mental model, let's analyze the DGX H100 reference architecture in more detail. Feel free to zoom in:
+Figure 25: NVIDIA DGX (H100) SuperPod (1024 GPUs) reference architectureWith the GPU cluster topology in mind, we're ready to shift our focus to collective operations.
+GPU Collectives Within the Node: Rings, Trees, and SHARP
+## In the intra-node setting (i.e. within a single GPU node), the collective algorithms look similar to the TPU case because they both operate on an abstract ring structure, but the underlying topology is different.
+On TPUs, the ring is a physical path through nearest-neighbor ICI links. On GPUs, the ring is a logical ordering chosen over the NVSwitch fabric.
+The NVSwitch fabric gives us effective all-to-all connectivity between GPUs, and the collective algorithm chooses a ring on top of that connectivity pattern.
+Let's break this down:
+Figure 26: Constructing a logical ring inside a GPU nodeAs we already know, All-Reduce can be implemented as Reduce-Scatter followed by All-Gather, so without special hardware support its communication cost is roughly 2× higher than either primitive alone.
+NVIDIA GPU switches (both NVSwitch and IB switches) have an important optimization called SHARP, an in-network reduction compute unit. Normally, a switch just routes data between GPUs. With SHARP, the switch can also perform the reduction operation itself. For example, instead of GPUs exchanging partial sums and reducing them locally, the GPUs send their partial values into the switch, the switch sums them, and the reduced result is sent back.
+So instead of spending SM cycles and HBM bandwidth on a largely memory-bound All-Reduce, the network performs the reduction in flight, leaving the GPUs free for useful computation.
+💡SHARP's FLOPs/s:As a reference point, the NVLink 4 NVSwitch (found in H100 nodes) SHARP has 400 GFLOP/s of FP32 reduction throughput [4].SHARP can theoretically make All-Reduce close to 2× faster! In the limit where N, the number of GPUs in the node, grows large, the improvement approaches 2×; for 8-GPU nodes, the ideal improvement is closer to 1.75×.
+So how does SHARP work?
+Figure 27: SHARP - in-network reduction compute unit💡Theory vs practice:Empirically, All-Reduce on GPUs can require very large messages to approach peak BW. In older NCCL measurements [5] on an 8×H100 node, performance was still ramping even at multi-GB message sizes, and bandwidth dropped noticeably once the message size fell below roughly 100 MB. This is one practical difference from TPUs, which tend to reach near-peak collective BW at much smaller message sizes (~10 MBs).
+Even with SHARP enabled for All-Reduce, we should still account for overhead: the reduce + multicast pipeline will not overlap perfectly in practice. In practice speedups from SHARP are only about 30% [5][6]! Always run microbenchmarks on your concrete cluster setup.
+💡Additional SHARP context:NVLink SHARP is not limited to reductions, it also accelerates the All-Gather phase through hardware multicast. A memory region can be registered as a multicast target for a group of GPUs. After that, a normal CUDA store to the multicast address is replicated by the NVSwitch fabric to every GPU in the group - the kernel itself does not need a special multicast instruction.
+One inefficiency is that the multicast includes the source GPU as well, even though it already has the data! (wasting 1/8th of BW in an H100 node).
+Inside an NVSwitch node, balanced All-to-All can require roughly 2× less communication time than on a bidirectional 1D torus ring (assuming equal bandwidths), because every GPU can send directly to every destination GPU:
+Figure 28: Dense All-to-All over a logical unidirectional ring inside an 8-GPU node💡All-to-All on NVL72:The dense, balanced All-to-All model is a reasonable simplification for an 8-GPU H100 node, but it becomes less representative on systems such as GB200 NVL72. In an MoE inference workload with 72 GPUs and only eight experts selected per token, each token needs to reach only about 8/72≈11% of the GPUs. Communication therefore becomes sparse and ragged rather than a uniform All-to-All: the router first determines each token's destination experts, and the system sends that token only to the GPUs hosting those experts.Before we move to inter-node collective ops, I want to briefly cover the main idea behind tree-based collectives.
+The main idea is to pair GPUs in rounds, doubling the amount of data each GPU has after every round. This gives us log₂(N) communication steps instead of N - 1.
+Here is tree-based All-Gather, implemented as recursive doubling:
+Figure 29: Tree All-GatherA few notes on tree vs. ring algorithms.
+Both ring and tree algorithms have step dependencies, but rings are usually easier to pipeline. In a ring, many chunks can be streamed continuously around the ring, keeping links busy. Recursive doubling can have lower latency complexity, but for large messages it may achieve lower effective bandwidth than ring because it is less pipeline-friendly.
+In the ideal bandwidth model, the byte cost is the same (as you can see in the figure above), but tree-style algorithms reduce the number of communication rounds from N - 1 to log₂(N). In practice, rings often achieve higher effective bandwidth on large tensors, so libraries like NCCL choose between ring, tree, and hybrid algorithms based on message size and topology.
+For completeness, here is Reduce-Scatter via recursive halving:
+Figure 30: Tree Reduce-ScatterNext, let's see what changes when we move outside a single GPU node and into the inter-node setting.
+GPU Collectives Across Nodes: Hierarchical Algorithms over InfiniBand
+## The low-level details of algorithms become more involved due to pipelining over multiple hierarchy levels (node-level, SU-level, spine-level).
+A good mental model is to imagine running one inter-node ring over every node in the cluster (this we can do thanks to the non-oversubscribed/full fat tree).
+For large messages, a good first-order approximation for All-Gather or Reduce-Scatter is therefore (where D is the tensor size in bytes):
+T_total ≈ D / BW_node = D / 400e9
+A slightly more accurate model also accounts for the intra-node stage. In hierarchical collectives, we usually have both scale-out traffic over IB and local traffic over NVLink/NVSwitch, and these stages can often be pipelined. So the total time is closer to the slower of the two terms:
+T_total ≈ max(D/BW_gpu, D/BW_node)
+Let's start with the first cross-node collective - All-Gather:
+Figure 31: Hierarchical All-Gather over the scalable-unit💡Why no spine switch?For these examples, I'm only showing communication within a single SU. Adding the spine fabric doesn't qualitatively change the algorithm, we'd still run the same kind of hierarchical collective (just across one more level of the topology). It does however complicate visualizations, so I'll skip doing spine-level collectives.💡Note on rail optimization:A node's aggregate inter-node bandwidth is not always fully fungible across all GPUs (like in the simple model I shared above). GPU clusters are often organized into parallel network rails, with particular GPUs having preferred paths into the network. Reaching the full node-level bandwidth therefore depends on rail-aware rank placement and balanced traffic across those paths.Next up, let's look at hierarchical All-Reduce (I'll skip hierarchical Reduce-Scatter because its structure closely mirrors hierarchical All-Gather):
+Figure 32: Hierarchical All-Reduce over the scalable-unitOne subtlety: the tensor being All-Reduced may itself be sharded over another parallelism axis.
+For example, in Megatron-style training (tensor/model parallelism), a weight matrix may be sharded over the tensor-parallel axis Y, while its gradients are reduced over the data-parallel axis X.
+The All-Reduce is not performed across the tensor-parallel ranks. Those ranks own different shards, so there is nothing elementwise to reduce between them.
+Instead, for each fixed tensor-parallel shard, we AllReduce across the corresponding data-parallel replicas.
+Let's work through a concrete example:
+Figure 33: Hierarchical sharded All-Reduce over the scalable-unitFinally, let's look at hierarchical All-to-All over a SU.
+Unlike All-Reduce, All-to-All cannot be compressed by doing a local reduction first (each chunk has a specific destination):
+Figure 34: Hierarchical All-to-All over the scalable-unitAs we did in the TPU section, let's collect the GPU cost models in one place:
+Figure 35: Summary of GPU collective communication costs for intra-node and inter-node collectivesEpilogue
+## Phew, that was a long one!
+What originally started as "let me maybe just make four figures covering All-Gather, Reduce-Scatter, All-Reduce, and All-to-All so I can understand them better, it shouldn't take more than a day, right, right" somehow turned into this.
+Along the way, I realized that the collective algorithms only really make sense once you understand the underlying hardware topology. TPUs were a bit easier to reason about, but I couldn't skip GPUs, I love them too much. Rings are cool, but I also wanted to understand tree algorithms. But also SHARP, and fat trees, and hierarchical collectives. :')
+So the scope slowly expanded, and little by little, this blog post came to fruition. Just a side-quest.
+Hope you liked it! :)
+💡Get in touch:If you spot any errors in the post, please DM me - feel free to drop me a message on X or LinkedIn or via anon feedback.Acknowledgements
+## Thanks to my friends Aroun Demeure (ex GPU & AI at Magic, and ex-GPU architect at Apple and Imagination), Axel Feldmann (ML perf engineer at Jane Street), and Pranjal Shankhdhar (prev. GPU kernel engineer at xAI) for reading pre-release version of this blog post and providing feedback!
+Arun broadened the GPU discussion beyond balanced All-to-All, highlighting NVL72’s any-to-any topology, sparse and imbalanced MoE routing, and NVLink SHARP’s memory-style multicast/reduction model and practical trade-offs.
+Axel refined the GPU section by highlighting rail optimization and SHARP’s SM/HBM offload benefits, then grounding the performance discussion with H100 measurements showing roughly 1.3× practical SHARP speedups and near-saturated collective bandwidth at around 1 GB.
+Pranjal independently reinforced the points on rail optimization and the gap between SHARP’s theoretical 2× speedup and the roughly 30% improvement typically observed in practice.
+Get notified when I publish a new post.
+subscribeReferences
+## "TPU 8t and TPU 8i technical deep dive", https://cloud.google.com/blog/products/compute/tpu-8t-and-tpu-8i-technical-deep-dive
+"TPU topology visualizer", https://tpu-visualizer.uc.r.appspot.com/
+"How to Scale Your Model", https://jax-ml.github.io/scaling-book/
+"NVSwitch Hot Chips 2022", https://hc34.hotchips.org/assets/program/conference/day2/Network%20and%20Switches/NVSwitch%20HotChips%202022%20r5.pdf
+"How to Scale Your Model: GPUs / intra-node collectives", https://jax-ml.github.io/scaling-book/gpus/#intra-node-collectives
+Axel independently re-ran the benchmark using NCCL 2.29.7 on a 32-GPU H100 InfiniBand setup, corroborating the reported result: he likewise observed only a ~1.3× speedup on a 4 GB All-Reduce. Pranjal also reported the same result. Arun said this is more of a NCCL problem than a SHARP problem.
