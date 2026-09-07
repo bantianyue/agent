@@ -98,9 +98,9 @@ sec["paras"] += [
  "上图的风险,在 CUTE 侧面就是一条『P 覆盖 S』的守卫——每个 warp 必须先读完自己的 S,别人才能覆写 P(去掉 tmem fence 后接 compute_sync_barrier.arrive_and_wait 那段):",
  "__CODE__cpp::"+C1,
  "这被称作 **alias guard**。P 对 S 有一道,dS 对 dP 有一道;每条本质是 **compute-wide barrier**:把八个 compute warp(256 线程)绑到一个 named barrier。P guard 每轮 mainloop 需要一次;dS guard 住在两级 dS 循环里,故每轮 mainloop 需要两次。baseline 的 TMEM 分配强迫这两道守卫存在,而每个屏障都把全体 warp 压在最慢那个 pace——性能就被摁在水平线下。",
- "别名还限制 MMA warp 发 GEMM:因 S 与 P 同址,下一 tile 的 S MMA 得等当前 tile 的 dV MMA 跑完才能发,致 dV MMA 暴露在它对 P 的依赖上,当中 tensor core 不干实事。baseline 默认发出顺序 QK_{t+1},dK_t,dQ_t,dP_{t+1},PdO_{t+1} 的 IKET trace 显示:hdim 64 下 dK/dQ/dP 三连乘并不足以藏住 softmax。图 3 是一次迭代的 timeline:",
+ "别名还限制 MMA warp 发 GEMM:因 S 与 P 同址,下一 tile 的 S MMA 得等当前 tile 的 dV MMA 跑完才能发,致 dV MMA 暴露在它对 P 的依赖上,当中 tensor core 不干实事。baseline 默认发出顺序 QK(t+1),dK(t),dQ(t),dP(t+1),PdO(t+1) 的 IKET trace 显示:hdim 64 下 dK/dQ/dP 三连乘并不足以藏住 softmax。图 3 是一次迭代的 timeline:",
 ]
-fig(sec,"fig03.png",3,"图 3  一次基线 mainloop 迭代(in-kernel 时间戳,单 CTA,SM cycles)。上为 MMA warp 发的 GEMM;下为八个 compute warp。因每 tile 有五道 compute-wide barrier(红虚画在最慢 warp 到点),所有 lane 同速前进;下一 tile QK 得等 softmax 结束、P 被 dV 消费才发出。softmax 期间 tensor core 只算 dQ_{t−1}、dP_t,大部分时间闲置。(注:PdO_t 图中误标 PV_t——概念上它是 P 在 backward 的 mma 消费方,含义相同。)")
+fig(sec,"fig03.png",3,"图 3  一次基线 mainloop 迭代(in-kernel 时间戳,单 CTA,SM cycles)。上为 MMA warp 发的 GEMM;下为八个 compute warp。因每 tile 有五道 compute-wide barrier(红虚画在最慢 warp 到点),所有 lane 同速前进;下一 tile QK 得等 softmax 结束、P 被 dV 消费才发出。softmax 期间 tensor core 只算 dQ(t−1)、dP(t),大部分时间闲置。(注:PdO(t) 图中误标成 PV(t)——概念上它是 P 在 backward 的 mma 消费方,含义相同。)")
 
 sec=h3("还有两道只是信号栅栏")
 sec["paras"] += [
@@ -125,9 +125,9 @@ sec["paras"] += [
  "TMEM 分配一变,内核对三处做改动。",
  "① **移除 alias guards。** P/dS 拥有专属槽后,Figure 2 的跨 warp hazard 不可能再发生,因此两个 alias guard 一并删掉(tmem fence 本身保留)。开槽的判断代码类似(split_P_dS 为真时给 P 从 [384,448)、dS 从 [448,512) 起,按 tile_m/2 半精度宽排):",
  "__CODE__cpp::"+C3,
- "② **更早释放 S。** 原先 S 与 P 共用一个 pipeline,信号在 P store 之后才发;现在拆开:pipeline_S_P 只载『S read』——compute warps 把 S 读进寄存器即可先行 release(before softmax),MMA warp 收到后再发 QK_{t+1};另起单级 pipeline_P 载『P written / P consumed』——写 P 后发 P written,MMA warp 等它发 PV_t,compute warps 则等 P consumed 才覆写下轮 P。提前放行的内层代码就是图 4 同来源这段:",
+ "② **更早释放 S。** 原先 S 与 P 共用一个 pipeline,信号在 P store 之后才发;现在拆开:pipeline_S_P 只载『S read』——compute warps 把 S 读进寄存器即可先行 release(before softmax),MMA warp 收到后再发 QK(t+1);另起单级 pipeline_P 载『P written / P consumed』——写 P 后发 P written,MMA warp 等它发 PV(t),compute warps 则等 P consumed 才覆写下轮 P。提前放行的内层代码就是图 4 同来源这段:",
  "__CODE__cpp::"+C4,
- "③ **重排 MMA warp。** 有了独立 P 槽,QK_{t+1} 只依赖 S 已被消费,故 MMA warp 收到 S read 即可把 QK_{t+1} 提到 PdO_t 前面,顺序变 QK_{t+1},PdO_t,dK_t,dQ_t,dP_{t+1}。t 轮 softmax 期间能塞下的张量核活多了 QK_{t+1},把 Figure 3 那段空闲大致填满。",
+ "③ **重排 MMA warp。** 有了独立 P 槽,QK(t+1) 只依赖 S 已被消费,故 MMA warp 收到 S read 即可把 QK(t+1) 提到 PdO(t) 前面,顺序变 QK(t+1),PdO(t),dK(t),dQ(t),dP(t+1)。t 轮 softmax 期间能塞下的张量核活多了 QK(t+1),把 Figure 3 那段空闲大致填满。",
  "**剩下的三道栅栏。** 三处 signal 前的 compute-wide barrier 仍留,但不再有跨 warp hazard,可整体换成 warp sync——八个 warp 在 softmax 与 dS 段自由漂移,所有核级栅栏由此消灭。改出的 IKET trace 明显更短:",
 ]
 fig(sec,"fig05.png",6,"图 5  下一 tile 的 QK 现在在 softmax 中段就发出,八个 warp 自由漂移——循环内没有东西再让它们互相等。tile 缩短约 19%(56 个 tile 中位数)。")
@@ -158,7 +158,7 @@ fig(sec,"fig07.png",0,"图 7  逐项改动单独、以及合并 时 相对基线
 sec["paras"] += [
  "再看只加专属槽、其余全留的中间形态(仍带核级栅栏、per-warp 信令未开),能确认收益是『去别名』这一步贡献的:仅去掉别名就把 QK 移进 softmax、warp 开始在其中漂移;但它们 S 的 release(绿)仍排整齐、signal P 段同收尾、dS 段同起跑——每 tile 仍三次等最慢 warp,故只短约 5%。",
 ]
-fig(sec,"fig08.png",1,"图 8  同一 tile、只加专属槽(dedicated TMEM slots only),同比例。去别名单独就把 QK 移入 softmax、warp 开始漂移;但它们的 S release(绿)仍竖排对齐、signal P 段同终、dS 段同起,每 tile 仍 eq 最慢 warp 三次,故 tile 短约 5%。")
+fig(sec,"fig08.png",1,"图 8  同一 tile、只加专属槽(dedicated TMEM slots only),同比例。去别名单独就把 QK 移入 softmax、warp 开始漂移;但它们的 S release(绿)仍竖排对齐、signal P 段同终、dS 段同起,每 tile 仍要等最慢 warp 三次,故 tile 短约 5%。")
 
 sec=h3("deterministic(确定性)模式")
 sec["paras"] += [
@@ -181,10 +181,10 @@ data={"title":"head dim 64 的 FlashAttention-4 反向为何慢：用空闲 TMEM
  "summary":[
    {"key":"现象","body":"FA4 反向内核在 B200、head dim 128 时达 1237 TFLOPS(约 55% 峰值);同内核切成 head dim 64 只剩 26–32% 峰值。根原在 GEMM FLOPs 随head dim减半、而逐点开销无关 head dim,张量核藏不住 softmax 段时延。"},
    {"key":"根因","body":"hdim 64 时 TMEM(128 lane×512 col)默认剩四分之一闲置。内核把 P 叠写于 S、dS 叠写于 dP(同址别名),被迫插两处核级 alias guard,并让张量核在 softmax 期间空转。"},
-   {"key":"修法与收益","body":"用闲置 TMEM 给 P/dS 开专用槽去别名,删两处核栅栏、余下降成 warp sync,并重排 MMA 为 QK_{t+1}→PdO_t→dK_t→dQ_t→dP_{t+1},令下一 tile QK 在 softmax 中段提前发出。整体 1.06–1.15×,峰值 903 TFLOPS(40%);124 组配置几何平均 1.129×。"}],
+   {"key":"修法与收益","body":"用闲置 TMEM 给 P/dS 开专用槽去别名,删两处核栅栏、余下降成 warp sync,并重排 MMA 为 QK(t+1)→PdO(t)→dK(t)→dQ(t)→dP(t+1),令下一 tile QK 在 softmax 中段提前发出。整体 1.06–1.15×,峰值 903 TFLOPS(40%);124 组配置几何平均 1.129×。"}],
  "lead":[
    "FlashAttention 的反向 pass,是训练里吃显存带宽与能耗的大头。Colfax Research 这篇『优化日记』讲的是 FA4 backward 在 Blackwell B200 上随 head dimension 的前后两档悬殊表现——head dim 128 能到约 55% 峰值,head dim 64 只剩 26–32%——以及作者如何靠闲置的四分之一张量内存(TMEM),把 hdim 64 拉回最高 903 TFLOPS。",
-   "下面按『为什么慢 → baseline 为何被迫插入五道全局栅栏 → 怎样用闲置 TMEM 去别名、让张量核在 softmax 区间多干活』逐步走完;文内图、表格与代码片段均按原文完整保留,实现以 PR 挂在 FlashAttention 仓库。"],
+   "下面按『为什么慢 → baseline 为何被迫插入五道全局栅栏 → 怎样用闲置 TMEM 去别名、让张量核在 softmax 区间多干活』逐步走完这条优化脉络。文内 8 张图、3 张表格、4 段代码片段均完整保留,实现以 PR 挂在 FlashAttention 仓库。"],
  "sections":S,
  "conclusion":conclusion,
 }
