@@ -22,3 +22,4 @@
 
 创建时间: 2026-09-07
 来源: https://www.aleksagordic.com/blog/collective-operations
+| Step 4d-i: 传送门 | completed |

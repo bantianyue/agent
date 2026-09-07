@@ -1,70 +1,361 @@
 {
+  "title": "TPU 与 GPU 集群里的集合通信解剖:4 个原语 + 7 节拓扑到算法的完整地图",
+  "reference_url": "https://www.aleksagordic.com/blog/collective-operations",
   "summary": [
     {
-      "key": "要点关键词1",
-      "body": "核心内容。替换本占位。"
+      "key": "组织",
+      "body": "7 部分长文,35 张配图图注全保留:①TPU 拓扑(superpod/slice/DCN/PCIe/ICI/带宽层级+2 数值例)②All-Gather(1D/2D ring/chain)③Reduce-Scatter 与 All-Reduce(AG 对偶+组合)④All-to-All(=分片式转置,MoE 场景)⑤NVIDIA 拓扑(node/SU/fat tree/bisection 数值)⑥节点内(Ring/Tree/SHARP+multicast)⑦跨节点(分层 All-Gather/All-Reduce/sharded/All-to-All over IB)。"
     },
     {
-      "key": "要点关键词2",
-      "body": "核心内容。替换本占位。"
+      "key": "核心数字可背",
+      "body": "单向 ICI 45GB/s×1μs=45KB(延迟主导分界);DGX H100 node 400GB/s IB 注入;NVSwitch 450GB/s/GPU(全双工);8 颗 node 内向侧 1.8TB/s↔双向 3.6;SU 32 颗 6.4(双向12.8);64/64 切分 25.6(双向51.2);SHARP 理论近2×(8颗~1.75×)、实测~1.3×;recursive doubling tree 步数 log2N。"
     },
     {
-      "key": "要点关键词3",
-      "body": "核心内容。替换本占位。"
+      "key": "方法提醒",
+      "body": "理想带宽模型是大前提:SHARP 实测打折、满 fat tree 才有满 bisection、多 GPU All-Reduce 常到 GB 级才接近峰值。文尾 all-reduce 实测多个复现都只 ~1.3× → 别照抄数字,对具体集群跑 microbenchmark。"
     }
+  ],
+  "lead": [
+    "面试里的最高频答案词,其实是一整套‘把数据搬过机器’的学问。这篇 7 大部分、35 张图的深潜文把 TPU 与 GPU 集群的拓扑、带宽层级与四大集合原语(All-Gather/Reduce-Scatter/All-Reduce/All-to-All)绑在一起讲——因为作者说得很直白:集合算法只有在你懂底层物理时才真的成立。",
+    "全文按 TPU(2D/3D torus,ICI/PCIe/DCN 的带宽金字塔)→ 三+一个原语的 ring/chain/tree 实现 → NVIDIA(DGX fat tree、不等值 bisection、NVLink/SHARP 网内归约、跨 node 分层算法)展开。想推理 transformer 训练/推理的性能,终究得推理数据怎么穿越芯片与集群;本文给的就是这条可以用数字估算的路。"
   ],
   "sections": [
     {
       "type": "h2",
-      "title": "正文第一章标题",
+      "title": "为什么关心集合通信",
       "paras": [
-        "第一段正文文字。",
-        "第二段正文文字。"
+        "2026 年,训练与服务于 transformer 本质是大规模分布式问题。数据并行靠 all-reduce(反向同步梯度);张量并行与 FSDP 重度依赖 all-gather 与 reduce-scatter;MoE 专家并行靠 Aall-to-all。要推理现代系统性能,终究要懂数据在集群里怎么动。",
+        "先从硬件与拓扑讲:TPU 均匀、GPU 分层。主推 ring(大消息),小消息则 tree(log2 步)更好。全篇七部分。"
       ],
-      "figs": [
-        {
-          "src": "fig1.png",
-          "caption": "图片说明文字"
-        }
-      ]
-    },
-    {
-      "type": "h3",
-      "title": "子标题示例",
-      "paras": [
-        "子标题下的段落。"
-      ]
+      "fig_after": {}
     },
     {
       "type": "h2",
-      "title": "含表格的章节",
+      "title": "TPU 集群拓扑: Superpod / Slice / DCN / PCIe / ICI",
       "paras": [
-        "下面是一张示例表格。"
+        "TPU 芯片直连近邻,每颗 4 或 6 个最近邻:2D torus=v2/v3/v5e/v6e(4邻);3D torus=v4p/v5p/TPU7x/8t(6 邻)。(新款推理芯片 8i 走 boardfly 式 high-radix,本文略。)",
+        "2D torus 就是带环绕边界的网格:左出右回、上出下回;把离散网格盖在甜甜圈上仅为找直觉。下面两张分别是 2D 直觉与 3D 六向连接。",
+        "(承接上图)",
+        "TPU 芯片经 ICI(inter-chip interconnect)连邻居。最大 ICI 连通岛叫 TPU Pod(常也叫 superpod)。一个 v4 pod=16³=4096;v5p=16×20×28=8960。",
+        "反观 GPU 的 scale-up 域:传统很小,通常单 NVLink 域 8 颗,近年 GB200 NVL72 到 72(稍后详谈)。",
+        "对 6 邻 pod,能整出满 3D torus 的最小组合是 4×4×4。若只要 2×2×2,会失去 wrap 而得 mesh:该轴向 ring 型集合大约慢 2×。术语:slice=单 pod 内经 ICI 连通的一块(v5e 可为 2×2/2×4/8×8,最大即 pod 本身);通信重的应用尽量选能保住 torus 的形状,如 4×4×8。",
+        "v5e=16×16 2D torus,wrap 成立在尺寸 16;只要 8×16 会在短轴向丢 wrap,同类惩罚大约 2×。",
+        "单 pod 之外用 DCN(data center networking)。DCN 吞吐远低于 ICI,过度跨 pod 流量易成瓶颈。多个 pod 经共享 DCN fabric 可连成更大集群;每颗芯片还经 PCIe 挂一块专属 CPU host(v5e:一个 host 接 2×4 八颗)。",
+        "到 DCN 骨干必经 PCIe,故 DCN 通信甚至比 PCIe 慢。跨 pod 路径:源 chip HBM→PCIe→源 host→DCN→目的 host→PCIe→目的 HBM。由此得出带宽层级:die 越近越快、越出集群越慢。",
+        "数值例 1:把 (2048,2048) bf16(≈8MiB)从(3,3)搬去(0,0)。经两条并行 ICI 路径各 6 跳。这里忽略时延——ICI 实际约 1μs/跳,本例两路并行各 6 跳≈6μs,大块下可忽略但小消息不行。",
+        "关键是要知道自己处于延迟主导还是吞吐主导。估法:打满单向 ICI 45GB/s,1μs 能过多少?45GB/s×1μs=45KB。消息 chunk 落在这量级,延迟就翻盘——忽略 1μs/跳会大幅估错,纯带宽近似不再成立。",
+        "数值例 2:(128·1024)² 的 bf16 分到 4×4(每 chip(32·1024)²)且已放 host DRAM;搬到(0,0)并与(128·1024,128)向量 matmul 要多久?(VMEM=片上 SRAM,≈ shared memory,细节不展开。)"
       ],
-      "table": {
-        "head": [
-          "列1",
-          "列2",
-          "列3"
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig01.png",
+            "caption": "图1 · TPU 两类连接:2D(4邻)/3D(6邻)。这张先给你芯片级别邻居的样子。"
+          }
         ],
-        "rows": [
-          [
-            "A",
-            "B",
-            "C"
-          ],
-          [
-            "D",
-            "<strong style=\"color:#0F4C81;\">E</strong>",
-            "F"
-          ]
+        "1": [
+          {
+            "src": "fig02.jpg",
+            "caption": "图2 · 2D torus 直觉:带环绕边界的网格。"
+          }
+        ],
+        "2": [
+          {
+            "src": "fig03.png",
+            "caption": "图3 · 3D torus 的六邻居连接(沿 ±x±y±z)。"
+          }
+        ],
+        "6": [
+          {
+            "src": "fig04.png",
+            "caption": "图4 · v5e 16×16 superpod 拓扑。行 0↔行15、列 0↔列15 相接便是 torus。"
+          }
+        ],
+        "7": [
+          {
+            "src": "fig05.png",
+            "caption": "图5 · 多 pod 经 DCN 骨干相连。"
+          }
+        ],
+        "8": [
+          {
+            "src": "fig06.png",
+            "caption": "图6 · v5e 集群带宽层级:Die/HBM > ICI > PCIe > DCN。"
+          }
+        ],
+        "9": [
+          {
+            "src": "fig07.png",
+            "caption": "图7 · 把 8MiB bf16 经两条 ICI 路径搬越 4×4 mesh。"
+          }
+        ],
+        "11": [
+          {
+            "src": "fig08.png",
+            "caption": "图8 · 分片矩阵 gather 到(0,0)用于 matmul。"
+          }
         ]
       }
+    },
+    {
+      "type": "h2",
+      "title": "All-Gather: 1D ring / 2D ring / chain",
+      "paras": [
+        "动机:矩阵 A 各片放到各 chip,要每 chip 都有完整 A 才能本地跑 matmul → 把全部分片复制给所有人。",
+        "高效实现多用 ring。先弄清 ring 从哪来:16×16 v5e torus 的两轴天然各成 1D 双向 ring。",
+        "为看得清改小成 8 颗(假装这条也 wrap)。",
+        "下面是双向 1D ring 上的 All-Gather。值得 zoom 后盯着一片 shard 绕环走。",
+        "小练习:若 ICI 非全双工如何?那跑单向 ring。为使图小,设 N=4,只需 N−1=3 步。",
+        "现实常遇到没 wrap 的 slice(如 4×4 v5e),一轴不成环、退化成 1D path,于是转 Alchain 算法。",
+        "再往上:数组若同跨两轴分片就做 2D All-Gather,可同时动用全部 4 条 ICI 邻居链路——相比只用单轴约 2× 提速。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig09.png",
+            "caption": "图9 · All-Gather 动机:收集 A 全部分片供每 chip 本地算。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig10.png",
+            "caption": "图10 · 双向 1D ring 沿 v5e 两轴自然出现。"
+          }
+        ],
+        "2": [
+          {
+            "src": "fig11.png",
+            "caption": "图11 · 简化的 8-chip ring。"
+          }
+        ],
+        "3": [
+          {
+            "src": "fig12.png",
+            "caption": "图12 · 双向 1D ring 上的 All-Gather。"
+          }
+        ],
+        "4": [
+          {
+            "src": "fig13.png",
+            "caption": "图13 · 单向 1D ring 上的 All-Gather。"
+          }
+        ],
+        "5": [
+          {
+            "src": "fig14.png",
+            "caption": "图14 · All-Gather 在 path/chain 上的走法。"
+          }
+        ],
+        "6": [
+          {
+            "src": "fig15.png",
+            "caption": "图15 · 双向 2D ring 上(4×4 且都有 wrap)做 2D All-Gather。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Reduce-Scatter 与 All-Reduce:All-Gather 的对偶",
+      "paras": [
+        "动机:前向用 All-Gather 的场景,后向常要 Reduce-Scatter;例如把不同 chip 各持的部分和归并、再让结果分布开。",
+        "Reduce-Scatter 几乎是 All-Gather 的对偶:通信 schedule 相近,但 shard 边传边 reduce 而不是边传边拷贝。吞吐主导下时间量级相同。",
+        "(旁注:二者存在漂亮对偶——多数分片模式下,前向 All-Gather 后向就 Reduce-Scatter,反之亦然。)",
+        "用减少归并再接 All-Gather,即可叠出 All-Reduce。",
+        "一致性起见也覆盖单向 1D ring 的 Reduce-Scatter(假想,v5e 需 16 颗才成环)。",
+        "没 wrap 的 slice(4×4 v5e)退化成 1D path/chain 再跑一遍。",
+        "若横跨多轴,则可并行多动几条 ICI;吞吐主导下总时延随所用拓扑轴数近似反比减少。至此 All-Gather / Reduce-Scatter / All-Reduce 收工。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig16.png",
+            "caption": "图16 · Reduce-Scatter 动机示意。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig17.png",
+            "caption": "图17 · 双向 1D ring 上的 Reduce-Scatter。"
+          }
+        ],
+        "3": [
+          {
+            "src": "fig18.png",
+            "caption": "图18 · 双向 1D ring 上把 Reduce-Scatter 后接 All-Gather 得 All-Reduce。"
+          }
+        ],
+        "4": [
+          {
+            "src": "fig19.png",
+            "caption": "图19 · 单向 1D ring 上的 Reduce-Scatter。"
+          }
+        ],
+        "5": [
+          {
+            "src": "fig20.png",
+            "caption": "图20 · Reduce-Scatter 的 chain/path 版。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "All-to-All: 一次分片式转置",
+      "paras": [
+        "最后原语出现在 MoE:假设 top-1 路由、每 chip 一个 expert。router 把每个 token 附上目标 expert ID;若每 expert 独占一 chip,那 ID 就指明 token 该送去哪颗。每 chip 开始手握一批本地 token,却可能要去往很多不同 chip 的 experts。All-to-All 做这种互换:把去 Expert j 的 token 全发往 TPU j。所以 All-to-All 有点像分布式转置——开始时按源芯片分组,结束后按目的 expert 分组。",
+        "图中假设完全均衡路由。真实现实会不均衡,但均衡是理解主体的干净心模。",
+        "单向 1D ring 版本同理。",
+        "没有 wrap 时又变 chain(4×4 v5e 退化)。",
+        "TPU 段小结:把所有原语的吞吐主导通信时间一次性汇总如下。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "fig21.png",
+            "caption": "图21 · 双向 1D ring 上的 All-to-All。"
+          }
+        ],
+        "2": [
+          {
+            "src": "fig22.png",
+            "caption": "图22 · 单向 1D ring 上的 All-to-All。"
+          }
+        ],
+        "3": [
+          {
+            "src": "fig23.png",
+            "caption": "图23 · All-to-All 的 chain/path 版。"
+          }
+        ],
+        "4": [
+          {
+            "src": "fig24.png",
+            "caption": "图24 · TPU 端各集合通信成本汇总。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "NVIDIA GPU 集群拓扑: Node / Scalable Unit / Fat Tree",
+      "paras": [
+        "与 TPU 的近邻 torus 不同,GPU 集群通常是分层交换网。本文专注 NVIDIA DGX H100 SuperPod 参考架构——一个以 fat tree 组织的 1024-GPU 集群。所谓 fat tree:树往根越走越胖,上层聚合带宽更高,众多节点的流量不会塌进单一窄瓶颈。",
+        "组织构件:最低一级 node。本文用 node 指本地 NVLink/NVSwitch scale-up 域;例如 DGX H100 node=8 颗 H100 经 NVSwitch 全连(GB200NVL72 则 72 颗)。node 内 GPU 通过 NVSwitch fabric 实际全连接:任意两颗之间一跳可达。",
+        "Node 之间用 InfiniBand(IB)串成 scale-out 网。DGX H100 SuperPod 参考架构里,32 个 node 组成一个 Scalable Unit(SU),经 IB leaf switch 连;多个 SU 再由更高层 spine switch 相连,构成 fat tree。",
+        "满 fat tree 是不 oversubscribe 的。所谓 oversubscribe:下游设备灌进 leaf 的流量大于 leaf 通往 spine 的上行能力(如一组可注入 12.8TB/s,但 leaf 只有 6.4 TB/s 上行,则 2:1 oversubscribe)。满 fat tree 每层上行带宽==下行注入带宽,意味着 full bisection bandwidth。",
+        "Bisection bandwidth=等切集群两边可用带宽。把 128-node 劈成两个 64,一边可按全部聚合注入带宽与另一边通信。一般化:任何分法,跨分区的带宽被切得更小的那侧 node 数限制。例:DGX H100 每 node 8×50GB/s 进 IB,给 400GB/s 单向注入;满 fat tree 下,N 个 node 那侧可跨分区分向 N×400GB/s发出。node 内:8 颗劈两半为两组 4,一边可向另一边发 4×450GB/s=1.8TB/s(正是那 4 颗上限);全双工→双向 bisection 3.6TB/s。",
+        "SU 有 32 node:劈 16/16,一侧 16×400=6.4TB/s(双向 12.8)。劈 64/64:一侧 64×400=25.6TB/s(双向 51.2)。不均匀如 88 对 40:小侧 40×400=16TB/s。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "fig25.png",
+            "caption": "图25 · NVIDIA DGX(H100)SuperPod 1024-GPU 参考架构(fat tree)。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "GPU 节点内集合: Ring / Tree / SHARP",
+      "paras": [
+        "node 内((单节点)TPU 与 GPU 算法表面很像——都作用在抽象 ring 上,但底层拓扑不同。TPU 的 ring 是过 ICI 的物理路径;GPU 的 ring 是在 NVSwitch 全连接上人为挑出的逻辑序。",
+        "既然 All-Reduce 可拆 Reduce-Scatter+All-Gather,无特别硬件时它成本≈单一原语 2×。NVIDIA 交换芯片(NVSwitch 与 IB switch)带 SHARP 优化——一个 in-network reduction 计算单元:平时 switch 只路由数据;有 SHARP 还能自己执行归约(如 GPU 把部分和送进 switch,switch 加好把结果发回)。于是把偏内存的 All-Reduce 让网络在天上归约,GPU 专心算有用活。",
+        "参考:H100 node 里的 NVLink4 NVSwitch 的 SHARP 有 400 GFLOP/s FP32 归约吞吐。理论上 SHARP 能把 All-Reduce 拉到接近 2×;N 很大时趋近 2×,8-GPU node 理想约 1.75×。但实际中归约与 multicast pipeline 无法完美重叠——实测加速常见仅 ~1.3×(见文末 ref)。务必对具体集群跑 microbenchmark。",
+        "(NVLink SHARP 也加速 All-Gather 的 multicast:先把内存区登记为某 GPU 组的 multicast target,此后对 multicast 地址做普通 CUDA store,便被 NVSwitch 复制给组内每颗——kernel 无需特殊指令。低效点在它连源 GPU 一起发(源已有数据),H100 node 里白耗 1/8)。)",
+        "在 NVSwitch node 内,均衡 All-to-All 通信可比双向 1D torus ring 少约半(带宽相等时),因为每颗直接可达每目的。",
+        "(注:对 GB200NVL72,MoE 推理里 72 颗只挑 8 个 expert/token 时,每个 token 只需到约 8/72≈11% 的 GPU,通信变稀疏带裂缝,不再是均匀 All-to-All。)",
+        "跨 node 前先看 tree 思想:每轮 GPU 两两配对、每轮数据量翻倍 → log2(N) 步而非 N−1。",
+        "ring 好流水(多 chunk 连续绕环让链路常忙);recursive doubling 延迟低,但大消息有效带宽常不及 ring(不擅流水)。理想带宽模型下字节成本相同;主因步数 ring(N−1)对 tree(log2N)。实际上 NCCL 会按消息大小与拓扑在 ring/tree/hybrid 里选。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig26.png",
+            "caption": "图26 · 在 GPU 节点内构造一个逻辑 ring。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig27.png",
+            "caption": "图27 · SHARP:in-network 归约计算单元。"
+          }
+        ],
+        "4": [
+          {
+            "src": "fig28.png",
+            "caption": "图28 · 8-GPU node 内逻辑单向 ring 上 dense All-to-All。"
+          }
+        ],
+        "6": [
+          {
+            "src": "fig29.png",
+            "caption": "图29 · Tree All-Gather(recursive doubling)。"
+          }
+        ],
+        "7": [
+          {
+            "src": "fig30.png",
+            "caption": "图30 · Tree Reduce-Scatter(recursive halving)。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "GPU 跨节点: InfiniBand 上的分层算法",
+      "paras": [
+        "跨 node 算法的低层细节因多级流水(节点级、SU 级、spine 级)而复杂。好心智:想象整集群(不超卖的满 fat tree 让这可行)挂一个跨 node 的 ring。大消息下 All-Gather/RS 的一阶近似(T_tot≈D/BW_node=D/400e9);再准点会加 intra-node 段——分层集合通常 scale-out(IB)与 node 内(NVLSwitch)可流水,故总时更接近 max(D/BW_gpu,D/BW_node)。",
+        "(只画单 SU 内因为加了 spine 不改变算法性质,只再多一层;画面会复杂故略。另:rail 优化——node 的跨 node 总带宽并非总能被任意 GPU 匀着用,通常成并行 rails,要吃到 node 级满带宽得拿 rail-aware rank 摆放与跨路径均衡。)",
+        "微妙处:被 All-Reduce 的张量本身可能又横跨另一并行轴。例:Megatron 式(tensor/model 并行)训练里,权矩阵按 tensor-parallel 轴 Y 分片,而其梯度按数据并行轴 X 归约。归约并不跨 tensor-parallel 那些 rank(它们各执不同 shard,无对应元素可加);而是对每个固定 shard、把沿数据并行的 replica 做 AllReduce。",
+        "最后 SU 上的分层 All-to-All。与 All-Reduce 不同,它无法靠先做本地归约压缩(每 chunk 都指向特定目的)。",
+        "收拢 GPU 端成本模型(节点内与跨节点)。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig31.png",
+            "caption": "图31 · 在 Scalable Unit 上的分层 All-Gather。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig32.png",
+            "caption": "图32 · SU 上的分层 All-Reduce。"
+          }
+        ],
+        "2": [
+          {
+            "src": "fig33.png",
+            "caption": "图33 · SU 上的分层 sharded All-Reduce。"
+          }
+        ],
+        "3": [
+          {
+            "src": "fig34.png",
+            "caption": "图34 · SU 上的分层 All-to-All。"
+          }
+        ],
+        "4": [
+          {
+            "src": "fig35.png",
+            "caption": "图35 · GPU 端节点内/跨节点集合通信成本汇总。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "结语:一份把原语砌进真机器的手艺地图",
+      "paras": [
+        "作者自述:本是\"四张图搞懂 AG/RS/AR/A2A,最多一天\",结果越挖越深直到把 scope 撑大——因为集合算法只在你懂底层拓扑时才真成立:TPU 好推(物理 ring),GPU 爱得深(fat tree+SHARP+tree+hierarchical)。(本段为人文 Epilogue,主体信息见前七节。)"
+      ],
+      "fig_after": {}
     }
   ],
   "conclusion": [
-    "结语分析内容1。",
-    "结语分析内容2。"
-  ],
-  "reference_url": "https://arxiv.org/html/XXXX.XXXXX"
+    "最值得带走的是作者怎么把四原语还原成可背的估算而非魔法。吞吐主导时,torus 上 All-Gather/Reduce-Scatter 一阶通信时间≈D/BW单向;能并行两轴就近似再减半,延迟主导时(log2N 步的 tree、消息 chunk 尺寸)决定主项。GPU 则是两级分域:node 内 NVSwitch 全连(满速直达、无绕行),node 外 InfiniBand 经 SU/spine(fat tree 不超卖才有跨分区的 N×400GB/s)。",
+    "作者反复夹一句现实提醒:SHARP 理论 2×实测只 1.3×、混装 fat tree 才满 bisection、GPU 大到 GB 级才拉满带宽——理想模型到真集群之间要靠 microbenchmark 校准,别照搬论文数字。这正是读性能文最该学的习惯。"
+  ]
 }
