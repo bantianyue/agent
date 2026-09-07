@@ -1,0 +1,552 @@
+Title: Speculative Decoding: How It Evolved, When It Stays Lossless, and What's Next
+
+URL Source: https://neurips2026-speculative-decoding.vercel.app/
+
+Markdown Content:
+Affiliations Independent Independent Venue NeurIPS 2026 Education Track (under review)
+
+## Introduction
+
+### What it is and why it matters
+
+**Every LLM you use generates one token at a time.** This is , which is a major bottleneck of inference: producing n tokens takes n passes through a model with tens of billions of parameters. , introduced in 2023 ([Leviathan et al., 2023](https://arxiv.org/abs/2211.17192)), is an approach to accelerate this: a lightweight proposes the next few tokens, and the full verifies these drafts, accepting or rejecting each one. The verified output has the same as the target model ([Chen et al., 2023](https://arxiv.org/abs/2302.01318)), which is why speculative decoding is in theory.
+
+**Teaser figure:** An autoregressive painter paints pixel by pixel; a diffusion painter is much faster because it denoises all pixels at once. Could we draft tokens the diffusion way: all at once instead of one by one?
+
+**The draft model still drafts one token at a time.** The first generation of speculative decoding speeds up inference with a smaller draft model, but drafting itself is still sequential. In vision, diffusion generation is widely adopted ([see teaser figure](https://neurips2026-speculative-decoding.vercel.app/#fig-teaser)): images are generated in parallel rather than pixel by pixel. Could a diffusion-style draft model propose all of its tokens in parallel and speed up inference further? The following sections will explain this.
+
+**Today, speculative decoding runs under nearly every hosted LLM**, so the speed and quality of decoding affect everyone. Frontier labs lean on it in production: OpenAI cut GPT-5.6 Luna prices by 80% in 2026 and credited the cut partly to a redesigned draft model ([OpenAI, 2026](https://community.openai.com/t/announcing-a-major-price-drop-for-5-6-terra-and-luna-and-fast-mode-for-5-6-sol/1388484)), Anthropic's fast mode serves the same Claude Opus model up to 2.5x faster at a premium rate ([Anthropic, 2026](https://platform.claude.com/docs/en/build-with-claude/fast-mode)), DeepSeek ships DSpark in its serving engine for a 51% throughput gain ([DeepSeek, 2026](https://arxiv.org/abs/2607.05147)), and Kimi K3 ships with its own draft model ([Kimi Team, 2026](https://arxiv.org/abs/2607.24653)). It is a cornerstone topic to learn in the LLM stack.
+
+**The target audience:** If you know that an LLM generates text one token at a time, you have all the prerequisites for this teaching material. The content is designed progressively, each section building on the previous one:
+
+1.   How it evolved. How does speculative decoding work, why is it lossless in theory, and how did four generations of speculative decoding models build upon each other?
+2.   When it stays lossless. Introducing [Losslessbench](https://huggingface.co/datasets/lilyzhng/lossless_bench), and a hands-on lab to run the models yourself.
+3.   What's next? What are the exciting new directions in accelerated inference?
+
+By the end, you will have walked through how speculative decoding evolved and how to serve and evaluate spec models, grounded in research from NeurIPS and ICML: blockwise parallel decoding at NeurIPS 2018 ([Stern et al.](https://arxiv.org/abs/1811.03115)), lossless speculative decoding at ICML 2023 ([Leviathan et al.](https://arxiv.org/abs/2211.17192)), EAGLE-3 at NeurIPS 2025 ([Li et al.](https://arxiv.org/abs/2503.01840)), DFlash at ICML 2026 ([Chen et al.](https://arxiv.org/abs/2602.06036)), DSpark ([DeepSeek, 2026](https://arxiv.org/abs/2607.05147)), and DFlash 2 ([Inco AI, 2026](https://inco.ai/blog/dflash2/)).
+
+You can find the full glossary for reference in [A.1](https://neurips2026-speculative-decoding.vercel.app/#glossary).
+
+### How it works
+
+This section explains why speculative decoding is faster than vanilla decoding, why rejection sampling makes it statistically lossless, how to evaluate the model, and what it looks like in practice.
+
+#### a. Why is it faster than the vanilla model decoding?
+
+With speculative decoding, a small draft model guesses the next γ tokens (typically 3 to 8), and the target model checks all γ of them in a single , which costs about the same as decoding one token. Speed comes from three places: better drafts get accepted more often, smarter verification wastes less compute on bad drafts, and drafting itself can run in parallel ([teaser figure](https://neurips2026-speculative-decoding.vercel.app/#fig-teaser)). [Figure 1](https://neurips2026-speculative-decoding.vercel.app/#fig-1) contrasts the two decoding modes:
+
+**Figure 1.** Vanilla decoding emits one token per target-model pass. Speculative decoding lets a draft model propose a short block, then verifies it with the target model.
+
+#### b. Rejection sampling: why it's statistically lossless
+
+So far we have covered why speculative decoding is fast. But why is it lossless? The answer is verification via : the target model checks every draft token against its own probabilities and accepts or rejects each one. Rejection sampling makes losslessness independent of the draft: even with a weak draft model, the output still follows the target model's own distribution ([Leviathan et al. 2023](https://arxiv.org/abs/2211.17192), Appendix A.1). Losslessness depends on how strictly the rejection sampling is run, and Section 2 covers when it stays lossless and when it does not. [Figure 2](https://neurips2026-speculative-decoding.vercel.app/#fig-2) walks through an example:
+
+**Figure 2.** Rejection sampling on one verify pass. Each draft token is accepted with probability min(1, p/q). A rejected token is resampled from norm(max(0, p − q)) and the rest of the draft is discarded.
+
+Here is the same rule in pseudocode:
+
+Python
+
+`# p(x): target model's probability for token x`
+
+`# q(x): draft model's probability for token x`
+
+`for each draft token x:`
+
+`accept x with probability`
+
+`min(1, p(x) / q(x))`
+
+`# q(x) <= p(x): always accepted`
+
+`# q(x) >  p(x): accepted with probability p(x)/q(x)`
+
+`on the first rejection:`
+
+`discard the remaining draft tokens`
+
+`resample one token from the residual`
+
+`p′(x) = norm( max(0, p(x) - q(x)) )`
+
+Statistically, a token can be emitted in two ways: accepted directly from the draft, which is the accepted mass, or resampled by the target after a rejection, which is the residual mass. The two add up to the same as the target's probability:
+
+Text
+
+`P(x is emitted) = q(x) * min(1, p(x)/q(x))   # accepted mass = min(p(x), q(x))`
+
+`+ P(reject) * p′(x)          # residual mass = max(0, p(x) - q(x))`
+
+`= min(p(x), q(x)) + max(0, p(x) - q(x))`
+
+`= p(x)                       # same as the target's probability`
+
+#### c. Evaluation metrics for speculative decoding
+
+How much faster exactly, and how do we measure it? Table 1 defines the six metrics. Three of them are deciding factors: drafting time, verification time, and acceptance length. The other three, decoding speedup, per-token latency, and tokens per second, are computed from these three factors.
+
+| Metric | Definition | Determined by |
+| --- | --- | --- |
+| Decoding speedup (η) | η = L_target / L, relative speed over the autoregressive baseline | Per-token latency L and the baseline latency L_target |
+| Per-token latency (L) | L = (T_draft + T_verify) / τ, the absolute time per generated token | T_draft, T_verify, and acceptance length τ |
+| T_draft | The time the draft model spends proposing tokens | The draft model's size plus how many draft tokens are needed: the smaller it is, the faster it drafts |
+| T_verify | The time the target model spends checking the proposed tokens | The target model's size, and how many draft tokens are verified |
+| Tokens per second | ≈ 1 / L, the throughput the user feels | Per-token latency L |
+| Acceptance length (τ) | The average number of draft tokens accepted per verification pass | How well the draft imitates the target: the closer its guesses, the more tokens survive verification |
+
+**Table 1.** The metrics of speculative decoding. How speed is reported, and three deciding factors (T_draft, T_verify, acceptance length τ).
+
+**Reading the acceptance rate.** From the 2023 paper (Leviathan et al., Theorem 3.5), the acceptance rate is one minus the total variation distance between the draft and target distributions:
+
+`α = 1 − E[D_LK(p, q)]`
+where p and q are the target and draft next-token distributions, and D_LK is the total variation distance between them. The same analysis also derives the acceptance length τ defined in Table 1 from the acceptance rate:
+
+`τ = (1 − α^(γ+1)) / (1 − α)`
+where γ is the number of draft tokens per verification cycle.
+
+Everything after 2023 inherits this theorem. Later papers do not re-verify losslessness: as long as verification keeps the accept-or-resample rule above, the output stays lossless however weak the draft is. What Theorem 3.5 adds is a way to read the speed numbers. A reported τ gives the acceptance rate α, and α is one minus a distributional distance: read τ, and you are reading how close the draft's distribution sits to the target's. Under strict verification this distance only decides speed. Once the acceptance threshold is relaxed, the distance would affect output quality.
+
+#### d. Speculative decoding in practice
+
+Serving Qwen3-8B on one B200, SGLang, the vanilla model decodes about 230 tokens per second; the first Harry Potter novel is roughly 100,000 tokens, more than seven minutes of decoding. With a DFlash draft model, conversational text decodes about 2.75x faster ([Chen et al., 2026](https://arxiv.org/abs/2602.06036)), ~630 tokens per second, cutting it under 3 minutes.
+
+Below is a math walk-through of the metrics producing a 2.3x decoding speedup in this setup.
+
+Text
+
+`T_verify = 4.3 ms   # one target forward pass (Qwen3-8B at 230 tok/s ≈ 4.3 ms/token)`
+
+`T_draft  = 1.3 ms   # drafting cost`
+
+`τ        = 3 tokens # accepted per verification pass`
+
+`L = (1.3 ms + 4.3 ms) / 3 ≈ 1.9 ms per token    # per-token latency`
+
+`η = 4.3 ms / 1.9 ms ≈ 2.3x                      # speedup: 2.3x`
+
+To summarize, speculative decoding speed comes down to three factors: **(1) drafting time, (2) verification time, and (3) acceptance length.** Section 1 walks through the state-of-the-art architectures and how each generation improves these deciding factors.
+
+## 1. How speculative decoding evolved
+
+Speculative decoding speed comes down to three factors: **drafting time, verification time, and acceptance length**. Four generations of speculative decoding models each remove one bottleneck: EAGLE-3 lengthens acceptance, DFlash cuts drafting time, DSpark cuts verification time, and DFlash 2 pushes acceptance further. We walk through them in order.
+
+### 1.1 EAGLE-3 (NeurIPS 2025) – longer acceptance length
+
+The 2023 papers use a separate small LLM as the draft. It guesses from scratch, and hosting a second model costs memory. Medusa ([Cai et al., 2024](https://arxiv.org/abs/2401.10774)) replaced it with extra prediction heads on the target; EAGLE ([Li et al., 2024](https://arxiv.org/abs/2401.15077)) replaced the heads with a single decoder layer that reads the target's hidden features and drafts autoregressively ([Figure 3](https://neurips2026-speculative-decoding.vercel.app/#fig-3)). We highlight EAGLE-3 because it is what ships in production.
+
+Earlier EAGLE models do not improve acceptance length with more training data. This is because the draft layer was trained to predict the target's next hidden feature as well as the next token. This training objective forced the model to reproduce the target's feature vectors; as a result, the draft spends its capacity copying features instead of guessing tokens better.
+
+**EAGLE-3** ([Li et al., 2025](https://arxiv.org/abs/2503.01840)) addresses this with a less-is-more training objective: it drops feature prediction and predicts the token directly, with features fused from low, middle, and high target layers instead of the top layer only. However, this introduces a new problem: at inference, the draft consumes its own outputs, which drift away from the training distribution, and acceptance collapses from the second step on. EAGLE-3 fixes this with training-time test: during training, the draft unrolls several steps and consumes its own outputs, so the distribution it trains on is the distribution it sees at inference.
+
+**Figure 3.** Vanilla speculative decoding uses a separate small LLM that guesses from scratch. EAGLE-3 replaces it with a single draft layer that reuses the target model's hidden features and LM head.
+
+The result is a longer acceptance length in EAGLE-3. It has a speedup of up to 6.5x over vanilla decoding, about 1.4x over EAGLE-2, and it is one of the most widely adopted draft models in production frameworks, with native support in both SGLang and vLLM.
+
+One bottleneck remains. A small draft model runs fast, but it still proposes one token at a time. Can drafting be parallel instead?
+
+### 1.2 DFlash (ICML 2026) – shorter drafting time
+
+The key design choice of **DFlash** ([Chen et al., 2026](https://arxiv.org/abs/2602.06036)) is to make drafting parallel: generate the whole block at once, instead of token by token ([Figure 4](https://neurips2026-speculative-decoding.vercel.app/#fig-4)).
+
+The beauty of DFlash is this very smart idea of diffusion block drafting. DFlash borrows it from diffusion models. In image and video generation, a diffusion model starts from pure noise and denoises every pixel in parallel, refining the whole canvas at once instead of painting it pixel by pixel ([see the teaser figure](https://neurips2026-speculative-decoding.vercel.app/#fig-teaser)). Text diffusion models carry the same idea over ([Arriola et al., 2025](https://arxiv.org/abs/2503.09573)): replace the noise with MASK tokens, and let the model predict every masked position in parallel. DFlash applies this to drafting: the draft block starts as a row of MASK tokens.
+
+**Figure 4.** Diffusion denoises every position in parallel, and DFlash carries that into drafting: EAGLE-3 drafts tokens sequentially, one at a time, while DFlash denoises a whole block of MASK tokens in one pass, with the target model's context features injected once per block.
+
+Diffusion drafting brings two benefits.
+
+*   **Generating the whole block in a single forward pass makes drafting fast.** An autoregressive draft spends one forward pass per token, so drafting γ tokens costs γ passes. DFlash drafts all γ positions in one pass, and the cost stays flat as the block grows ([Figure 5](https://neurips2026-speculative-decoding.vercel.app/#fig-5)). The flat cost also buys capacity: EAGLE-3 keeps a single layer to stay fast, while DFlash can afford five layers and still drafts faster. Five layers generating 16 tokens beat EAGLE-3's single layer generating 8, on both drafting cost and acceptance length.
+*   **Conditioning on the target model's context features makes the drafts accurate.** Feeding the draft only the last token's fused feature has two problems: it carries a single position, and a signal added only at the bottom of the stack fades in deeper layers. DFlash instead converts the target's features for every verified prefix position into keys and values and injects them into each draft layer's KV cache ([Figure 6](https://neurips2026-speculative-decoding.vercel.app/#fig-6)), so every layer sees the full context while the block is filled in. The result is high-quality drafts with higher acceptance rates.
+
+**Figure 5.** Drafting cost versus block size. EAGLE-3 keeps one layer to stay fast, so drafting γ tokens costs γ passes; DFlash spends five layers in one pass, flat at any γ.
+
+**Figure 6.** DFlash converts the target's features at every verified prefix position into keys and values, injected into each draft layer's KV cache, so every layer sees the full prefix. EAGLE-3 conditions on the last token only, at the bottom layer only.
+
+As a result, DFlash cuts drafting time. This removes autoregressive drafting as the bottleneck: over 6x lossless acceleration across a range of models and tasks, up to 2.5x higher speedup than EAGLE-3.
+
+The block positions are predicted independently, so draft tokens cannot see each other. How do we handle the acceptance decay toward the end of the block?
+
+### 1.3 DeepSeek DSpark (2026) – shorter verification time
+
+Unlike the previous models that optimize the draft mechanism, **DSpark** ([DeepSeek, 2026](https://arxiv.org/abs/2607.05147)) optimizes the verification mechanism: verify only the draft tokens that are worth it. DSpark keeps the parallel draft backbone and adds two modules ([Figure 7](https://neurips2026-speculative-decoding.vercel.app/#fig-7)).
+
+*   A lightweight sequential head restores dependencies inside the block, so later positions can condition on earlier ones.
+*   A confidence head estimates how likely each draft prefix is to survive verification, and a load-aware scheduler sets the verification length per request, based on the estimated survival probability and the engine's throughput profile.
+
+**Figure 7.** DSpark adds a sequential head for intra-block dependencies and a confidence head that scores each draft position; a load-aware scheduler trims low-confidence queues before verification.
+
+Consequently, DSpark cuts verification time. Offline, DSpark improves accepted length by 16–31% over state-of-the-art drafters. Deployed in the DeepSeek-V4 production serving stack, it accelerates per-user generation by 60–85% at matched throughput over the MTP-1 production baseline ([DeepSeek, 2026](https://arxiv.org/abs/2607.05147)). DeepSeek open-sourced the DSpark checkpoints together with DeepSpec, an open-source training repository for speculative decoding.
+
+DSpark cuts verification time, and its sequential head eases the decay. But that head walks token by token again. Was giving up parallel drafting the right trade?
+
+### 1.4 DFlash 2 (2026) – longer acceptance length
+
+DSpark tries to address the acceptance decay with a sequential token head, but **DFlash 2** ([Inco, 2026](https://inco.ai/blog/dflash2/)) argues drafting should stay parallel: it replaces DSpark's sequential head with a parallel selector. The cost gap is the argument: the sequential head re-predicts a full vocabulary distribution at every position, 77.8M parameters and 9.6% latency, while the selector does its job with 2.0M and 0.6%.
+
+What makes parallel selection possible is that the right tokens are usually already there. Take a verified prefix "The fastest way to" and four masked positions. Each position's short candidate list contains the token the target would pick, but taking the top candidate at every position independently yields "get to to school": two neighbors picked the same word, and the sentence breaks. The coherent "get to school quickly" was sitting in the lists all along. Inco measured how much this is worth: if a perfect judge always picked the right candidate out of the top 16, acceptance length would jump from 4.27 to 6.79. The missing tokens are rarely the problem; the missing judgment is. The job is selection, and selection can run in parallel ([Figure 8](https://neurips2026-speculative-decoding.vercel.app/#fig-8)).
+
+**Figure 8.** To keep the block coherent, DFlash 2 adds a path selector that picks coherent token sequences across adjacent positions, and local convolutions that reduce acceptance decay toward the end of the block.
+
+DFlash 2 does it with two additions.
+
+*   **A path selector picks a coherent sequence.** It scores each adjacent pair of candidates: the drafter's own logit for the candidate, plus a compatibility term that embeds the previous token and the candidate into compact 256-dimensional vectors and matches them under a context gate. Walking the best-scoring path from the last verified token replaces independent guesses, at 2M added parameters and 0.6% latency.
+*   **Two-tap convolutions keep neighbors consistent.** Inserted before and after each attention and feed-forward sublayer, they mix every position with its predecessor, and the first position reads the last verified token. Attention reads the long-range context, and the convolution handles local consistency inside the block. Reaching one position back recovers most of what ten extra layers would buy: the decay at the block's tail is a local problem, and a local fix is enough.
+
+As we can tell, DFlash 2 raises acceptance length: from 4.92 to 5.97 tokens per verification pass on Qwen3.5-4B, 21% more output than DFlash at 1.3% added latency, and 2.7x to 3.4x throughput over autoregressive decoding on Qwen3.8-27B ([Inco, 2026](https://inco.ai/blog/dflash2/)).
+
+After four generations of speculative decoding architectures, do you have an idea that could be the next SOTA?
+
+### 1.5 Case study: the decoding race
+
+With all 4 models introduced, the race can now run in full comparison. See [Figure 9](https://neurips2026-speculative-decoding.vercel.app/#fig-9). All 5 models decode the same sentence on the same target model.
+
+**Figure 9.** The full decoding race. The EAGLE-3, DFlash, and DSpark numbers are our own measurements on one H100. DFlash 2's results use Inco's reported 2.7–3.4x range.
+
+| Method | τ | Speedup | Engines | Official drafters |
+| --- | --- | --- | --- | --- |
+| EAGLE-3 | 2.66 | 6.5x | SGLang, vLLM | Llama, Qwen, DeepSeek V3, Kimi K2.5 |
+| DFlash | 3.11 | >6x | SGLang, vLLM, TRT-LLM, llama.cpp | Meta, Poolside, NVIDIA, Xiaomi |
+| DSpark | 3.72 | 60–85% vs MTP-1 | DeepSeek-V4 stack | GLM-5.2, Kimi K3 (RedHat) |
+| DFlash 2 | ~3.76 (+21% vs DFlash, reported) | 2.7–3.4x | SGLang, vLLM, llama.cpp, Ollama | Qwen3.8-27B, Muse Glimmer |
+
+**Table 2.** The four models at a glance.
+
+All four models are in production today. Since March 2025, EAGLE-3 draft heads ship for Llama, Qwen, and DeepSeek V3. By spring 2026, DFlash was integrated into SGLang, vLLM, TensorRT-LLM, and llama.cpp, and NVIDIA reported up to 15x throughput with it on Blackwell GPUs ([NVIDIA, 2026](https://developer.nvidia.com/blog/boost-inference-performance-up-to-15x-on-nvidia-blackwell-using-dflash-speculative-decoding/)). DFlash alone has been downloaded more than 3.5 million times in seven months. By mid-2026, model builders release official drafters alongside the models themselves: Meta, Poolside, and NVIDIA for DFlash ([Inco, 2026](https://inco.ai/blog/dflash2/)), Red Hat for DSpark ([RedHatAI, 2026](https://huggingface.co/RedHatAI/GLM-5.2-speculator.dspark-preview)), and in July 2026, Kimi K3 shipped with its own speculator, trained during post-training ([Kimi Team, 2026](https://arxiv.org/abs/2607.24653)). See Table 2.
+
+**When it doesn't help.** Speculative decoding is not free:
+
+*   The draft model takes extra memory. On a machine with little RAM or VRAM, hosting a second model next to the target can cost more than it saves.
+*   Every cycle pays the drafting cost up front. If the draft guesses poorly and acceptance stays low, the speedup can drop below 1x.
+*   Under heavy serving load, the GPU is already saturated by batching, so there is no spare compute for speculation. Engines can disable it at high concurrency.
+
+So far we have covered how speculative decoding works and evolved. In the next section, we will discuss when it stays lossless.
+
+## 2. When it stays lossless
+
+Section 1 covered how speculative decoding ensures lossless acceleration. In this section, we go through when that holds and when it does not: (2.1) lossless in papers, (2.2) lossless in deployment, and (2.3) a case study, LosslessBench, which measures losslessness on domains beyond math and coding.
+
+### 2.1 Lossless in papers
+
+Even in the original papers, lossless is not unconditional. EAGLE-3 compares against Medusa only at temperature 0 but the relaxed acceptance variant is no longer lossless. This is because a method like Medusa is lossless depending on the temperature and on how strict the acceptance rule is:
+
+*   At temperature 0, decoding is deterministic: the target model selects its highest-probability next token, a draft token is accepted only when it matches, and it's lossless.
+*   At temperature 1, decoding is random: one position can have multiple valid answers. A method like Medusa accepts any draft tokens that clear a target probability threshold, so the mix of answers follows the draft's preference instead of the target's. The output distribution shifts and is no longer lossless ([Cai et al., 2024](https://arxiv.org/abs/2401.10774)).
+
+Taking a prompt with two valid continuations: "The best pet is a ___". Say the target model assigns cat 0.5 and dog 0.5, and the draft model prefers dog:
+
+*   Rejection sampling: the draft proposes dog 80% of the time, but the target accepts only 5 out of 8 dog proposals (p/q = 0.5/0.8) and resamples the rest, so dog still comes out 50% of the time.
+*   A relaxed rule: every dog proposal that clears the threshold is accepted, so the output is biased toward the draft's favorite: the best pet becomes a dog with 0.8 probability. See [Figure 10](https://neurips2026-speculative-decoding.vercel.app/#fig-10).
+
+**Figure 10.** Rejection sampling keeps the draft aligned with the target distribution. A relaxed rule follows the draft's preference.
+
+Lossless also depends on how verification is scheduled. A poorly designed scheduler introduces selection bias. The acceptance rate improves while the output distribution has already shifted. This makes the inference no longer lossless. To be more specific, the scheduler decides whether draft token k gets verified, and that decision must depend on only the prefix through 1 to k-1. If the draft proposes token A at position k, followed by token B at position k+1, the scheduler cannot use B to decide whether to verify A. (See the [Figure 11](https://neurips2026-speculative-decoding.vercel.app/#fig-11) example.)
+
+**Figure 11.** Peeking at the token at k+1 creates selection bias.
+
+DSpark ([DeepSeek, 2026](https://arxiv.org/abs/2607.05147)) almost violated this non-anticipating rule. All prior methods rely on this precondition for their lossless claim to hold, but none of them tested whether the proof still holds when the precondition changes:
+
+1.   **The precondition.** As noted above, lossless speculative decoding requires non-anticipating admission: deciding whether to verify position k may use only the prefix through 1 to k - 1.
+2.   **What's wrong in DSpark's scheduler.** DSpark's scheduler ranks candidate draft tokens by their estimated probability of passing verification, then admits them one at a time while updating expected throughput. Scoring token k+1 from the preceding token k is ordinary. The problem arises because DSpark schedules the whole draft block jointly: its decision to admit token k can depend on the score of token k+1, and that score was computed from the proposed token k. The admission decision for k thus indirectly depends on k itself, violating non-anticipating admission, which the paper calls selection bias (Section 3.2.2, counterexample in Appendix A).
+3.   **DSpark's fix.** DSpark stops the search as soon as expected throughput declines. This makes the truncation decision depend only on the prefix processed so far, eliminating the selection bias.
+
+A relaxed acceptance rule or a peeking scheduler shifts the output distribution. In deployment, what else does losslessness depend on?
+
+### 2.2 Lossless in deployment
+
+In production, there are many configurations a user or company can adjust, and some of them decide whether decoding stays lossless. vLLM and SGLang, the two major engines, put it this way:
+
+*   **SGLang** keeps strict verification as the default: its acceptance thresholds ship at 1.0 ([SGLang docs](https://docs.sglang.ai/advanced_features/speculative_decoding.html)). A user can lower them to accept more tokens aggressively, and once they trade quality for speed this way, decoding is no longer lossless.
+*   **vLLM** splits losslessness into three layers ([vLLM docs](https://docs.vllm.ai/en/latest/features/speculative_decoding/)): (1) theoretical losslessness holds up to the precision limits of hardware numerics; (2) algorithmic losslessness is validated by convergence tests on the rejection sampler; (3) output stability is not promised. Layers 1 and 2 are covered by the paper's proof and the engine's tests, but layer 3 is not: a simple change in batch size can change logprobs, shifting the output distribution.
+
+DSpark is a concrete example. When DeepSeek deployed it in production, the scheduler exposed two conflicts with real-world infrastructure ([DeepSeek, 2026](https://arxiv.org/abs/2607.05147), Section 5.2), and they had to redesign around both to keep decoding lossless:
+
+1.   The algorithm assumes a smooth hardware capacity curve, but real GPU throughput is jagged. The fix is removing the early stop and searching over the whole jagged curve.
+2.   The algorithm decides how many draft tokens to verify at each step, but the serving engine needs the batch size to be fixed. The fix is scheduling asynchronously, using confidence predictions from two steps earlier to set the batch size. This also keeps the decision from seeing the current tokens, so the wider search in the first fix stays lossless.
+
+Lastly, the production stack is complicated: it accelerates inference well beyond speculative decoding. Weights are (lossy). are compressed (lossy). The serving system adds KV-cache-aware routing and prefill-decode disaggregation on top. With this many factors stacked together, whether the deployment as a whole is still lossless is hard to gauge.
+
+Suppose a deployment gets everything above right: strict thresholds, a non-anticipating scheduler, a redesign for every engine constraint. How do we verify it still serves the end user's goal across all the different domains? Evidence for losslessness is limited to the domains where it was tested.
+
+The state-of-the-art speculative decoding methods are all evaluated on: coding, chat, and mathematics. EAGLE-3, DFlash, and DSpark report acceptance length and speedup on GSM8K, MATH-500, AIME25, HumanEval, MBPP, LiveCodeBench, MT-Bench, Alpaca, and Arena-Hard. DeepSpec uses the same nine benchmarks (Table 3). These benchmarks cover only a small slice of real-world tasks. Outside them, the empirical evidence for losslessness is simply absent. [Figure 12](https://neurips2026-speculative-decoding.vercel.app/#fig-12) shows the 29 task types in OpenRouter's real traffic ([OpenRouter, 2026](https://openrouter.ai/rankings)): the tested domains account for only 17% of token usage, and the other 83% has never been measured.
+
+| Method | Math | Code | Chat / instruction | Other |
+| --- | --- | --- | --- | --- |
+| EAGLE-3 (2025) | GSM8K | HumanEval | MT-Bench, Alpaca | CNN/Daily Mail (summarization) |
+| DFlash (2026) | GSM8K, MATH-500, AIME25 | HumanEval, MBPP, LiveCodeBench | MT-Bench, Alpaca | — |
+| DSpark (2026) | GSM8K, MATH-500, AIME25 | HumanEval, MBPP, LiveCodeBench | MT-Bench, Alpaca, Arena-Hard | DeepSeek-V4 live traffic (speed only) |
+| DeepSpec harness | gsm8k, math500, aime25 | humaneval, mbpp, livecodebench | mt-bench, alpaca, arena-hard-v2 | — |
+
+**Table 3.** Where lossless was measured. Evaluation datasets in each paper's experiment section.
+
+**Figure 12.** OpenRouter traffic by task type. 83% of tasks have never been measured by speculative decoding methods.
+
+So does lossless hold on the 83% domains/tasks that have never been measured?
+
+### 2.3 Introducing Lossless Bench
+
+The previous sections covered theoretical and algorithmic losslessness. To measure speculative decoding and inference acceleration on domains beyond coding and math, we built the [LosslessBench](https://lilyzh.ng/writing/losslessbench/).
+
+**[LosslessBench](https://huggingface.co/datasets/lilyzhng/lossless_bench)** evaluates across five domains: coding, agent workflows, creative writing, guardrails, and frontend design. See [Figure 14](https://neurips2026-speculative-decoding.vercel.app/#fig-14), each axis uses its domain's own benchmark and metric:
+
+*   Frontend: OpenDesign. Each page is judged twice: a GPT-4o vision judge scores the rendered screenshot on alignment, aesthetics, and structure, and a browser agent clicks every component to score whether the page actually works.
+*   Creative: EQ-Bench longform score, judged over multi-chapter creative writing.
+*   Guardrail: XSTest, classification accuracy on safe vs unsafe prompts built to sit near the decision boundary.
+*   Coding: Terminal-Bench pass rate.
+*   Agent workflow: tau3-bench long-horizon agent tasks, action match rate.
+
+The benchmarks in these papers are simple, single-turn tasks such as grade-school math and function-level coding. They capture only a narrow slice of what models are asked to do in practice, which motivates the five domains above for LosslessBench.
+
+Section 1 showed that a reported acceptance length is an implicit token-level divergence measurement, which makes it a natural probe for the five new domains ([Figure 13](https://neurips2026-speculative-decoding.vercel.app/#fig-13)). As a sanity check, our harness reproduces DFlash's published numbers on its own benchmarks: 5.32 vs. their 5.98 on GSM8K, and 5.96 vs. their 5.52 on HumanEval. Across the five LosslessBench axes, acceptance falls from 5.24 to 1.84. The draft drifts furthest on the domains the papers never measured. Frontend design is an exception: its acceptance stays high while the generated pages break ([Figure 15](https://neurips2026-speculative-decoding.vercel.app/#fig-15)), because acceptance measures draft and target agreement, not output quality. Whether the divergence translates into task-level quality loss is what [Figure 14](https://neurips2026-speculative-decoding.vercel.app/#fig-14) examines.
+
+![Image 1: Two-panel bar chart: DFlash acceptance length by domain and the implied distributional divergence](https://neurips2026-speculative-decoding.vercel.app/figures/fig_alpha_divergence.svg)
+
+**Figure 13.** DFlash acceptance length by domain (left) and the implied distributional divergence D_LK = 1 − α (right). Lower acceptance means larger token-level divergence.
+
+![Image 2: Radar chart of Qwen3-8B with vs without speculative decoding across five domains on LosslessBench](https://neurips2026-speculative-decoding.vercel.app/figures/fig_radar_spec_pilot.svg)
+
+**Figure 14.** Qwen3-8B with vs without speculative decoding on LosslessBench. Axes are independently scaled, so each domain's relative gap is visible.
+
+With the DFlash draft, frontend design drops from 54.5 to 45.5 and creative writing from 70 to 30. Guardrail holds at 80. Agentic workflow rises from 20.0 to 27.5. Both runs use the same Qwen3-8B with the same distribution, so the gain comes from the path each run happened to take. Under greedy decoding a small numerical difference flips one token; in an agent loop that flip can become an extra tool call, whose result changes every later turn. Across the ten tau3 retail tasks the accelerated run took that branch more often: it thinks longer (416 vs 261 words per thinking turn) and calls more tools (76 vs 54), and the extra tool results carry it to the higher score.
+
+**Explore the evaluation by yourself.** Pick any domain and run the task:
+
+[Frontend Design](https://neurips2026-speculative-decoding.vercel.app/demo/compare_frontend.html)[Agentic Workflow](https://neurips2026-speculative-decoding.vercel.app/demo/compare_taubench.html)[Safety Guardrail](https://neurips2026-speculative-decoding.vercel.app/demo/compare_guardrail.html)[Creative Writing](https://neurips2026-speculative-decoding.vercel.app/demo/compare_creative.html)[Agentic Coding](https://neurips2026-speculative-decoding.vercel.app/demo/compare_coding.html)
+
+**Figure 15.** The decoding race on the LosslessBench calendar brief (L101). Vanilla takes 18.7s, DFlash 8.9s. DFlash is the fastest, and its page is the broken one.
+
+Look closely at [Figure 15](https://neurips2026-speculative-decoding.vercel.app/#fig-15): the four models did not generate the same page, or even the same number of tokens. Vanilla produced 2,683 tokens on the calendar brief, the accelerated models between 2,606 and 3,048. DFlash decoded fastest per token (341 vs 143 tok/s), and its calendar came out visibly broken.
+
+**Figure 16.** The same race on a 1000-word creative brief (LosslessBench L073). Vanilla takes 15.2s, DFlash 8.5s.
+
+[Figure 16](https://neurips2026-speculative-decoding.vercel.app/#fig-16) is the evaluation result on the creative writing task: EAGLE-3 and DSpark wrote identical stories, while vanilla and DFlash each took a different trajectory from the same opening line. That leaves three distinct stories to judge:
+
+| story | instruction following | Latin vocabulary | writing style |
+| --- | --- | --- | --- |
+| vanilla · 7/10 | 979 words. Ends entering the fight, close to violating the no-combat rule. | Correct, restrained. | Strongest sensory detail. Named cast. Ending falls back on a generic freedom monologue. |
+| EAGLE-3 / DSpark · 6/10 | Best. 998 words, all constraints met. | Correct, sparse. | Weakest as fiction. Restates one thesis three times. No named characters. Explains politics rather than dramatizing it. |
+| DFlash · 7.5/10 | Worst. 1,092 words, 9% over. Invents a sacrae bell. | Inaccurate, decorative. | Best structure. Full dawn-to-night arc, one side character with a backstory, strongest closing image. |
+
+**Table 4.** The three distinct gladiator stories, judged on the brief's own constraints. Same target model, greedy decoding: the differences are trajectory divergence, not different models.
+
+Overall, DFlash wins. Fiction lives on shape and character before compliance, and DFlash is the only story that delivers a complete day, a side character you remember, and a closing image that lands. Its violations are copyedit-level fixes. EAGLE-3 and DSpark followed every rule and produced the piece you forget first.
+
+Interestingly, DFlash wrote the worst calendar page but the best story. Why do EAGLE-3 and DSpark match in writing and front end code, while DFlash stands apart? EAGLE-3 and DSpark share DeepSpec's training data, propose similar tokens. DFlash differs in training data, block size, and serving path, so the exact cause cannot be ruled out here, but likely caused by the difference in training data.
+
+### 2.4 Hands-On Lab
+
+This section is a hands-on tutorial. A [Jupyter notebook walkthrough](https://github.com/lilyzhng/2026_NeurIPS_Education/blob/main/submission/teaching_materials/lab/lab_walkthrough.ipynb) covers every stage with results embedded, so you can read the whole lab before spending GPU time.
+
+**Where to get the GPU.** Any H100/A100 works. If you don't have one, get $30 free credits by signing up for a [Modal](https://modal.com/) account. That covers this whole lab (an H100 is ~$4/hour, a full afternoon uses $8-12).
+
+#### a. Serve your first accelerated model
+
+In this section you serve the same model twice, once vanilla and once with a speculator, and measure inference acceleration on your own GPU.
+
+The checkpoints come from [DeepSpec](https://github.com/deepseek-ai/DeepSpec), which releases drafts for EAGLE-3, DFlash, and DSpark on the same target, Qwen3-8B. The serving engine is vLLM. The first deployment will have a cold start (image build plus a 16GB weight download, about 10 minutes), but it is cached afterwards, so later experiments are faster.
+
+```
+pip install modal && modal setup                    # one-time account link
+git clone https://github.com/lilyzhng/2026_NeurIPS_Education && cd 2026_NeurIPS_Education/submission/teaching_materials/lab
+SPEC_MODE=vanilla modal deploy modal_vllm_serve.py   # prints your server URL
+```
+
+The script pins the image, caches model weights in a volume so they download once, and exposes the server at a public URL. When done, `modal app stop neurips-spec-lab` releases the GPU.
+
+Serve the vanilla model:
+
+`vllm serve Qwen/Qwen3-8B --port 8000`
+
+Send a prompt and measure the generation speed (`measure_decoding_speed.py`). Then restart the server with the DeepSpec DSpark speculator (on Modal: `SPEC_MODE=dspark modal deploy modal_vllm_serve.py`) and run the same bench again:
+
+```
+vllm serve Qwen/Qwen3-8B --port 8000 --speculative-config \
+  '{"model": "deepseek-ai/dspark_qwen3_8b_block7", "method": "dspark", "num_speculative_tokens": 7}'
+```
+
+Across 5 runs on one H100, the speedup is stable (mean ± std, [Figure 17](https://neurips2026-speculative-decoding.vercel.app/#fig-17)):
+
+![Image 3: Bar chart: vanilla Qwen3-8B decodes 136.3 plus or minus 1.3 tok/s, with the DSpark draft 231.4 plus or minus 4.5 tok/s, a 1.70x speedup](https://neurips2026-speculative-decoding.vercel.app/figures/fig13_runs_h100.svg)
+
+**Figure 17.** Decode throughput of Qwen3-8B on one H100, vanilla vs with the DSpark draft. Mean ± std over 5 runs.
+
+vLLM does not report acceptance length or per-token latency directly. Both come from real measurements: latency from the throughput above, and τ from the server's `/metrics` counters (5,180 draft tokens proposed at 7 per pass = ~740 verification passes for 2,606 generated tokens). See the calculation below:
+
+Text
+
+`L_target = 1 / 136.3 tok/s ≈ 7.3 ms         # latency of the target (vanilla) model, per token`
+
+`L_dspark = 1 / 231.4 tok/s ≈ 4.3 ms         # latency with the DSpark draft, per token`
+
+`τ        ≈ 3.5                             # acceptance length`
+
+`T_draft + T_verify = L_dspark × τ ≈ 15.1 ms # cost of one draft+verify pass`
+
+`η = L_target / L_dspark ≈ 1.70x             # speedup`
+
+#### b. Adjust acceptance rate yourself
+
+SGLang ships with `--speculative-accept-threshold-single` at 1.0, where rejection sampling matches the target model. Lowering it accepts draft tokens more aggressively, trading losslessness for speed. We benchmarked 1.0 → 0.4 on the LosslessBench frontend design task (L101, the same calendar-popup prompt as [Figure 15](https://neurips2026-speculative-decoding.vercel.app/#fig-15), temperature 1), regenerating the page at each stop and recording acceptance length and decode speed ([Figure 18](https://neurips2026-speculative-decoding.vercel.app/#fig-18)). At temperature 0 the threshold does nothing: every stop returned byte-identical pages.
+
+**Figure 18.** The SGLang acceptance threshold on the LosslessBench frontend design task (L101, temperature 1).
+
+At threshold 1.0 the verifier runs rejection sampling: the page follows the target model's distribution, whatever the draft proposes. Below 1.0 the lossless free lunch is gone: any draft token whose target probability clears the threshold is accepted without resampling, and the output drifts toward the draft. τ climbs from 4.9 to 7.2: 48% more draft-preferred tokens get through. The prompt asks for a stunning translucent calendar popup, judge each page with your own eyes.
+
+#### c. The decoding race
+
+In this section you watch four deployments race on the same prompt: the vanilla model against EAGLE-3, DFlash, and DSpark, all on H100. The point is to let the reader get a sense of what inference acceleration does on real-world tasks.
+
+```
+SPEC_MODE=eagle3 modal deploy modal_vllm_serve.py
+SPEC_MODE=dspark modal deploy modal_vllm_serve.py
+modal run modal_dflash_offline.py            # DFlash, see note below
+python3 build_race_demo.py                   # assembles the demo from your outputs
+```
+
+These commands reproduce the two live demos in Section 2.3 (Figures 15 and 16).
+
+Note: `vllm serve` crashes on DFlash in stable 0.28.0, and only the offline `LLM()` path is CI-tested, so `modal_dflash_offline.py` runs this way. Its draft is also the z-lab release rather than DeepSpec's.
+
+#### d. Run LosslessBench on your own server
+
+Let's use LosslessBench task L101: "Stunning translucent calendar popup that smoothly blends into the interface."
+
+`python3 generate_frontend_task.py --url <your-url> --label vanilla`
+
+Greedy decoding, so losslessness makes a concrete prediction: a speculator should reproduce the vanilla HTML exactly. Here is what we measured instead:
+
+Run it twice, once on the vanilla server and once on the DSpark server, and compare the two HTML files:
+
+| Comparison | Identical prefix | First divergence | Final length |
+| --- | --- | --- | --- |
+| vanilla vs DSpark | 8,299 chars (76% of the page) | `transition: color 0.2s` → `0.3s` | 10,924 vs 10,535 chars |
+
+**Table 5.** The greedy byte-level comparison of the same L101 page, vanilla vs DSpark.
+
+The rejection-sampling proof still holds at the algorithm level: it assumes both paths compute the same target probabilities. In practice the speculative path runs different kernels, the logits shift within floating-point precision, and a near-tie token (0.2s vs 0.3s here) falls the other way. Both pages render and satisfy the brief, and they are different pages: output stability is a separate layer, one that no engine promises (Section 2.2).
+
+#### e. Measure per-domain speed
+
+The outputs vary by domain, and so does the speed. Measure each decoding method on the coding, creative, and frontend prompts with `race_domains.py`:
+
+| domain | vanilla | DSpark | EAGLE-3 | DFlash |
+| --- | --- | --- | --- | --- |
+| coding | 138.1 | 311.9 (2.3x) | 158.8 (1.15x) | 311.3 (2.25x) |
+| creative | 138.2 | 416.7 (3.0x) | 229.5 (1.66x) | 265.6 (1.92x) |
+| frontend | 137.6 | 333.1 (2.4x) | 208.2 (1.51x) | 274.0 (1.99x) |
+
+**Table 6.** Decoding speed by domain: the same draft buys different speedups on different text.
+
+As shown in Table 6, vanilla decodes at about 138 tok/s in every domain. The speculators' speed varies with the domain, because acceptance depends on how well the draft guesses that kind of text: DSpark reaches 3.0x on creative and 2.3x on coding. On this harness DSpark leads with acceptance length τ 3.5, DFlash follows at τ 2.2 to 2.5, and EAGLE-3 trails at τ 1.3.
+
+Then the open exercise: swap in prompts from a domain nobody measured (OpenRouter's other 83%), rerun the race, and report three numbers together: acceptance rate, task correctness, domain coverage. LosslessBench samples 100 such tasks across the full OpenRouter distribution if you want a ready-made prompt set.
+
+## 3. What's Next
+
+In this section we go through the exciting new directions for speculative decoding: (3.1) multimodal speculative decoding and (3.2) speculative decoding going from tokens to tool calls.
+
+### 3.1 Multimodal Speculative Decoding
+
+The methods above all target language-only models, but a growing share of decoding workloads is multimodal. A computer-use agent reads a screenshot at every step of its trajectory, whether it is browsing the web or checking its own front-end code, and parsing User uploaded documents, charts, and videos in the chat.
+
+So the question is: can we expect speculative decoding to work for multimodal language models as well?
+
+The answer is not yet: no multimodal speculative decoding method has reached mainstream adoption. vLLM merged its first VLM support for EAGLE-3 (Qwen2.5-VL only) in v0.11.1 ([vLLM #22872](https://github.com/vllm-project/vllm/pull/22872)) while its other speculative paths still reject multimodal models, and SpecForge, SGLang's draft-training framework, lists VLM integration as roadmap ([SpecForge, 2025](https://www.lmsys.org/blog/2025-07-25-spec-forge/)).
+
+On the research side, MMSpec, the first VLM speculative decoding benchmark, measures over 600 samples across ten algorithms ([MMSpec, 2026](https://arxiv.org/abs/2603.14989)), and its main finding is that speculative decoding designed for language models can degrade on multimodal input, because the draft model has limited vision capability compared to the target model. This happens in two ways:
+
+*   **Text-only drafters miss the image entirely.** The standard drafter is a small language model with no component for vision input ([MASSV, 2025](https://arxiv.org/abs/2505.10526)).
+*   **Small VLM does not close the gap.** ViSpec's hypothesis is that a large VLM filters redundant image information layer by layer, while a small model struggles to do the same, so vision capability degrades disproportionately as the drafter shrinks ([ViSpec, NeurIPS 2025](https://neurips.cc/virtual/2025/poster/115277)).
+
+The early findings converge on the same design choice: share the target's visual representations with the drafter, rather than training vision capacity into a small model from scratch. MASSV connects the target's own vision encoder to the draft model through a lightweight projector and distills on the target's responses, reaching up to 30% longer accepted length and 1.46x end-to-end speedup over text-only drafting ([MASSV, 2025](https://arxiv.org/abs/2505.10526)). ViSpec trains a vision-aware drafter and reports the first substantial speedups on VLM decoding ([ViSpec, NeurIPS 2025](https://neurips.cc/virtual/2025/poster/115277)).
+
+### 3.2 From Speculating Tokens to Speculating Tool Calls
+
+Speculative decoding so far operates on tokens. The same predict-then-verify idea extends one level up, to tool calls in agents. For an agent, the expensive unit is the tool call: a sub-LLM query or an API request takes seconds, while the code that issues it is still being generated.
+
+Early work has started to formalize this. Speculative Interaction Agents define speculative tool calling as a way to cut time-to-first-token ([Hooper et al., 2026](https://arxiv.org/abs/2605.13360)), and Act While Thinking pre-executes tool calls predicted from patterns in the reasoning trace ([Ji et al., 2026](https://arxiv.org/abs/2603.18897)). A shared benchmark is still missing: each paper evaluates on its own setup, either borrowing OOLONG ([2025](https://arxiv.org/abs/2511.02817)) or building a private task corpus.
+
+Speculative programmatic tool calling is a concrete instantiation ([Zhang, 2026](https://alexzhang13.github.io/blog/2026/spec-ptc/)). While the model is still writing code, a second interpreter runs the partial program and launches any tool call whose inputs are already determined. When the code executes for real, a matching pre-launched call returns its stored result, and a mismatched one is discarded and re-executed. A wrong guess costs only the wasted early launch. On OOLONG with Qwen3-30B, this yields 1 to 1.2x end-to-end speedup.
+
+If agent workloads keep growing, this direction will likely follow the trajectory of token-level speculative decoding: better speculation policies, acceptance rate as a first-class metric, and a shared benchmark to standardize the speedup claims.
+
+## Acknowledgements
+
+This article is better because of its early readers. We are grateful to Vibhu Sapra, Swyx, Andrew Hartnett, Vighnesh Birodkar, Philip Kiely, Ali Taha, Huaizheng Zhang, and Cara Li, who generously gave their time to read early drafts, and whose feedback sharpened both the writing and the ideas.
+
+## Citation
+
+You can cite this article here:
+
+BibTeX
+
+`@article{zhang2026losslessspec,`
+
+`title   = "Speculative Decoding: How It Evolved, When It Stays Lossless, and What's Next",`
+
+`author  = "Zhang, Lily and Kanna, Madison",`
+
+`year    = "2026",`
+
+`month   = "August",`
+
+`url     = "https://neurips2026-speculative-decoding.vercel.app/"`
+
+`}`
+
+## Appendix
+
+### Glossary
+
+Acceptance length (τ)The average number of draft tokens the target model accepts each time it checks a batch, counting the extra token it adds itself.Acceptance rate (α)How often a proposed draft token passes the target model's check. The more the draft agrees with the target, the higher it is.Acceptance threshold A serving setting for how strictly draft tokens are checked. At 1.0 the check is exact; lowering it lets more draft tokens through.Autoregressive decoding Generating text one token at a time, with each token depending on the one before it.Block diffusion Predicting a whole block of masked tokens at once, instead of one token at a time.Bonus token The one extra token the target model produces itself each time it checks the draft.Draft model A cheaper model or draft layer that proposes several likely next tokens.Forward pass Running the model on its current input to produce scores for possible next tokens.Greedy decoding Always picking the single most likely next token, so the same prompt gives the same output.KV cache Stored attention information from earlier tokens that lets the model avoid recomputing the whole context.Lossless The model produces the same distribution of outputs as the unaccelerated version.MASK token A placeholder slot in a draft block that the model fills in with a predicted token.Probability distribution The model's probabilities over all possible next tokens.Quantization Storing model weights with fewer bits to make inference faster and cheaper, sometimes with accuracy loss.Rejection sampling A method that accepts or replaces draft tokens so the final outputs still follow the target model's distribution.Speculative decoding A generation method that uses a fast smaller draft model to propose several tokens, which are then verified by a larger slower target model.Target model The larger model whose output distribution we want to preserve.Temperature A setting for how random sampling is. At 0 the model always picks its top choice; at 1 it samples with its natural randomness.Total variation distance A measure of how different two sets of probabilities are. The closer the draft's guesses are to the target's, the more tokens get accepted.Vanilla model The target model running without any acceleration, used as the speed baseline.
+
+### A.2 Frontend gap under a vendor-assembled stack
+
+We identified a significant gap in the frontend design evaluation under a vendor-assembled stack (fp4 quantization, speculative decoding, KV routing, prefill-decode disaggregation): the same GLM 5.2 model lost 5.6 points, 76.9 to 71.2 ([Figure A2](https://neurips2026-speculative-decoding.vercel.app/#fig-A2)). Design output is open-ended and hard for a draft to predict. It is absent from the speculative decoding benchmarks. However, frontend and UI tasks carry significant weight in the OpenRouter task usage ([Figure 12](https://neurips2026-speculative-decoding.vercel.app/#fig-12)). In other words, users would receive degraded performance when they use spec models tuned for coding and math only. The other four domains showed no significant gap. The culprit in that stack was quantization, so the measurement says little about speculative decoding on its own.
+
+![Image 4: reference render of the calendar prompt, with the requested translucent popup implemented](https://neurips2026-speculative-decoding.vercel.app/figures/id673_fp8.png)![Image 5: accelerated render of the same prompt, a clean page with the calendar popup missing](https://neurips2026-speculative-decoding.vercel.app/figures/id673_fp4.png)
+
+**Figure A2.** The same model, the same frontend prompt, left is the original model, right is under the vendor-assembled accelerated stack. The culprit here was quantization.
+
+### A.3 Should the Lab Own Inference Acceleration?
+
+Step by step, acceleration is moving from the serving layer into frontier labs. DeepSeek pushed FP8 into pre-training with DeepSeek-V3 ([DeepSeek-AI, 2024](https://arxiv.org/abs/2412.19437)). OpenAI shipped gpt-oss MXFP4 weights with quantization-aware training ([OpenAI, 2025](https://arxiv.org/abs/2508.10925)). K2-Thinking reported every benchmark number at INT4, making the quantized model the official model. Kimi K3 has the draft model fine-tuned as part of post-training, and validated before the model leaves the lab ([Kimi Team, 2026](https://arxiv.org/abs/2607.24653)).
+
+![Image 6: Timeline of acceleration work migrating from the serving layer into the labs, 2025 to 2026](https://neurips2026-speculative-decoding.vercel.app/figures/fig14_ownership_migration.svg)
+
+**Figure A3.** The model layer absorbs acceleration step by step. The room left for serving shrinks toward one job: serve. From [LosslessBench](https://lilyzh.ng/writing/losslessbench/)[Figure 6](https://neurips2026-speculative-decoding.vercel.app/#fig-6), boundary redrawn as steps.
+
+See [Figure A3](https://neurips2026-speculative-decoding.vercel.app/#fig-A3). Each step, from 2025 to 2026, shows frontier labs owning more of the inference acceleration space. The work used to be owned by the serving layer. An inference provider would take the released FP8 weights, quantize them, train a draft model on top, and serve it on OpenRouter for the general public. This meant the inference layer owned the quality evaluation. But now, the labs do this work themselves and validate it before the model ships, leaving less room for the inference layer ([LosslessBench](https://lilyzh.ng/writing/losslessbench/), [Figure 6](https://neurips2026-speculative-decoding.vercel.app/#fig-6)).
+
+This ownership shift fixes the missing quality validation: the lab validates the accelerated model before it ships, closing the gap Section 2 described.
+
+## References
+
+1.   Smith, J. E. (1981). A Study of Branch Prediction Strategies. _ISCA 1981_. [dl.acm.org/doi/10.5555/800052.801871](https://dl.acm.org/doi/10.5555/800052.801871)
+2.   Stern, M., Shazeer, N., & Uszkoreit, J. (2018). Blockwise Parallel Decoding for Deep Autoregressive Models. _NeurIPS 2018_. [arxiv.org/abs/1811.03115](https://arxiv.org/abs/1811.03115)
+3.   Chen, C., Borgeaud, S., Irving, G., Lespiau, J.-B., Sifre, L., & Jumper, J. (2023). Accelerating Large Language Model Decoding with Speculative Sampling. [arxiv.org/abs/2302.01318](https://arxiv.org/abs/2302.01318)
+4.   Leviathan, Y., Kalman, M., & Matias, Y. (2023). Fast Inference from Transformers via Speculative Decoding. _ICML 2023_. [arxiv.org/abs/2211.17192](https://arxiv.org/abs/2211.17192)
+5.   Cai, T. et al. (2024). Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads. [arxiv.org/abs/2401.10774](https://arxiv.org/abs/2401.10774)
+6.   Li, Y. et al. (2024). EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty. [arxiv.org/abs/2401.15077](https://arxiv.org/abs/2401.15077)
+7.   Li, Y. et al. (2025). EAGLE-3: Scaling up Inference Acceleration of Large Language Models via Training-Time Test. [arxiv.org/abs/2503.01840](https://arxiv.org/abs/2503.01840)
+8.   Arriola, M., Gokaslan, A., Chiu, J. T., Yang, Z., Qi, Z., Han, J., Sahoo, S. S., & Kuleshov, V. (2025). Block Diffusion: Interpolating Between Autoregressive and Diffusion Language Models. _ICLR 2025_. [arxiv.org/abs/2503.09573](https://arxiv.org/abs/2503.09573)
+9.   Anthropic (2026). Fast Mode (Research Preview). Claude Platform Docs. [platform.claude.com](https://platform.claude.com/docs/en/build-with-claude/fast-mode)
+10.   Chen, J. et al. (2026). DFlash: Block Diffusion for Flash Speculative Decoding. [arxiv.org/abs/2602.06036](https://arxiv.org/abs/2602.06036)
+11.   DeepSeek (2026). DSpark: Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation. [arxiv.org/abs/2607.05147](https://arxiv.org/abs/2607.05147)
+12.   Inco (2026). DFlash 2: Keep Drafting Parallel. [inco.ai/blog/dflash2](https://inco.ai/blog/dflash2/)
+13.   Kimi Team (2026). Kimi K3 Technical Report. [arxiv.org/abs/2607.24653](https://arxiv.org/abs/2607.24653)
+14.   NVIDIA (2026). Boost Inference Performance up to 15x on NVIDIA Blackwell Using DFlash Speculative Decoding. [developer.nvidia.com](https://developer.nvidia.com/blog/boost-inference-performance-up-to-15x-on-nvidia-blackwell-using-dflash-speculative-decoding/)
+15.   OpenAI (2026). Announcing a Major Price Drop for 5.6 Terra and Luna and Fast Mode for 5.6-Sol. [community.openai.com](https://community.openai.com/t/announcing-a-major-price-drop-for-5-6-terra-and-luna-and-fast-mode-for-5-6-sol/1388484)
+16.   RedHatAI (2026). GLM-5.2 DSpark Speculator (preview). Hugging Face model card. [huggingface.co/RedHatAI/GLM-5.2-speculator.dspark-preview](https://huggingface.co/RedHatAI/GLM-5.2-speculator.dspark-preview)
+17.   DeepSeek-AI (2024). DeepSeek-V3 Technical Report. [arxiv.org/abs/2412.19437](https://arxiv.org/abs/2412.19437)
+18.   MASSV (2025). Multimodal Adaptation and Self-Data Distillation for Speculative Decoding of Vision-Language Models. [arxiv.org/abs/2505.10526](https://arxiv.org/abs/2505.10526)
+19.   OpenAI (2025). gpt-oss-120b & gpt-oss-20b Model Card. [arxiv.org/abs/2508.10925](https://arxiv.org/abs/2508.10925)
+20.   ViSpec (2025). Vision-Aware Speculative Decoding for Vision-Language Models. _NeurIPS 2025_. [neurips.cc/virtual/2025/poster/115277](https://neurips.cc/virtual/2025/poster/115277)
+21.   OOLONG (2025). A Benchmark for Long-Context Agent Workloads. [arxiv.org/abs/2511.02817](https://arxiv.org/abs/2511.02817)
+22.   SGLang Team (2025). SpecForge: Train Your Own Speculative Decoding Models. LMSYS blog. [lmsys.org/blog/2025-07-25-spec-forge](https://www.lmsys.org/blog/2025-07-25-spec-forge/)
+23.   MMSpec (2026). A Benchmark for Speculative Decoding on Vision-Language Models. [arxiv.org/abs/2603.14989](https://arxiv.org/abs/2603.14989)
+24.   Hooper, C. et al. (2026). Speculative Interaction Agents. [arxiv.org/abs/2605.13360](https://arxiv.org/abs/2605.13360)
+25.   Ji, K. et al. (2026). Act While Thinking: Pre-Executing Tool Calls from Reasoning Traces. [arxiv.org/abs/2603.18897](https://arxiv.org/abs/2603.18897)
+26.   Zhang, A. (2026). Speculative Programmatic Tool Calling. [alexzhang13.github.io/blog/2026/spec-ptc](https://alexzhang13.github.io/blog/2026/spec-ptc/)
+27.   Zhang, L. (2026). LosslessBench: Does Inference Acceleration Hold Beyond Math and Coding? [lilyzh.ng/writing/losslessbench](https://lilyzh.ng/writing/losslessbench/)
+28.   OpenRouter (2026). LLM Rankings: Traffic by Task Type. [openrouter.ai/rankings](https://openrouter.ai/rankings)
+29.   SGLang docs. Speculative Decoding. [docs.sglang.ai](https://docs.sglang.ai/advanced_features/speculative_decoding.html)
+30.   vLLM docs. Speculative Decoding. [docs.vllm.ai](https://docs.vllm.ai/en/latest/features/speculative_decoding/)
