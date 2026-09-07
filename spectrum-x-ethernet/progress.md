@@ -22,3 +22,4 @@
 
 创建时间: 2026-09-07
 来源: https://developer.nvidia.com/blog/giga-scale-ai-ethernet-evolution-spectrum-x-ethernet-rewrites-rules/
+| Step 4d-i: 传送门 | completed |
