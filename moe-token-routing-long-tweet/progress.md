@@ -1,25 +1,6 @@
-# 进度追踪 - moe-token-routing-long-tweet
-
-| Step | 状态 |
-|------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
-| Step 6: 推送草稿 | pending |
-
-创建时间: 2026-09-08
-来源: https://x.com/navaneethvb/status/2094708652724883845
-| Step 4d-i: 传送门 | completed |
+✅ 完成 (moe-token-routing-long-tweet)
+- 源: x.com @navaneethvb 长推 (~690 英文词+1 图) MoE token 路由原子拆解 8 步
+- 中文 8 节; 保留 Top-2 打分 / permute / GPU=专家 / 加权合成等全部示意; fig01 架构图(从 pbs 下载转 png)
+- cover 由 fig01 裁; preflight ALL PASS(来源0/平台0,清洗掉 @作者/平台词至参考区)
+- push OK draft=TIqnnVEu6Oy3-wtKttGa0fCoPetTxlI9bxWnXhsArprdPswXu0B-l1EvdAh82SIJ verify 1/1
+source: https://x.com/navaneethvb/status/2094708652724883845
