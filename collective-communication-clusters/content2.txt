@@ -1,0 +1,35 @@
+S# NVIDIA GPU 集群拓扑: Node / Scalable Unit / Fat Tree
+T 与 TPU 的近邻 torus 不同,GPU 集群通常是分层交换网。本文专注 NVIDIA DGX H100 SuperPod 参考架构——一个以 fat tree 组织的 1024-GPU 集群。所谓 fat tree:树往根越走越胖,上层聚合带宽更高,众多节点的流量不会塌进单一窄瓶颈。
+T 组织构件:最低一级 node。本文用 node 指本地 NVLink/NVSwitch scale-up 域;例如 DGX H100 node=8 颗 H100 经 NVSwitch 全连(GB200NVL72 则 72 颗)。node 内 GPU 通过 NVSwitch fabric 实际全连接:任意两颗之间一跳可达。
+F fig25.png|图25 · NVIDIA DGX(H100)SuperPod 1024-GPU 参考架构(fat tree)。
+T Node 之间用 InfiniBand(IB)串成 scale-out 网。DGX H100 SuperPod 参考架构里,32 个 node 组成一个 Scalable Unit(SU),经 IB leaf switch 连;多个 SU 再由更高层 spine switch 相连,构成 fat tree。
+T 满 fat tree 是不 oversubscribe 的。所谓 oversubscribe:下游设备灌进 leaf 的流量大于 leaf 通往 spine 的上行能力(如一组可注入 12.8TB/s,但 leaf 只有 6.4 TB/s 上行,则 2:1 oversubscribe)。满 fat tree 每层上行带宽==下行注入带宽,意味着 full bisection bandwidth。
+T Bisection bandwidth=等切集群两边可用带宽。把 128-node 劈成两个 64,一边可按全部聚合注入带宽与另一边通信。一般化:任何分法,跨分区的带宽被切得更小的那侧 node 数限制。例:DGX H100 每 node 8×50GB/s 进 IB,给 400GB/s 单向注入;满 fat tree 下,N 个 node 那侧可跨分区分向 N×400GB/s发出。node 内:8 颗劈两半为两组 4,一边可向另一边发 4×450GB/s=1.8TB/s(正是那 4 颗上限);全双工→双向 bisection 3.6TB/s。
+T SU 有 32 node:劈 16/16,一侧 16×400=6.4TB/s(双向 12.8)。劈 64/64:一侧 64×400=25.6TB/s(双向 51.2)。不均匀如 88 对 40:小侧 40×400=16TB/s。
+S# GPU 节点内集合: Ring / Tree / SHARP
+T node 内((单节点)TPU 与 GPU 算法表面很像——都作用在抽象 ring 上,但底层拓扑不同。TPU 的 ring 是过 ICI 的物理路径;GPU 的 ring 是在 NVSwitch 全连接上人为挑出的逻辑序。
+F fig26.png|图26 · 在 GPU 节点内构造一个逻辑 ring。
+T 既然 All-Reduce 可拆 Reduce-Scatter+All-Gather,无特别硬件时它成本≈单一原语 2×。NVIDIA 交换芯片(NVSwitch 与 IB switch)带 SHARP 优化——一个 in-network reduction 计算单元:平时 switch 只路由数据;有 SHARP 还能自己执行归约(如 GPU 把部分和送进 switch,switch 加好把结果发回)。于是把偏内存的 All-Reduce 让网络在天上归约,GPU 专心算有用活。
+F fig27.png|图27 · SHARP:in-network 归约计算单元。
+T 参考:H100 node 里的 NVLink4 NVSwitch 的 SHARP 有 400 GFLOP/s FP32 归约吞吐。理论上 SHARP 能把 All-Reduce 拉到接近 2×;N 很大时趋近 2×,8-GPU node 理想约 1.75×。但实际中归约与 multicast pipeline 无法完美重叠——实测加速常见仅 ~1.3×(见文末 ref)。务必对具体集群跑 microbenchmark。
+T (NVLink SHARP 也加速 All-Gather 的 multicast:先把内存区登记为某 GPU 组的 multicast target,此后对 multicast 地址做普通 CUDA store,便被 NVSwitch 复制给组内每颗——kernel 无需特殊指令。低效点在它连源 GPU 一起发(源已有数据),H100 node 里白耗 1/8)。)
+T 在 NVSwitch node 内,均衡 All-to-All 通信可比双向 1D torus ring 少约半(带宽相等时),因为每颗直接可达每目的。
+F fig28.png|图28 · 8-GPU node 内逻辑单向 ring 上 dense All-to-All。
+T (注:对 GB200NVL72,MoE 推理里 72 颗只挑 8 个 expert/token 时,每个 token 只需到约 8/72≈11% 的 GPU,通信变稀疏带裂缝,不再是均匀 All-to-All。)
+T 跨 node 前先看 tree 思想:每轮 GPU 两两配对、每轮数据量翻倍 → log2(N) 步而非 N−1。
+F fig29.png|图29 · Tree All-Gather(recursive doubling)。
+T ring 好流水(多 chunk 连续绕环让链路常忙);recursive doubling 延迟低,但大消息有效带宽常不及 ring(不擅流水)。理想带宽模型下字节成本相同;主因步数 ring(N−1)对 tree(log2N)。实际上 NCCL 会按消息大小与拓扑在 ring/tree/hybrid 里选。
+F fig30.png|图30 · Tree Reduce-Scatter(recursive halving)。
+S# GPU 跨节点: InfiniBand 上的分层算法
+T 跨 node 算法的低层细节因多级流水(节点级、SU 级、spine 级)而复杂。好心智:想象整集群(不超卖的满 fat tree 让这可行)挂一个跨 node 的 ring。大消息下 All-Gather/RS 的一阶近似(T_tot≈D/BW_node=D/400e9);再准点会加 intra-node 段——分层集合通常 scale-out(IB)与 node 内(NVLSwitch)可流水,故总时更接近 max(D/BW_gpu,D/BW_node)。
+F fig31.png|图31 · 在 Scalable Unit 上的分层 All-Gather。
+T (只画单 SU 内因为加了 spine 不改变算法性质,只再多一层;画面会复杂故略。另:rail 优化——node 的跨 node 总带宽并非总能被任意 GPU 匀着用,通常成并行 rails,要吃到 node 级满带宽得拿 rail-aware rank 摆放与跨路径均衡。)
+F fig32.png|图32 · SU 上的分层 All-Reduce。
+T 微妙处:被 All-Reduce 的张量本身可能又横跨另一并行轴。例:Megatron 式(tensor/model 并行)训练里,权矩阵按 tensor-parallel 轴 Y 分片,而其梯度按数据并行轴 X 归约。归约并不跨 tensor-parallel 那些 rank(它们各执不同 shard,无对应元素可加);而是对每个固定 shard、把沿数据并行的 replica 做 AllReduce。
+F fig33.png|图33 · SU 上的分层 sharded All-Reduce。
+T 最后 SU 上的分层 All-to-All。与 All-Reduce 不同,它无法靠先做本地归约压缩(每 chunk 都指向特定目的)。
+F fig34.png|图34 · SU 上的分层 All-to-All。
+T 收拢 GPU 端成本模型(节点内与跨节点)。
+F fig35.png|图35 · GPU 端节点内/跨节点集合通信成本汇总。
+S# 结语:一份把原语砌进真机器的手艺地图
+T 作者自述:本是"四张图搞懂 AG/RS/AR/A2A,最多一天",结果越挖越深直到把 scope 撑大——因为集合算法只在你懂底层拓扑时才真成立:TPU 好推(物理 ring),GPU 爱得深(fat tree+SHARP+tree+hierarchical)。(本段为人文 Epilogue,主体信息见前七节。)

@@ -1,0 +1,61 @@
+S# 为什么关心集合通信
+T 2026 年,训练与服务于 transformer 本质是大规模分布式问题。数据并行靠 all-reduce(反向同步梯度);张量并行与 FSDP 重度依赖 all-gather 与 reduce-scatter;MoE 专家并行靠 Aall-to-all。要推理现代系统性能,终究要懂数据在集群里怎么动。
+T 先从硬件与拓扑讲:TPU 均匀、GPU 分层。主推 ring(大消息),小消息则 tree(log2 步)更好。全篇七部分。
+S# TPU 集群拓扑: Superpod / Slice / DCN / PCIe / ICI
+T TPU 芯片直连近邻,每颗 4 或 6 个最近邻:2D torus=v2/v3/v5e/v6e(4邻);3D torus=v4p/v5p/TPU7x/8t(6 邻)。(新款推理芯片 8i 走 boardfly 式 high-radix,本文略。)
+F fig01.png|图1 · TPU 两类连接:2D(4邻)/3D(6邻)。这张先给你芯片级别邻居的样子。
+T 2D torus 就是带环绕边界的网格:左出右回、上出下回;把离散网格盖在甜甜圈上仅为找直觉。下面两张分别是 2D 直觉与 3D 六向连接。
+F fig02.jpg|图2 · 2D torus 直觉:带环绕边界的网格。
+F fig03.png|图3 · 3D torus 的六邻居连接(沿 ±x±y±z)。
+T TPU 芯片经 ICI(inter-chip interconnect)连邻居。最大 ICI 连通岛叫 TPU Pod(常也叫 superpod)。一个 v4 pod=16³=4096;v5p=16×20×28=8960。
+T 反观 GPU 的 scale-up 域:传统很小,通常单 NVLink 域 8 颗,近年 GB200 NVL72 到 72(稍后详谈)。
+T 对 6 邻 pod,能整出满 3D torus 的最小组合是 4×4×4。若只要 2×2×2,会失去 wrap 而得 mesh:该轴向 ring 型集合大约慢 2×。术语:slice=单 pod 内经 ICI 连通的一块(v5e 可为 2×2/2×4/8×8,最大即 pod 本身);通信重的应用尽量选能保住 torus 的形状,如 4×4×8。
+T v5e=16×16 2D torus,wrap 成立在尺寸 16;只要 8×16 会在短轴向丢 wrap,同类惩罚大约 2×。
+F fig04.png|图4 · v5e 16×16 superpod 拓扑。行 0↔行15、列 0↔列15 相接便是 torus。
+T 单 pod 之外用 DCN(data center networking)。DCN 吞吐远低于 ICI,过度跨 pod 流量易成瓶颈。多个 pod 经共享 DCN fabric 可连成更大集群;每颗芯片还经 PCIe 挂一块专属 CPU host(v5e:一个 host 接 2×4 八颗)。
+F fig05.png|图5 · 多 pod 经 DCN 骨干相连。
+T 到 DCN 骨干必经 PCIe,故 DCN 通信甚至比 PCIe 慢。跨 pod 路径:源 chip HBM→PCIe→源 host→DCN→目的 host→PCIe→目的 HBM。由此得出带宽层级:die 越近越快、越出集群越慢。
+F fig06.png|图6 · v5e 集群带宽层级:Die/HBM > ICI > PCIe > DCN。
+T 数值例 1:把 (2048,2048) bf16(≈8MiB)从(3,3)搬去(0,0)。经两条并行 ICI 路径各 6 跳。这里忽略时延——ICI 实际约 1μs/跳,本例两路并行各 6 跳≈6μs,大块下可忽略但小消息不行。
+F fig07.png|图7 · 把 8MiB bf16 经两条 ICI 路径搬越 4×4 mesh。
+T 关键是要知道自己处于延迟主导还是吞吐主导。估法:打满单向 ICI 45GB/s,1μs 能过多少?45GB/s×1μs=45KB。消息 chunk 落在这量级,延迟就翻盘——忽略 1μs/跳会大幅估错,纯带宽近似不再成立。
+T 数值例 2:(128·1024)² 的 bf16 分到 4×4(每 chip(32·1024)²)且已放 host DRAM;搬到(0,0)并与(128·1024,128)向量 matmul 要多久?(VMEM=片上 SRAM,≈ shared memory,细节不展开。)
+F fig08.png|图8 · 分片矩阵 gather 到(0,0)用于 matmul。
+S# All-Gather: 1D ring / 2D ring / chain
+T 动机:矩阵 A 各片放到各 chip,要每 chip 都有完整 A 才能本地跑 matmul → 把全部分片复制给所有人。
+F fig09.png|图9 · All-Gather 动机:收集 A 全部分片供每 chip 本地算。
+T 高效实现多用 ring。先弄清 ring 从哪来:16×16 v5e torus 的两轴天然各成 1D 双向 ring。
+F fig10.png|图10 · 双向 1D ring 沿 v5e 两轴自然出现。
+T 为看得清改小成 8 颗(假装这条也 wrap)。
+F fig11.png|图11 · 简化的 8-chip ring。
+T 下面是双向 1D ring 上的 All-Gather。值得 zoom 后盯着一片 shard 绕环走。
+F fig12.png|图12 · 双向 1D ring 上的 All-Gather。
+T 小练习:若 ICI 非全双工如何?那跑单向 ring。为使图小,设 N=4,只需 N−1=3 步。
+F fig13.png|图13 · 单向 1D ring 上的 All-Gather。
+T 现实常遇到没 wrap 的 slice(如 4×4 v5e),一轴不成环、退化成 1D path,于是转 Alchain 算法。
+F fig14.png|图14 · All-Gather 在 path/chain 上的走法。
+T 再往上:数组若同跨两轴分片就做 2D All-Gather,可同时动用全部 4 条 ICI 邻居链路——相比只用单轴约 2× 提速。
+F fig15.png|图15 · 双向 2D ring 上(4×4 且都有 wrap)做 2D All-Gather。
+S# Reduce-Scatter 与 All-Reduce:All-Gather 的对偶
+T 动机:前向用 All-Gather 的场景,后向常要 Reduce-Scatter;例如把不同 chip 各持的部分和归并、再让结果分布开。
+F fig16.png|图16 · Reduce-Scatter 动机示意。
+T Reduce-Scatter 几乎是 All-Gather 的对偶:通信 schedule 相近,但 shard 边传边 reduce 而不是边传边拷贝。吞吐主导下时间量级相同。
+F fig17.png|图17 · 双向 1D ring 上的 Reduce-Scatter。
+T (旁注:二者存在漂亮对偶——多数分片模式下,前向 All-Gather 后向就 Reduce-Scatter,反之亦然。)
+T 用减少归并再接 All-Gather,即可叠出 All-Reduce。
+F fig18.png|图18 · 双向 1D ring 上把 Reduce-Scatter 后接 All-Gather 得 All-Reduce。
+T 一致性起见也覆盖单向 1D ring 的 Reduce-Scatter(假想,v5e 需 16 颗才成环)。
+F fig19.png|图19 · 单向 1D ring 上的 Reduce-Scatter。
+T 没 wrap 的 slice(4×4 v5e)退化成 1D path/chain 再跑一遍。
+F fig20.png|图20 · Reduce-Scatter 的 chain/path 版。
+T 若横跨多轴,则可并行多动几条 ICI;吞吐主导下总时延随所用拓扑轴数近似反比减少。至此 All-Gather / Reduce-Scatter / All-Reduce 收工。
+S# All-to-All: 一次分片式转置
+T 最后原语出现在 MoE:假设 top-1 路由、每 chip 一个 expert。router 把每个 token 附上目标 expert ID;若每 expert 独占一 chip,那 ID 就指明 token 该送去哪颗。每 chip 开始手握一批本地 token,却可能要去往很多不同 chip 的 experts。All-to-All 做这种互换:把去 Expert j 的 token 全发往 TPU j。所以 All-to-All 有点像分布式转置——开始时按源芯片分组,结束后按目的 expert 分组。
+T 图中假设完全均衡路由。真实现实会不均衡,但均衡是理解主体的干净心模。
+F fig21.png|图21 · 双向 1D ring 上的 All-to-All。
+T 单向 1D ring 版本同理。
+F fig22.png|图22 · 单向 1D ring 上的 All-to-All。
+T 没有 wrap 时又变 chain(4×4 v5e 退化)。
+F fig23.png|图23 · All-to-All 的 chain/path 版。
+T TPU 段小结:把所有原语的吞吐主导通信时间一次性汇总如下。
+F fig24.png|图24 · TPU 端各集合通信成本汇总。
