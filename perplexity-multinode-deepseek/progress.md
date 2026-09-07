@@ -1,25 +1,5 @@
-# 进度追踪 - perplexity-multinode-deepseek
-
-| Step | 状态 |
-|------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
-| Step 6: 推送草稿 | pending |
-
-创建时间: 2026-09-08
-来源: https://www.perplexity.ai/hub/blog/lower-latency-and-higher-throughput-with-multi-node-deepseek-deployment
-| Step 4d-i: 传送门 | completed |
+✅ 完成 (perplexity-multinode-deepseek)
+- 源: perplexity.ai hub blog "Lower Latency and Higher Throughput with Multi-node DeepSeek Deployment" (官网被403, 走 r.jina.ai 取全文)
+- 中文 10 节; 9 张正文图(全部 sanity cdn 3840 原图转 png)逐图带图注; 数据保留(EP128 5x, 2667/2651/1896us, Dispatch 593→367, Combine 1012→237, GroupGEMM 555→270 等)
+- cover: fig01 -> cover/square; FIG LAYOUT PASS(9); preflight ALL PASS(清洗 dash); push media=TIqnnVEu6Oy3-wtKttGa0dnXSSq7eOjFY95c5vnFj9MKvRgw5mhAjpm7NhYLtM11; verify 9/9
+source: https://www.perplexity.ai/hub/blog/lower-latency-and-higher-throughput-with-multi-node-deepseek-deployment
