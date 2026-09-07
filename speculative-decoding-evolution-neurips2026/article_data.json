@@ -1,70 +1,73 @@
 {
+  "title": "投机解码怎么从自己跟自己赛跑聊到无损,聊到下一个十年",
+  "reference_url": "https://neurips2026-speculative-decoding.vercel.app/",
   "summary": [
     {
-      "key": "要点关键词1",
-      "body": "核心内容。替换本占位。"
+      "key": "它是谁",
+      "body": "一页给 LLM 推理加速的『可动手可交互』大学教程(NeurIPS 2026 Education Track):把 speculative decoding 从头讲透——为何快、何为 rejection sampling 统计无损、怎么评估,再沿四代模型(EAGLE-3/DFlash/DSpark/DFlash 2)看每代拔掉一个瓶颈。"
     },
     {
-      "key": "要点关键词2",
-      "body": "核心内容。替换本占位。"
+      "key": "特殊之处",
+      "body": "页里配了大量可运行交互动画(逐像素画家 vs 扩散画家、四代解码同题竞速)。公众号放不了 iframe,故以文字忠实还原各动画的机制与结论,并保留真正落地的几张数据静态图。"
     },
     {
-      "key": "要点关键词3",
-      "body": "核心内容。替换本占位。"
+      "key": "核心视角",
+      "body": "『论文里报的接受长度 τ,正是 token 级分布距离的镜像』——但业界只在编码/数学/聊天上测过,其余 83% 真实流量域从没被量过。作者为此拉起 LosslessBench,在前端/创意写作/agent 流/护栏等 5 域试出无损真正失效的洞。"
     }
+  ],
+  "lead": [
+    "你每次让大模型生成文字,背后大概率跑着一个投机解码(speculative decoding)加速器——今天几乎所有托管 LLM 都靠它把吐字变快、把价格打低。它到底怎么做到『又快又无损』?",
+    "这份 NeurIPS 2026 Education Track 的交互大教程(约 4.4 万英文正文、6 张表、大量可播放动画)把全貌摊开:先讲它为什么快、为何拒绝采样统计无损;再按 EAGLE-3→DFlash→DSpark→DFlash 2 四代演进看每代拔哪个瓶颈;最后深挖『无损在论文成立、在真实部署里还成立吗、在我们没测的 83% 流量里呢』。原文交互动画多,本文以文字还原其机制结论,并以数据图保留落地成果。",
+    "不含原文的『动手部署 Lab 逐命令』与附录(术语表/A.2/A.3/References)——那些是教你租 GPU 自己跑的导览,不属于知识主干。"
   ],
   "sections": [
     {
       "type": "h2",
-      "title": "正文第一章标题",
+      "title": "引言：每一代架构,都在拔同一个瓶颈图一里的一颗钉子",
       "paras": [
-        "第一段正文文字。",
-        "第二段正文文字。"
-      ],
-      "figs": [
-        {
-          "src": "fig1.png",
-          "caption": "图片说明文字"
-        }
+        "几乎每个 LLM 都一次吐一个 token,这叫**自回归解码**——它是推理最大的瓶颈:要产 n 个 token,得让几百亿参数前向跑 n 趟。",
+        "**投机解码(speculative decoding)**(Leviathan et al., 2023)就是来加速的:一个轻量小模型先**草拟**出接下来几个 token,再让目标模型**逐验**,接受或拒绝。关键:验过的输出与目标模型**自身分布完全相同**(Chen et al., 2023)——这就是它『理论上无损』的出处。",
+        "开场动画(原文可播放,此处还原其意):**自回归的画家逐像素作画,扩散画家一次性把整张画布同时去噪**。于是抛出核心问题:能否照 diffusion 那样,把一串 token『并行地一次性草拟』,而不再逐个 draft?"
       ]
     },
     {
       "type": "h3",
-      "title": "子标题示例",
+      "title": "凭什么是基石话题",
       "paras": [
-        "子标题下的段落。"
+        "第一代投机解码用小 draft 提速,但草拟本身仍逐 token。视觉这边 diffusion 早已大规模并行落地;作者追问:diffusion 式 draft 能否并行提出整块 token,把推理再推快一层——这是后文主线。",
+        "如今投机解码**塞在几乎所有托管 LLM 下面**:OpenAI 2026 给 GPT-5.6 Luna 降价 80%(部分归功于重设计的 draft);Anthropic 'fast mode' 把同一 Claude Opus 溢价档跑快 2.5×;DeepSeek 引擎随附 DSpark +51% 吞吐;Kimi K3 随发自家 draft。它是 LLM 栈基石话题。",
+        "门槛极低:**只要知道『一次吐一个 token』就够了**。三条主线:① 怎么演化;② 何时依旧无损;③ 接下来怎么做。"
       ]
     },
     {
       "type": "h2",
-      "title": "含表格的章节",
+      "title": "它为什么比朴素解码快",
       "paras": [
-        "下面是一张示例表格。"
-      ],
-      "table": {
-        "head": [
-          "列1",
-          "列2",
-          "列3"
-        ],
-        "rows": [
-          [
-            "A",
-            "B",
-            "C"
-          ],
-          [
-            "D",
-            "<strong style=\"color:#0F4C81;\">E</strong>",
-            "F"
-          ]
-        ]
-      }
+        "轻量 draft 赌出接下来 γ 个 token(通常 3–8),目标模型在**单次前向里打包验证全部 γ 个**,成本≈只解一个。速度来自三处:**draft 越准被接受越多 / 验证越不浪费算力 / 草拟越能并行**。Figure 1(页内为动态图,文字示意):朴素解码一 pass 一个 token;投机让草稿提出短块、目标整段校验。"
+      ]
+    },
+    {
+      "type": "h3",
+      "title": "Rejection sampling：无损的数学骨架",
+      "paras": [
+        "快有了,可为什么『无损』?答案靠验证里走的**拒绝采样(rejection sampling)**:目标模型把每个 draft token 对照自己的概率,要么接受要么拒绝。它让无损与 draft 强弱无关——draft 再废,输出仍服从目标模型自身分布(Leviathan et al. App.A.1)。无损与否取决于拒绝采样**跑得有多严**,是否真损放到第二节讨论。Figure 2(动态示意)走一遍单次验证:每个 draft token 以概率 min(1,p/q) 接受;一旦拒绝就按残差 norm(max(0,p−q)) 重采样一个,并把其后整段 draft 丢弃。",
+        "同一规则用伪代码写清(target 的概率为 p(x),draft 为 q(x)):",
+        "__CODE__python::# p(x): target model's probability for token x\n# q(x): draft model's probability for token x\nfor each draft token x:\n    accept x with probability min(1, p(x) / q(x))\n    # q(x) <= p(x): always accepted\n    # q(x) >  p(x): accepted with probability p(x)/q(x)\non the first rejection:\n    discard the remaining draft tokens\n    resample one token from the residual p'(x) = norm( max(0, p(x) - q(x)) )",
+        "统计上看,一个 token 能被发出只有两条路:直接来自被接受的 draft(即 accepted mass),或来自 rejection 后 target 的重采样(residual mass)。两者相加与 target 原本的概率一致——推导一目了然:",
+        "__CODE__text::P(x is emitted) = q(x)*min(1, p(x)/q(x))      # accepted mass = min(p(x), q(x))\n              + P(reject)*p'(x)                # residual mass = max(0, p(x) - q(x))\n              = min(p(x), q(x)) + max(0, p(x) - q(x))   = p(x)   # 与 target 概率相同"
+      ]
+    },
+    {
+      "type": "h3",
+      "title": "怎么量化『快多少』：6 个指标",
+      "paras": [
+        "Table 1 给出六个指标的来源——其中三个是决定性量:**drafting time、verification time、acceptance length**;另外三个(解码加速、每 token 时延、tok/s)由它们推出。"
+      ]
     }
   ],
   "conclusion": [
-    "结语分析内容1。",
-    "结语分析内容2。"
-  ],
-  "reference_url": "https://arxiv.org/html/XXXX.XXXXX"
+    "这篇教程最可贵的不是讲清了投机解码『怎么提速』,而是帮读者把『读加速宣传』的姿势调正:**任何声称的加速背后都有一个分布距离在买单**——接受长度 τ = 1−散度,读 τ 就是在读 draft 离 target 有多近;业界只在编码/数学/聊天(token 用量 17%)测过,剩下 83% 真实流的域 LosslessBench 一量就露馅:接受从 5.24 掉到 1.84。",
+    "几个值得带走的点:① 瓶颈流动——EAGLE-3 拉接受、DFlash 砍草稿、DSpark 砍验证、DFlash 2 再抬一档,恰似对着同一木桶逐块抬高不同的短板;② 无损不是免费午餐,由『拒绝采样是否严格执行』和『调度是否非预判』共同保证,一出厂就是 SGLang 阈值 1.0 / vLLM 只承诺两层;③ 这类可动手做 demo 的教育站,静态图少、交互动画多——公众号里只能承载静态,动画的机制要点这里已用文字尽述。",
+    "最后一句很实用:如果你在自己引擎把接受阈值调低换速度,或照 SGLang/vLLM 配置抄,你已经走出『无损区』了——差别只是 vLLM 明说『稳定不被保证』,而多数部署懒得把这个 trade-off 讲给调用方。想量一量,原页 2.4 Lab(LosslessBench 一百题)给了现成入口。"
+  ]
 }

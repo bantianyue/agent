@@ -45,8 +45,30 @@ SECS3=[
    "编码/数学/聊天之外的 83% 域,无损真的还成立吗?作者没有只停在问号——他们亲自拉了 LosslessBench。",
  ]},
  {"type":"h3","title":"2.3 LosslessBench：测 5 个从未被量过的域","paras":[
-   "为了在编码/数学之外也去量 spec decoding 与推理加速,作者建了 LosslessBench,横跨五域(各用自己的基准与指标,原文对应某雷达图):前端 Frontend→OpenDesign(每页用 GPT-4o 视觉 judge 对截图打分对齐/美学/结构,browser agent 逐组件点击验证是否真能跑);创意 Creative→EQ-Bench 长文分(多章节创意写作评判);护栏 Guardrail→XSTest(对贴近决策边界的 safe/unsafe prompt 分类准确率);编码 Coding→Terminal-Bench pass rate;agent 流→tau3-bench 长程 agent 任务 action match rate。",
-   "这些论文里用的基准都是单轮简单任务(小学算术、函数级编码),只盖住模型被问到的窄窄一刀——这正是 LosslessBench 选五域去补齐的动机。",
-   "第一层探针:接受长度。Section1 已说明 τ 是 token 级散度的隐测量,天然能做这五个新域的探针——harness 在 DFlash 自家基准上复现其公布数(GSM8K:5.32 vs 5.98,HumanEval:5.96 vs 5.52 作 sanity)。横跨五域后,接受长度从 5.24 一路掉到 1.84:draft 在『从没被论文量过』的域漂得最远。前端例外(接受高但页面照坏)——因为接受量的是『draft 与 target 一致』,不是『输出质量』。下面两张图(原文纯文件图)分别是『accepted length/散度』与『Qwen3-8B 开与不开 spec 的 radar 对比』:",
+   "为了在编码/数学之外也去量 spec decoding 与推理加速,作者建了 LosslessBench,横跨五域(各用自己的基准与指标):前端→OpenDesign(每页 GPT-4o 视觉 judge 对截图打『对齐/美学/结构』分,browser agent 逐组件点击判页面真能跑);创意→EQ-Bench 长文分;护栏→XSTest(safe/unsafe 贴近决策边界的分类准确率);编码→Terminal-Bench pass rate;agent 流→tau3-bench 长程任务 action match rate。",
+   "这些论文基准都是单轮简单任务(小学算术、函数级编码),只盖住模型被问到的窄窄一刀——这正是 LosslessBench 选五域补齐的动机。",
+   "第一层探针 = 接受长度(Section1:τ 即 token 级散度的隐测量)。harness 在 DFlash 自家基准复现公布数作 sanity(GSM8K 5.32 vs 5.98、HumanEval 5.96 vs 5.52)。横跨五域后接受长度从 5.24 跌到 1.84——draft 在『论文从没量过』的域漂得最远;前端例外(接受高但页面照坏),因为接受量的是 draft 与 target 一致度、而非输出质量。下面两张是原页少数能静态保留的真·文件图:分歧(接受vs散度)与雷达(加/不加 spec 五域对比)。",
  ]},
+ {"type":"h2","title":"两张图：lossless 在哪儿掉的","paras":[
+   "先看接受长度到底随域差多大、以及它映射出的 token 级散度 D_LK=1−α(左图);右图把加/不加 spec 的 Qwen3-8B 在五域雷达排开(每轴独立标尺,便于看相对缺口)。这是原页为数不多能当静态文件存下来的两张实图:",
+  ],"fig_after":{"0":[{"src":"fig13_divergence.png","caption":"Figure 13  DFlash 接受长度按域(左)及隐含的分布散度 D_LK=1−α(右)。接受越低、散度越大:draft 在论文从没测过的域漂得最近。"},
+                      {"src":"fig14_radar.png","caption":"Figure 14  Qwen3-8B 加与不加投机解码在 LosslessBench 五域的雷达对比(各轴独立标尺,便于看每域相对缺口)。"}]}},
+ {"type":"h2","title":"3. What's next：两个新路口","paras":[
+   "投机解码的正文快车已到二〇二六,作者把镜头转向两个新方向:多模态 (multimodal) 与『从猜 token 升级到猜 tool calls』。",
+ ]},
+ {"type":"h3","title":"3.1 多模态投机解码：主流还远","paras":[
+   "前面所有方法只对着纯语言;但离线推理正向多模态壮大——computer-use agent 每步都在读截图(浏览网页、审自己写的前端、解析上传文档/图表/视频)。多模态 LLM 上投机解码能照做吗?答案:还没一个多模态投机方法进入主流。vLLM v0.11.1 才合进第一个 VLM 版 EAGLE-3(仅 Qwen2.5-VL),其余投机路径仍拒多模态;SGLang 训练框架 SpecForge 把 VLM 列为 roadmap。",
+   "研究侧有 MMSpec(首个 VLM 投机基准,600+ 样本十种算法),核心发现:**为语言设计的投机解码在多模态输入上会退化**——因为 draft 的视觉力相比 target 很有限。两种坏法:纯文本 drafter 压根看不见图(标准 drafter 是没有视觉组件的纯 LLM);小 VLM 也补不齐——ViSpec 猜想大 VLM 逐层滤冗余图像信息,小模型做不到,于是 drafter 一缩小视觉力崩得不成比例。",
+   "早期结果收敛到同一选择:**把目标的视觉表示共享给 drafter**,而不是给一个小模型从零训视觉。MASSV 用轻量 projector 把 target 的 vision encoder 接到 draft、在 target 回答上蒸馏,拿最长 30% 更长接受 + 相对文本式 1.46× end-to-end;ViSpec 训出视觉感知 drafter,报首批 VLM 解码实质加速。",
+ ]},
+ {"type":"h3","title":"3.2 从猜 token 到猜 tool call","paras":[
+   "投机解码一直作用于 token;同一个『先预测再验证』可上移到 agent 的 tool-call 层——agent 的昂贵单位正是 tool call(sub-LLM 查询 / API 请求要几秒,而发它的代码此刻还在生成)。",
+   "早期开始形式化:Speculative Interaction Agents 把投机式 tool calling 定义为缩短 time-to-first-token;Act While Thinking 从推理轨迹的模式里预执行预测出的 tool。共基准则缺:各家自摆(OOLONG 或自建语料)。Speculative programmatic tool calling 给了落地方案:模型写代码的同时第二个解释器跑部分程序、提前启动输入已定的 tool;真执行时命中则回缓存结果、不中丢弃重跑,猜错只浪费一次早启动——OOLONG+Qwen3-30B 上 1–1.2×。",
+   "若 agent 负载继续涨,前线大概复刻 token 级投机那条路:更聪明的策略、把接受率提为一等指标、以及一个统一定义加速的基准。",
+ ]},
+]
+CONCL=[
+ "这篇教程最可贵的不是讲清了投机解码『怎么提速』,而是帮读者把『读加速宣传』的姿势调正:**任何声称的加速背后都有一个分布距离在买单**——接受长度 τ = 1−散度,读 τ 就是在读 draft 离 target 有多近;业界只在编码/数学/聊天(token 用量 17%)测过,剩下 83% 真实流的域 LosslessBench 一量就露馅:接受从 5.24 掉到 1.84。",
+ "几个值得带走的点:① 瓶颈流动——EAGLE-3 拉接受、DFlash 砍草稿、DSpark 砍验证、DFlash 2 再抬一档,恰似对着同一木桶逐块抬高不同的短板;② 无损不是免费午餐,由『拒绝采样是否严格执行』和『调度是否非预判』共同保证,一出厂就是 SGLang 阈值 1.0 / vLLM 只承诺两层;③ 这类可动手做 demo 的教育站,静态图少、交互动画多——公众号里只能承载静态,动画的机制要点这里已用文字尽述。",
+ "最后一句很实用:如果你在自己引擎把接受阈值调低换速度,或照 SGLang/vLLM 配置抄,你已经走出『无损区』了——差别只是 vLLM 明说『稳定不被保证』,而多数部署懒得把这个 trade-off 讲给调用方。想量一量,原页 2.4 Lab(LosslessBench 一百题)给了现成入口。",
 ]

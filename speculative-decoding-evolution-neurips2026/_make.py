@@ -11,7 +11,7 @@ import json, os, glob, importlib.util, re
 
 D=os.path.dirname(os.path.abspath(__file__))
 files=sorted(glob.glob(os.path.join(D,"_data*.py")))
-TITLE=None; REFURL=None; SUMMARY=[]; LEAD=[]
+TITLE=None; REFURL=None; SUMMARY=[]; LEAD=[]; CONCL=None
 allsec=[]
 for fp in files:
     spec=importlib.util.spec_from_file_location("dt"+os.path.basename(fp), fp)
@@ -19,6 +19,7 @@ for fp in files:
     if getattr(pp,"TITLE",None): TITLE=pp.TITLE
     if getattr(pp,"REFURL",None): REFURL=pp.REFURL
     SUMMARY+=getattr(pp,"SUMMARY",[]); LEAD+=getattr(pp,"LEAD",[])
+    if getattr(pp,"CONCL",None) is not None: CONCL=getattr(pp,"CONCL")
     allsec+=getattr(pp,"SECS",[])
 
 # ---- 归一化：把 table/code 粘到上一节 ----
@@ -58,7 +59,7 @@ for fn in sorted(need_figs):
 
 data={"title":TITLE,"reference_url":REFURL,"summary":SUMMARY,"lead":LEAD,
       "sections":sections,
-      "conclusion":["（结语占位，_data4 填充）"] }
+      "conclusion":CONCL if CONCL else ["（缺结语）"] }
 open(os.path.join(D,"article_data.json"),"w",encoding="utf-8").write(
     json.dumps(data,ensure_ascii=False,indent=2))
 print("written article_data.json ", len(json.dumps(data,ensure_ascii=False)))
