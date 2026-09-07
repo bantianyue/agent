@@ -1,0 +1,92 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">一句话</strong>：『vLLM为什么快？』标配答案多半是PagedAttention。本文用一个更准的视角拆开它：打开vLLM仓库，PagedAttention早已不是唯一的答案，而是attention/backends/ 下一长串kernel(FlashInfer、FlexAttention、MLA、GDN、Triton…)里的一员。它没有消失：它被『降级』成一个memory后端。作者把它从内存到compute的完整演进讲成一篇漂亮的科普短文。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心论点</strong>：彻底分开两件常被混为一谈的事：KV cache放哪(KV cache manager管内存)+ 在上面怎么算attention(attention backend管compute)。PagedAttention只解决了前者(非连续、前缀可共享的block内存)，从没规定后者怎么算；卡在kernel层的新瓶颈(不同GPU代、不同attention形状)才逼出这条拆分之路。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">本文料</strong>：纯文字X Article，约3800词无代码/无表格配图。保留全部后端名/命令位/机制。适合给『想用一个清晰模型看vLLM内部如何演化』的人。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">面试官问『vLLM为什么快』，十有八九你会脱口而出PagedAttention：它随论文走红，进过keynote，至今还被人当系统设计面试的标准答案。这篇用词锋利的长文想纠正的正是这点：这个答案从来没完整过，而且已经不是一天两天了。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">此刻打开vLLM仓库，PagedAttention只是attention后端注册表里的一条，旁边并排站着FlashInfer、FlexAttention等半打kernel。它没消失：它被降了级(from『整个story』变成几个memory后端之一)。原文把这段『从地基往上』的演化脉络盘得清清楚楚，本文按其全文逐节编译(约3800词、纯文字、无配图可保)。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么先有个缓存</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Transformer逐个token生成。要产出第N个token，必须回看1..N−1的全部token：naive做法是每步、每层把先前每个token的K、V投影重算一遍，极浪费。好在这两头K/V矢量一旦处理完就不变了，serve引擎于是把它们缓存起来。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">KV cache里放的是每个token的key与value向量，逐层逐注意力头存放。每步只算最新token的K/V，其余直接复用。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这是一笔真实成本，不是可以四舍五入的误差：中型模型一条序列的KV cache就能到GB级。乘起来就是：层数 × 头数 × head dim × 序列长 × (K和V两份) × batch大小。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">解码同时还是带宽受限的：每吐一个token，都要把那整份KV cache从GPU里重新读一遍。内存摆成什么样、读取效率如何，直接决定吞吐。这就是PagedAttention出场要修的地形。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">PagedAttention实际修了什么</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">问题又窄又具体：KV cache的内部碎片化。PagedAttention之前，引擎给每条序列的KV cache分配一整段连续内存：按该请求可能到达的最大序列长度预留。可生成多长你提前不知道，而连续内存必须一次定死。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">绝大多数请求根本到不了那个上限，差出来的那块就白白预留、用不上。这正是操作系统几十年前为了解决进程内存碎片而解决过的那道内部碎片问题。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">vLLM直接把那个解法借了过来：把KV cache切成可放物理内存任意位置的定长block、用一个block table(页表式的间接寻址)把逻辑位置映射到物理位置、让共享公共前缀的请求共用block、并且不再按『极少发生的worst case』预留内存。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这四点让vLLM把batch推上去、真正在吞吐上变得有竞争力。但它是一个纯内存管理层面的修复：它一个字都没说『数据就位之后attention本身该怎么算』，只改了字节住在哪、怎么寻址。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">随之而来的分岔</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">核心区别在此：cache放在哪vs. 在上面怎么做compute。这正是vLLM架构自此长出来的一道接缝。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">现行设计(v1，不是已废弃的v0路径)把两件事当成分离的关注点、各有独立接口。KV cache manager管内存：分配block、跟踪引用计数、处理前缀缓存命中、决定驱逐谁；它调get_computed_blocks()、allocate_slots() 这类函数，根本不在乎最终哪个kernel去读这些block。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">attention backend管compute：拿一个query向量 + 它要的K/V block，算softmax(QKᵀ/√d)V，在多快算多快的前提下吐一个output tensor。它用各种tile/fusion技巧讨好GPU内存层级，唯一在乎的是有人给它合法可读的指针。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个模型体内甚至可以混用多个backend：vLLM支持按KV-cache-group覆盖backend，既有full attention又有sliding-window attention层的模型，可以把每组路由到不同kernel。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">后端现场，具体地看</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这不是为讲故事硬造句：它就是代码现在的样子。打开vllm/v1/attention/backends/ 能看到(以下不穷尽)：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">flash_attn：FlashAttention，tiled-softmax kernel，把中间值放在快的片上SRAM而非去HBM来回倒。flashinfer：FlashInfer，覆盖block-sparse paged attention等多算子的更宽库。flex_attention：FlexAttention，把自定义attention mask编起来而不是写死各种pattern。mla：multi-head latent attention，DeepSeek架构带火的压缩KV方案。gdn_attn：GatedDeltaNet式线性attention。triton_attn(及ROCm侧rocm_attn / rocm_aiter_unified_attn)：按vLLM官方文档，PagedAttention配Triton prefix prefill的组合。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">PagedAttention并没有从这个清单消失：它活在triton_attn里。现在只是『一个backend 』，不再是『那个backend』。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">MLA还有一层自己的拆分：prefill与decode行为完全不同：prefill处理整段prompt、是compute-bound；decode逐token生成、是memory-bound。于是各阶段各选各的backend：prefill后端可从FlashAttention、FlashInfer、TRT-LLM Ragged里独立挑；decode后端有FlashMLA、Triton MLA、CUTLASS MLA等等；DeepSeek更新的稀疏MLA变体又各有专属decode后端。这些通过 --attention-backend参数 / VLLM_ATTENTION_BACKEND环境变量 / 或显式per-group override配置：不是事后从benchmark里反推的。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么这次分岔非发生不可</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一旦KV cache碎片不再是瓶颈，瓶颈就移进kernel内部了。而没有任何单一kernel处处最优：两股力量逼着拆分。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一是硬件分化：Hopper与Blackwell是不同代的tensor core，低精度格式的原生支持也不同；在A上最快的FlashAttention版本在B上不一定最快。vLLM文档按SM代给不同默认FlashAttention版本正是为此，而这还没算FlashInfer那边单独由TensorRT-LLM支撑的kernel。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">二是attention本身的形态分化：标准MHA每token每头留一份完整K/V(这正是PagedAttention要高效分页的对象);MLA把每token的K/V压进一个很小的共享latent向量、用时再现场扩回：cache显著缩小，但kernel必须围着压缩转，而不是朴素per-head block;GDN则干脆扔了越来越大的cache，改成每token更新的定长循环态，更接近RNN而非通常二次查找式的attention。三种<strong>真正的内存访问方式</strong>，没有一种贴合最初的PagedAttention kernel。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个为某代GPU、某一种attention形态硬调优的单体PagedAttention kernel，永远追不上这摊子演化。把cache管理与kernel选择拆开，是让两边各自按各自节奏演化的唯一办法。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">实际收益</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">『你开PagedAttention了吗』变成了一句没有意义的问题：基于block的KV cache管理就是vLLM现在的工作方式，那个意义上是默认开着的。真正能推动你吞吐数字的问题是：你给『你这个模型 + 你这块硬件』挑了哪套组合：即KV cache布局、cache manager行为(前缀缓存、hybrid sliding-window处理)、attention kernel。它们现在已经是独立决策：各有各的默认、各自override的开关、以及一旦配错各自的坏法。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这是个比老问题更复杂、也更诚实的问题。H100上跑dense attention的吞吐，和Blackwell上跑MLA的吞吐，本来就是两个工程问题：假装一个kernel名字能同时解释两者，从来都是过度简化。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">PagedAttention真正的遗产</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这整篇不是说PagedAttention错了、或在任何值得抱怨的意义上过时了。注册表里每个backend仍都踩着它引进的内存管理模型受益：block化、非连续、可共享前缀的KV cache，是其余一切立身的基底。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">变的是scope。PagedAttention曾经在很多人对vLLM的心智模型里代表整整一个推理引擎；现在它是『在那些内存之上计算attention的若干种方式』中的一种内存策略。attention计算本身成了快速移动层，其迭代速度快过了底下那套存储模型不得不更新的速度。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这不是意义上的失败式降级，而是『组织架构长胖了』式的降级：它解决的问题，原来只是整个公司里的一个部门，而不是整个公司。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+什么是把一个技术名词祛魅、而不贬低它的正确姿势，这篇给了个范例。它没有说PagedAttention没用，而是精确指出它的领地边界：它解决了『字节在哪、怎么寻址』，然后坦白那里从来不是全部。当单一kernel无法跟上硬件(每代tensor core/精度支持)与attention形态(MHA分页 / MLA压缩KV / GDN去cache)的分化时，把cache管理与compute拆成两个可独立演进的后端，是唯一能让一层别拖垮另一层的做法。<br  /><br  />留三句话提醒自己：① 面试里的旧口头禅(PagedAttention=vLLM快)是个会过时的简化：修内存不等于定死怎么算attention；② 真能推动吞吐的三旋钮(布局、cache manager行为、kernel)现在是三个独立决策，各带默认与坏法；③ 架构演化的健康信号不是旧件被删，而是它从「整家公司」缩成「一个部门」：注册表里别的kernel照样踩在它的block内存基底上。<br  /><br  />此为作者Nikhil Mourya个人长文，观点与vLLM官方文档对应但不代表项目官方口径；原文见X(author/status/2096506355217809626)。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HPaDwcT_4Rw5ty7LwDG4Ng" target="_blank" data-linktype="2">Torch Profiler在Trace里分析性能瓶颈: 剖析SGLang LLM推理</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4aEYa-5J2Ir82V_1_9anDA" target="_blank" data-linktype="2">AI芯片架构全景: 从NVIDIA到Groq的六条设计路线</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/YHmkt8EHFGm-HeflWCsB2w" target="_blank" data-linktype="2">英伟达Kernel Agent: 编译器与算子调优Agent的协同设计</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/i-NZ-4oCXs48XpDfdcBfPw" target="_blank" data-linktype="2">在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://x.com/GonnabeNikhil/status/2096506355217809626</span></p>
+</section>
