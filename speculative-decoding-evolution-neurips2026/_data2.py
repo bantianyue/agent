@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # part2: metrics table/公式 → how-in-practice → section1 four generations (EAGLE3/DFlash/DSpark/DFlash2/race)
-SECS2=[
+SECS=[
  # ---- 6 指标表 (Table1) 连同公式 ----
  {"type":"table","head":["Metric","Definition","Determined by"],
   "rows":[["Decoding speedup (η)","η = L_target / L  相对自回归基线","单 token 时延 L 与基线 L_target"],

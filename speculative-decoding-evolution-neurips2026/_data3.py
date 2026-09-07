@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # part3: race(表2) + 无损in-paper/部署 + LosslessBench(图13/14) + fig 挂载锚
-SECS3=[
+SECS=[
  {"type":"h2","title":"1.5 实战案例：让四代模型同题赛跑","paras":[
    "四家都介绍完,终于能同场竞技了——在同一个目标模型上,same 句子让 EAGLE-3/DFlash/DSpark/DFlash2 各自解码(Figure 9 动画示意;数值为作者在单张 H100 自测,DFlash 2 用 Inco 的 2.7–3.4×)。",
  ]},
