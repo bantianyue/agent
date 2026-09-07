@@ -49,10 +49,11 @@ SECS=[
    "这些论文基准都是单轮简单任务(小学算术、函数级编码),只盖住模型被问到的窄窄一刀——这正是 LosslessBench 选五域补齐的动机。",
    "第一层探针 = 接受长度(Section1:τ 即 token 级散度的隐测量)。harness 在 DFlash 自家基准复现公布数作 sanity(GSM8K 5.32 vs 5.98、HumanEval 5.96 vs 5.52)。横跨五域后接受长度从 5.24 跌到 1.84——draft 在『论文从没量过』的域漂得最远;前端例外(接受高但页面照坏),因为接受量的是 draft 与 target 一致度、而非输出质量。下面两张是原页少数能静态保留的真·文件图:分歧(接受vs散度)与雷达(加/不加 spec 五域对比)。",
  ]},
- {"type":"h2","title":"两张图：lossless 在哪儿掉的","paras":[
-   "先看接受长度到底随域差多大、以及它映射出的 token 级散度 D_LK=1−α(左图);右图把加/不加 spec 的 Qwen3-8B 在五域雷达排开(每轴独立标尺,便于看相对缺口)。这是原页为数不多能当静态文件存下来的两张实图:",
-  ],"fig_after":{"0":[{"src":"fig13_divergence.png","caption":"Figure 13  DFlash 接受长度按域(左)及隐含的分布散度 D_LK=1−α(右)。接受越低、散度越大:draft 在论文从没测过的域漂得最近。"},
-                      {"src":"fig14_radar.png","caption":"Figure 14  Qwen3-8B 加与不加投机解码在 LosslessBench 五域的雷达对比(各轴独立标尺,便于看每域相对缺口)。"}]}},
+ {"type":"h2","title":"两张实图：无损到底在哪一步掉的","paras":[
+   "左图把『DFlash 在五个域里的接受长度』与它映射出的 token 级散度 D_LK=1−α 摆在一起(接受越低、散度越大)——你看得出：在接受长度最哑火的域，draft 分布离 target 也漂得最远，前端是唯一『接受高却输出坏』的特例：因为接受量的是 draft 与 target 的一致度，不是输出质量。",
+   "右图是 Qwen3-8B『加 spec / 不加 spec』在 LosslessBench 五域的雷达对比。轴各自独立标尺，方便看见每域相对缺口；它回答的是接受长度掉下去之后，任务层质量到底伤没伤。这两张是这份交互教程里少数能直接静态保留下来的真·文件图：",
+  ],"fig_after":{"0":[{"src":"fig13_divergence.png","caption":"Figure 13  DFlash 在接受长度上按域的表现，以及背后的 token 级散度 D_LK=1−α。接受越低、散度越大：draft 在论文从没测过的域漂得最远。"}],
+                        "1":[{"src":"fig14_radar.png","caption":"Figure 14  Qwen3-8B 开与不开投机解码，在 LosslessBench 五个域的雷达对比（各轴独立标尺，便于看相对缺口）。"}]}},
  {"type":"h2","title":"3. What's next：两个新路口","paras":[
    "投机解码的正文快车已到二〇二六,作者把镜头转向两个新方向:多模态 (multimodal) 与『从猜 token 升级到猜 tool calls』。",
  ]},

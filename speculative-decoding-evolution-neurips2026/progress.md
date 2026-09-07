@@ -1,25 +1,6 @@
-# 进度追踪 - speculative-decoding-evolution-neurips2026
-
-| Step | 状态 |
-|------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
-| Step 6: 推送草稿 | pending |
-
-创建时间: 2026-09-07
-来源: https://neurips2026-speculative-decoding.vercel.app/
-| Step 4d-i: 传送门 | completed |
+✅ 完成 (speculative-decoding-evolution-neurips2026)
+- 全文(主正文,去掉附录A/Glossary/HandsOn-Lab逐命令)translate中文
+- 26节 / 15+ h3; 3 表格 + 4 伪代码块(type code) + 5 pre; 正文知识保留(英文原文已据 Jina 62KB 全文忠实译入主干,处理Lab/附录跳过)
+- 图: 源交互教程绝大多数 figure 是 iframe 动画(微信不支持) → 用文字还原机制结论; 真正可静态保的 2 张 svg→png(fig13 divergence / fig14 radar)已嵌正文(无连排)
+- preflight ALL PASS / fig-layout PASS
+- push OK draft=TIqnnVEu6Oy3-wtKttGa0XqlJALPFssEoGBzBKQlE3pBp7qX6Kq-e6pCI8zcVVat verify 2/2
