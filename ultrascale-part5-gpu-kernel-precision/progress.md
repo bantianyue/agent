@@ -22,3 +22,4 @@
 
 创建时间: 2026-09-08
 来源: https://huggingface.co/spaces/nanotron/ultrascale-playbook
+| Step 4d-i: 传送门 | completed |
