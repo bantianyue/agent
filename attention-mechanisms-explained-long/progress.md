@@ -1,25 +1,7 @@
-# 进度追踪 - attention-mechanisms-explained-long
-
-| Step | 状态 |
-|------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
-| Step 6: 推送草稿 | pending |
-
-创建时间: 2026-09-08
-来源: https://x.com/akshay_pachaar/status/2096215921568498042
-| Step 4d-i: 传送门 | completed |
+✅ 完成 (attention-mechanisms-explained-long)
+- 源: X Article @akshay 《Attention Mechanisms in LLMs, clearly explained》 约 12KB 文字
+- 原生无正文插图实体(media 0 / coverMedia none / markdown 0 inline); 高峰不反复打 X。
+- 中文 11 节纯文字全编译: Self/Cross/MHA/MQA/GQA/MLA/FlashAttention/Sparse(SWA/NSA)/Paged/Radix + 主线收束
+- 封面: 源无原图 -> 信息卡(900x383 + square500, 深蓝标题页, 与 OpenAI 篇同法说明)
+- preflight ALL PASS(清洗 @akshay/X 长文 残留), push draft media=TIqnnVEu6Oy3-wtKttGa0cBWffyGGuWYeORomjvbY4TA9G3fzTh77HLAfu5Oy6nf; verify 0 图(纯文字篇符合)
+source: https://x.com/akshay_pachaar/status/2096215921568498042
