@@ -9,7 +9,7 @@ with sync_playwright() as p:
     pg=ctx.new_page()
     try:
         pg.goto(URL, wait_until="commit", timeout=90000)
-        time.sleep(20)   # allow SPA article hydrate & lazy load
+        time.sleep(22)   # allow SPA article hydrate & lazy load
         # login marker WITHOUT crashing on networkidle
         try:
             auth=pg.evaluate("async()=>{try{const r=await fetch('https://x.com/i/api/1.1/account/settings.json',{credentials:'include'});return r.status}catch(e){return 'x'}}")
@@ -31,6 +31,10 @@ with sync_playwright() as p:
         out['title']=pg.title()[:70]
         imgs=[x for x in imgs if x['w']>=120 and (x['h']>=60)]
         out['images']=imgs
+        try:
+            pg.screenshot(path="D:/06_Hermes/articles/_full_"+NAME+".png", full_page=True)
+            out['shot']=True
+        except Exception as e2: out['shot']=str(e2)[:80]
     except Exception as e:
         out['err']=str(e)[:300]
     finally:
