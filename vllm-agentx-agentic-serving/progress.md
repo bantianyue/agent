@@ -1,24 +1,8 @@
-# 进度追踪 - vllm-agentx-agentic-serving
-
-| Step | 状态 |
-|------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
-| Step 6: 推送草稿 | pending |
-
-创建时间: 2026-09-09
-来源: https://x.com/vllm_project/status/2097427730983776758
+✅ 完成 (vllm-agentx-agentic-serving)
+- 源: X Article @vllm_project《vLLM x AgentX: Optimizing for Real-World Agentic Serving》 ~24.9K
+- 主题: agentic 负载(多轮/长上下文/96%+前缀复用) 的 serving 优化: 数据面(混合KV/紧凑布局/分级外置/会话感知保留) · 执行面(K3 DCP · V4 PCP/DEP · 双层调度 · P:D率匹配) · kernel与社区 · 性能与成本数字 · 苦涩教训 · 下一步
+- 体验: AgentX: V4 Pro 130K tok/GPU·s · MiniMax 最高376tok/s; 对 Opus5 14.6x-106x cost优势  (以正文数据为准)
+- 正文图: 8 (来自登录DOM按序截的正文静态图 fig01-08, 已剔除嵌入式视频占位; 封面用真实 hero)
+- preflight ALL PASS; push media=TIqnnVEu6Oy3-wtKttGa0TuzAyQyIA87ku7GuXaXLh0ZfpNcKsXvTHYcoJ9Ixme5; verify body 8/8
+- progress note: 覆盖推送同 id 时返回 "media undefined" 属正常覆盖路径
+source: https://x.com/vllm_project/status/2097427730983776758
