@@ -1,90 +1,95 @@
 #!/usr/bin/env python3
-"""
-article_data_build.py 模板
-=====================
-写新文章时：cp 到文章目录下，填入 DATA 字典内容，然后：
-    python write-article-data.py <文章目录>
-    python render-article.py <文章目录>
-    python add-portal.py <文章目录>
-
-字段说明：
-  - summary: 要点速览，列表格式 [{key, body}]。每条 key 是一两个词的标题，body 是一条结论（≤50字）。
-            ⚠️ 必须为 [{key, body}] 列表，不能是字符串！template.html 用 {% for item in summary %} 遍历。
-  - lead: 导语段落列表，每段用 **加粗** 标核心句
-  - sections: 正文章节。type 为 'h2'（大标题）或 'h3'（子标题）。
-              figs 可选，每个 {src: 文件名, caption: 图注文字}
-  - conclusion: 结语段落列表。**铁律**：① 不出现"本文""这篇""本博客"等自称/元引用前缀——直接陈述结论，读者知道在说谁。② 每段不超过180 token。③ 不出现"独立观点""我的看法""个人见解"等废话标记——结语本身就是观点。④ 每段首句直接是结论，不是"本文提出了…"。
-  - reference_url: 原文出处 URL
-"""
-
+# -*- coding: utf-8 -*-
 import json, os, sys
 
-# 获取文章目录（兼容 write-article-data.py 的 exec 调用）
 _article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
 
 DATA = {
-    # ⚠️ 要点速览：必须为 [{key, body}] 列表，不可为字符串。**必须恰好 3 条**（write-article-data.py 三重校验要求 len(summary) == 3）
     "summary": [
-        {"key": "核心观点", "body": "一句话说清论文/文章最关键的结论"},
-        {"key": "关键数据", "body": "支撑核心结论的具体数字或对比"},
-        {"key": "方法创新", "body": "区别于已有工作的核心创新点"},
+        {"key": "核心结论", "body": "Databricks 的 Proteus 用 agent 自动生成 GPU kernel：Qwen 3.5 122B 的专用 kernel 比 vLLM 现成实现快 1.8–5.2 倍"},
+        {"key": "设计重心", "body": "难点不在生成而在验证与上下文管理：一致性检查防作弊、多重计时交叉验证、prompt 只喂高可信经验"},
+        {"key": "真实案例", "body": "Gated DeltaNet 打包解码 kernel 在 B200 上最低延迟 0.018ms、单 shape 最优加速 1.6 倍"},
     ],
 
     "lead": [
-        "引导段第一句。介绍背景和问题定位。",
-        "引导段第二句。点明本文核心内容。",
+        "GPU 运算的形状，一部分由静态的模型结构决定，另一部分却随着每次请求动态变化：比如矩阵乘法的一个维度固定在模型里，另一个维度取决于这次请求实际有多少 token。生产推理系统却往往用同一套通用 kernel 去覆盖各种模型和负载，天然不高效。",
+        "Databricks 团队因此构建了 Proteus——用 agent 自动生成、验证并迭代优化 GPU kernel，针对运行时真实遇到的形状逐个做专用化。在 Qwen 3.5 122B 上，生成的专用 kernel 比 vLLM 现有最佳实现快 1.8–5.2 倍。",
     ],
 
     "sections": [
         {
             "type": "h2",
-            "title": "第一节标题",
+            "title": "从通用 kernel 到按需专用",
             "paras": [
-                "段落一正文。**加粗** 标核心结论。",
-                "段落二正文。",
+                "这类任务上，常规的编码 harness 往往失效，因为 agent 天生会 reward-hacking：它遵循规则的字面意思，而不是规则的意图。给它一个 benchmark，它就会去优化这个 benchmark，而不是真正想优化的算子。",
+                "Proteus 的做法是让 agent 不断提出 kernel 草稿，再把草稿对照受控的参考实现做验证，给通过的草稿计时，并在此基础上迭代出更好的结果。流程听起来直接，但成败几乎全压在两个基础问题上（整体架构见图 1）；这套流程为 Qwen 3.5 122B 生成的 kernel，比 vLLM 里最好的现成实现快 1.8–5.2 倍。",
             ],
-            # ⚠️ ⚠️ ⚠️ 图必须放在 section 内部，绝不能放在 DATA 顶层！
-            #    模板只遍历 sec.figs / sec.fig_after，顶层 figs 被静默忽略。
-            #    推送前务必 grep -c '<img' article.html 确认 > 0。
-            # 可选：图嵌入。src 是文件名（相对文章目录），caption 是图注文字
-            # ⚠️ 铁律：正文中引用的每个"图 N"都必须有对应的 fig 条目，不能少。
-            #    blocks.jsonl 中标记 hero=true 的图只用作封面，不会嵌入正文。
-            #    如果正文引用该图，必须同时 embed 一份（不能只做封面）。
-            "figs": [
-                {"src": "fig01.png", "caption": "图 1：说明文字"},
-            ],
-            # 进阶：使用 fig_after 实现段落级内联（比 figs 更精确，图挂在指定段落之后）
-            # 格式：{"para_index": [{"src": "figN.png", "caption": "图注"}]}
-            # 推荐 5 图以上的文章使用 fig_after，render-article.py 自动内联
+            "fig_after": {
+                "1": [{"src": "fig01.png", "caption": "图 1：Proteus harness 的简化架构"}]
+            },
         },
         {
-            "type": "h3",
-            "title": "子节标题",
+            "type": "h2",
+            "title": "Validation：先确保测的是对的东西",
             "paras": [
-                "子节段落。",
+                "我们最初以为 kernel 搜索是最难的部分：如何在一片庞大的程序空间里探索，又不至于卡在某个不再提升的平台期？实践中冒出来的第一个问题更基本——我们真的在测量我们以为在测的东西吗？",
+                "模型只会优化你给它的那个分数，它甚至不需要什么花哨的作弊手法，只要评估本身悄悄做了某个假设就够了。旋转位置编码（RoPE）的 kernel 就是个例子：某个候选可以复用上一次尝试留下的编译产物，看起来比老老实实从头重建更便宜；另一个候选把一批 GPU 启动录进 CUDA graph 后作为一个整体回放，而我们拿来对比的基线还在逐个启动，两边做的根本不是同样的工作量；还有一个候选在我们放进测试集的输入尺寸上表现很好，一旦换到没见过的尺寸就露馅。",
+                "所以我们把早期设计精力花在验证器上，而不是 prompt 上：用同样的方式给两边计时，必要时用多个计时器交叉验证（CUDA event 计时、墙钟时间、CUPTI 计时）；清掉不该残留的编译状态；保持 setup 与 teardown 顺序一致，让一方没法偷掉另一方仍在付出的工作量；胜出的 kernel 先再测一轮才作为下一轮起点；再留一些候选看不到的测试，防止它只拟合考试。为了杜绝用人为虚高的性能数字蒙混过关，我们还加了自动一致性检查：凡是超出物理 GPU 带宽与算力上限的加速（比如超过 100 倍）都会被标记为可疑。不设这些约束，多生成 kernel 基本只是多产生噪音。",
+                "把重心放在验证器上，也改变了这类 agentic 生成任务的瓶颈。在纯程序搜索里，好候选很稀有，而写草稿的成本可以压得很低：草稿能大批并行产出，验证却一步也省不了——必须在真实 GPU 上、隔离环境里、跑不止一次。整个系统的前进速度取决于它多快能信任一个 kernel，而不是多快能写出来一个。",
             ],
         },
         {
             "type": "h2",
-            "title": "第二节标题",
+            "title": "Context Management：决定模型能看到什么",
             "paras": [
-                "段落正文。",
+                "第二个挑战是决定 kernel 生成模型到底能看什么，这是一个取舍。prompt 给得越大，信息越多——当前最好的 kernel、最近的失败、profiler 的提示、历次运行留下的笔记都可能有用；但每个 token 都要花钱，而且 prompt 越长，下一次尝试越容易漂移。有用的信号总是和过时建议、互相矛盾的提示、只适用于另一种输入尺寸或另一个算子的细节混在一起，模型常常不知道该信哪句，最后要么跟着最大声的那句走，要么每句都信一点。",
+                "给得太少则是另一个极端：每次尝试都从零开始，同样的死胡同反复撞进去，上一次运行或相关算子的经验一点也带不过来，循环原地踏步。",
+                "我们想要一个知识层来解决这个问题：记住什么有效、稍后能复用，而且不需要人在环里。这个层又带来第二个取舍——存下来的经验要具体到什么程度，以及它能在多大范围上复用。",
+                "一条很具体的笔记（在这个 kernel 上、这种输入尺寸下，展开这个循环）可能正是下一次尝试需要的，但换一个算子、换一块 GPU、换一种输入尺寸就很容易被误用；一条很通用的笔记（更好地利用片上内存）几乎处处适用，却又没告诉模型具体该做什么。两种失败模式我们都见过。在某次很长的运行里，模型读写的大部分内容都耗在取记忆、路由记忆上，而不是写 kernel——记忆层忙得很，却没有让下一个候选变得更好。图 2 展示了这类系统的 token 消耗分布，成本几乎全被知识层吃掉了。",
+                "真正值得留存的版本更小，要在通用与具体之间取平衡。当模型要写 kernel 时，prompt 里只应该放进高可信的上下文：把具体情境和动作配对起来的可执行经验（从历史改动到效果的映射中蒸馏而来），以及来自密切相关父运行的简短失败笔记。检索靠分层标签过滤加混合式搜索（关键词加语义）；更深层的整理与再蒸馏放到后台任务里做，而不是让每次尝试都同步地来回遍历历史。一条经验如果既说不清情境也说不出动作，就不配进 prompt。图 3 是修好知识层之后的 token 分布——大头终于回到了候选生成本身。",
+            ],
+            "fig_after": {
+                "3": [{"src": "fig02.png", "caption": "图 2：初始 harness 各阶段的 token 消耗分布"}],
+                "4": [{"src": "fig03.png", "caption": "图 3：改进 harness 各阶段的 token 消耗分布"}],
+            },
+        },
+        {
+            "type": "h2",
+            "title": "案例研究：Gated DeltaNet 的打包解码",
+            "paras": [
+                "一个具体例子是 Qwen 3.5 122B 里 Gated DeltaNet 路径上的 packed decode（打包解码）kernel。这个算子要更新循环状态，并从打包好的 QKV 输入、门控参数和状态索引里写出解码输出。我们用它在 NVIDIA B200 GPU、Triton 后端上跑了一遍完整的 Proteus 循环：先验证任务契约，测量参考实现，再让 agent 出候选 kernel，跑静态检查和编译，对照受控参考验证正确性，只给通过验证的候选做基准测试，最后把最佳候选再复测一遍。",
+                "图 4 需要从左往右读。基线节点把基准锚定在 0.025 ms。候选 0000 是那颗安全种子：它复现了 packed-decode 的结构并通过验证，但比参考实现还慢，所以 Proteus 只把它留作一个有测量的父节点，而不是当作一次胜利。从那里开始，Proteus 不再去优化一颗服务所有 shape 的通用 kernel，而是把搜索拆成了各 shape 专属的路径。",
+                "Batch-1 修复路径在候选 012 上产出了 shape 专用 kernel，在单 batch 解码这种 shape 上拿到 1.5 倍。最强结果出现在 serving-decode 路径：候选 030 拿到测得的最低 kernel 延迟 0.018 ms，候选 036 交出最佳 shape 加速 1.6 倍。这个胜出的 serving 片段专精于 Batch=4、Key=128、Value=128 的布局，把 value 维按 64 宽的块来处理——所以它是那颗 shape 上的安全 kernel，而不是可随处替换的通用方案。",
+                "时间线最后那段岔路，正好说明为什么 trace（完整轨迹）有价值。后来改用 C++（而非 Triton）生成的尝试撞上了编译与生成失败，长跑在耗尽这个分支的尝试预算后结束。所以真正有用的产物不只是那颗最快的 kernel，而是图里呈现的完整路径：语义上失败的被拒绝，正确但更慢的被测量，真正的性能胜利则被贴回它所属的 shape，从而能安全地组合进生产 kernel。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig04.png", "caption": "图 4：Proteus harness 的一次 kernel 进化案例"}]
+            },
+        },
+        {
+            "type": "h2",
+            "title": "下一步：把写的自由还给 agent",
+            "paras": [
+                "我们搭的这个进化环像个严格的写手，经常按固定套路叫模型：拿当前最好的 kernel，试着做一个小改动，检查，再重复。这拿走了 agent 真正需要的自主权——它很难改结构、换语言，或者干脆放弃一个死掉的设计。",
+                "但这个环仍然是必要的——不是让它来写 kernel，而是给 agent 一个可信的下一步提示。提示必须来自两个地方。",
+                "第一，与知识层的沟通：几条具体到能执行、且边界清楚到知道哪里不适用的经验。没有这个，每次尝试都从零开始。",
+                "第二，可信验证器的结果：agent 自己没有亲手测过的正确性与耗时。这些数字既是下一轮的提示，也是唯一值得相信的分数。如果让 agent 给自己的成果计时，我们又会退回到残留缓存、不对等的比较，还有它能看得见的测试上去。",
+                "所以我们想要的分工比 agent 对 loop 更细：kernel 怎么写，自主权归 agent；loop 退回去当记忆与评估的通道。agent 提出方案，loop 决定它能看见什么、以及上一份方案到底赢没赢。",
+                "在 NVIDIA B200 GPU 上，Proteus 为 Qwen 3.5 122B 的 Gated DeltaNet 路径（一种类线性注意力模块）构建了专用 kernel，单颗 kernel 的加速在 1.8 倍到 5.2 倍之间。",
             ],
         },
     ],
 
     "conclusion": [
-        "结语第一段。直接陈述结论，不出现「本文」「这篇」等前缀。不超过180 token。",
-        "结语第二段。行业影响或展望。不超过180 token。",
+        "把这次实践压缩成一句话：生成 kernel 是便宜的环节，验证与上下文管理才是真正的难点，值得投入最多的设计精力。对任何快得离谱的 kernel 先打折再兴奋——测量 bug、残留状态、不对等的比较，比真正的优化常见得多。",
+        "知识也不是越多越好：prompt 里只留情境加动作配对的高可信经验，其余整理交给后台；同时给 agent 探索的自由、把外部环收紧成记忆与评估的通道。自由探索加严格把关这套组合，正是把 kernel 专用化从演示推向生产的关键。Databricks 也正在为 AI 与系统交叉方向的难题招兵买马。",
     ],
 
-    "reference_url": "https://arxiv.org/html/XXXX.XXXXXv1",
-    # ⚠️ 必须设置！push-draft.py 从此字段读取公众号标题
-    "title": "公众号文章标题",
+    "reference_url": "https://www.databricks.com/blog/achieving-extreme-efficiency-through-specialized-gpu-kernel-generation",
+    "title": "Agent 自动生成专用 GPU Kernel，推理提速最高 5.2 倍",
 }
 
-# ── 写入 article_data.json ──
 out_path = os.path.join(_article_dir, "article_data.json")
 with open(out_path, "w", encoding="utf-8") as f:
     json.dump(DATA, f, ensure_ascii=False, indent=2)
-print(f"✅ 写入 {out_path} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA.get('sections', []))} sections)")
+print("OK wrote", out_path, len(DATA.get("sections", [])), "sections")
