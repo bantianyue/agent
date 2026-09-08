@@ -1,24 +1,7 @@
-# 进度追踪 - math-for-ai-inference-roadmap
-
-| Step | 状态 |
-|------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
-| Step 6: 推送草稿 | pending |
-
-创建时间: 2026-09-08
-来源: https://x.com/TheVixhal/status/2097008871231672595
+✅ 完成 (math-for-ai-inference-roadmap)
+- 源: X Article @TheVixhal《The Math Needed for AI Inference Engineering (Complete Roadmap)》 (~28.5k 文字)
+- 用户要求: 原文 100% 保留 / 用中文 / 别摘要 — 已按其逐章完整直译(数字与精度/量化/面向算力的线性代数/性能建模/Transformer推断算术/解码概率/基准统计/离散位级 + 学习路线与可省内容)
+- 中文正文 13 节, ~8600 汉字, 逐点子点全保留(含格式清单、公式表述、资料名称)
+- 封面: msyh 信息卡(源无原图, 正文纯文字, 图数 0 符合源)
+- preflight ALL PASS; push media=TIqnnVEu6Oy3-wtKttGa0a0cTH3cOfT7RS4KWbPloiZuq_zdT4R6o4hJKbWvAQro; verify 0 图; arbiter(queue jid_20260908_141544_8f621b) done
+source: https://x.com/TheVixhal/status/2097008871231672595
