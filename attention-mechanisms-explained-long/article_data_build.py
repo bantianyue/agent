@@ -9,7 +9,7 @@ def t(o,*ps): o["paras"]+=list(ps)
 s=h2("为什么 attention 存在、又贵在哪")
 t(s,"早期序列模型(RNN)把固定大小的 hidden state 从 token 传到 token,隔得越远联系越弱、长程依赖会衰减。Attention 直接解决它:不用经过瓶颈式的汇总,每个 token 都能看全其他 token、自己判相关度。这种直给是 transformer 强的原因,也是它贵的原因——成本在存『每个 token 都见过什么』所需的显存。")
 s=h2("驱动一切的约束在 KV Cache")
-t(s,"每次 attention 都要记住之前每个 token 的样子。prefill 一次性处理整段 prompt,每层为每个 token 算一个 key 向量和 value 向量,存进所谓 KV cache,让 decode 时能直接查而不重算。缓存随生成增长:70B @BF16 模型、单个 128K 上下文, KV cache 约 40GB,接近 4bit 量化后的模型权重本身。真正的约束不是算力也不是公式里的数学,而是『存 attention 已看过的东西』那点显存。")
+t(s,"每次 attention 都要记住之前每个 token 的样子。prefill 一次性处理整段 prompt,每层为每个 token 算一个 key 向量和 value 向量,存进所谓 KV cache,让 decode 时能直接查而不重算。缓存随生成增长:70B BF16 模型、单个 128K 上下文, KV cache 约 40GB,接近 4bit 量化后的模型权重本身。真正的约束不是算力也不是公式里的数学,而是『存 attention 已看过的东西』那点显存。")
 s=h2("self-attention / causal / cross")
 t(s,"Self-attention:每个 token 与同一序列内其他 token 互相注意;模型给每 token 算 query/key/value,用 q?k 的点积判断相关度,是每个 transformer 层的基础算子。Causal attention=self-attention 加三角掩码:token 只能看更早的、不能看未来的——这让 decoder-only 能逐 token 生成而不提前见到答案。Cross-attention 是另一种:query 来自一个序列,key/value 来自第二个序列;encoder-decoder(T5/Whisper)用它把 encoder 输出喂给 decoder;而 Llama/GPT 这类 decoder-only 根本没有 cross-attention。")
 s=h2("Multi-Head Attention(MHA)")
@@ -33,10 +33,10 @@ d={"title":"一张卡怎么装下 attention 想记住的一切：KV 缓存压力
  "summary":[
   {"key":"一条主线","body":"模型卡上都会标 MQA/GQA/MLA，它们全因同一个约束而生：把 attention 看过的长序列状态存下来会撑爆 GPU 显存(KV cache)。这篇按出场顺序逐个拆它们各自修了什么缺陷——Self/Cross→MHA→MQA→GQA→MLA→FlashAttention→Sparse(SWA/NSA)→Paged/Radix。MHA 之后的每个设计都是在跟 KV cache 内存较劲。"},
   {"key":"四类招式","body":"存多少：MQA 共享单 K/V、GQA 按组共享(32→8 组, 约 4× 省)、MLA 压缩进低秩 latent(DeepSeek-V2 把 KV 压到 MHA 的 5-13% 还追平质量)。算多贵：FlashAttention 分块不物化整矩阵、只写 HBM 一次。attend 几个：SWA 滑窗 + NSA(训练内稀疏)，唯一扩到 1M 上下文的答案。分配复用：PagedAttention(vLLM, 块表按需分配, 碎片<4%) 与 RadixAttention(SGLang, radix-tree 按公共前缀复用 KVPrefix, 多轮命中 75-95%)。"},
-  {"key":"性质与其他","body":"@akshay_pachaar 的 X 长文(社区科普, 非论文);约 12KB 文字、原生无正文插图实体。文中 40GB/128K、GQA 8 组、MLA~5-13%、Paged<4% 等数字为作者引述口径, 供直觉参考。"}],
+  {"key":"性质与其他","body":"作者一篇社区科普长文(非论文);约 12KB 文字、原生无正文插图实体。文中 40GB/128K、GQA 8 组、MLA~5-13%、Paged<4% 等数字为作者引述口径, 供直觉参考。"}],
  "lead":[
   "每张模型卡都拿『注意力机制』当卖点:MQA、GQA、MLA 和参数量、benchmark 一起被印在右上角。它们背后是同一个憋屈的现实——给长序列和大 batch 存 attention 状态, 会把 GPU 显存撑爆。",
-  "这篇把注意力从 Self 一路拆到 RadixAttention, 按『谁先来、它修了什么缺陷』的顺序讲清九种设计。它是作者发布在 X 上的长文(约 1.2 万字符, 社区科普向), 源本身无正文插图实体, 故本稿为纯文字完整编译。"],
+  "这篇把注意力从 Self 一路拆到 RadixAttention, 按『谁先来、它修了什么缺陷』的顺序讲清九种设计。它是作者发布的一篇社区科普长文(约 1.2 万字符), 源本身无正文插图实体, 故本稿为纯文字完整编译。"],
  "sections":S,
  "conclusion":[
   "最值得记住的是那句归纳:KV cache 是整条演化的压力源。MQA/GQA/MLA 在『每 token 存多少』上取舍质量换显存;FlashAttention 换的是计算怎么访存;稀疏(SWA/NSA)换的是到底 attend 多少——这是唯一能把上下文推到百万 token 的答案;而 Paged/Radix 换的是 serving 层怎么分配与复用,与模型机制正交,你的 Llama-3-GQA 换哪个引擎都照跑。判断哪一种在你这真正见效,就看自己的部署里哪个是紧约束。",
