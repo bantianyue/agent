@@ -1,0 +1,341 @@
+{
+  "ok": true,
+  "schema_version": "1",
+  "data": [
+    {
+      "id": "2096215921568498042",
+      "text": "https://t.co/WTN3AnM9U4",
+      "author": {
+        "id": "703601972",
+        "name": "Akshay 🚀",
+        "screenName": "akshay_pachaar",
+        "profileImageUrl": "https://pbs.twimg.com/profile_images/1578327351544360960/YFpWSWIX_normal.jpg",
+        "verified": true
+      },
+      "metrics": {
+        "likes": 519,
+        "retweets": 83,
+        "replies": 6,
+        "quotes": 4,
+        "views": 74888,
+        "bookmarks": 823
+      },
+      "createdAt": "Sat Sep 05 12:36:36 +0000 2026",
+      "createdAtLocal": "2026-09-05 20:36",
+      "createdAtISO": "2026-09-05T12:36:36+00:00",
+      "media": [],
+      "urls": [
+        "https://x.com/i/article/2096206462469218304"
+      ],
+      "isRetweet": false,
+      "retweetedBy": null,
+      "lang": "zxx",
+      "score": null,
+      "articleTitle": "Attention Mechanisms in LLMs, clearly explained",
+      "articleText": "Self-attention → Cross-attention → Multi-Head Attention → MQA → GQA → FlashAttention → Sparse attention → PagedAttention → RadixAttention, explained with illustrations.\n\nEvery model card advertises its attention mechanism.\n\nMulti-Query Attention, Grouped-Query Attention, and Multi-Head Latent Attention are listed alongside parameter counts and benchmark scores.\n\nThey all exist because of the same constraint. Storing attention state for long sequences and large batches runs you out of GPU memory.\n\nAnd today we break down each of them, in the order they arrived and the flaw each one fixed.\n\nLet’s begin!\n\n# Why attention exists\n\nEarly sequence models like Recurrent Neural Networks (RNNs) passed a fixed-size hidden state from token to token.\n\nThe further apart two tokens were, the weaker the connection. Long-range dependencies faded.\n\nAttention solves this directly. Instead of passing state through a bottleneck, every token gets to look at every other token and decide how relevant each one is.\n\nNothing is hidden behind a summarization step.\n\nThat directness is what makes transformers powerful. It is also what makes them expensive. The cost lives in the memory required to store what every token has seen.\n\n# The constraint that drives everything\n\nEvery time the model attends, it needs to remember what every previous token looked like.\n\nDuring prefill, the model processes your entire prompt at once and computes a key vector and a value vector for each token at each layer.\n\nThese get stored in what’s called the KV cache so that decode steps can attend over them without recomputing from scratch.\n\nThe cache grows with every token generated. For a 70B model at BF16, a single 128K-token context holds roughly 40 GB of KV cache, comparable to the model weights themselves at 4-bit quantization.\n\nThe constraint is not compute and not the math in the attention formula. It is the memory that stores what attention has already seen.\n\n# Self-attention and causal attention\n\nSelf-attention lets each token attend to every other token in the same sequence.\n\nThe model computes a query, key, and value for each token, then uses query-key dot products to decide how much each token should attend to every other one.\n\nThis is the base operation inside every transformer layer.\n\nCausal attention is self-attention with a triangular mask applied. Each token can only attend to tokens that came before it, never future ones.\n\nThis is what makes decoder-only generation possible, because without the mask the model would see the answer before producing it.\n\nCross-attention is different in kind. The queries come from one sequence, the keys and values come from a second sequence.\n\nThis is how encoder-decoder models like T5 and Whisper connect the encoder’s output to the decoder. In decoder-only models like Llama and GPT, cross-attention does not appear at all.\n\n# Multi-Head Attention\n\nMulti-Head Attention (MHA) is the original design from the 2017 Transformer paper.\n\nEach attention head gets its own independent set of query, key, and value weight matrices. With 32 heads, you have 32 independent KV projections per layer.\n\nThe benefit is expressiveness. Different heads learn to track different kinds of relationships simultaneously. One head might track syntactic structure, another semantic proximity, another long-range coreference.\n\nThe cost is memory. Every head maintains its own KV cache. A model with 32 layers and 32 heads per layer stores 1,024 separate KV tensors per token per request.\n\nGPT-3 uses 96 heads per layer. At a 128K-token context on a model that size, the KV cache alone fills a GPU before the batch grows at all.\n\nThat memory cost is what every design after MHA is built to reduce.\n\n# Multi-Query Attention\n\nMulti-Query Attention (MQA) takes the most direct route. All query heads still have their own weight matrices, but every query head shares a single key head and a single value head.\n\nThe KV cache shrinks by a factor equal to the number of heads. Where MHA stores 32 separate KV projections, MQA stores one.\n\nDecode gets faster because you are loading far fewer bytes from HBM per step, which matters because decode is memory-bandwidth-bound.\n\nThe quality cost is real. Forcing all query heads to share one key and one value loses some of the expressiveness MHA provides.\n\nFalcon, PaLM, and early Gemini variants used MQA and accepted this tradeoff for the throughput gain.\n\nWhat MQA gives up in quality, the next design largely recovers.\n\n# Grouped-Query Attention\n\nGrouped-Query Attention (GQA) sits between MHA and MQA.\n\nQuery heads are divided into groups, and each group shares one key head and one value head. The groups are independent of each other.\n\nWith 32 query heads and 8 KV groups, you store 8 KV projections instead of 32, a 4x reduction in KV cache size compared to MHA, while recovering most of the quality that MQA trades away.\n\nThis balance is why GQA has become the default for almost every major open-weight model released in recent years. Llama 2 70B uses 8 KV groups. Llama 3, Mistral, Mixtral, Gemma, and Qwen all use GQA.\n\nThe original GQA paper showed it matches MHA quality at a fraction of the memory cost, and that has held up across model families.\n\nGQA reduces the number of KV heads stored. What comes next compresses the heads themselves.\n\n# Multi-Head Latent Attention\n\nMulti-Head Latent Attention (MLA) is DeepSeek’s contribution, introduced in DeepSeek-V2 in May 2024.\n\nWhere MQA and GQA reduce the number of KV heads, MLA compresses the full-dimensional key and value vectors into a low-rank latent space before caching them. At attention time, those latent vectors get decompressed back to full dimension.\n\nThe cached object is the latent vector, not the full KV tensors. This makes the cache footprint smaller than even GQA while preserving more of the expressiveness that MQA sacrifices.\n\nThe tradeoff is compute. Decompressing at every attention step adds FLOPs. But at inference, memory bandwidth is the bottleneck far more often than compute, so smaller cache beats extra math in most real serving configurations.\n\nDeepSeek-V2, V3, and R1 all use MLA. On DeepSeek-V2’s benchmarks, MLA matched or exceeded MHA quality while cutting the KV cache to roughly 5-13% of what MHA would require at the same model size.\n\nMHA, MQA, GQA, and MLA are all decisions about what to store. The next technique is about how expensively you compute it.\n\n# FlashAttention\n\nFlashAttention does not change what attention computes. It changes how the computation accesses memory.\n\nStandard attention builds the full N x N attention matrix, writes it to HBM, reads it back for the softmax, writes the result again, then reads it again for the weighted sum.\n\nFor a 4K-token sequence, that matrix is 4,096 x 4,096 values. Moving it in and out of HBM repeatedly is what makes attention the bottleneck for long contexts.\n\nFlashAttention tiles the computation. It processes the attention matrix in blocks that fit in on-chip SRAM, computes the softmax incrementally without materializing the full matrix, and writes the output to HBM once.\n\nThe math is identical. The memory traffic is not.\n\nEvery major serving engine uses FlashAttention kernels by default today. It is not a new attention type. It is the standard kernel for executing whatever attention type your model uses.\n\nMHA, GQA, and MLA answer what to store and how to compress it. FlashAttention answers how to compute it efficiently.\n\nSparse attention takes a different angle. Not which tokens to cache, but how many tokens to attend to at all.\n\n# Sparse attention\n\nFull attention is O(N²) in sequence length. For a 1M-token context, the attention matrix has a trillion entries. Even with FlashAttention reducing memory traffic, computing attention over that many tokens is not tractable.\n\nSparse attention skips large portions of the attention matrix. Instead of every token attending to every other token, only a selected subset of pairs gets computed.\n\nSliding Window Attention (SWA) is the simplest variant. Each token attends only to the most recent W tokens. Local context is preserved; distant context is dropped.\n\nMistral uses SWA on some layers, alternating with full attention on others to maintain both local precision and some global reach.\n\nNative Sparse Attention (NSA) is DeepSeek’s 2025 contribution, distinct from MLA. Rather than applying sparsity post-hoc at inference, NSA trains the model with sparse attention from the start.\n\nEach layer combines three parallel branches: compressed coarse-grained attention for global context, selective fine-grained attention for important token blocks, and sliding window attention for local context. The model learns during pretraining which tokens matter.\n\nNSA matches full-attention quality on most benchmarks while running substantially faster on long sequences.\n\nQwen2.5-1M uses a sparse attention approach for its million-token context window because at that length full attention consumes over 90% of the forward pass time.\n\nTrained-in sparsity is proving to be the most principled answer to long-context scaling.\n\n# The serving layer\n\nEverything above lives inside the model weights. PagedAttention and RadixAttention live in the serving engine, and they are answers to the same KV cache pressure at a different level.\n\nWhen a request arrives, the serving engine needs to allocate GPU memory for its KV cache. The naive approach reserves contiguous memory for the maximum possible sequence length.\n\nA request allowed to generate up to 4,096 tokens gets 4,096 slots reserved upfront, whether it uses 40 or 4,000 of them.\n\nThis approach wastes 60-80% of GPU memory. Fragmentation between requests makes it worse.\n\nPagedAttention, the mechanism vLLM runs, manages the KV cache the way an OS manages virtual memory. Fixed-size blocks are allocated on demand.\n\nA block table maps each request’s logical blocks to whatever physical blocks happen to be free. There is no pre-allocation, no fragmentation, and memory waste drops below 4%.\n\nRadixAttention, the mechanism SGLang runs, takes the next step. When multiple requests share a common prefix, like a long system prompt sent to every user, the KV blocks for that prefix only need to be computed once.\n\nRadixAttention stores KV blocks in a radix tree indexed by token sequence. A new request walks the tree, finds the longest matching prefix, reuses those blocks, and computes only the genuinely new suffix.\n\nOn multi-turn workloads, RadixAttention hits 75-95% cache hit rates. A system prompt served to thousands of users gets computed once and reused until evicted by the LRU policy.\n\nPagedAttention and RadixAttention do not change which attention mechanism your model uses. A Llama 3 model with GQA runs fine under either engine. The two layers are independent.\n\n# Putting it together\n\nThe through-line across all of them is the same pressure. KV cache memory is the bottleneck, and every design here is a different move against it.\n\nMQA, GQA, and MLA reduce how much you store per token, each trading a different amount of quality for memory.\n\nFlashAttention reduces how expensively the computation accesses memory, without touching the math at all.\n\nSparse attention reduces how many tokens you attend to, which is the only answer that scales to million-token contexts.\n\nPagedAttention and RadixAttention work at the serving layer, cutting waste in allocation and reuse rather than in the model itself.\n\nKnowing which of these is the binding constraint in your setup is what determines which one actually moves the number for you.\n\nThanks for reading. That's all for today.\n\nCheers! :)"
+    },
+    {
+      "id": "2096229238441648627",
+      "text": "@akshay_pachaar https://t.co/bgWFfqtPRB",
+      "author": {
+        "id": "1747854638345572352",
+        "name": "YOKESWARAN AS",
+        "screenName": "Yokii_26",
+        "profileImageUrl": "https://pbs.twimg.com/profile_images/2084153705138671616/yfj4PaFc_normal.jpg",
+        "verified": true
+      },
+      "metrics": {
+        "likes": 0,
+        "retweets": 0,
+        "replies": 0,
+        "quotes": 0,
+        "views": 869,
+        "bookmarks": 0
+      },
+      "createdAt": "Sat Sep 05 13:29:31 +0000 2026",
+      "createdAtLocal": "2026-09-05 21:29",
+      "createdAtISO": "2026-09-05T13:29:31+00:00",
+      "media": [],
+      "urls": [
+        "https://x.com/Yokii_26/status/2096227111434412032?s=20"
+      ],
+      "isRetweet": false,
+      "retweetedBy": null,
+      "lang": "qme",
+      "score": null,
+      "quotedTweet": {
+        "id": "2096227111434412032",
+        "text": "Programming languages ranked by difficulty 👀\n\n🟢 EASY\nPython • BASIC • Visual Basic\n\n🟡 EASY–MEDIUM\nJavaScript • PHP • Ruby • Groovy\n\n🟠 MEDIUM\nJava • C# • Go • Swift • Kotlin • Dart\n\n🔴 HARD\nC • Objective-C • Scala • Zig • Perl\n\n🟣 VERY HARD\nC++ • Rust\n\n☠️ EXTREME\nAssembly\n\nWhich one are you learning right now? 👇",
+        "author": {
+          "screenName": "Yokii_26",
+          "name": "YOKESWARAN AS"
+        }
+      }
+    },
+    {
+      "id": "2096623365566193822",
+      "text": "@akshay_pachaar Hi Akshay,\nAre you up for a discussion related to the new foundational model’s arch? I am getting it hard to find people with whom I can discuss it. \n\nLmk. \n\nTweet for the problem detail: https://t.co/RtTmReNNqv",
+      "author": {
+        "id": "108878985",
+        "name": "Vikas Singh (vikas.lens) 🌿, in Dubai 🇦🇪",
+        "screenName": "HeyVixon",
+        "profileImageUrl": "https://pbs.twimg.com/profile_images/1904823617650601984/FE2RMyay_normal.jpg",
+        "verified": true
+      },
+      "metrics": {
+        "likes": 1,
+        "retweets": 0,
+        "replies": 0,
+        "quotes": 0,
+        "views": 189,
+        "bookmarks": 0
+      },
+      "createdAt": "Sun Sep 06 15:35:38 +0000 2026",
+      "createdAtLocal": "2026-09-06 23:35",
+      "createdAtISO": "2026-09-06T15:35:38+00:00",
+      "media": [],
+      "urls": [
+        "https://x.com/heyvixon/status/2096333545841328265?s=46"
+      ],
+      "isRetweet": false,
+      "retweetedBy": null,
+      "lang": "en",
+      "score": null,
+      "quotedTweet": {
+        "id": "2096333545841328265",
+        "text": "@beingamanFF hi Aman, may I talk to you sometime tomorrow? \nIts regarding foundational model discussion other than Transformer, JEPA, TimesFM.",
+        "author": {
+          "screenName": "HeyVixon",
+          "name": "Vikas Singh (vikas.lens) 🌿, in Dubai 🇦🇪"
+        }
+      }
+    },
+    {
+      "id": "2096811592650314228",
+      "text": "@akshay_pachaar I am interested in attention layers(or multihead layers) nowadays. at Deep learning(LSTM, VAE,...) , are attention mechanisms similar with LLM?",
+      "author": {
+        "id": "2281229996",
+        "name": "Gökhan DİNCEL",
+        "screenName": "gokhan_dincel",
+        "profileImageUrl": "https://pbs.twimg.com/profile_images/1674779783853649920/P74YVfy1_normal.jpg",
+        "verified": false
+      },
+      "metrics": {
+        "likes": 0,
+        "retweets": 0,
+        "replies": 0,
+        "quotes": 0,
+        "views": 62,
+        "bookmarks": 0
+      },
+      "createdAt": "Mon Sep 07 04:03:35 +0000 2026",
+      "createdAtLocal": "2026-09-07 12:03",
+      "createdAtISO": "2026-09-07T04:03:35+00:00",
+      "media": [],
+      "urls": [],
+      "isRetweet": false,
+      "retweetedBy": null,
+      "lang": "en",
+      "score": null
+    },
+    {
+      "id": "2096228185377738978",
+      "text": "@akshay_pachaar Thank you",
+      "author": {
+        "id": "1130467473495535617",
+        "name": "Asesh",
+        "screenName": "frontier_ai_era",
+        "profileImageUrl": "https://pbs.twimg.com/profile_images/2073780457175707649/dfP3wp5X_normal.jpg",
+        "verified": false
+      },
+      "metrics": {
+        "likes": 0,
+        "retweets": 0,
+        "replies": 0,
+        "quotes": 0,
+        "views": 555,
+        "bookmarks": 0
+      },
+      "createdAt": "Sat Sep 05 13:25:20 +0000 2026",
+      "createdAtLocal": "2026-09-05 21:25",
+      "createdAtISO": "2026-09-05T13:25:20+00:00",
+      "media": [],
+      "urls": [],
+      "isRetweet": false,
+      "retweetedBy": null,
+      "lang": "en",
+      "score": null
+    },
+    {
+      "id": "2094992337860796745",
+      "text": "At ESC 2026, Prof. Jing Gao’s Tianjin Chest Hospital team found homocysteine ≥15 μmol/L independently predicted MACE in 1,220 premature MI patients (aHR 2.72). Risk reached 17.5-fold with obesity and high hs-CRP—supporting Hcy for risk stratification, pending validation.",
+      "author": {
+        "id": "1891757501277929473",
+        "name": "MedJ",
+        "screenName": "MedJ0401",
+        "profileImageUrl": "https://pbs.twimg.com/profile_images/1891757892191305728/jIxAEqaH_normal.jpg",
+        "verified": true
+      },
+      "metrics": {
+        "likes": 3,
+        "retweets": 0,
+        "replies": 0,
+        "quotes": 0,
+        "views": 50091,
+        "bookmarks": 0
+      },
+      "createdAt": "Wed Sep 02 03:34:31 +0000 2026",
+      "createdAtLocal": "2026-09-02 11:34",
+      "createdAtISO": "2026-09-02T03:34:31+00:00",
+      "media": [],
+      "urls": [],
+      "isRetweet": false,
+      "retweetedBy": null,
+      "lang": "en",
+      "score": null
+    },
+    {
+      "id": "2096916362207625667",
+      "text": "This is arguably one of the best technical books you can read on how LLMs are trained at scale:\n\n> GPU memory and profiling \n> tiling, kernel fusion, FlashAttention  \n> Data / Tensor / Pipeline / Context Parallelism\n\nI’ve already read the online free version, but still had to get the physical copy for the library lol.\n\nYou can also read it here on @huggingface: https://t.co/zkFhABMOTw",
+      "author": {
+        "id": "1836078160653246464",
+        "name": "ℏεsam",
+        "screenName": "Hesamation",
+        "profileImageUrl": "https://pbs.twimg.com/profile_images/1978647680357134336/ioMmfkXF_normal.jpg",
+        "verified": true
+      },
+      "metrics": {
+        "likes": 1353,
+        "retweets": 124,
+        "replies": 24,
+        "quotes": 1,
+        "views": 55231,
+        "bookmarks": 1838
+      },
+      "createdAt": "Mon Sep 07 10:59:54 +0000 2026",
+      "createdAtLocal": "2026-09-07 18:59",
+      "createdAtISO": "2026-09-07T10:59:54+00:00",
+      "media": [
+        {
+          "type": "photo",
+          "url": "https://pbs.twimg.com/media/HRm-T9DXYAID5F_.jpg",
+          "width": 2425,
+          "height": 3234
+        }
+      ],
+      "urls": [],
+      "isRetweet": false,
+      "retweetedBy": null,
+      "lang": "en",
+      "score": null
+    },
+    {
+      "id": "2096935042387714521",
+      "text": "Over 300 original figures!\n\nAn Illustrated Guide to AI Agents is now OUT on Kindle and other Ebook stores! Presses are rolling, print copies ship in a few weeks.\n\n@MaartenGr and I spent the last year and a half making the agent stack legible: memory, tools, planning, evaluation, multi-agent systems, and code agents. We're ecstatic to finally be able to share it with you!\n\nAgents are being adopted faster than they're being understood. Our bet is that a small number of concepts will outlast everything else in this field, so we spent the time identifying them and explaining them properly.\n\nConcepts and code. You build a working agent yourself along the way.\n\nOrder here: \nAmazon: https://t.co/cZscqbIc5h\nO'Reilly: https://t.co/yQlkQSkcuE",
+      "author": {
+        "id": "1245260977626587136",
+        "name": "Jay Alammar",
+        "screenName": "JayAlammar",
+        "profileImageUrl": "https://pbs.twimg.com/profile_images/1325460517922729984/xDO9dBt-_normal.jpg",
+        "verified": true
+      },
+      "metrics": {
+        "likes": 1230,
+        "retweets": 150,
+        "replies": 38,
+        "quotes": 12,
+        "views": 64987,
+        "bookmarks": 1354
+      },
+      "createdAt": "Mon Sep 07 12:14:07 +0000 2026",
+      "createdAtLocal": "2026-09-07 20:14",
+      "createdAtISO": "2026-09-07T12:14:07+00:00",
+      "media": [
+        {
+          "type": "photo",
+          "url": "https://pbs.twimg.com/media/HRnMNwDbAAA0fxu.jpg",
+          "width": 1370,
+          "height": 1772
+        }
+      ],
+      "urls": [],
+      "isRetweet": false,
+      "retweetedBy": null,
+      "lang": "en",
+      "score": null
+    },
+    {
+      "id": "2097017979229659523",
+      "text": "Sharing lecture videos for the **How to AI (Almost) Anything/Multimodal AI** course I taught at MIT in spring 2026.\n\nThis course became quite a hit the last time I shared it in spring 2025. Spring 2026's updated version contains updated topics on multimodal agents, reasoning, self-evolving AI, and new modalities like touch and smell. Also includes slides (not videos) of guest lectures on multimodal AI for health, design, manufacturing, cities, & transportation.\n\nYoutube playlist: https://t.co/awhFUqHGBt\n\nCourse website and materials: https://t.co/m7LZaCQ4fw\n\nToday's AI can be applied to almost anything - from language to vision, audio, sensors, medical data, music, art, smell, and taste. This course covers the principles of AI (focusing on deep learning and foundation models), how we can apply AI to novel real-world data modalities, and multimodal AI that can process many modalities at once, such as connecting language and multimedia, music and art, sensing and actuation, and more.",
+      "author": {
+        "id": "630270019",
+        "name": "Paul Liang",
+        "screenName": "pliang279",
+        "profileImageUrl": "https://pbs.twimg.com/profile_images/1845163496721481729/O0UfmKab_normal.jpg",
+        "verified": true
+      },
+      "metrics": {
+        "likes": 612,
+        "retweets": 85,
+        "replies": 4,
+        "quotes": 3,
+        "views": 24054,
+        "bookmarks": 793
+      },
+      "createdAt": "Mon Sep 07 17:43:41 +0000 2026",
+      "createdAtLocal": "2026-09-08 01:43",
+      "createdAtISO": "2026-09-07T17:43:41+00:00",
+      "media": [
+        {
+          "type": "photo",
+          "url": "https://pbs.twimg.com/media/HRoZhoYaEAAnQKV.jpg",
+          "width": 2972,
+          "height": 1538
+        }
+      ],
+      "urls": [],
+      "isRetweet": false,
+      "retweetedBy": null,
+      "lang": "en",
+      "score": null
+    },
+    {
+      "id": "2096962820512559422",
+      "text": "Theres a very famous article on finding good problems to solve by stanford engineering \n\nhttps://t.co/7ln7ywT0il",
+      "author": {
+        "id": "1463444679001731076",
+        "name": "Mrinal",
+        "screenName": "Hi_Mrinal",
+        "profileImageUrl": "https://pbs.twimg.com/profile_images/2090508280460443648/TFf5f_Ga_normal.jpg",
+        "verified": true
+      },
+      "metrics": {
+        "likes": 1097,
+        "retweets": 53,
+        "replies": 2,
+        "quotes": 0,
+        "views": 74540,
+        "bookmarks": 1750
+      },
+      "createdAt": "Mon Sep 07 14:04:30 +0000 2026",
+      "createdAtLocal": "2026-09-07 22:04",
+      "createdAtISO": "2026-09-07T14:04:30+00:00",
+      "media": [],
+      "urls": [
+        "https://engineering.stanford.edu/news/how-pick-and-solve-next-great-problem"
+      ],
+      "isRetweet": false,
+      "retweetedBy": null,
+      "lang": "en",
+      "score": null,
+      "quotedTweet": {
+        "id": "2095021880898097646",
+        "text": "Work on interesting problems anon https://t.co/VMTBsAIijA",
+        "author": {
+          "screenName": "Hi_Mrinal",
+          "name": "Mrinal"
+        }
+      }
+    }
+  ]
+}
