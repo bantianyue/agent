@@ -10,3 +10,5 @@ source: https://x.com/liao_lucas/status/2097149853499588971
 - 已用 登录态本地Chrome(DOM 全页+滚动触发懒加载) + 公共 Article JSON + 公开渠道 三层核验: 本篇原文正文【无任何插图实体】(仅作者头像/分享卡)。
 - 非缺图漏传——故以忠实原文的纯文字稿为终稿, 不伪造、不挪用异文插图。
 - 若需把 X 分享卡头图作文首配图, 另行告知即可补。
+| Step 4d-i: 传送门 | completed |
+| Step 5: 预发布检查 | completed |
