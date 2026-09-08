@@ -8,8 +8,8 @@ with sync_playwright() as p:
     ctx=b.contexts[0] if b.contexts else b.new_context()
     pg=ctx.new_page()
     try:
-        pg.goto(URL, wait_until="commit", timeout=60000)
-        time.sleep(14)   # allow SPA article hydrate & lazy load
+        pg.goto(URL, wait_until="commit", timeout=90000)
+        time.sleep(20)   # allow SPA article hydrate & lazy load
         # login marker WITHOUT crashing on networkidle
         try:
             auth=pg.evaluate("async()=>{try{const r=await fetch('https://x.com/i/api/1.1/account/settings.json',{credentials:'include'});return r.status}catch(e){return 'x'}}")
