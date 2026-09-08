@@ -1,0 +1,81 @@
+Everyone seems to be talking about inference and performance engineering right now. 
+
+I have seen the word “kernel” show up in every other post on my timeline, and inference companies are raising huge rounds left and right.
+
+So here’s an intro to GPU kernels and why writing custom kernels is useful.
+
+## background: "kernel" is overloaded
+
+In an operating system, a kernel is the core program that provides an API between software programs and physical hardware (CPU, memory etc).
+
+In GPU programming, a kernel is a function that is run in parallel across thousands of GPU threads. NVIDIA GPUs are shipped with the cuBLAS library, which provides precompiled kernels for matrix multiply, matrix-vector multiply, dot product, and so on.
+
+These two definitions of “kernel” are vastly different. You’ve probably heard more about the last one: when someone says they "wrote a kernel," or that a model runs fast because of "custom kernels," they are referring to writing a custom GPU kernel.
+
+## what a kernel is
+
+A kernel is a function run on the GPU. The GPU runs that same function across thousands of threads at the same time, and each thread is assigned a thread ID, allowing it to identify itself and its scope.
+
+This is an example of a kernel that adds two vectors:
+
+Notice how there is no loop. a[], b[], out[] are in shared memory, and you can run this on thousands of threads split across GPU cores.
+
+This is the main idea! Each thread figures out which piece of shared memory they’re responsible for, loads it from shared memory, does some math, then writes it back to shared memory.
+
+## how a kernel gets called
+
+You do not call a kernel directly unless you write a custom one.
+
+For example, torch.matmul(a, b) gets compiled like so:
+
+1. PyTorch sees the two arrays are on the GPU and picks the C++ function for matmul on GPU
+
+2. That function calls into a precompiled library that NVIDIA ships (e.g. cuBLAS for matrix multiply, cuDNN for other common neural net operations), or into a kernel PyTorch wrote itself.
+
+3. The library tells the GPU driver to launch the kernel. Here's the code and pointers to the data; now run it with this many threads.
+
+4. The CPU puts the launch in a queue and moves on to the next line of Python. The GPU works through the queue in order.
+
+So running a model once entails the CPU queuing a bunch of kernel launches and the GPU processing them. If you open a profiler that records what the GPU is doing over time, you will see exactly this: a timeline of hundreds of little boxes, each one a kernel.
+
+Every kernel launch has a cost of a few microseconds, which adds up!
+
+## writing custom kernels
+
+At first glance, GPU kernels seem to be a solved problem; surely we have written a near-perfect matmul kernel by now. However, a model isn't one matmul; It's hundreds of small operations in a row, and optimizations can be made in fusing them, specializing for various input shapes, optimizing fewer kernel launches, and using brand-new hardware features.
+
+We’ll cover kernel fusion here:
+
+A GPU is made of up of slow, large High Bandwidth Memory (HBM) and small, fast SRAM. HBM ↔ SRAM bandwidth is maybe a few terabytes / second, but the cores can do math much faster than that. So for most steps in inference, the cores sit idle waiting for data to arrive.
+
+Now look at what a stock PyTorch model does. Say you have three operations in a row: multiply, add a constant, run every number through an activation function. This would mean three separate kernels, each reading its input from slow memory, doing a small amount of math, then writing it back to slow memory.
+
+A custom kernel would do all three steps in one pass. Read once, do the multiply, the add, and the activation function while the numbers are still in SRAM, and write back once. This is what people mean by "fused" kernels.
+
+FlashAttention is the famous example: Standard attention computes the full attention matrix, writes it to HBM, then reads it back to apply softmax and multiply by V.
+
+FlashAttention instead computes attention scores, softmax, and multiplies by V in tiles while each tile is in SRAM, then accumulates the result before moving to the next block. (Note: doing this in tiles is actually quite hard and requires a clever algorithm)
+
+## writing custom kernels is sexy, but comes last
+
+it is important to know that while writing custom kernels is the cool, sexy way to improve time to first token (TTFT), latency per token, and throughput, most gains are made in the unsexy layers above the kernel:
+
+- Batching: grouping many requests into one forward pass
+
+- Quantization: storing weights in 8 or 4 bits instead of 16, so there's less to read per token
+
+- Speculative decoding: using a small model to guess several tokens, then verifying them with the big model in one pass
+
+- Compiler work: letting an ML compiler fuse easy ops before you write anything by hand
+
+- Other tricks like prefix caching, prefill/decode disaggregation, paged attention and more
+
+A slow inference system is probably slow because it’s skipping the standard tricks above. Writing a custom kernel is a lot of work and it’s only worth it once everything above it is already fast.
+
+## where to start
+
+For NVIDIA GPUs, Triton is a Python library where you write logic for one block of data and it generates GPU code for you. It gets you most of the way, but CUDA is the next level down and gives you full control.
+
+There is a lot of work left in this space. Most of it is above the kernel: better batching, scheduling, and memory management across the whole inference stack. A lot of it is next to the kernel too..Triton is one of many kernel DSLs (languages built just for writing kernels) and the field is moving fast, with projects like ThunderKittens, TileLang, CuTe, and Mojo all trying different tradeoffs between control and ease of use.
+
+“Making Deep Learning Go Brrrr From First Principles” by Horace He is a great introductory piece to performance engineering and inference, and I highly recommend a read even if you’re not particularly interested in writing kernels.
