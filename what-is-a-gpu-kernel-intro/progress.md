@@ -1,25 +1,7 @@
-# 进度追踪 - what-is-a-gpu-kernel-intro
-
-| Step | 状态 |
-|------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
-| Step 6: 推送草稿 | pending |
-
-创建时间: 2026-09-08
-来源: https://x.com/liao_lucas/status/2097149853499588971
-| Step 4d-i: 传送门 | completed |
+✅ 完成 (what-is-a-gpu-kernel-intro)
+- 源: X Article @liao_lucas《what is a kernel, anyway?》 ~6.4k 文字
+- 主题: GPU kernel 是什么 / 如何被调用(fusion 例 HBM-vs-SRAM / FlashAttention) / 该在 standard 层之后就绪后才是自己写 / Triton→CUDA + DSL 生态
+- 正文图: 0 —— 原文插图/例程系 X 客户端渲染, 公共 JSON/md 只含作者头像, 平台侧取不到静态图, 故文字展开机制(不臆造插图)
+- 封面: 源无原图 → msyh 标题信息卡(cover 900x383 + square 500)
+- preflight ALL PASS; push media=TIqnnVEu6Oy3-wtKttGa0W23o-413NO8LTeOFI4Xh6bc9X8OS5gjX2sxMH0Byw18; verify body 0 图; arbiter(queue jid_20260908_140245_1dac2d) done
+source: https://x.com/liao_lucas/status/2097149853499588971
