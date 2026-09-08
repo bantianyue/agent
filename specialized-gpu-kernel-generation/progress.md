@@ -10,4 +10,4 @@ source: https://www.databricks.com/blog/achieving-extreme-efficiency-through-spe
 | Step 2: 写文章（含翻译+结语+参考区+传送门） | completed |
 | Step 3: Humanizer 润色 | completed |
 | Step 4: 预发布检查 | completed |
-| Step 5: 推送草稿 | pending |
+| Step 5: 推送草稿 | completed |
