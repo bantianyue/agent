@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """article_data_build.py — 跨模型 KV 缓存迁移 arXiv 论文 (正文翻译)"""
 
-import json, os, sys
+import json, os, re, sys
 
 _article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
 
@@ -137,6 +137,25 @@ DATA = {
     "reference_url": "https://arxiv.org/html/2608.03893v1",
     "title": "跨模型 KV 缓存迁移：前缀复用的闭式线性映射",
 }
+
+# === 2026-09-09 用户指令：忽略实验与消融部分 ===
+DATA["sections"] = [s for s in DATA["sections"] if s.get("title") != "4 实验"]
+_sec_renum = {
+    "5 更广泛的影响、未来工作与局限性": "4 更广泛的影响、未来工作与局限性",
+    "6 结论": "5 结论",
+}
+for _s in DATA["sections"]:
+    if _s.get("title") in _sec_renum:
+        _s["title"] = _sec_renum[_s["title"]]
+    for _i, _p in enumerate(_s.get("paras", [])):
+        # 去掉指向已删除实验/消融章节的交叉引用与消融结论
+        _p = _p.replace(
+            "跨层源选择是三个映射组件中贡献最大的单一组件（§4.3）。",
+            "跨层源选择是映射器的三个组件之一。",
+        )
+        _p = re.sub(r"[（(][^（()）]*§4\.[0-9][^（()）]*[）)]", "", _p)
+        _p = re.sub(r"[（(][^（()）]*表\s*2[^（()）]*[）)]", "", _p)
+        _s["paras"][_i] = _p
 
 out_path = os.path.join(_article_dir, "article_data.json")
 with open(out_path, "w", encoding="utf-8") as f:
