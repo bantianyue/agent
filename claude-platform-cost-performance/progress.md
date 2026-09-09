@@ -18,7 +18,7 @@
 | Step 4f: Humanizer 润色 | completed |
 | Step 4g: 文本格式修复 | completed |
 | Step 5: 预发布检查 | completed |
-| Step 6: 推送草稿 | pending |
+| Step 6: 推送草稿 | completed |
 
 创建时间: 2026-09-09
 来源: https://x.com/ClaudeDevs/status/2097369738968195513

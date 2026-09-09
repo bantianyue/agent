@@ -1305,3 +1305,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-09-09 19:21 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-09 19:35 | ✅ 完成 | 草稿已推送并核验（draft.id: TIqnnVEu6Oy3-wtKttGa0eaxtuJBPj2-9xb8JYTfaiN4q0FKf9XPmhiXpTC4UVGR） |
