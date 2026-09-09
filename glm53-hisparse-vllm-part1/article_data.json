@@ -1,70 +1,98 @@
 {
+  "title": "Hybrid HiSparse：把 KV 卸载省到刀刃上（vLLM×GLM 5.3 Part1）",
+  "reference_url": "https://vllm.ai/blog/2026-09-08-glm53-part1-hybrid-sparse-offloading",
   "summary": [
     {
-      "key": "要点关键词1",
-      "body": "核心内容。替换本占位。"
+      "key": "它解决什么",
+      "body": "在 8×H200 这类内存很紧的节点上跑 GLM5.3 这类大模型的强装部署，把此前做不到的 100 万上下文跑起来、并拿下更高并发。稀疏-MLA 的 indexer 只 attend top-K，于是能只把「被选中的 token」留 GPU、其余 KV 卸 CPU；Hybrid 更进一步，GPU 够用就全留、吃紧才卸，让它几乎只在高并发时才付搬运成本。"
     },
     {
-      "key": "要点关键词2",
-      "body": "核心内容。替换本占位。"
-    },
-    {
-      "key": "要点关键词3",
-      "body": "核心内容。替换本占位。"
+      "key": "一句话创新",
+      "body": "暖则满驻留、压则逐页放下热与旧的，配合共享块池的热缓冲页 + 每请求 2× top-K，让被压的请求以部分驻留继续解码而不是被抢占重 prefill。"
     }
+  ],
+  "lead": [
+    "vLLM 官方博客 GLM 5.3 优化系列第一篇，讲 Hybrid HiSparse 卸载。正文中文导读尽量保留其数字与机制，SVG 原图来自官方博客。",
+    ""
   ],
   "sections": [
     {
       "type": "h2",
-      "title": "正文第一章标题",
+      "title": "为什么需要更聪明的 KV 取舍",
       "paras": [
-        "第一段正文文字。",
-        "第二段正文文字。"
+        "vLLM 的目标很直白：把推理变快、变便宜。本文是 GLM 5.3 优化系列的第一篇，讲怎么靠 Hybrid HiSparse 在一台 8×H200 节点(对这种体量的模型内存抓得很紧)上做强装部署。关键成效是让 GLM 5.3 得以在这套硬件上跑满 100 万上下文——此前在这个硬件上做不到——并在各上下文长度下拿到明显更高的并发。",
+        "agentic 负载的特点是许多并发请求、每段上下文都很长且不断变长。GPU 块池是固定的，KV cache 终会放不下新并发请求的新块。此前两道旧解：一是抢占式(preemption)，选一个请求丢它的 KV 稍后再 prefill 回来，每被逐出一次该请求的 TTFT 就要原样再吃一遍；二是常规 offloading，把块搬到宿主内存，可密集 attention 要求每个 token 都留在 GPU 上，所以并发请求数仍被 GPU 内存钉死(见下图一：同一个池、两个在长高的请求，抢占 vs 卸载)。"
       ],
-      "figs": [
-        {
-          "src": "fig1.png",
-          "caption": "图片说明文字"
-        }
-      ]
-    },
-    {
-      "type": "h3",
-      "title": "子标题示例",
-      "paras": [
-        "子标题下的段落。"
-      ]
+      "fig_after": {}
     },
     {
       "type": "h2",
-      "title": "含表格的章节",
+      "title": "稀疏给了 offloading 新杠杆",
       "paras": [
-        "下面是一张示例表格。"
+        "对稀疏 MLA 类 KV cache，indexer 只挑 top-K 个 token、attention 也只看向这些。HiSparse 正利用这点：除被选中的 token 外把其余 KV 全部卸到 CPU，于是每个请求对 GPU 内存的占用就有了一个有效上界。indexer 的 KV 会留在 GPU、并且随上下文还会长，但它整体小得多；GLM 5.3 的 IndexShare 意味着每四个稀疏-MLA 层共享同一个 indexer 层，把这块成本也摊薄了。",
+        "Hybrid HiSparse 再进一步：只要 GPU 还放得下，KV 就尽量留在 GPU 上、不卸；只有 KV 吃紧时才动用上面这套 HiSparse 卸载。热缓冲页(hot buffer)按 token 索引，所以一页能装来自许多不同 CPU 块的 token，跨大段上下文省下搬运。也就是说，只有系统在 KV 压力下、即并发更高时，它才付出 CPU-GPU 搬运的代价，热页来自与常规 KV 页同一个块池、同一个 KV-tensor，对稀疏 MLA kernel 来说看起来就是普通页。Hybrid HiSparse 会同时保留两个请求解码：每个请求就地释放它最冷的页、同一块槽位再租给新尾与热页，两者都继续 decode。只有它做得到两个请求同时在跑(这也是下图一右下格的要点)。"
       ],
-      "table": {
-        "head": [
-          "列1",
-          "列2",
-          "列3"
-        ],
-        "rows": [
-          [
-            "A",
-            "B",
-            "C"
-          ],
-          [
-            "D",
-            "<strong style=\"color:#0F4C81;\">E</strong>",
-            "F"
-          ]
+      "fig_after": {
+        "1": [
+          {
+            "src": "fig01.png",
+            "caption": ""
+          }
         ]
       }
+    },
+    {
+      "type": "h2",
+      "title": "三种驻留状态",
+      "paras": [
+        "驻留状态按页跟踪，压力涨落时请求在三种态之间移动。满驻留(full)：只要压力不到，所有稀疏-MLA KV 都留在 GPU，完成的整段前缀页则主动复制一份进宿主内存备预案。混合驻留(mixed)：请求的尾部继续留在 GPU，较老的页只存在 CPU 里，indexer 要的那几行放进热缓冲；块表里真块与空占位符并排，尾部永不被逐出。用一个融合 kernel 解 top-K：驻留 token 原地读，热 token 读并刷新其 LRU 项，miss 时把 pinned 宿主内存的单个行拷进一个 LRU 槽位。decode 路径上没有任何地方要等 CPU 的裁决，所以它可以继续被 CUDA graph 捕获。零驻留(no)：一个只存在于 CPU 内存里的前缀被新请求复用，开始时全用占位符加一个热页；行在 indexer 选中时才来，因此只为模型真正 attend 到的内容付钱，而不是为整段历史付钱。",
+        "三种态之所以成立，是因为缓冲页并不是一块独立分配：它就是一块普通 KV-cache 块，经 vLLM 的 Hybrid Memory Allocator(HMA) 与驻留页共用同一个块池，请求第一次需要时租下、不需要时还回；一请求释放的块能成为另一请求的缓冲容量。核心里无论是驻留页里的行还是热缓冲里的行，resolver 都只给 HMA 行 id，由 HMA 用同一个 stride 一并抓取。",
+        "HiSparse 还会在压力到来之前就做准备：一段可缓存前缀页完成后，在继续用 GPU 服务它的同时就排起到 CPU 的拷贝；之后若 GPU 缓存填满，这页无需再拷便能释放 GPU 槽。就算压力先打到更新的页，那页的 GPU 槽在拷贝一排队即可立刻复用，拷贝完成时 CPU 副本即可用来做前缀复用。hisparse-glm 分支把这条路径做得轻：前传结束后一次性同 launch 把全部稀疏-MLA 层拷过去，拷贝被排在该模型的 GPU stream 上，从而同步简单又安全。"
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": "fig02.png",
+            "caption": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "与 vLLM 其它机制协作",
+      "paras": [
+        "Hybrid HiSparse 本质是对共享 HMA 池的一个驻留策略 + 一个连接器，其它 KV 机制照旧。别的缓存组仍用普通前缀缓存 / 传输 / offloading；indexer KV 完全不被它碰，标准的 OffloadingConnector 就能用普通块粒度独立把它卸载。来自 P/D 拆分的导入在某个前缀放不进驻留时可直接落到宿主侧；投机解码经由每步可重放的 resolver 计划、与该请求共享热态。",
+        "热缓冲默认每个请求 2 倍 top-K 行，保证命中率高同时保持缓冲体积小。由于同一 TP rank 组里 MLA KV 相同，pinned 宿主池按每个 DP 副本分配、由它局部的各 TP rank 共享：TP rank 0 写共享副本、每个 rank 都可读，再以 CUDA event 保证流顺序。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "测试配置与关键数字",
+      "paras": [
+        "在 8×H200 上用 OpenHands 的多轮 agentic 工作负载(来源：lmsys 的 glm5.2 优化博客)：13 轮对话，第一轮 74,160 token、后续轮 753 token、输出固定 220 token。两侧 TP8 部署都用 MTP3、FP8 KV、admission 上限 142K、max_num_batched_tokens=32768、max_num_seqs=256、gpu_memory_utilization=0.92。offloading 基线用 512 GiB 卸载池；Hybrid HiSparse 把同一份宿主预算切成 384 GiB HiSparse 池 + 128 GiB 普通 offloading。",
+        "图上横轴是纯逻辑总吞吐按 8 卡均摊、纵轴是交互度(1000 除以平均 TPOT)；下图下半给的是各 benchmark 点测出的平均非零并发运行请求数(vllm:num_requests_running)。你能看到在更长上下文区段，因为稀疏-MLA 的驻留被限定住，HiSparse 能撑住更多并发请求；而热缓冲给每个请求加一块固定的 GPU 成本，所以短上下文时普通驻留反而能放下更多请求。加大热缓冲会用一部分这种容量换取更大的热命中覆盖。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig03.png",
+            "caption": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "路线图与注意",
+      "paras": [
+        "作者计划让 Hybrid HiSparse 随 vLLM v0.30 广泛可用；现阶段论文全文与 HiSparse 方法见 arXiv 2608.07009(hisparse)与 2603.12201(IndexShare)。上文给出的启动命令与客户端配置都可从原文的复现附录拿到。计算器的数字只是预估而非保证的 serving 上限，运行时工作区、请求长度倾斜与调度行为都可能让实际并发更低；另外 MTP 会进一步限制并发，因为其热缓冲要一次容纳所有验证 token，发布时每个热缓冲需按(投机 token 数+2)×top-K 来定体积，这一约束作者也计划继续收紧、目前尚未被计算器计入。"
+      ],
+      "fig_after": {}
     }
   ],
   "conclusion": [
-    "结语分析内容1。",
-    "结语分析内容2。"
-  ],
-  "reference_url": "https://arxiv.org/html/XXXX.XXXXX"
+    "一句话收束：稀疏的注意力让「只卸掉模型不会 attend 的历史」成为可能，而 Hybrid 把这层卸载推迟到真的缺内存时才启用，于是在短上下文保住普通驻留的高并发、长上下文靠界定稀疏驻留继续多塞请求。方法细节与复现见其博客附录及 arXiv 2608.07009 / 2603.12201。"
+  ]
 }
