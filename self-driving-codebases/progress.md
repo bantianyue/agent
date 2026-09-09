@@ -22,3 +22,4 @@
 
 创建时间: 2026-09-09
 来源: https://cursor.com/cn/blog/self-driving-codebases
+| Step 4d-i: 传送门 | completed |
