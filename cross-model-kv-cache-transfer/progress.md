@@ -1,25 +1,14 @@
-# 进度追踪 - cross-model-kv-cache-transfer
-
-| Step | 状态 |
-|------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | completed |
-| Step 6: 推送草稿 | completed |
-
-创建时间: 2026-08-11
-来源: https://arxiv.org/html/2608.03893v1
-| Step 4d-i: 传送门 | completed |
+✅ 完成 (cross-model-kv-cache-transfer) — 公式修复后覆盖推送（2026-09-09 第二版）
+- 源: arXiv 2608.03893《Cross-Model KV Cache Transfer in LLM Families》(arXiv HTML v1)
+- 主题: 模型家族内跨模型 KV 缓存迁移，matched-KV 对的闭式线性映射跳过 prefill；top-k 源层选择 + 去 RoPE 内容空间 + 500 序列岭回归
+- 本次修复: 残留裸 LaTeX（20 段 \cmd、\{、{=} 等）全部转 Unicode/中文描述；修复 json 转义损坏的 \times；补全 S1/S2 多处被丢弃公式造成的悬空句；图 3 张核对齐全
+- 正文图: 3（fig01 管线总览 / fig02 线性结构热图 / fig03 映射器架构，中文图注）
+- 封面: cover 900x383 + cover-square 500
+- preflight ALL PASS; 2026-09-09 18:40 覆盖推送; verify body 3 图
+source: https://arxiv.org/html/2608.03893v1
+| Step 0: 提取原文+下载图片 | completed |
+| Step 1: 生成封面 | completed |
+| Step 2: 写文章（含翻译+结语+参考区+传送门） | completed |
+| Step 3: Humanizer 润色 | completed |
+| Step 4: 预发布检查 | completed |
+| Step 5: 推送草稿 | completed |
