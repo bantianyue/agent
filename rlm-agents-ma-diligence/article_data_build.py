@@ -1,90 +1,104 @@
 #!/usr/bin/env python3
-"""
-article_data_build.py 模板
-=====================
-写新文章时：cp 到文章目录下，填入 DATA 字典内容，然后：
-    python write-article-data.py <文章目录>
-    python render-article.py <文章目录>
-    python add-portal.py <文章目录>
-
-字段说明：
-  - summary: 要点速览，列表格式 [{key, body}]。每条 key 是一两个词的标题，body 是一条结论（≤50字）。
-            ⚠️ 必须为 [{key, body}] 列表，不能是字符串！template.html 用 {% for item in summary %} 遍历。
-  - lead: 导语段落列表，每段用 **加粗** 标核心句
-  - sections: 正文章节。type 为 'h2'（大标题）或 'h3'（子标题）。
-              figs 可选，每个 {src: 文件名, caption: 图注文字}
-  - conclusion: 结语段落列表。**铁律**：① 不出现"本文""这篇""本博客"等自称/元引用前缀——直接陈述结论，读者知道在说谁。② 每段不超过180 token。③ 不出现"独立观点""我的看法""个人见解"等废话标记——结语本身就是观点。④ 每段首句直接是结论，不是"本文提出了…"。
-  - reference_url: 原文出处 URL
-"""
-
+# -*- coding: utf-8 -*-
 import json, os, sys
 
-# 获取文章目录（兼容 write-article-data.py 的 exec 调用）
 _article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
 
 DATA = {
-    # ⚠️ 要点速览：必须为 [{key, body}] 列表，不可为字符串。**必须恰好 3 条**（write-article-data.py 三重校验要求 len(summary) == 3）
     "summary": [
-        {"key": "核心观点", "body": "一句话说清论文/文章最关键的结论"},
-        {"key": "关键数据", "body": "支撑核心结论的具体数字或对比"},
-        {"key": "方法创新", "body": "区别于已有工作的核心创新点"},
+        {"key": "核心结论", "body": "Harvey 联合 Baseten 用递归语言模型（RLM）harness 做并购尽调，7 个模型的 rubric 通过率平均从 23.3% 提到 62.4%，涨 39.1 个百分点"},
+        {"key": "后训练增益", "body": "在 harness 内后训练：Qwen3.5-122B-A10B root 经 GRPO 强化学习，50 个留出文档室通过率从 29.9% 升至 63.0%"},
+        {"key": "关键洞察", "body": "文档室高达 80M token、远超单上下文；root 只占 token 小头却决定质量，穷尽委派等行为少量样本即可习得"},
     ],
 
     "lead": [
-        "引导段第一句。介绍背景和问题定位。",
-        "引导段第二句。点明本文核心内容。",
+        "端到端法律任务往往要读几十 M token 的文档：一场并购尽调需要在一个文档室里翻遍数千份文件，再产出一份带引用和量化敞口的尽调备忘录。Harvey 团队此前的 Tenet 研究预览强调过模型与 harness 协同优化的价值，今天他们放出了在并购尽调上继续实验的最新结果。",
+        "Harvey 与 Baseten 合作构建了一个递归语言模型（RLM）harness：把整个文档室装进 Python REPL，由一个 root agent 向各自有独立上下文的子代理派发有界的审阅任务。在 LAB Diligence 任务上，这套框架把 7 个模型的平均 rubric 通过率提升了 39.1 个百分点；再对 root 做强化学习后训练，Qwen3.5-122B-A10B 的通过率从 29.9% 涨到 63.0%。",
     ],
 
     "sections": [
         {
             "type": "h2",
-            "title": "第一节标题",
+            "title": "任务与 harness 的错配",
             "paras": [
-                "段落一正文。**加粗** 标核心结论。",
-                "段落二正文。",
+                "Harvey 最近发布的 LAB Diligence 是 LAB 的扩展，加入了并购尽调的综合环境。一个文档室最多包含 5000 份文档，按类别组织在几十个文件夹里，总上下文可达 8000 万 token。",
+                "文档室内的 agent 要产出完整的尽调备忘录，包括带文档引用的发现、相关的量化敞口，以及对交易下一步的建议；由 LLM judge 依据一份包含数百条 pass/fail 判据的专家 rubric 打分——Aravon Bridge Bank 这个例子就有 571 条判据。",
+                "尽调所需的证据散落在文档室里：有些发现要把多份文档合起来看，有些则要核对支撑材料是否缺失。在基线实验里，agent 只是选择性地搜索和阅读，文档室的大部分内容根本没被读过。这类任务需要的，是一个能把审阅分散到多个有界上下文、再把结论汇总起来的 harness。",
+                "作为基线，他们先用了 Legal Agent Bench 的标准工具循环（tool-loop）harness。在这个框架里，基础模型在 50 个留出文档室上平均只通过 23.3% 的 rubric 判据，没有任何一个模型能在任何文档室全过。",
+                "这暴露的是任务与 harness 之间的错配：单个文档室太大，放不进一个模型的上下文，但大部分初步审阅可以按类别拆开，再由 root 汇总出备忘录——律所交易团队本来就是这么分工的。",
+                "于是他们改用 RLM harness：root agent 拿到一个加载了文档室（可查询变量）的 Python REPL，能程序化搜索语料；它规划审阅范围并把子任务派发给子代理。每个子代理收到一份有界的语料切片和 root 的指令，在自己的上下文窗口内工作，把发现作为 REPL 变量返回。默认使用单层子代理，实际运行时 root 会并行派出大量调用。",
+                "七个模型在 RLM harness 下平均通过率从 23.3% 升到 62.4%。作为对照，两个禁用联网工具的通用编码 agent（Claude Code + Opus-5、Codex + GPT-5.6 Sol）在同样极简指令下只分别通过 24.6% 和 12.0%，比它们自己跑工具循环还低 17.9 和 4.6 个百分点——两个 agent 都过早停止阅读、写更短的备忘录，而且明明有能力派生子代理却一个都没派。",
+                "RLM harness 还显著提高了真正进入模型上下文的语料占比。用探针估测覆盖率（root 或子代理任一模型读到的文档室内容占比），标准工具循环下没有任何一次 run 读过 1% 以上，多数在 0.1% 到 0.5% 之间；RLM 下几乎每次 run 都读过 10% 以上，多数接近全读。在这个区间里，覆盖率越高，rubric 通过率越高。",
+                "换到 RLM harness，七个基线模型里有六个的每文档室生成成本上升，Claude Opus 5 是例外：它在工具循环里靠自己读要花约 18 美元一个文档室；作为 RLM root 只花约 7 美元，得分还高出 35 个百分点。",
+                "再拆解 root 与子代理各自的贡献：用四个 root 模型配三个 Qwen 子代理模型在 30 个留出文档室上测试，换 root 的影响明显更大——固定子代理只换 root，最高分与最低分平均差约 38 个百分点；固定 root 只换子代理，差距平均只有约 8 个百分点。值得注意的是，root 只占整个 agent token 用量的小头：以 Opus 5 编排时，它只占输入 token 的 3.8% 和输出 token 的 1.1%，大部分文本由子代理消化，root 负责决定怎么拆、怎么汇总。",
+                "既然协调才是主要瓶颈，他们把最初的后训练实验聚焦在 root 上。",
             ],
-            # ⚠️ ⚠️ ⚠️ 图必须放在 section 内部，绝不能放在 DATA 顶层！
-            #    模板只遍历 sec.figs / sec.fig_after，顶层 figs 被静默忽略。
-            #    推送前务必 grep -c '<img' article.html 确认 > 0。
-            # 可选：图嵌入。src 是文件名（相对文章目录），caption 是图注文字
-            # ⚠️ 铁律：正文中引用的每个"图 N"都必须有对应的 fig 条目，不能少。
-            #    blocks.jsonl 中标记 hero=true 的图只用作封面，不会嵌入正文。
-            #    如果正文引用该图，必须同时 embed 一份（不能只做封面）。
-            "figs": [
-                {"src": "fig01.png", "caption": "图 1：说明文字"},
-            ],
-            # 进阶：使用 fig_after 实现段落级内联（比 figs 更精确，图挂在指定段落之后）
-            # 格式：{"para_index": [{"src": "figN.png", "caption": "图注"}]}
-            # 推荐 5 图以上的文章使用 fig_after，render-article.py 自动内联
+            "fig_after": {
+                "0": [{"src": "fig01.jpg", "caption": "图 1：tool-loop 基线、通用编码 agent 与 RLM harness 的通过率对比"}],
+                "1": [{"src": "fig02.jpg", "caption": "图 2：LAB Diligence 的示例文档室（Aravon Bridge Bank：2270 份文档、82 个文件夹、14 个类别）"}],
+                "2": [{"src": "fig03.jpg", "caption": "图 3：Aravon Bridge Bank 任务的 rubric 判据示例"}],
+                "3": [{"src": "fig04.jpg", "caption": "图 4：标准 tool-loop harness 在 50 个留出文档室上的平均通过率"}],
+                "5": [{"src": "fig05.jpg", "caption": "图 5：depth-1 的 RLM harness：文档室载入 Python REPL，root 规划并派发子任务"}],
+                "6": [{"src": "fig06.jpg", "caption": "图 6：通过率与探针覆盖率的散点（7 个模型、两种 harness，每点一次 run）"}],
+                "8": [{"src": "fig07.jpg", "caption": "图 7：平均通过率 vs 每文档室生成成本（7 个模型、两种 harness）"}],
+                "9": [{"src": "fig08.jpg", "caption": "图 8：RLM harness 内的分工（4 个 root × 3 个子代理，30 个留出文档室）"}],
+            },
         },
         {
-            "type": "h3",
-            "title": "子节标题",
+            "type": "h2",
+            "title": "在 harness 内做后训练：先 SFT，再 RL",
             "paras": [
-                "子节段落。",
+                "他们先对 GLM-5.2 root 做 rejection-sampling 自蒸馏 SFT。这批实验用的是另一套 20 个文档室的留出集，GLM-5.2 基座在该集上的基线是 46.1%，低于在更大留出集上报的 65.4%。",
+                "基座 GLM-5.2 开箱并不能稳定执行高分行策略——频繁出现性能塌陷：作为 root 过早放弃、委派不足，或没把子代理结果转成像样的交付物。既然强策略本来就在模型分布之内、只是不够稳，他们用 rejection-sampling 自蒸馏把分布收紧到目标模式：挑出覆盖率高的成功 run，用这些轨迹微调 root。",
+                "在这 20 个文档室的留出集上，SFT 后的 root 拿到 60.1%，基座只有 46.1%。回看轨迹可以发现，训练帮 root 更全面地审阅文档室，并把更高比例的子代理发现带进最终备忘录。",
+                "其他行为变化也很有信息量：子代理调用量与文档室规模的相关系数从 0.17 升到 0.84，说明训练后的 root 学会按文档室大小伸缩委派规模；它还学会了在子代理仍在阅读时就开始写备忘录。结论是，穷尽委派这类构成强 root 的行为，从少量 on-policy 轨迹就能学到，既不需要特权信息也不需要标注的法律知识——因为好行为本来就在分布里，自蒸馏只是把它稳住。",
+                "这个结果推动他们尝试基于强化学习的后训练，看能否把模型推到分布之外、直接通过任务奖励引出新行为。",
+                "RL 实验先用较小的 root——Qwen3.5-122B-A10B，让循环更快跑起来。用 GRPO 训练，奖励就是 judge 判定的 rubric 通过率，子代理固定为 Qwen3.6-35B-A3B。40 个训练步内，平均 rollout 通过率从约 23% 升到约 56%；在 50 个文档室的留出集上，最终 checkpoint 得 63.0%，基座只有 29.9%。",
+                "RL 之后，文档室平均覆盖率从 62% 升到 96%——尽管覆盖率并不是显式奖励项。基座 run 分布在整个覆盖区间，其中还有一团覆盖率低于 20%、得分接近 0 的；而每条 RL 训练的 run 都读过 60% 以上的文档室，多数读完全部。",
+                "训练后的 root 每个文档室多发出 64% 的子代理调用（RL 比 SFT 对委派量的改变更大：64% 对 29%）。基座 Qwen root 原本要等所有子代理返回后才一次性写备忘录；RL 后它学会边写边审：把备忘录写作分段进行，与子代理成果的审阅交错推进。",
+                "为验证这套配方在大模型上也成立，他们正在用同样的 GRPO 配置把 GLM-5.3 训练成 RLM root：judge 通过率作奖励、Qwen3.6-35B-A3B 子代理固定、root 用 LoRA、group size 8、batch size 24。GLM-5.3 的 rollout 起点比 Qwen root 高不少，提升空间更小；从第 0 到第 20 步，平均 rollout 通过率从约 51% 爬到约 59%（首尾八步平均），噪声在这个 batch size 下属正常。",
+            ],
+            "fig_after": {
+                "2": [{"src": "fig09.jpg", "caption": "图 9：GLM-5.2 作 root，自蒸馏 SFT 前后通过率对比（独立 20 个文档室留出集）"}],
+                "3": [{"src": "fig10.jpg", "caption": "图 10：GLM-5.2 root 在 SFT 前后的行为变化（表 1）"}],
+                "6": [{"src": "fig11.jpg", "caption": "图 11：Qwen3.5-122B-A10B root 在 RL 前后的通过率与覆盖率关系"}],
+                "8": [{"src": "fig12.png", "caption": "图 12：GLM-5.3 大规模 RL 训练的早期进展（平均 rollout 通过率）"}],
+            },
+        },
+        {
+            "type": "h2",
+            "title": "下一步与启示",
+            "paras": [
+                "RLM harness 在测过的模型上都带来提升，RL 又在这个 harness 内给 Qwen root 再添增益；不过这些分数距离他们设想的近乎满分仍有明显差距。",
+                "以上训练实验只是初步探索。除了跑完 GLM-5.3 的大规模训练，他们还会试 SFT 与 RL 的组合、训练子代理本身。RLM harness 把 root 的编排和子代理的阅读拆开了，因此两者可以单独或联合训练，包括让子代理也学会继续向下委派。",
+                "最核心的发现——模型与 harness 协同优化能显著改善长地平线环境里的 agent 表现——并不局限于尽调场景。他们正在把同一套 harness 结构与训练方法迁移到其他长上下文的法律工作。",
             ],
         },
         {
             "type": "h2",
-            "title": "第二节标题",
+            "title": "附录：递归深度与 RL 基础设施",
             "paras": [
-                "段落正文。",
+                "他们也测过再加一层委派是否有帮助。depth-1 的子代理只返回普通 LLM 补全，不给工具也不准再委派；depth-2 的子代理拿到 Python REPL，可以继续往下派。每轮实验里 root 与所有子代理用同一模型。GLM-5.2 和 Qwen3.5-122B-A10B 都试了，但 GLM-5.2 的 depth-2 run 大量超时，下面只报 Qwen：在 14 个文档室上，depth-2 改善了 4 个、拖累了 10 个，平均通过率降了 19 个百分点；其中四个 regression 里，depth-2 agent 读了文档内容却始终没产出报告。这也是最初后训练实验采用 depth-1 的原因。",
+                "RL，尤其在这种超长 episode 下，与其说是训练信号问题，不如说是基础设施问题：单个 rollout 可能要跑一个多小时墙钟。为了压训练墙钟，他们用了异步 off-policy 推理、连续推理批处理、过采样、飞行中权重更新等方法，并用选择性 token masking 和异步相关上限来控制 off-policy 的影响。由于 RLM harness 里大部分墙钟都在等子代理完成，能用小而快的子代理大大加速了 RL 训练。",
+                "下图是每个训练步的墙钟耗时：主要由 rollout 时间主导，并随 RL 进行而增长——agent 越来越彻底，派出的子代理波次也越来越大。",
             ],
+            "fig_after": {
+                "0": [{"src": "fig13.jpg", "caption": "图 13：14 个文档室上 depth-1 与 depth-2 的逐个通过率（附录）"}],
+                "2": [{"src": "fig14.jpg", "caption": "图 14：RL 每训练步的墙钟耗时（40 步 run、5 步滚动平均，附录）"}],
+            },
         },
     ],
 
     "conclusion": [
-        "结语第一段。直接陈述结论，不出现「本文」「这篇」等前缀。不超过180 token。",
-        "结语第二段。行业影响或展望。不超过180 token。",
+        "模型与 harness 必须一起设计。同一个基础模型，换一套能把长文档拆进多个有界上下文、再由一个编排者汇总的框架，通过率平均能涨 39 个百分点——比换更强的模型来得更直接。",
+        "把后训练放回 harness 语境里做，收益还在继续：root 只消耗少量 token，却是质量的杠杆点，SFT 能稳住分布内已有的好行为，RL 则把覆盖率从 62% 推到 96%，让模型学会穷尽委派和边写边审。长地平线 agent 的 RL 瓶颈其实在基础设施，异步 off-policy 与小巧快速的子代理是关键；这套协同优化的思路应当能迁移到其他长上下文的专业任务上。",
     ],
 
-    "reference_url": "https://arxiv.org/html/XXXX.XXXXXv1",
-    # ⚠️ 必须设置！push-draft.py 从此字段读取公众号标题
-    "title": "公众号文章标题",
+    "reference_url": "https://x.com/nikogrupen/status/2097369705791307952",
+    "title": "模型与 Harness 协同优化：并购尽调 Agent 的通过率拉到 63%",
 }
 
-# ── 写入 article_data.json ──
 out_path = os.path.join(_article_dir, "article_data.json")
 with open(out_path, "w", encoding="utf-8") as f:
     json.dump(DATA, f, ensure_ascii=False, indent=2)
-print(f"✅ 写入 {out_path} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA.get('sections', []))} sections)")
+print("OK wrote", out_path, len(DATA.get("sections", [])), "sections")
