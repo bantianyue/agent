@@ -6,13 +6,13 @@ import json, os, sys
 
 _article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
 
-DEMO = {"src": "demo.gif", "caption": "图1：SGLang 与 Outlines + vLLM 的 JSON 解码对比。"}
-SCHEMA_FIG = {"src": "json_schema.png", "caption": "图2：遵循 JSON Schema 的约束生成示例。"}
-METHOD1_FIG = {"src": "method1.png", "caption": "图3：基于 FSM 与 logits 掩码的约束解码。第一次约束解码只允许 age；第二次解码时，由于正则要求数字，0 和 1 都被允许，但 LLM 采样 1 的概率更高。"}
-METHOD2_FIG = {"src": "method2.png", "caption": "图4：Guidance 中的交织式 JSON 解码。"}
-COMPARE_FIG = {"src": "compare.png", "caption": "图5：压缩 FSM 跳跃式解码与普通解码的对比。"}
-RESULT_FIG = {"src": "result.png", "caption": "图6：基准测试结果。"}
-LLAVA_FIG = {"src": "llava_demo.gif", "caption": "图7：使用 SGLang 与 LLaVA 从图像中提取结构化信息。"}
+DEMO = {"src": "fig01.gif", "caption": "图1：SGLang 与 Outlines + vLLM 的 JSON 解码对比。"}
+SCHEMA_FIG = {"src": "fig02.png", "caption": "图2：遵循 JSON Schema 的约束生成示例。"}
+METHOD1_FIG = {"src": "fig03.png", "caption": "图3：基于 FSM 与 logits 掩码的约束解码。第一次约束解码只允许 age；第二次解码时，由于正则要求数字，0 和 1 都被允许，但 LLM 采样 1 的概率更高。"}
+METHOD2_FIG = {"src": "fig04.png", "caption": "图4：Guidance 中的交织式 JSON 解码。"}
+COMPARE_FIG = {"src": "fig05.png", "caption": "图5：压缩 FSM 跳跃式解码与普通解码的对比。"}
+RESULT_FIG = {"src": "fig06.png", "caption": "图6：基准测试结果。"}
+LLAVA_FIG = {"src": "fig07.gif", "caption": "图7：使用 SGLang 与 LLaVA 从图像中提取结构化信息。"}
 
 DATA = {
     "summary": [
