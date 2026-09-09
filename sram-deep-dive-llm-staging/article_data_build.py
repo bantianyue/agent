@@ -1,0 +1,54 @@
+# -*- coding: utf-8 -*-
+import os,json
+D=os.path.dirname(os.path.abspath(__file__))
+S=[]
+def h2(t): o={"type":"h2","title":t,"paras":[]};S.append(o);return o
+def t(o,*p): o["paras"]+=list(p)
+
+intro=h2("SRAM：LLM 推理里被低估的那块内存")
+t(intro,"SRAM 是可与逻辑晶体管同片集成的记忆体中速度最快的一种，却被容量与成本卡住，通常只够做片上小块的本地缓存。在 LLM 应用里，SRAM 的重要性或许排在 HBM 之后排第二：它是 KV Cache 从 HBM 被读取后最先落脚的暂存处。SRAM 尺寸直接决定本地可备给算子的最多数据量；SRAM 越大，与 HBM 之间的内存往返就越少，内存带宽密度与算子间就越匹配。")
+t(intro,"也因此，作者认为搞 AI 的研究者与硬件工程师都应该懂一点嵌入式 SRAM 的基础与约束，大家都盼着更大的 SRAM bank。本篇理论素材主要来自作者在 ISSCC 2026 旁听的大师课：Memory and Logic Circuit Design in Technologies Beyond FinFET，讲师是 Intel 的 Zheng Guo，内容把 FinFET/GAA 工艺下 SRAM 的真实非理想效应与扩展挑战讲得很全。本文其余面向 HBM 的更多内容要等 Hot Chips 之后另起一篇。")
+
+c=h2("6T SRAM 基础：几乎所有 VLSI 课的入门功")
+t(c,"SRAM 常在电路 课程当作业让本科生设计与优化一个存储单元，因为它在最个把尺度上演示了晶体管怎么被物理实现、怎么参与集成接线与 fab 的设计规则。工程师往往会把单元与阵列的 PPA 压到不能再紧，这本身就说明 SRAM 单元必须在功耗、性能与面积上同时做到极致。")
+cl=h2("单元结构")
+t(cl,"6T SRAM 用一个交叉耦合反相器对来存状态：两个反相器各把输出接到对方输入，形成静态锁存。具体用到三种管：上拉 PMOS 接在 VCC 与内部节点之间；下拉 NMOS 接在 GND/VSS 与节点之间；每个内部节点还通过由 wordline 电压开启的 NMOS 传输管 pass gate 连到 bitline 上。普通逻辑里 PMOS 的 W/L 偏大，因为 PMOS 的孔迁移率通常低于 NMOS 的电子迁移率；但 SRAM 里反而是下拉 NMOS 做得很大，原因见后。")
+sw=h2("强开关与弱开关")
+t(sw,"strong 与 weak 常和 fast/slow 混为一谈，而这两组词在模拟、数字与存储工程师嘴里又有不同含义。当晶体管工作在饱和区时电流由公式 v 决定，这类用法适合用来控流，SRAM 里 pass gate 就工作在饱和区、让读电流流过。设计者能控制管长管宽：L 越短、W 越宽则电流越大，W/L 高的开关算强。公式里还有几项设计者控制不了但必须计入变化的量：电子/孔迁移率、栅氧电容 Cox、阈值电压 Vth。")
+t(sw,"模拟世界里这些器件参数被拢进 3 sigma 角模型，即 SS、SF、FS、FF 这四种 NMOS/PMOS 组合。3 sigma 代表片上工艺变化里系统的波动范围：晶圆中心一粒 die 可能相对边缘 die 在某个参数上有系统性偏移，谁都不想把大片晶圆只因这系统性偏移而报废。这些角模型去微调各种影响电路速度、驱动电流与偏置的内部 FET 参数，由 fab 在其工艺控制(PCM)电路里标定联相关；设计者既改不了也看不着这些模型。每搭一个模块都须在这些角模型上做足够的蒙特卡洛仿真来保证抗变异性——作者说这种低技术含金量的活正是 AI 很适合去自动化的一类。")
+t(sw,"量产时 fab 还会故意把一 lot 里少数晶圆做歪成 SS/SF/FS/FF 的分裂样，供 PTE(电测试)与后硅验证去筛，用以正确量化良率；die 出自晶圆哪个位置都有记录。良率取决于所造器件里的最差器件:由百万乃至万亿个重复晶体管组成的 SRAM/数字电路要把良率做到 6 到 7 sigma，而只有几百几个手工调过晶体管的模拟电路只需 3 到 4 sigma。")
+
+r=h2("读操作原理")
+t(r,"步骤：(1)bitline 先用 BLPCH_B 这一信号预充并等化到 VDD；(2)wordline 置位开启 PG，使两根 bitline 上出现差分信号，其中一根 BL 靠读电流放掉 BL 电容被拉低，读的过程中 PG 与 PD 构成电阻分压让 SRAM 内部电压微抬，但不能高到翻状态；(3)若多根线共享同一个 sense amp，可选地使能 MUX；(4)过一段时间 sense amplifier 触发并把这段差分放大到足以区分 0 与 1。line 放得太慢或太快会有两种非理想。")
+t(r,"放得太慢会出现读错误与信噪比(SNR)退化：感知到的差分信号不足最小阈值。它受电路所有参数影响，包括读电流、BL 漏电、bitline 电容与 sense amp 的偏置电压。")
+t(r,"放得状态翻转属于稳定性失效：当内部节点电压抬得太高，加上晶体管失配，电荷注入可能让不该翻的时刻把存储状态翻掉，常用读静噪容限(read static noise margin)度量。给 NMOS/PMOS 尺寸目标取不同相对比例，会带来一大片不同的读稳定性表现。")
+w=h2("写操作原理")
+t(w,"步骤：输入 DATA/DATA_B 先把其中一根线从 VDD 拉到 GND，然后 WL 置位，去更新内部节点 N0/N1 的电平。要成功写进 0 或 1，写驱动 PD 与 PG 的串联组合必须明显强于(即电阻更低)cell 内部上拉 PU。这个由 PG 与 PU 的尺寸之比决定：比例过高则锁存翻不动，产生写边距(write margin)失效。")
+tr=h2("读稳定性与写边距的核心取舍")
+t(tr,"读与写的边距相互对立，导致一块 SRAM 只有在器件相对尺寸落在某一个可运行的区域内才可用。存在三种边界会造成低边距：NMOS 偏弱时读电流不可接受；PMOS 与 NMOS 都强时漏电流不可接受；PMOS 偏弱时最小工作电压 Vmin 不可接受。取决于 bank 的大小，需要用高 sigma 的方法去刻画工艺波动、找那个保证 SRAM 不越区的全局最优点，6 到 7 sigma 是黄金标准。像 Siemens Solido 这类 ML 辅助工具就会去搜这块设计空间，因为暴力仿真跑到 6-7 sigma 会吃掉大量算力与 license。SRAM 单元还能为存内计算而改造，那部分作者在其 AI 加速器全景一文详述。")
+lo=h2("单元版图")
+t(lo,"常见的紧凑实现如下:横向的 poly 线是控制电流的栅极，纵向的沟道走电流，VDD 与地在 cell 的上下两侧。SRAM 是逻辑/存储工程师都应懂的最基础存储，也是加速器里真正决定片上能放多少 KV cache 的高密度块。")
+
+pay=h2("关于付费订阅段：本节仅为公开可见内容")
+t(pay,"作者本文其后单列了扩展与挑战章节：大 SRAM 阵列扩展的难点、SNR 与互连 RC、常用的优化/辅助技术、为嵌入式 SRAM 单元优化晶体管尺寸、以及在 FinFET 与 GAA 工艺上设计 SRAM 的机会与挑战。这些段落位于 Silicon Co-Design 的付费墙之内，公开页面仅给出标题大纲，未提供正文，故本文无法也不应代其复述或臆造细节。若你订阅了该刊，可直接在原文读到对应小节；也希望某天作者开放后我们能补上。")
+
+d={"title":"SRAM 深潜：LLM 推理的中转存储（公开节全文）",
+ "reference_url":"https://www.siliconcodesign.com/p/a-deep-dive-into-sram-the-staging",
+ "summary":[{"key":"这篇是什么","body":"Silicon Co-Design(Chad)付费长文《A Deep Dive into SRAM》。公开免费段完整讲清 6T SRAM 基础：单元结构→强/弱开关→读/写原理→读稳定性与写边距取舍→单元版图，并给出 ISSCC 2026(Z. Guo)等来源的原型图。对付费墙后的阵列扩展/互连 SNR/assist/FinFET-GAA 仅列其存在，不臆造。"},{"key":"核心一句","body":"SRAM 是能与逻辑同片集成的最快存储，LLM 里它是 KV cache 离开 HBM 的落地级。SRAM 单元要把读稳定性与写边距同时顾好，只能落在 NMOS/PMOS 尺寸设计的一个狭窄窗口里(弱NMOS读电流差、双强漏电大、弱PMOS的Vmin差)，良率做 6-7 sigma。"}],
+ "lead":["一篇付费站的 SRAM 长文。本文交付其中公开免费段的完整中文翻译(6T SRAM 全基础)与真实原理图；订阅号付费段落(阵列扩展/互连/FinFET-GAA)因被墙仅作存在性提示。可结合内容核对每张图出自 Introduction其原刊。"],
+ "sections":S,
+ "conclusion":["综上：SRAM 单元的价值在于其紧凑、可同片集成与极快速度，而决定它能否在错误率目标内越做越大的，是读/写边距那个窄窗口与 6-7 sigma 的良率负担；这也是为什么加速器设计者会执着于更大的 bank。以下为本文配图全套(公开段 Figure 1-8 仅此可见)顺带注：图 9/10/11 与扩展/辅助/FinFET-GAA 段处于订阅读者可见区。"]}
+# attach figures by section figure numbers (files exist fig01..fig08)
+FIGZ={ '单元结构':1,'读操作原理':[2,3,4,5,6],'写操作原理':[7,8] }
+for sec in S:
+    if sec['title'] in FIGZ:
+        fs=FIGZ[sec['title']]
+        if not isinstance(fs,list): fs=[fs]
+        sec['fig_after']={}
+        for i,f in enumerate(fs):
+            idx= min(len(sec['paras'])-1, i)
+            fn=f"fig{f:02d}.png"
+            if os.path.exists(os.path.join(D,fn)):
+                sec.setdefault('fig_after',{})[str(idx)]=sec.setdefault('fig_after',{}).get(str(idx),[])+[{"src":fn,"caption":""}]
+json.dump(d,open(os.path.join(D,'article_data.json'),'w',encoding='utf8'),ensure_ascii=False,indent=2)
+print('sections',len(S))

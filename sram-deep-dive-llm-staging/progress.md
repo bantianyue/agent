@@ -22,3 +22,4 @@
 
 创建时间: 2026-09-09
 来源: https://www.siliconcodesign.com/p/a-deep-dive-into-sram-the-staging
+| Step 4d-i: 传送门 | completed |
