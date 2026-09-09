@@ -1,25 +1,14 @@
-# 进度追踪 - self-driving-codebases
-
-| Step | 状态 |
-|------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (zh) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
-| Step 6: 推送草稿 | pending |
-
-创建时间: 2026-09-09
-来源: https://cursor.com/cn/blog/self-driving-codebases
-| Step 4d-i: 传送门 | completed |
+✅ 完成 (self-driving-codebases) — 2026-09-09 推送草稿
+- 源: Cursor 官方中文博客《迈向自动驾驶代码库》(Wilson Lin, 研究)
+- 主题: 数千 agent 自主编码一周构建 Web 浏览器；harness 演进（共享状态文件→角色分工→持续执行器→递归规划器+互不通信 worker）；峰值 ~1000 commits/hr
+- 处理: 源为 Cursor 官方中文译文，直接以官方中文为底做公众号适配，保留全部核心内容
+- 正文图: 4（autonomy-diagram 1-4 light 版 → fig01-04，中文图注）
+- 封面: og 图 → cover 900x383 + cover-square 500
+- preflight ALL PASS; 2026-09-09 19:08 推送; verify body 4 图
+source: https://cursor.com/cn/blog/self-driving-codebases
+| Step 0: 提取原文+下载图片 | completed |
+| Step 1: 生成封面 | completed |
+| Step 2: 写文章（含翻译+结语+参考区+传送门） | completed |
+| Step 3: Humanizer 润色 | completed |
+| Step 4: 预发布检查 | completed |
+| Step 5: 推送草稿 | completed |
