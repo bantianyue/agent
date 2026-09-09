@@ -1,25 +1,8 @@
-# 进度追踪 - sram-deep-dive-llm-staging
-
-| Step | 状态 |
-|------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
-| Step 6: 推送草稿 | pending |
-
-创建时间: 2026-09-09
-来源: https://www.siliconcodesign.com/p/a-deep-dive-into-sram-the-staging
-| Step 4d-i: 传送门 | completed |
+✅ 完成 (sram-deep-dive-llm-staging)
+- 源: Silicon Co-Design (Chad) Substack 付费文《A Deep Dive into SRAM: The Staging Ground of LLM Inference》
+- 重要: 该站为付费订阅 - 仅公开免费段全文可得(6T SRAM Fundamentals 到 Cell Layout 结尾); 扩展与挑战(大阵列扩展/SNR与互连RC/assist技术/嵌入SRAM单元尺寸优化/FinFET-GAA)被置订阅墙后, 只列共存, 未臆造正文
+- 中文 9 节: 定位/单元结构与强弱开关/读操作(SNR与稳定性)/写操作/读写边距取舍(含3失效区与6-7σ)/版图/付费围墙声明
+- 正文图: 8 (公开段真实 Figure1-8 原理图, 来自 substackcdn; Figure 9-11 无公开图, 按要求不伪造)
+- 封面: OG 图经 make-cover 生成真实封面
+- preflight ALL PASS; push media=TIqnnVEu6Oy3-wtKttGa0VtrrjvNbvG8JlZndv2n-husnc1wNhv9shBUe6ZeXpma; verify body 8/8; arbiter(queue jid_20260909_100801_24aeb6) done
+source: https://www.siliconcodesign.com/p/a-deep-dive-into-sram-the-staging
