@@ -22,3 +22,4 @@
 
 创建时间: 2026-09-09
 来源: https://github.com/FrontiersMindAI/GVA/blob/main/GVA_Efficient-KV.pdf
+| Step 4d-i: 传送门 | completed |
