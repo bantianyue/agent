@@ -1,25 +1,7 @@
-# 进度追踪 - gva-grouped-value-attention
-
-| Step | 状态 |
-|------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
-| Step 6: 推送草稿 | pending |
-
-创建时间: 2026-09-09
-来源: https://github.com/FrontiersMindAI/GVA/blob/main/GVA_Efficient-KV.pdf
-| Step 4d-i: 传送门 | completed |
+✅ 完成 (gva-grouped-value-attention)
+- 源: GitHub 论文 PDF《Grouped Value Attention: Efficient KV Caching via On-Demand Key Reconstruction》(FrontiersMind, GVA_Efficient-KV.pdf) 16p/27.8k字
+- 用户要求: 去掉实验和消融、去掉引用部分 → 本稿只保留 摘要/引言/记法与现状(MHA/MQA/GQA/MLA)/方法(3.1 K=V·M + per-head 映射/吸收进 query/deco ep decoupled RoPE + 共享 ro轮通道/缓存规模估算); 4 Experiments 起(含变体消融) 与 References 整段省略
+- 核心: 只缓存分组 value, 用每 head 线性映射在线重建 key; content-key 写作非必要; KV 缓存标量相对同级 GQA ~省45-47%; dec 结构沿 MLA 共享 decoup RoPE, 每 token 仅补 dr 维
+- 说明: 原文为论文型(无嵌入正文图) -> 0 正文图, 信息卡封面; 实验/消融/参考章节因指令未纳入
+- preflight ALL PASS; push media=TIqnnVEu6Oy3-wtKttGa0ci4836WGr4qvl59f6oOCfE6joq37Lud1YgOwZO-pi1O; verify body 0; arbiter(queue jid_20260909_174813_1db501) done
+source: https://github.com/FrontiersMindAI/GVA/blob/main/GVA_Efficient-KV.pdf
