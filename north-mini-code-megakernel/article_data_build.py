@@ -1,0 +1,67 @@
+# -*- coding: utf-8 -*-
+import os,json
+D=os.path.dirname(os.path.abspath(__file__))
+S=[]
+def h2(t): o={"type":"h2","title":t,"paras":[]};S.append(o);return o
+def t(o,*p): o["paras"]+=list(p)
+def add_figs(even=True):
+    figs=sorted(f for f in os.listdir(D) if f.startswith('fig') and f.endswith('.png'))
+    slots=[]
+    for sid,sec in enumerate(S):
+        for pidx,pa in enumerate(sec['paras']):
+            if pa.strip(): slots.append((sid,pidx))
+    L=len(slots)
+    if even and L>=len(figs):
+        # give each fig a paragraph near start of its region at 1/2/3 of list etc.
+        seen=[]
+        for k,fg in enumerate(figs):
+            a=min(L-1,int((k+1)*L/(len(figs)+1)))
+            if a not in seen:
+                seen.append(a)
+        for k,fg in enumerate(figs):
+            a=seen[k] if k<len(seen) else min(L-1,int((k+0.5)*L/len(figs)))
+            sid,pidx=slots[max(0,a)]
+            S[sid].setdefault('fig_after',{})[str(pidx)]=S[sid].setdefault('fig_after',{}).get(str(pidx),[])+[{"src":fg,"caption":""}]
+    else:
+        for k,fg in enumerate(figs):
+            sid,pidx=slots[(k*L)//max(1,len(figs))]
+            S[sid].setdefault('fig_after',{})[str(pidx)]=S[sid].setdefault('fig_after',{}).get(str(pidx),[])+[{"src":fg,"caption":""}]
+
+lead=h2("为什么 decode 这么慢：不是算力，是把权重搬进显存")
+t(lead,"解码在低批次时本质是内存受限：每步要从 HBM 搬大块权重、算得相对少。North Mini Code 是 30B 模型、每 token 激活 3.3B 参数，BF16 意味着每一步要流过 6.6GB 权重，8K 上下文还要带约 0.5GB KV cache。单块 H100 有 3.35TB/s 带宽，光速上限 SoL 大约 470 tok/s；vLLM 同机只跑出 185 tok/s，仅有 SoL 的 39%。Cohere 这份新作：用 megakernel serving engine 服务 North Mini Code，把 61% 那部分被浪费的带宽捡回来一些。单批次达 292 tok/s、62% SoL，= vLLM 的 1.58x；端到端在 AIME/GPQA/MMLU-Pro/SciCode/LiveCodeBench 上为 1.25x 到 1.41x，且无精度损失。" )
+
+w=h2("Megakernel 是什么")
+t(w,"GPU 上是约 100-150 个 SM 各跑同一段 program。megakernel 把一次前传做成单个常驻 kernel：每 SM 只 launch 一个 threadblock、整个 decode 步都常驻；驱动不再一步步派活，而是每 block 去读一份宿主预置在全局内存里的 task list。数据依赖不再由 kernel 边界表达，而用全局内存里由任务自增/自旋等待的整数计数器来细粒度表达。于是调度单元从“整个算子”缩到“算子的一块 tile”，同步单元从“整卡”缩到“某个任务依赖的那几个生产者”。")
+t(w,"好处一：省掉每两步之间的 launch + 全栅 barrier 开销，这部分它每步只付一次。好处二：消波次量化（wave quantization）。任何 kernel 若 200 块 tile、132 个 SM，第一波 132、剩下 68 进第二波就有 64 个 SM 空置；GEMM tile 形状被矩阵与设计定死，很难刚好整除。megakernel 没有需要向上取整的边界，就绪的 tile 会在任一空闲 SM 上开始，还能把空闲 SM 用就绪工作“回填”。")
+t(w,"好处三：去掉伪依赖。SM 即便负载相同也不会同时完工；kernel 边界等于全栅 barrier，最慢的 SM 给所有人定速。megakernel 的细粒度 barrier 让某 KV 组的输出一落地，它对应该组的 O-proj 就能开始，MoE down 投影也只要对应 expert 的 up 投影完成即可，不必等全体 expert。好处四：权重预取。权重不变，可提前把权重块从 HBM 流进 shared memory，再等激活；router 与 QKV 会抢在上一层 O-proj 尾部、RMSNorm 还没跑就把自己的权重搬进，吃掉原本浪费的空闲带宽。")
+t(w,"此外 Cohere 的一个关键观察是 North Mini Code 用的是并行 transformer 层：attention 与 MoE 前馈两者读同一份归一化输入、只在层末 fused residual+norm 处汇合，互不依赖对方输出，这让回填可以更激进。")
+
+a=h2("一条 ABI 缝合所有算子")
+t(a,"没有编译器、没有新编程范式、没有 exotic 抽象，就是一个普通 CUDA 文件。核心是统一 calling convention：每个较小 kernel 都必须用 12 warps=3 warpgroups 的形状，含 8 个 consumer、1 个 controller、1 个 producer、1 个 storer，角色是编译期 tag（if constexpr 删掉用不到的代码），每个 kernel 又从定长 32-int task descriptor 读参数。整个 decode 图被降成一个小的 tile 任务清单：16 个 opcode 覆盖 QKV_PROJ/O_PROJ/FFN_x/…、ATTN_DECODE/COMBINE/DRAIN、ROUTER/TOPK/MOEGATHER、Moe up/down drain/combine、ADD_RMSNORM 等。")
+t(a,"同一份 warp-specialized 流水承载所有 GEMM：producer 把激活与权重块喂进 shared-memory 的 stage ring，consumer 在 tensor core 上算 MMA，storer 写输出 tile 后到 barrier。opcode 之间只差一段 per-op 细节：等哪个 barrier、到哪个数、有没有把 SiLU×gate 或 RoPE 融进 epilogue、store 是不是 split-K 规约。因此新增 GEMM 只是编辑细节，不是重写 load/math/store。解码一条 GEMV 主路径里典型的 standalone 核只多了两行：wait_input_bars 与 arrive_output_bar，加上 descriptor 里记的 barrier 目标数和完成要发信号的 barrier。任务的 controller 会预取下一批 descriptor 进小 shared ring；workers 别用 __syncthreads（那会连 controller 一起等），只在排除 controller 的 worker_sync 上汇合。")
+t(a,"barrier 就是全局内存里的整数计数：某个数到达前自旋等待，到达后发出。0(1) 的扇入扇出成本；最难点在计数语义下谁先到够数并不校验身份，一个 opcode 若多报一次到达，会让 warp 逐渐漂到别的任务上并在后面死锁，因此 barrier 记账要显式不变量 + 仔细测试。这套 descriptor 格式、block 形状、计数器协议，就构成了把一个已有算子塞进 megakernel 的全部集成契约。")
+
+s=h2("任务调度：谁是后端性能旋钮")
+t(s,"kernel 只保证正确，吞吐取决于哪个 SM 在何时跑哪个 tile。静态部分：宿主按层构造命名好的 wave(qkv、router、attn、moe、oproj…)选定顺序后拍平，把第 k 个任务交给 SM k mod 132。当前默认顺序把 router 及其设置放 attention 之前：qkv→router→top-k→route-setup→MoE gather→attention→MoE up/down→O-proj→RMSNorm，让 MoE 分支提前起步、用非计算密集的 routing 去配 QKV 大块让 SM 更满。交互影响跨整层，难孤立。波次顺序消融：tuned 291 tok/s(batch1)、interleaved 282(-3%)、attention-first 236(-19%)；批量更大差值收窄。作者还试过依赖亲和放法同 SM 复用 cache，反而慢 1-2%，release 用朴素 round-robin。")
+t(s,"动态部分用局部 work stealing 处理宿主不可预知的失衡：完整 attention 每活请求读的 KV 长度差很多、router 决定各 expert 拿多少 token，只有边跑边知。静态清单里预置少量 claimer 任务，ATTN_DRAIN/MOE_*_DRAIN 原子地从 stage 的共享队列偷下一块跑到空；claimer 数控制并行度，attention 队列反映实时活请求。这样静态调度保持稳定，无需每次批次变化重建全清单。早期在稠密模型上做过拓扑感知贪心与数百随机候选暴力搜，都能再多约 10%，但 MoE 的路由使工作动态化、那些稠密调度搬不过去，最终采用了本轮调好的波次顺序+round robin+local stealing；若 Blackwell 或 NVFP4/FP8 下简单 round robin 不够，作者会回头用复杂调度器。")
+
+sv=h2("背后的服务引擎")
+t(sv,"服务端两个长驻宿主线程交接：Python 线程是控制面，负责收请求、跑 prefill、管 KV 容量与批次；一个原生 C++ 线程独占 decode 以取最高性能。megakernel 跑的是预构建的任务清单，tile 数/barrier 指标/槽位一早在编译阶段定死，所以 Python 在要 admit、退役或重塑批次前先 park decode，等 C++ resume 时换用与新 batch 尺寸和上下文匹配的 schedule。park/resume 是可变批状态的属主边界：prefill 会暂停 decode，即引擎如今不在单张 GPU 上混跑 prefill 与 decode。外部它就是 OpenAI-compatible 接口，带 streaming、prefix cache、tool call。当前已知限制：无 prefill/decode 混合；最大 batch 8(配限制非架构限制)；MK 纯 decode，prefill 仍走普通 PyTorch 核。")
+
+p=h2("性能与保真")
+t(p,"对比基线为 vLLM v0.24(FA3 attention/Triton MoE)、decode 对合成 KV、1K 输出测吞吐。设置两种路由并有意报较难面：uniform 路由下批量1时差距最大（气泡占比高），随 batch 增大气泡占比降、差距收窄；真实路由下 expert 命中集中、MoE 稀疏、气泡占比更高，收获更大，batch8 时真实道路 1.32x、uniform 只有 1.14x——uniform 合成会低估真实流量里 megakernel 的优势，是更难一例。端到端 batch8 全服务：AIME2025 平均 decode 吞吐 935 对 661(=1.41x)、GPQA 787:631(1.25x)、MMLU-Pro-CS 948:713(1.33x)、SciCode 711:560(1.37x)、LiveCodeBench v6 803:625(1.28x)。精度用 SciCode 38.9±1.6%(vLLM 38.2%) 与 LiveCodeBench 70.3±1.1% 均接近，7 次运行均值，确认内核不损质量。端到端增益(1.25-1.41x)略低于 decode-only，因 prefill 仍普通核且会暂停解码、路由逐批变化、活跃批次在服务中波动。")
+t(p,"学到的东西：megakernel 起始于简单，无需编译器；对 MoE 模型在真实流量下收获更大；能很好地嵌进服务器（常驻 decode kernel + C++ host 环 + Python 线程控制）；kernel 快起来之后，schedule 是剩下那部分加速的关键。业界这套设计源自 Hazy Research 的 Look Ma,No Bubbles（单核前传、达到 78% H100 带宽），本文另改进了：GEMM 强依赖 tensor core(wgmma)即使 batch1；不用 shared-memory paging 做权重预取（记账复杂易错），改为每 opcode 有自己编译期定的 warp-specialized 流水，重叠来自同型 GEMM 任务间与 GEMM 内部(producer 在跨 SM 等激活前先发权重 tile 载入)。下一步：prefill 形状不同、混合 prefill/decode 批次需要调度器同时推动不打断延迟敏感 decode；正在做 RTX Blackwell(如 RTX Pro 6000 与 50 系)版本并把 FP8/FP4 量化列上路线，之后把同一方法带去数据中心 Blackwell 与多 GPU 推理(tp/ep 引入跨设备集合通信这个新同步边界与更多可回收的 pipeline bubble)。")
+
+add_figs(True)
+d={"title":"megakernel 服务引擎与 North Mini Code：把 decode 往内存带宽极限推",
+"reference_url":"https://cohere.com/blog/megakernels",
+"meta_label":"GPU Kernel / Serving",
+"summary":[
+ {"key":"现象","body":"decode 低批次是内存受限不是算力受限：North Mini Code 每步要搬 6.6GB 权重(BF16)。单 H100 上光速上限约470 tok/s，vLLM 只到 185(39% SoL)。Cohere 的服务引擎(batch1)到292 tok/s=62% SoL=1.58x vLLM；端到端 AIME/GPQA/MMLU 等 1.25–1.41x，无精度损失，连续批/paged attention/OpenAI兼容接口齐全。"},
+ {"key":"机制","body":"Megakernel=一次 decode 前传做成单个常驻 kernel(每SM一块常驻threadblock)：宿主把整步切成小 tile 任务写进全局 task list，任务用全局计数器表达细粒度依赖(计数到即放行)；靠 ABI(统一12warp形状+32-int描述符+计数协议)把全部算子(16 opcode)手工缝成一个普通CUDA文件。红利主要来自省 launch/全栅barrier 、消波次量化(就绪tile在空闲SM回填)、去伪依赖(每KV组/每expert 粒度的barrier)、以及权重预取。调度=静态round-robin+调好的波序+局部work stealing应付路遥与MoE的不均衡。"}],
+ "lead":["Cohere《Inside the megakernel serving engine for North Mini Code》(本人已读全, 46k)。此文为中文导读与机制重述,偏工程实现; 插图即原文官方图(experiment charts/示意), 不另行画。"],
+ "sections":[lead,w,a,s,sv,p],
+ "conclusion":["一句话收束：服务 inference 的下一个瓶颈不是把单个 kernel 调快，而是把 kernel 之间等来等去的时间拿走——用一条 ABI 把整步 decode 缝成常驻 megakernel，再让宿主决定每个空闲 SM 下一刻跑哪块 tile。schedule 与 barrier 记账是它真正的难点与后续性能钥匙。代码见 github.com/cohere-ai/cohere-megakernel。"]}
+json.dump(d,open(os.path.join(D,'article_data.json'),'w',encoding='utf8'),ensure_ascii=False,indent=2)
+used=sum(len(v) for s in S for v in s.get('fig_after',{}).values())
+print('sections',len(S),'paras',sum(len(s['paras']) for s in S),'figs',used)

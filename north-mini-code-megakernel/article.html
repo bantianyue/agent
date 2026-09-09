@@ -1,6 +1,6 @@
 <section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
 <style>
-/* 传送门统一样式（add-portal.py 动态注入时引用此 class） */
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
 .portal-title { font-size:12px; color:#888; }
 .portal-links { font-size:12px; color:#888; }
 .portal-links a { color:#888; text-decoration:none; }
@@ -10,30 +10,40 @@
 <strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">要点关键词1</strong>：核心内容。替换本占位。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">要点关键词2</strong>：核心内容。替换本占位。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">要点关键词3</strong>：核心内容。替换本占位。</div>
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">现象</strong>：decode低批次是内存受限不是算力受限：North Mini Code每步要搬6.6GB权重(BF16)。单H100上光速上限约470 tok/s，vLLM只到185(39% SoL)。Cohere的服务引擎(batch1)到292 tok/s=62% SoL=1.58x vLLM；端到端AIME/GPQA/MMLU等1.25–1.41x，无精度损失，连续批/paged attention/OpenAI兼容接口齐全。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">机制</strong>：Megakernel=一次decode前传做成单个常驻kernel(每SM一块常驻threadblock)：宿主把整步切成小tile任务写进全局task list，任务用全局计数器表达细粒度依赖(计数到即放行)；靠ABI(统一12warp形状+32-int描述符+计数协议)把全部算子(16 opcode)手工缝成一个普通CUDA文件。红利主要来自省launch/全栅barrier 、消波次量化(就绪tile在空闲SM回填)、去伪依赖(每KV组/每expert粒度的barrier)、以及权重预取。调度=静态round-robin+调好的波序+局部work stealing应付路遥与MoE的不均衡。</div>
 </div>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Cohere《Inside the megakernel serving engine for North Mini Code》(本人已读全, 46k)。此文为中文导读与机制重述,偏工程实现; 插图即原文官方图(experiment charts/示意), 不另行画。</p>
 
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">正文第一章标题</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第一段正文文字。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第二段正文文字。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么decode这么慢：不是算力，是把权重搬进显存</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">解码在低批次时本质是内存受限：每步要从HBM搬大块权重、算得相对少。North Mini Code是30B模型、每token激活3.3B参数，BF16意味着每一步要流过6.6GB权重，8K上下文还要带约0.5GB KV cache。单块H100有3.35TB/s带宽，光速上限SoL大约470 tok/s；vLLM同机只跑出185 tok/s，仅有SoL的39%。Cohere这份新作：用megakernel serving engine服务North Mini Code，把61% 那部分被浪费的带宽捡回来一些。单批次达292 tok/s、62% SoL，= vLLM的1.58x；端到端在AIME/GPQA/MMLU-Pro/SciCode/LiveCodeBench上为1.25x到1.41x，且无精度损失。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Megakernel是什么</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GPU上是约100-150个SM各跑同一段program。megakernel把一次前传做成单个常驻kernel：每SM只launch一个threadblock、整个decode步都常驻；驱动不再一步步派活，而是每block去读一份宿主预置在全局内存里的task list。数据依赖不再由kernel边界表达，而用全局内存里由任务自增/自旋等待的整数计数器来细粒度表达。于是调度单元从“整个算子”缩到“算子的一块tile”，同步单元从“整卡”缩到“某个任务依赖的那几个生产者”。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">好处一：省掉每两步之间的launch + 全栅barrier开销，这部分它每步只付一次。好处二：消波次量化（wave quantization）。任何kernel若200块tile、132个SM，第一波132、剩下68进第二波就有64个SM空置；GEMM tile形状被矩阵与设计定死，很难刚好整除。megakernel没有需要向上取整的边界，就绪的tile会在任一空闲SM上开始，还能把空闲SM用就绪工作“回填”。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
-<img style="display: block;width: 100%;margin: 0 auto;" src="fig1.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图片说明文字</figcaption></figure>
-<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">子标题示例</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">子标题下的段落。</p>
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">含表格的章节</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下面是一张示例表格。</p>
-<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
-<thead style="font-weight: bold;color: #3f3f3f;">
-<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">列1</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">列2</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">列3</th></tr>
-</thead>
-<tbody>
-<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">A</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">B</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">C</td></tr>
-<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">D</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong style="color:#0F4C81;">E</strong></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">F</td></tr>
-</tbody>
-</table>
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">好处三：去掉伪依赖。SM即便负载相同也不会同时完工；kernel边界等于全栅barrier，最慢的SM给所有人定速。megakernel的细粒度barrier让某KV组的输出一落地，它对应该组的O-proj就能开始，MoE down投影也只要对应expert的up投影完成即可，不必等全体expert。好处四：权重预取。权重不变，可提前把权重块从HBM流进shared memory，再等激活；router与QKV会抢在上一层O-proj尾部、RMSNorm还没跑就把自己的权重搬进，吃掉原本浪费的空闲带宽。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">此外Cohere的一个关键观察是North Mini Code用的是并行transformer层：attention与MoE前馈两者读同一份归一化输入、只在层末fused residual+norm处汇合，互不依赖对方输出，这让回填可以更激进。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">一条ABI缝合所有算子</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>没有编译器、没有新编程范式、没有exotic抽象，就是一个普通CUDA文件。核心是统一calling convention：每个较小kernel都必须用12 warps=3 warpgroups的形状，含8个consumer、1个controller、1个producer、1个storer，角色是编译期tag（if constexpr删掉用不到的代码），每个kernel又从定长32-int task descriptor读参数。整个decode图被降成一个小的tile任务清单：16个opcode覆盖QKV_PROJ/O_PROJ/FFN_x/…、ATTN_DECODE/COMBINE/DRAIN、ROUTER/TOPK/MOEGATHER、Moe up/down drain/combine、ADD_RMSNORM等。</strong></p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">同一份warp-specialized流水承载所有GEMM：producer把激活与权重块喂进shared-memory的stage ring，consumer在tensor core上算MMA，storer写输出tile后到barrier。opcode之间只差一段per-op细节：等哪个barrier、到哪个数、有没有把SiLU×gate或RoPE融进epilogue、store是不是split-K规约。因此新增GEMM只是编辑细节，不是重写load/math/store。解码一条GEMV主路径里典型的standalone核只多了两行：wait_input_bars与arrive_output_bar，加上descriptor里记的barrier目标数和完成要发信号的barrier。任务的controller会预取下一批descriptor进小shared ring；workers别用 __syncthreads（那会连controller一起等），只在排除controller的worker_sync上汇合。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">barrier就是全局内存里的整数计数：某个数到达前自旋等待，到达后发出。0(1) 的扇入扇出成本；最难点在计数语义下谁先到够数并不校验身份，一个opcode若多报一次到达，会让warp逐渐漂到别的任务上并在后面死锁，因此barrier记账要显式不变量 + 仔细测试。这套descriptor格式、block形状、计数器协议，就构成了把一个已有算子塞进megakernel的全部集成契约。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">任务调度：谁是后端性能旋钮</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">kernel只保证正确，吞吐取决于哪个SM在何时跑哪个tile。静态部分：宿主按层构造命名好的wave(qkv、router、attn、moe、oproj…)选定顺序后拍平，把第k个任务交给SM k mod 132。当前默认顺序把router及其设置放attention之前：qkv→router→top-k→route-setup→MoE gather→attention→MoE up/down→O-proj→RMSNorm，让MoE分支提前起步、用非计算密集的routing去配QKV大块让SM更满。交互影响跨整层，难孤立。波次顺序消融：tuned 291 tok/s(batch1)、interleaved 282(-3%)、attention-first 236(-19%)；批量更大差值收窄。作者还试过依赖亲和放法同SM复用cache，反而慢1-2%，release用朴素round-robin。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">动态部分用局部work stealing处理宿主不可预知的失衡：完整attention每活请求读的KV长度差很多、router决定各expert拿多少token，只有边跑边知。静态清单里预置少量claimer任务，ATTN_DRAIN/MOE_*_DRAIN原子地从stage的共享队列偷下一块跑到空；claimer数控制并行度，attention队列反映实时活请求。这样静态调度保持稳定，无需每次批次变化重建全清单。早期在稠密模型上做过拓扑感知贪心与数百随机候选暴力搜，都能再多约10%，但MoE的路由使工作动态化、那些稠密调度搬不过去，最终采用了本轮调好的波次顺序+round robin+local stealing；若Blackwell或NVFP4/FP8下简单round robin不够，作者会回头用复杂调度器。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">背后的服务引擎</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">服务端两个长驻宿主线程交接：Python线程是控制面，负责收请求、跑prefill、管KV容量与批次；一个原生C++ 线程独占decode以取最高性能。megakernel跑的是预构建的任务清单，tile数/barrier指标/槽位一早在编译阶段定死，所以Python在要admit、退役或重塑批次前先park decode，等C++ resume时换用与新batch尺寸和上下文匹配的schedule。park/resume是可变批状态的属主边界：prefill会暂停decode，即引擎如今不在单张GPU上混跑prefill与decode。外部它就是OpenAI-compatible接口，带streaming、prefix cache、tool call。当前已知限制：无prefill/decode混合；最大batch 8(配限制非架构限制)；MK纯decode，prefill仍走普通PyTorch核。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">性能与保真</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对比基线为vLLM v0.24(FA3 attention/Triton MoE)、decode对合成KV、1K输出测吞吐。设置两种路由并有意报较难面：uniform路由下批量1时差距最大（气泡占比高），随batch增大气泡占比降、差距收窄；真实路由下expert命中集中、MoE稀疏、气泡占比更高，收获更大，batch8时真实道路1.32x、uniform只有1.14x：uniform合成会低估真实流量里megakernel的优势，是更难一例。端到端batch8全服务：AIME2025平均decode吞吐935对661(=1.41x)、GPQA 787:631(1.25x)、MMLU-Pro-CS 948:713(1.33x)、SciCode 711:560(1.37x)、LiveCodeBench v6 803:625(1.28x)。精度用SciCode 38.9±1.6%(vLLM 38.2%) 与LiveCodeBench 70.3±1.1% 均接近，7次运行均值，确认内核不损质量。端到端增益(1.25-1.41x)略低于decode-only，因prefill仍普通核且会暂停解码、路由逐批变化、活跃批次在服务中波动。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">学到的东西：megakernel起始于简单，无需编译器；对MoE模型在真实流量下收获更大；能很好地嵌进服务器（常驻decode kernel + C++ host环 + Python线程控制）；kernel快起来之后，schedule是剩下那部分加速的关键。业界这套设计源自Hazy Research的Look Ma,No Bubbles（单核前传、达到78% H100带宽），本文另改进了：GEMM强依赖tensor core(wgmma)即使batch1；不用shared-memory paging做权重预取（记账复杂易错），改为每opcode有自己编译期定的warp-specialized流水，重叠来自同型GEMM任务间与GEMM内部(producer在跨SM等激活前先发权重tile载入)。下一步：prefill形状不同、混合prefill/decode批次需要调度器同时推动不打断延迟敏感decode；正在做RTX Blackwell(如RTX Pro 6000与50系)版本并把FP8/FP4量化列上路线，之后把同一方法带去数据中心Blackwell与多GPU推理(tp/ep引入跨设备集合通信这个新同步边界与更多可回收的pipeline bubble)。</p>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
@@ -42,12 +52,35 @@
 <strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-结语分析内容1。<br  /><br  />结语分析内容2。</div>
+一句话收束：服务inference的下一个瓶颈不是把单个kernel调快，而是把kernel之间等来等去的时间拿走：用一条ABI把整步decode缝成常驻megakernel，再让宿主决定每个空闲SM下一刻跑哪块tile。schedule与barrier记账是它真正的难点与后续性能钥匙。代码见github.com/cohere-ai/cohere-megakernel。</div>
 </div>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HPaDwcT_4Rw5ty7LwDG4Ng" target="_blank" data-linktype="2">Torch Profiler在Trace里分析性能瓶颈: 剖析SGLang LLM推理</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4aEYa-5J2Ir82V_1_9anDA" target="_blank" data-linktype="2">AI芯片架构全景: 从NVIDIA到Groq的六条设计路线</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/42s6fk-xdo23L-vtLj6Q8Q" target="_blank" data-linktype="2">vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/i-NZ-4oCXs48XpDfdcBfPw" target="_blank" data-linktype="2">在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+</div>
+</div>
+
+
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://arxiv.org/html/XXXX.XXXXX</span></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://cohere.com/blog/megakernels</span></p>
 </section>
