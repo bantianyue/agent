@@ -1,25 +1,9 @@
-# 进度追踪 - north-mini-code-megakernel
-
-| Step | 状态 |
-|------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
-| Step 6: 推送草稿 | pending |
-
-创建时间: 2026-09-09
-来源: https://cohere.com/blog/megakernels
-| Step 4d-i: 传送门 | completed |
+✅ 完成 (north-mini-code-megakernel)
+- 源: Cohere 官方博客《Inside the megakernel serving engine for North Mini Code》(46k/22min; 图11)
+- 主题(亲自读全): 以 decode megakernel(单常驻kernel+task list+计数barrier)服务 North Mini Code, 目标解码内存带宽极限
+- 体验数字: H100 SoL≈470tok/s; vLLM185(39%); megakernel bs1=292=62%SoL(=1.58x); 端到端 AIME1.41x/GPQA1.25x/MMLU-Pro1.33x/SciCode1.37x/LiveCodeBench1.28x; 无精度损失; 真实路由batch8 1.32x vs uniform1.14x
+- 机制要点(正文): ABI(12warf/3warpgroup + 32-int task descriptor + counting barrier) 缝16 opcode单CUDA文件; 红利=省launch/全栅barrier+消波次量化+去伪依赖+权重预取; 调度 round-robin+调好波序(bs1: tuned291/interleaved282/attn-first236)+局部work stealing; 服务= Python控制面暂挂 decode + C++独占decode(park/resume)
+- 已知限制(正文): 无 prefill/decode 混合; max batch 8 为配置限制; MK 纯 decode
+- 配图: 官方真实图4张 cdn.sanity PNG (decode吞吐/波次量化示意/并行transformer层/跨batch-上下文); 封面=官方 abstract hero(源码512上限)
+- preflight ALL PASS; push media=TIqnnVEu6Oy3-wtKttGa0QgtEVQo8I7ZSJYzv_RCTgCp-IrpcGZxaAR6Y90n2Xbe; verify body 4/4; arbiter(queue jid_20260909_175046_87917b) done
+source: https://cohere.com/blog/megakernels
