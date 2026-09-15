@@ -1,25 +1,23 @@
 # 进度追踪 - making-softmax-fast
 
+✅ 完成 (making-softmax-fast)
+
+- 全步骤 completed（step0 提取 → step1 封面 → step2 写文章 → step3 baseline → step4 预检 → step5 推送），状态快照见同目录 progress.json
+- source: https://heyyanshuman.com/posts/making_softmax_fast
+- 结构：5 个 h2 + 11 个 h3；正文 78 段（含 23 个代码块，逐字原样保留）；表格 3 张（朴素三遍 / 在线两遍 / 合并访问后）
+- 图片：5 张（fig01 原文 hero 图，fig02-fig05 由原文 SVG 2 倍渲染），一张不少
+- 封面：取自原文 hero 图 fig01.png（cover.png 900x383 + cover-square.png 500x500）
+- preflight-check.py: ALL CHECKS PASSED（exit 0）；check-fig-layout.py: PASS（无连排/图序单调/无越界）
+- 推送：新建草稿成功，draft/get 回读 body 图 5 张、上传成功 5 张，传送门 16 条
+
 | Step | 状态 |
 |------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | completed |
-| Step 6: 推送草稿 | pending |
+| Step 0: 提取原文+下载图片 | completed |
+| Step 1: 生成封面 | completed |
+| Step 2: 写文章（含翻译+结语+参考区+传送门） | completed |
+| Step 3: Humanizer 润色 | completed |
+| Step 4: 预发布检查 | completed |
+| Step 5: 推送草稿 | completed |
 
 创建时间: 2026-09-16
 来源: https://heyyanshuman.com/posts/making_softmax_fast
-| Step 4d-i: 传送门 | completed |
