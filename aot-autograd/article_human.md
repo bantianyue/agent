@@ -1,289 +1,117 @@
-<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;">
-<div style="text-align:center;margin-bottom:10px;">
-<strong style="font-size:16px;color:#1a6ba0;">要点速览</strong>
-</div>
-<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-- <strong>torch.compile之前</strong>：fx和TorchDynamo都只抓前向图，后向由autograd引擎动态生成，编译器看不到完整图，无法跨前向/后向边界优化。<br><br>
-- <strong>AOTAutograd的核心</strong>：用 __torch_dispatch__ 把前向和后向都在执行前追踪成一张joint graph，再切分成独立的前向/后向图，编译器得以对整个图统一优化。<br><br>
-- <strong>关键机制torch dispatcher</strong>：每次算子调用都经dispatcher路由到对应kernel，__torch_dispatch__ 钩子在最终kernel前触发，给你拦截、检查、改写算子的机会：make_fx正是靠它拿到底层ATen算子。<br><br>
-- <strong>min-cut切分</strong>：默认切分把每个中间张量都存下来，访存付两次代价；min_cut_rematerialization_partition用最大流/最小割决定「存还是重算」，只存输入、后向重算中间值，把activation checkpointing一般化了。
-</div>
-</div>
-
-## 为什么需要AOTAutograd
-
-在前两篇文章里，我们看到了torch.fx如何用符号追踪（symbolic tracing）把Python代码变成一张图，以及TorchDynamo如何在字节码层面捕获图。但两者都只捕获了前向传播。**后向传播呢？**
-
-在torch.compile生态出现之前，用户可以用torch.fx追踪捕获前向图，但后向仍然由autograd引擎动态生成，编译器只能看到前向图。这意味着你无法把前向和后向计算图合并成一张图、跨这个边界做优化。
-
-**AOTAutograd解决的正是这个。** 它把前向和后向都在执行之前追踪好，编译器现在就能把整个图当作一个整体来优化。
-
-## aot_function：最小例子
-
-我们从functorch.compile里aot_function最简单的例子开始。定义一个把两个张量相乘的函数，然后用一个只打印图的编译器把它包起来：
-
-```python
-import torch
-from functorch.compile import aot_function, make_boxed_func
-
-def fn(a, b):
-    return a * b
-
-def compiler_fn(fx_module, _):
-    print(fx_module.code)
-    return make_boxed_func(fx_module.forward)
-
-a, b = [torch.randn(2, 4, requires_grad=True, device="cuda")
-        for _ in range(2)]
-
-aot_fn = aot_function(fn, fw_compiler=compiler_fn,
-                      bw_compiler=compiler_fn)
-res = aot_fn(a, b)
-loss = res.sum()
-loss.backward()
-```
-
-这会打印两张图：前向和后向。我们仔细读一下。
-
-```python
-def forward(self, primals_1, primals_2):
-    mul = torch.ops.aten.mul.Tensor(primals_1, primals_2)
-    return (mul, primals_1, primals_2)
-```
-
-什么是 **primal**？primals就是函数的原始输入，或者按autograd的术语，primals是你对其施加运算的张量。这里primals_1 = a，primals_2 = b。
-
-前向返回 `(mul, primals_1, primals_2)`。**为什么返回三个值？** 第一个是真正输出（a * b），另外两个张量是为后向保存的。
-
-现在看后向图：
-
-```python
-def forward(self, primals_1, primals_2, tangents_1):
-    mul_1 = torch.ops.aten.mul.Tensor(tangents_1, primals_1)
-    mul_2 = torch.ops.aten.mul.Tensor(tangents_1, primals_2)
-    return (mul_2, mul_1)
-```
-
-前两个参数primals_1, primals_2是来自前向传播的已保存张量。**tangents** 就是你在后向传播中计算得到的传入梯度。
-
-后向返回 `(mul_2, mul_1)`，梯度的顺序和前向原始输入 (a, b) 相同。这个顺序约定就是autograd知道哪个梯度属于哪个参数的方式。
-
-## 为什么叫AOT？
-
-通常，PyTorch的autograd在前向传播期间动态构建后向图，后向图只有等前向结束后才最终确定。这很灵活，但在执行之前你永远看不到整张图。
-
-**AOTAutograd的做法不同。** 它把前向和后向传播都在真正执行函数之前、提前（Ahead-of-Time）追踪好，这就把两张计算图都提前给了你。
-
-一般工作流如下：
-
-- **AOT Dispatch** 追踪前向和后向，生成一张联合图（joint graph），本质上是一张包含前向和后向Aten/Prim算子的FX图。
-- **Partition** 用partition_fn把联合图分成独立的前向和后向图。
-- 可选**分解（decomposition）**：把高层算子拆成更小粒度的算子。
-- 独立的图被编译并整合成一个 `torch.autograd.Function`。
-
-## torch dispatcher：一切的关键
-
-PyTorch有一个你可以理解为「路由器」的dispatcher。每次你调用像 `a * b` 这样的算子，dispatcher都会根据输入张量的属性决定运行哪个kernel。CUDA张量？跑CUDA kernel。需要梯度？用autograd包一层。一个算子通常要经过多个dispatch层才到达最终的kernel。
-
-`__torch_dispatch__` 是在最终kernel执行之前触发的一个钩子（hook）。它让你能访问原始的ATen算子和它的输入，于是你可以在算子层面拦截、检查或修改行为。
-
-![](fig01.png)
-<span style="font-size:12px;color:rgb(153,153,153);">图：torch dispatcher像路由器，每次算子调用都经多层dispatch才能到达最终kernel</span>
-
-## make_fx：靠dispatcher拿到底层算子
-
-torch.fx有个叫make_fx的东西，和普通symbolic_trace不同，它是通过 `__torch_dispatch__` 实现的。这让它能访问底层ATen算子。
-
-```python
-import torch
-from torch.fx.experimental.proxy_tensor import make_fx
-
-def f(x, y):
-    return x + y
-
-x = torch.randn(8)
-y = torch.randn(8)
-
-g = make_fx(f)(x, y)
-print(g.code)
-```
-
-make_fx通过dispatcher追踪，捕获到底层ATen算子 `torch.ops.aten.add.Tensor`：
-
-```python
-def forward(self, x_1, y_1):
-    add = torch.ops.aten.add.Tensor(x_1, y_1)
-    return add
-```
-
-而符号追踪要高层得多：
-
-```python
-from torch.fx import symbolic_trace
-h = symbolic_trace(f)
-print(h.code)
-
-def forward(self, x, y):
-    add = x + y
-    return add
-```
-
-既然已经看到torch dispatcher为什么重要，就可以进入联合图以及怎么创建它了。
-
-## 联合图（The Joint Graph）
-
-用一张覆盖前向和后向的FX图，给了我们跨整个边界做优化的可能，而不是分开看前向和后向。
-
-用伪代码表示这个想法：
-
-```python
-def joint_forward_backward(*inputs):
-    outputs = forward_fn(*inputs)
-    grads = torch.autograd.grad(
-        outputs, inputs, grad_outputs=...
-    )
-    return outputs, grads
-```
-
-在追踪期间，每个算子都被 `__torch_dispatch__` 拦截，对每个算子，AOTAutograd会：
-
-- 从张量取回FX proxy；
-- 用该ATen算子作为target，在FX图里创建一个 `call_function` 节点；
-- 用实际张量运行这个算子；
-- 把结果张量绑定到该proxy。
-
-如此重复，直到AOTAutograd追踪完前向和后向传播里的所有算子，产出一张完整的联合图。
-
-## 切分联合图（Partitioning the Joint Graph）
-
-一旦有了联合图，我们需要把它切回独立的前向和后向图。AOTAutograd的partition_fn做这件事，有两个内建策略。我们用一个具体例子比较它们：
-
-```python
-def fn(a, b, c, d):
-    x = a + b + c + d
-    return x.cos().cos()
-```
-
-### default_partition
-
-这就是第一个例子里看到的默认行为，它找出从输入到前向输出的所有算子输出。后向需要用到的张量也作为前向输出被包含进来，所有中间结果都被保留。
-
-```python
-def forward(self, primals_1, primals_2, primals_3, primals_4):
-    add   = torch.ops.aten.add.Tensor(primals_1, primals_2)
-    add_1 = torch.ops.aten.add.Tensor(add, primals_3)
-    add_2 = torch.ops.aten.add.Tensor(add_1, primals_4)
-    cos   = torch.ops.aten.cos.default(add_2)
-    cos_1 = torch.ops.aten.cos.default(cos)
-    return (cos_1, add_2, cos)    # 为后向保存 add_2 和 cos
-```
-
-后向把这些已保存的张量作为输入接收：
-
-```python
-def forward(self, add_2, cos, tangents_1):
-    sin   = torch.ops.aten.sin.default(cos)
-    neg   = torch.ops.aten.neg.default(sin)
-    mul   = torch.ops.aten.mul.Tensor(tangents_1, neg)
-    sin_1 = torch.ops.aten.sin.default(add_2)
-    neg_1 = torch.ops.aten.neg.default(sin_1)
-    mul_1 = torch.ops.aten.mul.Tensor(mul, neg_1)
-    return (mul_1, mul_1, mul_1, mul_1)
-```
-
-## 背景：访存受限（memory bound）算子
-
-这是一段背景，用来解释下一个技巧以及它为什么这么有效。
-
-如果你记得GPU上的情况，一个算子花的大部分时间不是算术，而是实际的内存读写。对逐点（pointwise）算子（add、mul、cos、sin、relu等）尤其如此，它们每个元素的计算量极少。
-
-### 所以融合多个逐点算子可能根本没帮助
-
-因为瓶颈是内存访问而不是浮点运算量（flops）。
-
-那么在训练时，如果你的图是一条逐点算子的链，前向和后向都完全是逐点的，运行时间和你读写的内存量成正比。由于默认切分保存了每一个中间张量，你本质上付了两次内存代价（前向里写、后向里读）。
-
-如果你改成只保存输入、在后向里重算中间结果呢？这意味着：
-
-- 前向和后向之间保存的张量更少；
-- 内存访问减少，因为我们既不用写中间结果来保存、也不用读回来加载它们。
-
-重算本身基本免费，因为这些逐点算子本来就是访存受限的，多出来的浮点运算会藏在内存延迟后面。这正是activation checkpointing（激活重计算）能工作的原因，而AOTAutograd用min-cut公式把它一般化了。
-
-![](fig02.png)
-<span style="font-size:12px;color:rgb(153,153,153);">图：融合多个逐点算子帮不上忙，因为瓶颈在内存访问而非计算量</span>
-
-## min_cut_rematerialization_partition
-
-既然已经说明不需要保存所有中间张量，那怎么决定保存什么、重算什么？这被框定成一个最大流/最小割（max-flow/min-cut）问题。
-
-用同样的代码看min-cut切分器：
-
-```python
-from functorch.compile import min_cut_rematerialization_partition
-
-aot_fn = aot_function(fn, fw_compiler=compiler_fn,
-                      bw_compiler=compiler_fn,
-                      partition_fn=min_cut_rematerialization_partition)
-```
-
-看前向图，注意cos不再被保存：
-
-```python
-def forward(self, primals_1, primals_2, primals_3, primals_4):
-    add   = torch.ops.aten.add.Tensor(primals_1, primals_2)
-    add_1 = torch.ops.aten.add.Tensor(add, primals_3)
-    add_2 = torch.ops.aten.add.Tensor(add_1, primals_4)
-    cos   = torch.ops.aten.cos.default(add_2)
-    cos_1 = torch.ops.aten.cos.default(cos)
-    return (cos_1, add_2)    # 只保存 add_2，不保存 cos
-```
-
-现在后向里cos是从add_2重算出来的，而不是被保存的：
-
-```python
-def forward(self, add_2, tangents_1):
-    cos   = torch.ops.aten.cos.default(add_2)  # 重算！
-    sin   = torch.ops.aten.sin.default(cos)
-    neg   = torch.ops.aten.neg.default(sin)
-    mul   = torch.ops.aten.mul.Tensor(tangents_1, neg)
-    sin_1 = torch.ops.aten.sin.default(add_2)
-    neg_1 = torch.ops.aten.neg.default(sin_1)
-    mul_1 = torch.ops.aten.mul.Tensor(mul, neg_1)
-    return (mul_1, mul_1, mul_1, mul_1)
-```
-
-![](fig03.png)
-<span style="font-size:12px;color:rgb(153,153,153);">图：min-cut切分下前向和后向之间保存的张量更少，内存访问随之减少</span>
-
-## 收尾
-
-如果你读到了这里，干得漂亮！在下一篇文章里，我们会看整个技术栈最后一块拼图：TorchInductor，看看捕获到的图是怎么被lowering成高效的triton代码的。
-
-<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
-<div style="text-align:center;margin-bottom:8px;">
-<strong style="font-size:15px;color:#8b6f4c;">结语</strong>
-</div>
-<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-AOTAutograd的真正价值，是把「后向图」从运行时动态构造，变成和前向图一样可以提前静态分析的产物。一旦前向、后向在同一张joint graph里，编译器就能跨边界做整体优化：这正是torch.compile能做fusion、checkpointing的前提。<br><br>
-而这一切的支点其实是torch dispatcher的 __torch_dispatch__ 钩子：它把「每次算子调用」变成一个可拦截的观测点，AOTAutograd才能在不真正执行、却能跑真实张量的前提下把整张图trace出来。<br><br>
-min-cut切分最值得记住的一点：默认保存所有中间张量在逐点算子链上是浪费的（内存读写付两次），而activation checkpointing的本质就是「只存输入、后向重算」，min-cut把它形式化成最大流/最小割的优化问题，自动决定每个张量存还是重算。
-</div>
-</div>
-
----
-
-<span style="font-size:14px;color:#888888;font-family:'Courier New',monospace;">【传送门】<br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2h0NULN9kXjdxoxphZx0Ew" target="_blank" data-linktype="2">OpenClaw之父&Claude Code之父都在用的Loop到底是什么？答案藏在Loop之下</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/f05wnBex0ECquqLadXgwAg" target="_blank" data-linktype="2">Agent自进化/持续学习的三个层次：Model、Harness、Context</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/lcs_gT9vfs0eaW001g2dfg" target="_blank" data-linktype="2">SGLang用Waterfill+LPLB解决DeepEP MoE负载不均，吞吐提升7.3%</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/1Sgdxx2WfDwlhc-tf2V1MQ" target="_blank" data-linktype="2">深度拆解Hermes Agent：一个最优秀Harness(之一)的九层架构</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/qHscVKN06FEGTru80STlxA" target="_blank" data-linktype="2">M²A多模态双层混合记忆系统：记住你的每一次变化</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/M0qN4cXknU_CmZBQm5ChzA" target="_blank" data-linktype="2">你为什么离职？Top AI公司面试秘籍-一套框架从容应对15个套路问题</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/o6pnSWW01pahFQelJSbSPA" target="_blank" data-linktype="2">华为「韬定律」全解析：从 τ 常数到4GHz麒麟，一张时间表看清未来十年芯片路线</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/_4vgKCTSir14mhtdvs7_HA" target="_blank" data-linktype="2">美团开源LongCat-2.0 (OpenRouter原Owl Alpha)解读：1.6T参数，5万国产卡上</a><br>
-</span>
-
----
-
-<span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://jino-rohit.github.io/blogs/14_aot_autograd.html</span>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+
+要点速览
+
+-核心机制：在函数执行之前，用__torch_dispatch__ 把前向和后向一起追踪进一张联合图，再用partition_fn切回两张独立图，编译器第一次能跨前向后向的边界做优化。-两种切分策略：default_partition把中间张量全保存下来，后向直接读；min_cut_rematerialization_partition把存与重算写成最大流/最小割问题，只保留输入，后向重算中间值。-省下来的是什么：逐点算子链上前后向都是访存受限，默认切分让每个中间张量被写一次、读一次；min-cut用几乎免费的多余浮点运算换掉这次写和读。
+
+torch.fx和TorchDynamo解决的是同一件事：把Python代码变成一张图。但这两种追踪都只覆盖前向传播，训练里真正耗时的那一半，编译器一直看不到。
+后向图原本由autograd引擎在前向跑完的那一刻动态搭出来，编译器插不上手，前向与后向之间那条边界也就无从优化。AOTAutograd补上了这一半：函数执行之前，前向和后向已经一起被追踪进同一张FX图。
+从一个最小的aot_function例子入手，逐张读前向图和后向图，再看联合图怎么建起来、怎么被切回去，以及min-cut重算为什么能用几乎免费的计算换掉真实的访存。
+
+后向传播：编译器看不到的另一半
+前两篇里，torch.fx用符号追踪把Python代码变成图，TorchDynamo在字节码层面捕获图。但两者抓到的都只有前向传播。后向传播怎么办？
+在torch.compile这套生态出现之前，用户可以用torch.fx追踪捕获前向图，后向却仍由autograd引擎动态生成，编译器只能看到前向那一半。前向和后向两张计算图因此无法合并成一张，跨这条边界的优化也就无从谈起。
+AOTAutograd解决的正是这件事：它在执行之前把前向和后向一起追踪出来，编译器于是可以把整张图当成一个整体来做优化。
+aot_function：最小能跑的例子
+先从functorch.compile里最简单的aot_function入手。定义一个把两个张量相乘的函数，外面套一个只负责打印图的编译器：
+import&nbsp;torchfrom&nbsp;functorch.compile&nbsp;import&nbsp;aot_function,&nbsp;make_boxed_funcdef&nbsp;fn(a,&nbsp;b):&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;a&nbsp;*&nbsp;bdef&nbsp;compiler_fn(fx_module,&nbsp;_):&nbsp;&nbsp;&nbsp;&nbsp;print(fx_module.code)&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;make_boxed_func(fx_module.forward)a,&nbsp;b&nbsp;=&nbsp;[torch.randn(2,&nbsp;4,&nbsp;requires_grad=True,&nbsp;device=&quot;cuda&quot;)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;for&nbsp;_&nbsp;in&nbsp;range(2)]aot_fn&nbsp;=&nbsp;aot_function(fn,&nbsp;fw_compiler=compiler_fn,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;bw_compiler=compiler_fn)res&nbsp;=&nbsp;aot_fn(a,&nbsp;b)loss&nbsp;=&nbsp;res.sum()loss.backward()
+运行后会打印两张图，一张前向、一张后向，我们逐张读。前向长这样：
+def&nbsp;forward(self,&nbsp;primals_1,&nbsp;primals_2):&nbsp;&nbsp;&nbsp;&nbsp;mul&nbsp;=&nbsp;torch.ops.aten.mul.Tensor(primals_1,&nbsp;primals_2)&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;(mul,&nbsp;primals_1,&nbsp;primals_2)
+primal是什么？primal是函数的原始输入，按autograd的术语，就是你施加运算的那些张量。这里primals_1 = a，primals_2 = b。
+前向返回(mul, primals_1, primals_2)，为什么要返回三个值？第一个是真正的输出（a * b），另外两个张量是为后向保存下来的。
+再看后向图：
+def&nbsp;forward(self,&nbsp;primals_1,&nbsp;primals_2,&nbsp;tangents_1):&nbsp;&nbsp;&nbsp;&nbsp;mul_1&nbsp;=&nbsp;torch.ops.aten.mul.Tensor(tangents_1,&nbsp;primals_1)&nbsp;&nbsp;&nbsp;&nbsp;mul_2&nbsp;=&nbsp;torch.ops.aten.mul.Tensor(tangents_1,&nbsp;primals_2)&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;(mul_2,&nbsp;mul_1)
+前两个参数primals_1, primals_2是前向传下来的已保存张量，tangents就是后向传播里算出来的传入梯度。
+后向返回(mul_2, mul_1)，梯度顺序与前向的原始输入(a, b) 一致。正是这个顺序约定，让autograd知道哪个梯度属于哪个参数。
+为什么叫AOT：把后向提前到执行之前
+正常情况下，PyTorch的autograd在前向传播过程中动态构建后向图，后向图要等前向结束才算最终确定。这种做法很灵活，代价是执行之前你永远看不到完整图。
+AOTAutograd换了做法：它在函数真正执行之前，就把前向和后向传播都以提前（Ahead-of-Time）的方式追踪好，两张计算图提前交到你手上。
+整体流程是这样几步：
+1&nbsp;AOT Dispatch追踪前向和后向，生成一张联合图（joint graph），本质是一张同时包含前向与后向Aten/Prim算子的FX图。
+2&nbsp;Partition用partition_fn把联合图切成独立的前向图和后向图。
+3&nbsp;Optional decomposition把高层算子拆成粒度更小的算子。
+4&nbsp;两张图分别编译，最后整合进一个torch.autograd.Function。
+torch dispatcher：算子是怎么被路由的
+PyTorch有一个dispatcher，你可以把它理解成路由器。每次调用像a * b这样的算子，dispatcher都会根据输入张量的属性决定跑哪个kernel：是CUDA张量就跑CUDA kernel，需要梯度就用autograd包一层。一个算子通常要穿过多个分发层，才到达最终kernel。
+
+图1：dispatcher像路由器，一次算子调用要穿过多个分发层才到达最终kernel
+__torch_dispatch__ 是一个在最终kernel执行之前触发的钩子。它让你拿到原始ATen算子和它的输入，于是可以在算子层面拦截、检查或改写行为。
+make_fx：借dispatcher拿到底层算子
+torch.fx里有个make_fx，它和普通的symbolic_trace不同，是通过__torch_dispatch__ 实现的，因此能访问底层ATen算子。
+看下面的例子。
+import&nbsp;torchfrom&nbsp;torch.fx.experimental.proxy_tensor&nbsp;import&nbsp;make_fxdef&nbsp;f(x,&nbsp;y):&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;x&nbsp;+&nbsp;yx&nbsp;=&nbsp;torch.randn(8)y&nbsp;=&nbsp;torch.randn(8)g&nbsp;=&nbsp;make_fx(f)(x,&nbsp;y)print(g.code)
+make_fx经由dispatcher追踪，捕获到的是底层ATen算子torch.ops.aten.add.Tensor。
+def&nbsp;forward(self,&nbsp;x_1,&nbsp;y_1):&nbsp;&nbsp;&nbsp;&nbsp;add&nbsp;=&nbsp;torch.ops.aten.add.Tensor(x_1,&nbsp;y_1)&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;add
+符号追踪则是另一套，抽象层级高得多。
+from&nbsp;torch.fx&nbsp;import&nbsp;symbolic_traceh&nbsp;=&nbsp;symbolic_trace(f)print(h.code)
+def&nbsp;forward(self,&nbsp;x,&nbsp;y):&nbsp;&nbsp;&nbsp;&nbsp;add&nbsp;=&nbsp;x&nbsp;+&nbsp;y&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;add
+dispatcher为什么重要到这里就清楚了。接下来看联合图是怎么建起来的。
+联合图：把前向和后向装进同一张图
+把前向和后向放进同一张FX图，价值在于能跨整条边界做优化，而不是把前向和后向分开看。
+思路写成伪代码是这样：
+def&nbsp;joint_forward_backward(*inputs):&nbsp;&nbsp;&nbsp;&nbsp;outputs&nbsp;=&nbsp;forward_fn(*inputs)&nbsp;&nbsp;&nbsp;&nbsp;grads&nbsp;=&nbsp;torch.autograd.grad(&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;outputs,&nbsp;inputs,&nbsp;grad_outputs=...&nbsp;&nbsp;&nbsp;&nbsp;)&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;outputs,&nbsp;grads
+追踪过程中，每个算子都会被__torch_dispatch__ 拦截，对每个算子，AOTAutograd依次做四件事：
+1&nbsp;从张量上取回FX proxy。
+2&nbsp;用ATen算子作为target，在FX图里创建一个call_function节点。
+3&nbsp;用真实张量把算子跑一遍。
+4&nbsp;把执行结果张量绑定回proxy。
+这个过程一直重复，直到前向和后向里的算子全部被追踪完，一张完整的联合图就出来了。
+切分联合图：两种内置策略
+拿到联合图之后，要把它切回独立的前向图和后向图。AOTAutograd的partition_fn负责这件事，它内置了两种策略，用一个具体例子来对比：
+def&nbsp;fn(a,&nbsp;b,&nbsp;c,&nbsp;d):&nbsp;&nbsp;&nbsp;&nbsp;x&nbsp;=&nbsp;a&nbsp;+&nbsp;b&nbsp;+&nbsp;c&nbsp;+&nbsp;d&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;x.cos().cos()
+default_partition：中间结果全留下
+这是默认行为，也是第一个例子里那种做法：从输入到前向输出，途经所有算子的输出都保留下来，后向需要的张量同样作为前向输出返回，中间结果一个不丢。
+def&nbsp;forward(self,&nbsp;primals_1,&nbsp;primals_2,&nbsp;primals_3,&nbsp;primals_4):&nbsp;&nbsp;&nbsp;&nbsp;add&nbsp;&nbsp;&nbsp;=&nbsp;torch.ops.aten.add.Tensor(primals_1,&nbsp;primals_2)&nbsp;&nbsp;&nbsp;&nbsp;add_1&nbsp;=&nbsp;torch.ops.aten.add.Tensor(add,&nbsp;primals_3)&nbsp;&nbsp;&nbsp;&nbsp;add_2&nbsp;=&nbsp;torch.ops.aten.add.Tensor(add_1,&nbsp;primals_4)&nbsp;&nbsp;&nbsp;&nbsp;cos&nbsp;&nbsp;&nbsp;=&nbsp;torch.ops.aten.cos.default(add_2)&nbsp;&nbsp;&nbsp;&nbsp;cos_1&nbsp;=&nbsp;torch.ops.aten.cos.default(cos)&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;(cos_1,&nbsp;add_2,&nbsp;cos)&nbsp;&nbsp;&nbsp;&nbsp;#&nbsp;saves&nbsp;add_2&nbsp;and&nbsp;cos&nbsp;for&nbsp;backward
+后向就把这些保存下来的张量当作输入收下来：
+def&nbsp;forward(self,&nbsp;add_2,&nbsp;cos,&nbsp;tangents_1):&nbsp;&nbsp;&nbsp;&nbsp;sin&nbsp;&nbsp;&nbsp;=&nbsp;torch.ops.aten.sin.default(cos)&nbsp;&nbsp;&nbsp;&nbsp;neg&nbsp;&nbsp;&nbsp;=&nbsp;torch.ops.aten.neg.default(sin)&nbsp;&nbsp;&nbsp;&nbsp;mul&nbsp;&nbsp;&nbsp;=&nbsp;torch.ops.aten.mul.Tensor(tangents_1,&nbsp;neg)&nbsp;&nbsp;&nbsp;&nbsp;sin_1&nbsp;=&nbsp;torch.ops.aten.sin.default(add_2)&nbsp;&nbsp;&nbsp;&nbsp;neg_1&nbsp;=&nbsp;torch.ops.aten.neg.default(sin_1)&nbsp;&nbsp;&nbsp;&nbsp;mul_1&nbsp;=&nbsp;torch.ops.aten.mul.Tensor(mul,&nbsp;neg_1)&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;(mul_1,&nbsp;mul_1,&nbsp;mul_1,&nbsp;mul_1)
+背景：逐点算子其实卡在访存上
+这一段背景是为了说清下一项技术为什么有效。
+在GPU上，一个算子耗掉的时间大头不是算术，而是内存的读写。对逐点算子（add、mul、cos、sin、relu等）尤其如此，它们对每个元素几乎不做多少计算。
+所以把多个逐点算子融合起来，可能一点忙都帮不上，因为瓶颈在访存，不在浮点运算量。
+放到训练里看，如果你的图是一条逐点算子链，前向和后向都是逐点算子，运行时间正比于读写的数据量。默认切分把每个中间张量都保存下来，等于把访存成本付了两遍：前向写一次做保存，后向读一次做加载。
+
+图2：默认切分下中间张量在前向写一次、后向读一次，访存成本被付了两遍
+那如果只保存输入、中间结果在后向里重算呢？这会带来两件事：
+1&nbsp;前向和后向之间需要保存的张量变少。
+2&nbsp;访存减少，因为既不用写中间结果去保存，也不用读回来加载。
+
+图3：只保存输入、后向重算中间值，保存与加载两侧的访存都降了下来
+重算本身几乎不花钱，因为这些逐点算子本来就被访存卡住，多出来的浮点运算会藏在内存延迟背后。这正是activation checkpointing（激活重计算）能成立的原因，AOTAutograd用min-cut建模把它一般化了。
+min_cut_rematerialization_partition：存还是重算
+既然不必保存所有中间张量，那怎么决定哪些保存、哪些重算？AOTAutograd把这件事写成最大流/最小割（max-flow/min-cut）问题，算法细节可以另外去读。
+把同一段代码换成min-cut切分策略：
+from&nbsp;functorch.compile&nbsp;import&nbsp;min_cut_rematerialization_partitionaot_fn&nbsp;=&nbsp;aot_function(fn,&nbsp;fw_compiler=compiler_fn,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;bw_compiler=compiler_fn,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;partition_fn=min_cut_rematerialization_partition)
+看前向图，cos不再被保存了：
+def&nbsp;forward(self,&nbsp;primals_1,&nbsp;primals_2,&nbsp;primals_3,&nbsp;primals_4):&nbsp;&nbsp;&nbsp;&nbsp;add&nbsp;&nbsp;&nbsp;=&nbsp;torch.ops.aten.add.Tensor(primals_1,&nbsp;primals_2)&nbsp;&nbsp;&nbsp;&nbsp;add_1&nbsp;=&nbsp;torch.ops.aten.add.Tensor(add,&nbsp;primals_3)&nbsp;&nbsp;&nbsp;&nbsp;add_2&nbsp;=&nbsp;torch.ops.aten.add.Tensor(add_1,&nbsp;primals_4)&nbsp;&nbsp;&nbsp;&nbsp;cos&nbsp;&nbsp;&nbsp;=&nbsp;torch.ops.aten.cos.default(add_2)&nbsp;&nbsp;&nbsp;&nbsp;cos_1&nbsp;=&nbsp;torch.ops.aten.cos.default(cos)&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;(cos_1,&nbsp;add_2)&nbsp;&nbsp;&nbsp;&nbsp;#&nbsp;only&nbsp;saves&nbsp;add_2,&nbsp;NOT&nbsp;cos
+后向图里，cos是从add_2重算出来的，而不是读保存下来的值。
+def&nbsp;forward(self,&nbsp;add_2,&nbsp;tangents_1):&nbsp;&nbsp;&nbsp;&nbsp;cos&nbsp;&nbsp;&nbsp;=&nbsp;torch.ops.aten.cos.default(add_2)&nbsp;&nbsp;#&nbsp;recomputed!&nbsp;&nbsp;&nbsp;&nbsp;sin&nbsp;&nbsp;&nbsp;=&nbsp;torch.ops.aten.sin.default(cos)&nbsp;&nbsp;&nbsp;&nbsp;neg&nbsp;&nbsp;&nbsp;=&nbsp;torch.ops.aten.neg.default(sin)&nbsp;&nbsp;&nbsp;&nbsp;mul&nbsp;&nbsp;&nbsp;=&nbsp;torch.ops.aten.mul.Tensor(tangents_1,&nbsp;neg)&nbsp;&nbsp;&nbsp;&nbsp;sin_1&nbsp;=&nbsp;torch.ops.aten.sin.default(add_2)&nbsp;&nbsp;&nbsp;&nbsp;neg_1&nbsp;=&nbsp;torch.ops.aten.neg.default(sin_1)&nbsp;&nbsp;&nbsp;&nbsp;mul_1&nbsp;=&nbsp;torch.ops.aten.mul.Tensor(mul,&nbsp;neg_1)&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;(mul_1,&nbsp;mul_1,&nbsp;mul_1,&nbsp;mul_1)
+整条栈还差最后一块
+到这里，前向图、后向图和联合图都齐了，整条栈还差最后一块拼图：TorchInductor，它负责把捕获到的图降级编译成高效的Triton代码。
+
+结语
+
+AOTAutograd真正的贡献不是让后向跑得更快，而是让后向变成编译器看得见的代码：前向和后向在执行之前就被追踪进同一张FX图，跨边界优化才第一次成为可能。① 联合图是整条思路的地基。每个算子被__torch_dispatch__ 拦下，依次取FX proxy、建call_function节点、用真实张量执行、把结果绑回proxy，前向和后向因此落在同一张图里，而不是各自独立。② 切分方式决定内存账本。default_partition把中间张量全保存，前向写一次、后向读一次，逐点算子链上的访存要付两遍；min_cut_rematerialization_partition用最大流/最小割划出存与重算的边界，只保留输入、后向重算中间值，本质上是activation checkpointing的一般化。③ 重算划得来的前提，是算子本身已经受限在访存上。多出来的浮点运算藏在内存延迟背后近乎免费，省下的那次写和读却是实打实的开销，这让min-cut的选择变成纯粹的收益。想亲手验证这套机制，最短路径是用aot_function配一个只打印fx_module.code的编译器：前向多返回了哪些张量、后向把它们当作什么收下，读几张图就能看清编译器的内存账本是怎么记的。这也是理解torch.compile内核比啃后端代码更快的入口。
+
+【传送门】
+
+Torch Profiler在Trace里分析性能瓶颈: 剖析SGLang LLM推理
+Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能
+vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%
+把KVCache变成可训练记忆：Context Tuning让LLM免权重微调
+MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法
+Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆
+Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降
+Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设
+AI芯片架构全景: 从NVIDIA到Groq的六条设计路线
+在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM
+KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍
+TokenSpeed-Kernel：把推理内核做成一等公民
+阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT
+英伟达Kernel Agent: 编译器与算子调优Agent的协同设计
+Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存
+RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'
+
+参考：https://jino-rohit.github.io/blogs/14_aot_autograd.html
