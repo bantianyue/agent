@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import json, os, sys
+
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+
+S = []
+def h2(t): S.append({"type":"h2","title":t,"paras":[],"fig_after":{}})
+def h3(t): S.append({"type":"h3","title":t,"paras":[],"fig_after":{}})
+def t(x): S[-1]["paras"].append(x)
+def code(x): S[-1]["paras"].append("__CODE__"+x)
+def fig(src,cap):
+    k=str(len(S[-1]["paras"])-1)
+    S[-1]["fig_after"].setdefault(k,[]).append({"src":src,"caption":cap})
+
+h2("引子")
+t("GEMV 是 GEneral Matrix Vector multiplication（通用矩阵向量乘法）的缩写，说白了就是把一个矩阵和一个向量相乘。")
+t("这份工作记录从一个朴素 kernel 开始。写完之后我们先研究它，搞清楚它为什么性能不行；找出瓶颈之后，再动手实现一个把所有问题都解决掉的、真正高效的 kernel。")
+t("形式化地说，我们的目标是计算：y（M×1）= A（M×N）· x（N×1）。")
+fig("fig01.png","图 1：GEMV 概览。一个 M×N 的矩阵 A 乘以长度为 N 的向量 x，得到长度为 M 的向量 y")
+
+h2("算力强度")
+t("假设所有操作数都用 FP32，每个元素占 4 字节。我们同时假设内存行为是理想的：输入向量 x 只加载一次并留在缓存里，而 A 的每个元素都恰好被读取一次。")
+
+h3("内存访问")
+t("把这一次 GEMV 涉及的数据移动量列出来，就是下面这张表（读取矩阵 A：MN 个元素、4MN 字节；读取输入向量 x：N 个元素、4N 字节；写出输出向量 y：M 个元素、4M 字节；合计 MN+N+M 个元素、4(MN+N+M) 字节）。")
+
+h3("计算量")
+t("对 A 的每一行，这个点积要做 N 次乘法与 N−1 次加法，因此精确的计算开销是 M(N+(N−1)) = M(2N−1) = 2MN−M 次浮点运算。")
+t("算力强度是浮点工作量与内存流量的比值：AI(M,N) = 浮点运算数 / 传输字节数 = M(2N−1) / [4(MN+N+M)] = (2MN−M) / [4(MN+N+M)]，单位是 FLOPs/byte。")
+t("当 M 和 N 都很大时，MN 主导 M 与 N，于是 AI ≈ 2MN/4MN = 1/2 = 0.5 FLOPs/byte。")
+t("这意味着每从内存读 2 个字节，我们才做 1 次浮点运算。这么低的算力强度，让 GEMV 在绝大多数现代处理器上都是内存受限的：处理器读取 A 的速度，通常会在浮点单元被喂饱之前就成为性能上限。按 roofline 模型，可达到的最高性能受 P ≤ min(P(峰值), AI × B(内存带宽)) 约束，其中 P(峰值) 是峰值算力、B(内存带宽) 是内存带宽。由于 AI 约为 0.5 FLOPs/byte，一台内存带宽为 B 的处理器跑 GEMV 时，最多只能维持约 0.5B FLOPs/s——除非矩阵已经驻留在更快的存储层级里。")
+t("虽然我们一直把 A 当作二维矩阵来推理，但它在内存里占的是一段连续的线性区域。CUDA 按行存放元素，所以位于（行、列）的元素，其偏移量是 offset(A(row,column)) = row × N + column；等价地写作 A(row,column) = A[row × N + column]。举个例子，当 N = 4 时，元素 A(2,2) 位于 2 × 4 + 2 = 10，也就是 A(2,2) = A[10]。")
+fig("fig02.png","图 2：三行四列的矩阵被展平成一行十二个内存位置，并标出 A(2,2) 的落点")
+
+h3("算法")
+t("GEMV 的分解特别简单：每一个输出元素，都是 A 的某一行与同一个输入向量 x 的点积。对第 i 行（i 取值 0 到 M−1），有 y(i) = Σ(j=0 到 N−1) A(i,j)·x(j)。")
+t("这 M 个点积彼此独立，所以我们可以把第 i 行分配给一个线程：该线程读取 A 的第 i 行，把其中的元素与 x 相乘、累加乘积，再写出 y(i)。")
+fig("fig03.png","图 3：朴素 GEMV 的访问模式。每个线程遍历展平后 A 的连续一行，使用共享的向量 x，并写出对应的 y 元素")
+code("""__global__ void naive_gemv_kernel(
+    float* A,
+    float* x,
+    float* y,
+    int M,
+    int N
+) {
+    int row = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (row < M) {
+        float sum = 0.0;
+
+        for (int column = 0; column < N; ++column) {
+            sum = A[row * N + column] * x[column];
+        }
+
+        y[row] = sum;
+    }
+}
+
+void launch_kernel(
+    float* __restrict__ A,
+    float* __restrict__ x,
+    float* __restrict__ y,
+    int M,
+    int N    
+) {
+    dim3 block_size(1024); 
+    dim3 grid_size(ceil_division(M, block_size.x));
+
+    naive_gemv_kernel<<<grid_size, block_size>>>(A, x, y, M, N);
+}""")
+t("到这里，我们写出了一段并行计算矩阵向量乘法的程序。既然是并行的，那肯定能省下大量时间，听起来很棒、很完美对吧？可惜并不是。")
+t("回想一下前面算算力强度时讨论过的内容：FLOPs 与内存。我们的计算也许确实很高效，但事实证明我们忽略了一个不起眼的细节，正是它让优化前功尽弃。这个细节就是内存访问模式。")
+t("现在正好介绍一下 warp 的概念。warp 是 NVIDIA GPU 上最基础的执行单元（AMD 喜欢叫它 wavefront），每个 warp 恰好包含 32 个线程；所有 NVIDIA 架构（截至本文写作时的 Ampere、Hopper、Blackwell）都是如此。")
+t("这里最关键的一点是：GPU 只有一次性读写一整块较宽的内存，才能达到高内存带宽。")
+t("看看这对刚写的 kernel 意味着什么。考虑第一个 block 里的第一个 warp：由于 blockIdx.x = 0，线程 0 到 31 被分配到了第 0 到第 31 行。现在把它们全部冻结在循环的第一次迭代上，也就是 column = 0 的时候：")
+code("""Thread 0:  row = 0,  accesses A[0 * N + 0]  = A[0]
+Thread 1:  row = 1,  accesses A[1 * N + 0]  = A[N]
+Thread 2:  row = 2,  accesses A[2 * N + 0]  = A[2N]
+Thread 3:  row = 3,  accesses A[3 * N + 0]  = A[3N]
+...
+Thread 31: row = 31, accesses A[31 * N + 0] = A[31N]""")
+t("对第一个 warp 来说，线程编号同时也是它的行号。在任意一列上，线程请求的线性下标就是 index = threadIdx.x * N + column。当 column = 0 时，它变成 threadIdx.x * N，于是得到上面那串 0, N, 2N, …, 31N。")
+t("看出问题了吗？这 32 个相邻线程读取的并不是 32 个相邻元素，任意两个线程之间都隔了整整一行，也就是内存里恰好 N 个浮点数。")
+fig("fig04.png","图 4：朴素 GEMV kernel 的第一个 warp 访问第零列时的情况。线程 0、1、2、3 与 31 各自落在相距一整行的位置")
+t("以 N = 8192 这个常见情形为例：线程 0 读 A[0]，线程 1 却读 A[8192]，中间隔了 8192 个浮点数、也就是 32768 字节；线程 2 又在 32768 字节之外，整个 warp 都是这个规律。")
+t("为什么这很糟？因为全局内存是按对齐的块来取数的。当一个 warp 里的 32 个线程请求连续的 FP32 值时，它们的请求可以被合并成很少几次内存事务；但这里请求彼此相距太远，N 一大，每个线程可能都要单独占用一次事务。于是一条载入指令可能逼 GPU 做多达 32 次内存事务，尽管每个线程只想要一个 4 字节的值。")
+t("而且这不是一次性的惩罚。同样的模式会在 column = 1、column = 2 一直到矩阵的每一列上反复出现：第 0 列取到 0, N, 2N, 3N…；第 1 列取到 1, N+1, 2N+1, 3N+1…；第 2 列取到 2, N+2, 2N+2, 3N+2…。")
+t("所以尽管每个单独的线程确实在自己的行里顺序前进，整个 warp 在每一次迭代上做的都是非连续、带跨步的访问。这就是这个看起来人畜无害的 kernel 为什么浪费了如此多内存带宽的原因。")
+
+h3("好吧，但到底有多糟？")
+t("我们其实可以把这件事联系回文章开头算过的算力强度。数据搬运花费的时间大约是 T(内存) ≈ 传输字节数 / 内存带宽。这个式子简单得几乎让人难受，但它说明的道理很直接：如果两个 kernel 做同样多的运算，其中一个却迫使 GPU 传输更多字节，那它就更慢。而 GEMV 本来就已经内存受限，几乎没有多余的计算可以用来掩盖这部分额外时间。")
+t("前面我们算出理想算力强度是 0.5 FLOPs/byte，这已经很低了。它还意味着：内存每送来 1 个字节，GPU 只拿到半次浮点运算可做；换句话说，每做 1 次浮点运算，大约需要 2 字节的内存流量。现代 GPU 的算力远快于它们从全局内存取数的速度，所以算力强度这么低的 kernel，会远在达到峰值算力之前就撞上带宽天花板。")
+t("但我们的计算里藏着一个重要的词：理想。它假设 GEMV 要 4 个字节，就只有这有用的 4 个字节被计入。而现实中的内存事务并不是以一个浮点数的粒度工作的，GPU 取的是对齐的内存块；如果取回来的块里剩下的部分没被这个 warp 用上，那些字节照样穿过了内存系统，只是我们没从它们身上得到任何计算。")
+t("我们用内存事务效率来描述这种浪费：η(A) = A 的有用字节数 / 为 A 实际传输的字节数。在完美合并的矩阵读取下，η(A) 可以接近 1，warp 几乎用上了它取回的所有东西。而我们刚写的朴素 kernel 得到的是：η(A) = (32 × 4) / (32 × 32) = 128 / 1024 = 1/8 = 12.5%。")
+t("这意味着，读取 A 的 4MN 个有用字节，可能迫使 GPU 在内存系统里传输 4MN / η(A) 个字节。如果对 x 保持同样的理想缓存假设，并注意到对 y 连续元素的写入是合并的，那么有效算力强度就变成 AI(有效) = M(2N−1) / [4MN/η(A) + 4N + 4M]。当 M 和 N 很大时，矩阵那一项压倒其它所有项，于是 AI(有效) ≈ 2MN / (4MN/η(A)) = η(A)/2。")
+t("现在能看清访问模式是怎么让一个本就内存受限的算法雪上加霜的：合并访问（η(A) ≈ 1）时 AI(有效) ≈ 0.5 FLOPs/byte；非合并访问（η(A) ≈ 1/8）时 AI(有效) ≈ 0.0625 FLOPs/byte。我们做的浮点运算完全一样，但因为内存访问方式的选择，现在每一个有用的矩阵字节都要花掉 8 个传输字节。")
+t("连续访问并不会神奇地提高 GEMV 的理论算力强度，它仍然约为 0.5 FLOPs/byte。它真正的作用是：不让糟糕的内存事务把有效算力强度进一步压低。合并访问让我们有机会真正用上 GPU 可用的内存带宽，而不是把它大部分扔掉。")
+t("这就是我们现在的目标。GEMV 依然是内存受限的，但只要相邻线程访问相邻元素，我们就能让那些昂贵的内存事务承载有用的数据。下一个问题是：该怎么重新安排工作，让一个 warp 沿着一行横向前进，而不是在行与行之间跳来跳去？")
+
+h3("我们真正想要的访问模式是什么？")
+t("在朴素 kernel 里，相邻线程处理的是不同的行，这正是它们的地址相隔 N 个元素的原因。")
+t("那如果把这件事反过来呢？不再把一整行交给一个线程，而是把一整行交给一个 warp，让全部 32 个线程都工作在同一个行上。")
+t("先看循环的第一遍：线程 0 处理第 0 列、线程 1 处理第 1 列、线程 2 处理第 2 列，一直到线程 31 处理第 31 列。")
+code("""thread 0  -> column 0
+thread 1  -> column 1
+thread 2  -> column 2
+...
+thread 31 -> column 31""")
+t("由于所有线程共享同一行，它们访问的是：")
+code("""thread 0  -> A[row * N + 0]
+thread 1  -> A[row * N + 1]
+thread 2  -> A[row * N + 2]
+...
+thread 31 -> A[row * N + 31]""")
+t("这 32 个元素在内存里彼此相邻。线程 0 与线程 1 之间的距离不再是 N 个元素，而恰好是 1 个元素。")
+t("这前 32 列处理完之后，每个线程向前移动 32：线程 0 到第 32 列、线程 1 到第 33 列、线程 2 到第 34 列，一直到线程 31 到第 63 列。于是第二遍访问的是 A[row * N + 32] 到 A[row * N + 63]，同样是一段连续的内存块。")
+code("""column = threadIdx.x + 32 * pass
+index  = row * N + column""")
+t("这里的 pass 只是表示 warp 已经循环了多少遍：0 对应第 0 到 31 列，1 对应第 32 到 63 列，2 对应第 64 到 95 列，以此类推。")
+t("单个线程随时间是按 32 个元素跳的，但全部 32 个线程在一起，每一遍访问的都是相邻元素。这正是前面看到的那个微妙区别，只不过现在它站在了我们这一边。")
+fig("fig05.png","图 5：合并访问的 GEMV 模式：一个 warp 负责矩阵的一行，第一遍时线程 0 到 31 访问相邻的 32 个元素")
+t("在 32 字节扇区的模型下，32 个相邻的 FP32 载入请求 128 个有用字节、也恰好传输 128 字节，于是 η(A) = (32 × 4) / (4 × 32) = 1。把它代回有效算力强度，得到 AI(有效) ≈ η(A)/2 ≈ 0.5 FLOPs/byte。")
+t("我们没有让 GEMV 变得不那么内存受限，只是把 GEMV 本应有的最好情形恢复了出来：朴素的映射把它压到了 0.0625 FLOPs/byte，而合并访问的映射把它拉回 0.5 FLOPs/byte 附近，让我们能从 GPU 本就在花的带宽里做出有用的工作。")
+t("把一行拆给 32 个线程会带来一个后果：不再有任何一个线程计算完整的点积了。以 N = 64 的行为例，第一遍里线程 0 累加 A(row,0)·x(0)、线程 1 累加 A(row,1)·x(1)、线程 2 累加 A(row,2)·x(2)，一直到线程 31 累加 A(row,31)·x(31)。")
+code("""thread 0  -> partial_sum += A[row, 0]  * x[0]
+thread 1  -> partial_sum += A[row, 1]  * x[1]
+thread 2  -> partial_sum += A[row, 2]  * x[2]
+...
+thread 31 -> partial_sum += A[row, 31] * x[31]""")
+t("第二遍里，同样的线程向前移动 32 列：线程 0 累加 A(row,32)·x(32)、线程 1 累加 A(row,33)·x(33)、线程 2 累加 A(row,34)·x(34)，一直到线程 31 累加 A(row,63)·x(63)。")
+code("""thread 0  -> partial_sum += A[row, 32] * x[32]
+thread 1  -> partial_sum += A[row, 33] * x[33]
+thread 2  -> partial_sum += A[row, 34] * x[34]
+...
+thread 31 -> partial_sum += A[row, 63] * x[63]""")
+t("循环结束后，线程 0 持有第 0 列与第 32 列的贡献，线程 1 持有第 1 列与第 33 列的贡献，以此类推。完整的点积现在分散在 32 个不同的部分和里：y(row) = 线程 0 的部分和 + 线程 1 的部分和 + … + 线程 31 的部分和。")
+code("""y[row] = partial_sum from thread 0
+       + partial_sum from thread 1
+       + ...
+       + partial_sum from thread 31""")
+t("所以修好内存访问之后，多出来一件小小的收尾工作：在写出 y(row) 之前，warp 必须把 32 个部分和归约成一个最终的和。这个收尾我们用下面这个小小的工具函数 warpReduceSum 来处理。")
+
+h3("把这个访问模式写成代码")
+t("到这里映射关系已经清楚了：block 0 对应第 0 行、写出 y[0]；block 1 对应第 1 行、写出 y[1]；block 2 对应第 2 行、写出 y[2]，以此类推。每个 block 恰好包含 32 个线程，所以一个 block 就是一个 warp。在这个 warp 内部，线程 0 处理第 0、32、64… 列，线程 1 处理第 1、33、65… 列，依此类推。")
+code("""__device__ __forceinline__ float warpReduceSum(float value) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        value += __shfl_down_sync(0xffffffff, value, offset);
+    }
+    return value;
+}
+
+__global__ void performant_gemv_kernel(
+    float* A,
+    float* x,
+    float* y,
+    int M,
+    int N    
+) {
+    // Ensure block size equals warp size for optimal performance
+    assert(blockDim.x == warpSize);
+
+    int block_id = blockIdx.x;
+    
+    if (block_id >= M)
+        return;
+
+    int thread_id = threadIdx.x;
+
+    float partial_sum = 0.f;
+
+    for (int column = thread_id; column < N; column += warpSize) {
+        partial_sum += A[block_id * N + column] * x[column];
+    }
+
+    float sum = warpReduceSum(partial_sum);
+
+    if (thread_id == 0){
+        y[block_id] = sum;
+    }
+}
+
+void launch_kernel(
+    float* __restrict__ A,
+    float* __restrict__ x,
+    float* __restrict__ y,
+    int M,
+    int N    
+) {
+    int num_threads = 32;
+
+    dim3 block_size(num_threads); 
+    dim3 grid_size(M);
+
+    performant_gemv_kernel<<<grid_size, block_size>>>(A, x, y, M, N);
+}""")
+t("回忆一下，lane 是线程在它所属 warp 内的位置编号，从 0 到 31。由于我们的 block 恰好包含一个 warp，线程 0 就是 lane 0、线程 1 就是 lane 1，依此类推。__shfl_down_sync 允许一个 lane 读取另一个 lane 寄存器里的值。例如 value += __shfl_down_sync(0xffffffff, value, 16) 的意思是：lane 0 加上 lane 16 的值，lane 1 加上 lane 17 的值，依此类推。循环用逐步减半的偏移量重复这个操作：偏移 16 时 32 个部分和变成 16 组、每组 2 个；偏移 8 时 16 组变成 8 组、每组 4 个；偏移 4 时 8 组变成 4 组、每组 8 个；偏移 2 时 4 组变成 2 组、每组 16 个；偏移 1 时 2 组变成 1 组、共 32 个。")
+code("""value += __shfl_down_sync(0xffffffff, value, 16);""")
+code("""offset 16 -> 32 partial sums become 16 groups of 2
+offset  8 -> 16 groups become 8 groups of 4
+offset  4 ->  8 groups become 4 groups of 8
+offset  2 ->  4 groups become 2 groups of 16
+offset  1 ->  2 groups become 1 group of 32""")
+t("这五步之后，lane 0 持有全部 32 个初始部分和的总和。完整的结果并不存在于每个 lane 里，这就是为什么只有线程 0 负责写回：if (thread_id == 0) { y[block_id] = sum; }。")
+code("""if (thread_id == 0) {
+    y[block_id] = sum;
+}""")
+t("朴素 kernel 并不需要这个归约，所以是的，我们确实引入了一些额外工作。但对一行包含数千个值的矩阵来说，五步寄存器级的 shuffle-and-add，比起把散乱的矩阵读取换成连续读取，代价小得可以忽略。我们用 warp 内部的一点点通信，换来了对全局内存带宽好得多的利用：而这正是内存受限的 kernel 希望我们做的交换。")
+
+h2("主要结论")
+t("好吧，对一个矩阵向量乘法来说，这已经讲了很多。我们从一个看起来显而易见的并行算法出发，发现它依然很慢，一路深挖到内存事务层面，然后重新安排工作，直到 GPU 终于拿到它想要的访问模式。如果要把整份工作记录压缩成几条，我会选下面这些。")
+t("FLOPs 只讲了一半的故事。GEMV 的算力强度大约是 0.5 FLOPs/byte，这已经相当低了。GPU 花在等矩阵值上的时间，比花在乘它们上面的时间更多，所以只盯着算力峰值，在这里几乎告诉我们任何有用的信息。")
+t("往一个问题上堆更多线程，并不会自动让它变快。我们的第一个 kernel 并行度极高，但每个 warp 都在内存里跳行。我们有大量线程在干活，只是给它们喂数据的方式糟透了。")
+t("不要只盯着一个线程就断言访问是连续的。线程 0 确实在逐元素走过自己那一行，问题在于它同一个 warp 里另外 31 个线程正在走另外 31 个完全不同的行。真正重要的是整个 warp 在同一时刻请求了什么。")
+t("有时候真正的优化，就是改变工作的归属。我们从「一个线程拥有一行」变成「一个 warp 拥有一行」，就这一个改动，把相隔 N 个元素的地址变成了相邻地址。同一个矩阵、同一种乘法，内存行为却好得多。")
+t("合并访问并没有神奇地提高 GEMV 的理论算力强度，最好情况仍然在 0.5 FLOPs/byte 左右。它做到的是：阻止糟糕的访问模式把有效算力强度拖向 0.0625 FLOPs/byte。我们没有创造更多带宽，只是不再浪费本来已有的带宽。")
+t("多做一点点工作，可以省下多得离谱的时间。新的 kernel 需要五步 shuffle-and-add 来合并部分和，这听起来像是额外开销（它确实是），但和反复从内存取回大块数据、却只用一个浮点数相比，这点开销微不足道。")
+t("这大概就是整件事的教训：对一个内存受限的 kernel 而言，聪明之处并不总是减少浮点运算的数量，有时候仅仅是确保每一个从内存里搬出来的昂贵字节，都真的被用上了。")
+
+DATA = {
+    "summary": [
+        {"key": "问题", "body": "GEMV 的算力强度只有约 0.5 FLOPs/byte，本就内存受限；朴素 kernel 让相邻线程隔着一整行访问，把有效算力强度拖到 0.0625"},
+        {"key": "方法", "body": "把工作归属从「一个线程一行」改成「一个 warp 一行」，用线程号加 32 的跨步索引让每次访问都连续，再用五步 shuffle 归约部分和"},
+        {"key": "结果", "body": "内存事务效率从 1/8（12.5%）提到 1，有效算力强度从 0.0625 恢复到约 0.5 FLOPs/byte，代价只是 warp 内五次寄存器级加法"},
+    ],
+    "lead": [
+        "GEMV（矩阵向量乘法）看起来是个再简单不过的并行问题：每个输出元素就是矩阵一行与输入向量的点积。但这篇文章走完了从朴素 kernel 到高效 kernel 的完整路程，也把 CUDA 优化里最核心的那个概念讲透了：线程级的连续访问不等于 warp 级的连续访问。",
+        "作者先算清 GEMV 的算力强度只有约 0.5 FLOPs/byte、注定内存受限，再指出朴素映射会让有效算力强度跌到 0.0625 FLOPs/byte，最后用一个改动把带宽利用拉回正轨。",
+    ],
+    "sections": S,
+    "conclusion": [
+        "**这篇工作记录最值钱的一句话是：不要用单个线程的视角判断访存是否连续。** 朴素 kernel 里线程 0 确实在自己的行里逐元素前进，但它同一个 warp 里的另外 31 个线程各自走在完全不同的行上，于是每一条载入指令都可能变成 32 次内存事务，事务效率只有 12.5%。",
+        "修法也简单得出奇：把「一个线程负责一行」改成「一个 warp 负责一行」，相邻线程就落在相邻元素上，事务效率变成 1，有效算力强度从 0.0625 回到约 0.5 FLOPs/byte。多出来的代价只是 warp 内五步 shuffle 归约，用一点点寄存器级通信换掉大量无用的内存流量，这正是内存受限 kernel 该做的交易。",
+    ],
+    "reference_url": "https://heyyanshuman.com/posts/making_gemv_fast",
+    "title": "让 GEMV 快起来：从朴素 kernel 到合并访存，算力强度翻八倍",
+}
+
+out_path = os.path.join(_article_dir, "article_data.json")
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print("OK wrote", out_path, len(DATA.get("sections", [])), "sections")

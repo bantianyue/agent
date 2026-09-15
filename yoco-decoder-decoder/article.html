@@ -1,0 +1,96 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心思路</strong>：YOCO用self-decoder生成一次全局KV cache，cross-decoder用交叉注意力复用；对外仍像decoder-only，只缓存一次<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">复杂度对比</strong>：KV cache显存从O(LND) 降到O((N+L)D)、约省L倍；prefill从O(LN²D) 降到O(LND)，还能提前退出只算一半层<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">实测收益</strong>：65B模型KV cache显存降约80倍；512K上下文prefill从180秒降到不足6秒；1M加速71.8倍、32K加速2.87倍</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Decoder-only Transformer靠KV cache复用历史、避免重复编码，成了语言模型的事实标准。但服务token数一多，KV cache就吃掉大量显存，长输入的prefill也慢得惊人：一个65B模型（加上分组查询注意力与8比特KV量化）在512K token下要占约86GB显存，超过单张H100-80GB；在四张H100上，7B模型prefill 450K token要约110秒、1M长度要380秒。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">YOCO（You Only Cache Once）提出decoder-decoder架构：self-decoder用高效自注意力只生成一份全局KV cache，cross-decoder用交叉注意力复用这份缓存，相当于把原来「每层都存一遍」的KV压缩成「只存一次」。KV cache的显存复杂度从O(LND) 降到O((N+L)D)，prefill复杂度从O(LN²D) 降到O(LND)，而且prefill阶段可以提前退出。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">1. Introduction：KV cache为何成为瓶颈</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">语言模型架构的探索大致有三条线索。一条是encoder-only，如BERT，对输入序列做双向编码；一条是encoder-decoder，如T5，用双向编码器处理输入、单向解码器生成输出；这两者在自回归生成上都吃亏，因为编码器必须把输入与已生成的输出重新编码一遍，encoder-decoder虽然只用解码器生成，但输出token没法充分利用编码器的参数，多轮对话时尤其明显。第三条是decoder-only，如GPT，靠缓存已算过的key/value向量在当前步复用，避免为每个token重新编码历史，推理速度大幅提升，也由此成为标准选择。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">问题随服务规模放大。随着token数增长，KV cache会占据大量GPU显存，让大模型推理变成「显存受限」：以65B模型（加上分组查询注意力与8比特KV量化）为例，512K token占用约86GB显存，比一张H100-80GB的容量还大。另一方面，长序列输入的prefill延迟极高，用四张H100时，7B模型（加上Flash-Decoding与kernel融合）prefill 450K token要约110秒、1M长度要380秒。这两道门槛让长上下文模型很难真正部署。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">YOCO的做法是把cross-decoder叠在self-decoder之上。给定输入序列，self-decoder先用高效自注意力得到KV cache，随后的cross-decoder层用交叉注意力复用这份共享缓存。它概念上接近encoder-decoder，但从外部看整体行为更像decoder-only，因此天然适配语言模型这类自回归任务。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这样带来三方面好处：只缓存一次，KV cache的显存占用显著下降；计算流允许prefill在进入self-decoder之前提前退出，prefill阶段被大幅加速；分布式长序列训练的系统设计也更高效。此外论文为self-decoder提出gated retention，在retention上加了数据控制的门控机制。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">论文给出的实测收益相当直观：65B模型的KV cache内存可减少约80倍；即使是3B模型，整体推理内存在32K token时减少两倍、1M时减少九倍以上；prefill在1M上下文加速71.8倍、32K输入加速2.87倍，512K上下文下把Transformer的prefill延迟从180秒压到不足6秒。训练侧，3B模型扩到万亿级token后与StableLM这类主流Transformer模型表现相当，160M到13B的scaling曲线也具竞争力，上下文扩展到1M时needle检索几乎全中。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1：decoder-decoder架构YOCO只缓存一次key/value，显著降低KV cache显存与prefill时间，并在训练token数、模型规模与上下文长度上保持可扩展（推理开销按512K上下文报告）</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">2. YOCO：只缓存一次</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">YOCO由两部分组成：self-decoder与cross-decoder。整个模型堆叠L个block，前L/2层是self-decoder，其余是cross-decoder。输入序列的嵌入打包成矩阵后，先由self-decoder逐层得到上下文表示，其第L/2层的输出被用来产生供cross-decoder使用的全局K、V；cross-decoder再逐层结合这份共享缓存得到最终输出。两部分都使用因果掩码。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两者的block布局与标准Transformer类似（注意力与前馈网络交替），同样带pre-RMSNorm、SwiGLU与分组查询注意力，差别只在注意力模块：self-decoder用高效自注意力（例如滑动窗口注意力），cross-decoder则用全局交叉注意力去读取self-decoder产出的共享KV缓存。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2：decoder-decoder架构总览。self-decoder生成全局KV cache，cross-decoder用交叉注意力复用这份共享缓存；两部分都使用因果掩码，整体行为与decoder-only Transformer一致、自回归生成token</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">2.1 Self-Decoder。每层由高效自注意力与前馈网络构成，归一化用RMSNorm，注意力施加因果掩码。这个模块的关键性质是推理内存为O(1)，也就是KV cache数量恒定：例如滑动窗口注意力的缓存大小只取决于窗口大小，而与输入长度无关。论文在第3节讨论gated retention等更具体的设计选择。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">2.2 Cross-Decoder。self-decoder的输出先经归一化与两组线性权重投影出全局的K和V，随后所有L/2个cross-decoder层共用这一份K、V：每层用自己的query权重产生Q，做标准多头注意力、加残差，再过SwiGLU前馈与残差得到输出。交叉注意力同样使用因果掩码，并且兼容分组查询注意力，可以进一步节省KV cache显存。得到最终输出后，由softmax分类器完成下一token预测。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>2.3推理优势。由于全局KV cache被复用、高效自注意力又只需要常量级缓存，缓存数量约为O(N+CL)，其中N是输入长度、C是常量（例如滑动窗口大小）、L是层数；长序列下CL远小于N，于是大约只需O(N) 个缓存，这正是「只缓存一次」的含义。相比之下，Transformer解码器在推理时要把N×L份key/value全部存下来，所以YOCO大约省下L倍显存。当推理容量瓶颈落在KV cache上时，这意味着同样的显存能服务多得多的token，更大的批大小也能进一步抬高吞吐。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">prefill侧的加速来自计算依赖关系：cross-decoder复用self-decoder的输出，所以prefill可以在进入cross-decoder之前提前退出、且不改变最终结果。这带来两层收益：只需一半层做前向，至少减半prefill延迟；self-decoder的高效注意力本身很快。以512K上下文为例，prefill延迟从180秒（Transformer配上Flash-Decoding与kernel融合这类优化）降到不足6秒；即便是32K长度，也有约三倍的prefill加速。</p>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);"></th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">KV cache显存复杂度</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">Prefill时间复杂度</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Transformer</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">O(LND)</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">O(LN²D)</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">YOCO</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong>O((N+L)D)</strong></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong>O(LND)</strong></td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">3. Self-Decoder的设计选择</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">self-decoder可以换成各种高效自注意力方法。只要模块只需要常量级推理内存，self-decoder的缓存复杂度就只取决于层数；而好的模块选择还能同时改善训练与部署成本。论文采用两种：gated retention与滑动窗口注意力。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">3.1 Gated Retention</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">gated retention（简称gRet，也叫gRetNet或RetNet-3）是在retention上增加数据相关门控的版本，能同时做到训练可并行、效果好、推理成本低，也是实验中的默认选择。它把并行、循环、分块循环三种计算范式统一起来：三者等价、结果相同；训练通常用并行或分块循环，推理则用循环范式来获得常量KV内存。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>并行表示下，Q、K、V由输入做线性变换得到，其中Q、K还带上位置相位（第n个位置的相位为e的i·n·θ 次方），门控由输入经sigmoid后开1/τ 次方得到；输出写成（Q乘K的转置、逐元素乘上因果衰减矩阵）再乘V，衰减矩阵在n≥m时保留、否则置零。温度项鼓励门控值趋近1以获得更好的记忆能力；而这个数据控制的衰减是按head而不是逐元素施加的，目的是让计算能充分利用NVIDIA tensor core。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">循环表示与并行表示等价：对第n个时间步，先更新中间状态（前一步状态按门控衰减后，加上当前步的K转置乘V），再用当前Q乘该状态得到输出。自回归推理时，self-decoder只需要维护这个中间状态，就得到常量级的KV内存。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">分块循环表示是前两者的统一写法：给定块大小B，逐块计算，输出分成块内与跨块两部分；跨块部分靠一个块级中间状态在块之间传递，门控衰减被汇总成一个系数。论文在附录里证明了三种表示的等价性。它的好处是兼取两者之长：相比完全并行计算更省FLOPs，相比循环计算迭代更少，因此在训练与prefill阶段都能提升吞吐、降低显存。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">多头版本与多头注意力、多尺度retention一致：每个头各自做gated retention，把各头输出拼接后做GroupNorm归一化，再过swish门与输出投影，以增加非线性。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">3.2滑动窗口注意力</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">滑动窗口注意力把每个token的注意力范围限制在固定窗口C内，而原始Transformer解码器会关注此前所有token。推理时的KV cache内存复杂度因此从O(N) 降到O(C)，也就是内存占用恒定、不随序列长度增长。它的计算方式与多头自注意力一致，只是注意力分数上叠加了一个掩码矩阵：窗口内的位置为0、窗口外为负无穷，从而使窗口外的位置在softmax后权重为零。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+<strong>YOCO的出发点很朴素：既然decoder-only的KV cache是「每层各存一份」，那就把存储和复用拆开。</strong> 前一半层用高效自注意力只生成一份全局KV，后一半层用交叉注意力反复读取这一份缓存；对外仍是decoder-only，因此不必牺牲自回归建模能力。<br  /><br  />真正有意思的是由此带来的两个连锁效果：缓存数量从随层数与长度增长变成近似只随长度增长，显存约省L倍；而prefill因为不必进入cross-decoder就能退出，只算一半层就够，512K上下文从180秒掉到不足6秒。架构上的一处解耦，同时解决了显存与延迟两个瓶颈。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HPaDwcT_4Rw5ty7LwDG4Ng" target="_blank" data-linktype="2">Torch Profiler在Trace里分析性能瓶颈: 剖析SGLang LLM推理</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/i-NZ-4oCXs48XpDfdcBfPw" target="_blank" data-linktype="2">在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/42s6fk-xdo23L-vtLj6Q8Q" target="_blank" data-linktype="2">vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/YHmkt8EHFGm-HeflWCsB2w" target="_blank" data-linktype="2">英伟达Kernel Agent: 编译器与算子调优Agent的协同设计</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4aEYa-5J2Ir82V_1_9anDA" target="_blank" data-linktype="2">AI芯片架构全景: 从NVIDIA到Groq的六条设计路线</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://arxiv.org/html/2405.05254v2</span></p>
+</section>

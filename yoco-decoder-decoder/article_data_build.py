@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import json, os, sys
+
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+
+TBL = {
+    "head": ["", "KV cache 显存复杂度", "Prefill 时间复杂度"],
+    "rows": [
+        ["Transformer", "O(LND)", "O(LN²D)"],
+        ["YOCO", "<strong>O((N+L)D)</strong>", "<strong>O(LND)</strong>"],
+    ],
+}
+
+DATA = {
+    "summary": [
+        {"key": "核心思路", "body": "YOCO 用 self-decoder 生成一次全局 KV cache，cross-decoder 用交叉注意力复用；对外仍像 decoder-only，只缓存一次"},
+        {"key": "复杂度对比", "body": "KV cache 显存从 O(LND) 降到 O((N+L)D)、约省 L 倍；prefill 从 O(LN²D) 降到 O(LND)，还能提前退出只算一半层"},
+        {"key": "实测收益", "body": "65B 模型 KV cache 显存降约 80 倍；512K 上下文 prefill 从 180 秒降到不足 6 秒；1M 加速 71.8 倍、32K 加速 2.87 倍"},
+    ],
+
+    "lead": [
+        "Decoder-only Transformer 靠 KV cache 复用历史、避免重复编码，成了语言模型的事实标准。但服务 token 数一多，KV cache 就吃掉大量显存，长输入的 prefill 也慢得惊人：一个 65B 模型（加上分组查询注意力与 8 比特 KV 量化）在 512K token 下要占约 86GB 显存，超过单张 H100-80GB；在四张 H100 上，7B 模型 prefill 450K token 要约 110 秒、1M 长度要 380 秒。",
+        "YOCO（You Only Cache Once）提出 decoder-decoder 架构：self-decoder 用高效自注意力只生成一份全局 KV cache，cross-decoder 用交叉注意力复用这份缓存，相当于把原来「每层都存一遍」的 KV 压缩成「只存一次」。KV cache 的显存复杂度从 O(LND) 降到 O((N+L)D)，prefill 复杂度从 O(LN²D) 降到 O(LND)，而且 prefill 阶段可以提前退出。",
+    ],
+
+    "sections": [
+        {
+            "type": "h2",
+            "title": "1. Introduction：KV cache 为何成为瓶颈",
+            "paras": [
+                "语言模型架构的探索大致有三条线索。一条是 encoder-only，如 BERT，对输入序列做双向编码；一条是 encoder-decoder，如 T5，用双向编码器处理输入、单向解码器生成输出；这两者在自回归生成上都吃亏，因为编码器必须把输入与已生成的输出重新编码一遍，encoder-decoder 虽然只用解码器生成，但输出 token 没法充分利用编码器的参数，多轮对话时尤其明显。第三条是 decoder-only，如 GPT，靠缓存已算过的 key/value 向量在当前步复用，避免为每个 token 重新编码历史，推理速度大幅提升，也由此成为标准选择。",
+                "问题随服务规模放大。随着 token 数增长，KV cache 会占据大量 GPU 显存，让大模型推理变成「显存受限」：以 65B 模型（加上分组查询注意力与 8 比特 KV 量化）为例，512K token 占用约 86GB 显存，比一张 H100-80GB 的容量还大。另一方面，长序列输入的 prefill 延迟极高，用四张 H100 时，7B 模型（加上 Flash-Decoding 与 kernel 融合）prefill 450K token 要约 110 秒、1M 长度要 380 秒。这两道门槛让长上下文模型很难真正部署。",
+                "YOCO 的做法是把 cross-decoder 叠在 self-decoder 之上。给定输入序列，self-decoder 先用高效自注意力得到 KV cache，随后的 cross-decoder 层用交叉注意力复用这份共享缓存。它概念上接近 encoder-decoder，但从外部看整体行为更像 decoder-only，因此天然适配语言模型这类自回归任务。",
+                "这样带来三方面好处：只缓存一次，KV cache 的显存占用显著下降；计算流允许 prefill 在进入 self-decoder 之前提前退出，prefill 阶段被大幅加速；分布式长序列训练的系统设计也更高效。此外论文为 self-decoder 提出 gated retention，在 retention 上加了数据控制的门控机制。",
+                "论文给出的实测收益相当直观：65B 模型的 KV cache 内存可减少约 80 倍；即使是 3B 模型，整体推理内存在 32K token 时减少两倍、1M 时减少九倍以上；prefill 在 1M 上下文加速 71.8 倍、32K 输入加速 2.87 倍，512K 上下文下把 Transformer 的 prefill 延迟从 180 秒压到不足 6 秒。训练侧，3B 模型扩到万亿级 token 后与 StableLM 这类主流 Transformer 模型表现相当，160M 到 13B 的 scaling 曲线也具竞争力，上下文扩展到 1M 时 needle 检索几乎全中。",
+            ],
+            "fig_after": {
+                "4": [{"src": "fig01.png", "caption": "图 1：decoder-decoder 架构 YOCO 只缓存一次 key/value，显著降低 KV cache 显存与 prefill 时间，并在训练 token 数、模型规模与上下文长度上保持可扩展（推理开销按 512K 上下文报告）"}],
+            },
+        },
+        {
+            "type": "h2",
+            "title": "2. YOCO：只缓存一次",
+            "paras": [
+                "YOCO 由两部分组成：self-decoder 与 cross-decoder。整个模型堆叠 L 个 block，前 L/2 层是 self-decoder，其余是 cross-decoder。输入序列的嵌入打包成矩阵后，先由 self-decoder 逐层得到上下文表示，其第 L/2 层的输出被用来产生供 cross-decoder 使用的全局 K、V；cross-decoder 再逐层结合这份共享缓存得到最终输出。两部分都使用因果掩码。",
+                "两者的 block 布局与标准 Transformer 类似（注意力与前馈网络交替），同样带 pre-RMSNorm、SwiGLU 与分组查询注意力，差别只在注意力模块：self-decoder 用高效自注意力（例如滑动窗口注意力），cross-decoder 则用全局交叉注意力去读取 self-decoder 产出的共享 KV 缓存。",
+                "2.1 Self-Decoder。每层由高效自注意力与前馈网络构成，归一化用 RMSNorm，注意力施加因果掩码。这个模块的关键性质是推理内存为 O(1)，也就是 KV cache 数量恒定：例如滑动窗口注意力的缓存大小只取决于窗口大小，而与输入长度无关。论文在第 3 节讨论 gated retention 等更具体的设计选择。",
+                "2.2 Cross-Decoder。self-decoder 的输出先经归一化与两组线性权重投影出全局的 K 和 V，随后所有 L/2 个 cross-decoder 层共用这一份 K、V：每层用自己的 query 权重产生 Q，做标准多头注意力、加残差，再过 SwiGLU 前馈与残差得到输出。交叉注意力同样使用因果掩码，并且兼容分组查询注意力，可以进一步节省 KV cache 显存。得到最终输出后，由 softmax 分类器完成下一 token 预测。",
+                "2.3 推理优势。由于全局 KV cache 被复用、高效自注意力又只需要常量级缓存，缓存数量约为 O(N+CL)，其中 N 是输入长度、C 是常量（例如滑动窗口大小）、L 是层数；长序列下 CL 远小于 N，于是大约只需 O(N) 个缓存，这正是「只缓存一次」的含义。相比之下，Transformer 解码器在推理时要把 N×L 份 key/value 全部存下来，所以 YOCO 大约省下 L 倍显存。当推理容量瓶颈落在 KV cache 上时，这意味着同样的显存能服务多得多的 token，更大的批大小也能进一步抬高吞吐。",
+                "prefill 侧的加速来自计算依赖关系：cross-decoder 复用 self-decoder 的输出，所以 prefill 可以在进入 cross-decoder 之前提前退出、且不改变最终结果。这带来两层收益：只需一半层做前向，至少减半 prefill 延迟；self-decoder 的高效注意力本身很快。以 512K 上下文为例，prefill 延迟从 180 秒（Transformer 配上 Flash-Decoding 与 kernel 融合这类优化）降到不足 6 秒；即便是 32K 长度，也有约三倍的 prefill 加速。",
+            ],
+            "table": TBL,
+            "fig_after": {
+                "1": [{"src": "fig02.png", "caption": "图 2：decoder-decoder 架构总览。self-decoder 生成全局 KV cache，cross-decoder 用交叉注意力复用这份共享缓存；两部分都使用因果掩码，整体行为与 decoder-only Transformer 一致、自回归生成 token"}],
+            },
+        },
+        {
+            "type": "h2",
+            "title": "3. Self-Decoder 的设计选择",
+            "paras": [
+                "self-decoder 可以换成各种高效自注意力方法。只要模块只需要常量级推理内存，self-decoder 的缓存复杂度就只取决于层数；而好的模块选择还能同时改善训练与部署成本。论文采用两种：gated retention 与滑动窗口注意力。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "3.1 Gated Retention",
+            "paras": [
+                "gated retention（简称 gRet，也叫 gRetNet 或 RetNet-3）是在 retention 上增加数据相关门控的版本，能同时做到训练可并行、效果好、推理成本低，也是实验中的默认选择。它把并行、循环、分块循环三种计算范式统一起来：三者等价、结果相同；训练通常用并行或分块循环，推理则用循环范式来获得常量 KV 内存。",
+                "并行表示下，Q、K、V 由输入做线性变换得到，其中 Q、K 还带上位置相位（第 n 个位置的相位为 e 的 i·n·θ 次方），门控由输入经 sigmoid 后开 1/τ 次方得到；输出写成（Q 乘 K 的转置、逐元素乘上因果衰减矩阵）再乘 V，衰减矩阵在 n≥m 时保留、否则置零。温度项鼓励门控值趋近 1 以获得更好的记忆能力；而这个数据控制的衰减是按 head 而不是逐元素施加的，目的是让计算能充分利用 NVIDIA tensor core。",
+                "循环表示与并行表示等价：对第 n 个时间步，先更新中间状态（前一步状态按门控衰减后，加上当前步的 K 转置乘 V），再用当前 Q 乘该状态得到输出。自回归推理时，self-decoder 只需要维护这个中间状态，就得到常量级的 KV 内存。",
+                "分块循环表示是前两者的统一写法：给定块大小 B，逐块计算，输出分成块内与跨块两部分；跨块部分靠一个块级中间状态在块之间传递，门控衰减被汇总成一个系数。论文在附录里证明了三种表示的等价性。它的好处是兼取两者之长：相比完全并行计算更省 FLOPs，相比循环计算迭代更少，因此在训练与 prefill 阶段都能提升吞吐、降低显存。",
+                "多头版本与多头注意力、多尺度 retention 一致：每个头各自做 gated retention，把各头输出拼接后做 GroupNorm 归一化，再过 swish 门与输出投影，以增加非线性。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "3.2 滑动窗口注意力",
+            "paras": [
+                "滑动窗口注意力把每个 token 的注意力范围限制在固定窗口 C 内，而原始 Transformer 解码器会关注此前所有 token。推理时的 KV cache 内存复杂度因此从 O(N) 降到 O(C)，也就是内存占用恒定、不随序列长度增长。它的计算方式与多头自注意力一致，只是注意力分数上叠加了一个掩码矩阵：窗口内的位置为 0、窗口外为负无穷，从而使窗口外的位置在 softmax 后权重为零。",
+            ],
+        },
+    ],
+
+    "conclusion": [
+        "**YOCO 的出发点很朴素：既然 decoder-only 的 KV cache 是「每层各存一份」，那就把存储和复用拆开。** 前一半层用高效自注意力只生成一份全局 KV，后一半层用交叉注意力反复读取这一份缓存；对外仍是 decoder-only，因此不必牺牲自回归建模能力。",
+        "真正有意思的是由此带来的两个连锁效果：缓存数量从随层数与长度增长变成近似只随长度增长，显存约省 L 倍；而 prefill 因为不必进入 cross-decoder 就能退出，只算一半层就够，512K 上下文从 180 秒掉到不足 6 秒。架构上的一处解耦，同时解决了显存与延迟两个瓶颈。",
+    ],
+
+    "reference_url": "https://arxiv.org/html/2405.05254v2",
+    "title": "YOCO：只缓存一次 KV 的 Decoder-Decoder 架构",
+}
+
+out_path = os.path.join(_article_dir, "article_data.json")
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
+print("OK wrote", out_path, len(DATA.get("sections", [])), "sections")

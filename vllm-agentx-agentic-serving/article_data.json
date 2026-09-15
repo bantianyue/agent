@@ -25,7 +25,7 @@
         "0": [
           {
             "src": "fig01.png",
-            "caption": ""
+            "caption": "数据来源：SemiAnalysis AgentX。"
           }
         ]
       }
@@ -48,7 +48,7 @@
         "0": [
           {
             "src": "fig02.png",
-            "caption": ""
+            "caption": "图 2：面向 agentic 服务的全栈优化。数据面管理分布式共享 KV 缓存，执行面为每个模型匹配恰当的并行与 kernel，控制面协调 P/D 比例与请求调度。"
           }
         ]
       }
@@ -63,10 +63,10 @@
         "会话感知的前缀缓存保留。对线性或滑窗与全 attention 混合的模型，前缀复用要保住线性态或滑窗缓存；每 token 都留快照太贵，于是结合两条互补策略。间隔式保留：每轮结束自动保留 prompt 端缓存/线性态，之后延续轮与分叉 subagent 常重放并扩展上一轮上下文，可复用；但共享前缀大多在轮内就结尾，间隔保留未必留到检查点。于是第二条：Marconi 式选择保留，当某前缀第二次被见到才留检查点，命中过但没留检查点的，就重算缺失态并在此边界存一次，后续共享前缀便能复用。两者结合在高命中率与可承受存储之间取平衡（技术细节见 Kimi K3 那篇）。"
       ],
       "fig_after": {
-        "3": [
+        "0": [
           {
             "src": "fig03.png",
-            "caption": ""
+            "caption": "图 3：vLLM 的混合 KV 缓存管理器。"
           }
         ]
       }
@@ -77,14 +77,27 @@
       "paras": [
         "模型专属并行。现代推理有 TP/DP/EP/PP/CP 多条并行轴，选哪样取决于模型结构、硬件拓扑、负载形态与延迟 SLO。下面看 GB/B 系两张代表卡上两个模型。",
         "Kimi K3。它有 MLA 与 Kimi delta attention(KDA)。MLA 把 KV 压进单 head 的单潜空间，朴素 TP 会在各 rank 复制这份 latent 缓存，并不划算。改成 decode context parallelism(DCP，沿序列维切缓存、每 rank 留 1/N KV) 对 agentic 有两个好处：decode 延迟更低，MLA attention 内存受限、成本随上下文涨，前缀越长 attention 占每步比例越大；吞吐与 KV 容量更高，避开 KV 复制就能让更多序列在途而不被 admission 卡住。代价是多一份通信：每层 MLA decode 在 attention 前要 query gather、结束后做 partial-output reduce。",
-        "DCP 计算路径被仔细优化以绕开 NCCL：用对称内存缓冲让对端 GPU 直接 load/store；query 直接多播进 attention kernel 消费的缓冲；每张 GPU 把 partial attention 输出与 log-sum-exp 统计直接写进对端接收槽，各 rank 用 online softmax 本地合并；还把这些 GPU 间直写与计算融进同一 kernel(s)，比默认 DCP8 每层省约 13% 延迟。更大的 scale-up 域会改最优策略：NVL72 级系统上宽 EP+DP(DEP) 常比 DCP 更会扩展、同一 decode SLO 下吞吐更高，因为更大的多节点 DCP 里分片 attention 的通信会盖过它省的算力；DEP 把请求及其 KV 分到不同 DP rank、同时把 MoE 专家分到各 rank，避开 DCP 的 attention 集合通信。",
+        "DCP 计算路径被仔细优化以绕开 NCCL：用对称内存缓冲让对端 GPU 直接 load/store；query 直接多播进 attention kernel 消费的缓冲；每张 GPU 把 partial attention 输出与 log-sum-exp 统计直接写进对端接收槽，各 rank 用 online softmax 本地合并；还把这些 GPU 间直写与计算融进同一 kernel(s)，比默认 DCP8 每层省约 13% 延迟。",
+        "更大的 scale-up 域会改最优策略：NVL72 级系统上宽 EP+DP(DEP) 常比 DCP 更会扩展、同一 decode SLO 下吞吐更高，因为更大的多节点 DCP 里分片 attention 的通信会盖过它省的算力；DEP 把请求及其 KV 分到不同 DP rank、同时把 MoE 专家分到各 rank，避开 DCP 的 attention 集合通信。",
         "DeepSeek V4。它也有 MLA 式 KV、在 TP 下复制导致内存低效；外加它特有的压缩稀疏 attention 让 TP 的 head 分片低效三处：compressor 路径每个压缩位置只产一份共享 KV 而非每 head 独立态，TP 无法沿 KV-head 维切算力、每个 rank 重复做 compressor；indexer 虽有 64 head 却每 token 只产一次全局 top-k 选择，现 TP 路径在每个 rank 复制整份 indexer，避开 top-k 前稠密 score reduce 却重复了活；稀疏 MLA 主要受累于扫与收集 top-k KV 条目而非 attention 算术，TP 在每个 rank 重做这段内存受限的活、只分了便宜的 head 向计算。实测 prefill context parallelism(PCP) 对长 prefill 最好，data+expert(DEP) 在更广服务条件下好。PCP 把 prompt 序列(query 张量)分片、把 compressor 与 indexer 工作摊到各 rank，给稀疏 MLA 更宽的局部 head 形状；32K prompt 下 PCP8 相对 TP8 有 2.65x prefill 加速，显著降 TTFT，但它 decode 侧态仍跨 rank 复制，最适合专职 prefill worker。DCP 因 V4 结构更复杂而不如对 Kimi K3 有效。DEP 把请求与 decode token 分到 DP rank、attention 全局部，成为多数 V4 配置的默认。"
       ],
       "fig_after": {
-        "2": [
+        "1": [
           {
             "src": "fig04.png",
-            "caption": ""
+            "caption": "图 4：对 Kimi K3，DCP 实现更低的 decode 延迟并扩展到更高并发。"
+          }
+        ],
+        "2": [
+          {
+            "src": "fig05.gif",
+            "caption": "图 5：DCP4 下基于对称内存的 MLA decode 路径，每一步都融合进单个 kernel。"
+          }
+        ],
+        "3": [
+          {
+            "src": "fig06.png",
+            "caption": "图 6：当每 rank batch size > 3 时，WideEP（DEP16）比 DCP8 扩展得更好。"
           }
         ]
       }
@@ -94,14 +107,21 @@
       "title": "两层调度混跑 agentic 流量",
       "paras": [
         "agentic 服务混合了频繁的 append-only 请求（长前缀复用+短 prefill）与偶尔几万 token 的新鲜长 prefill，产生两个调度问题：实例内一个长 prefill 会挡短交互轮；DEP 各 rank 上 prefill 排布不均造成负载失衡。vLLM 用两个互补控制来解。",
-        "打破队头阻塞。默认 chunked-prefill 按 FIFO，一个长 prefill 会一步步占满整段预算、同 rank 排队的短轮完全排不进去。对策是 --long-prefill-token-threshold 限制单请求每步最多调度的 token 数；设成 512 时，长 prefill 能让出空间让短轮进同 batch 更早开始 decode。DeepSeek V4 Pro 在 B300 上因此每 GPU 秒 token(TPGS) 最多提升约 93%、p90 交互度约改善 2.3x；代价是长请求自身 TTFT 变高，TTFT 敏感部署应调高阈值。",
+        "打破队头阻塞。默认 chunked-prefill 按 FIFO，一个长 prefill 会一步步占满整段预算、同 rank 排队的短轮完全排不进去。",
+        "对策是 --long-prefill-token-threshold 限制单请求每步最多调度的 token 数；设成 512 时，长 prefill 能让出空间让短轮进同 batch 更早开始 decode。DeepSeek V4 Pro 在 B300 上因此每 GPU 秒 token(TPGS) 最多提升约 93%、p90 交互度约改善 2.3x；代价是长请求自身 TTFT 变高，TTFT 敏感部署应调高阈值。",
         "对齐 DEP prefill 节奏。DEP 的 MoE all-to-all 让各 rank 必须同一步调前进，一个在腾 prefill 的 rank 拖慢整组；不同 rank 在不同步收到 prefill 时这惩罚会反复暴露。对策是 --prefill-schedule-interval：只每隔 N 个引擎步放行一次 prefill 工作，用跨 DP rank 对齐的计数器，把 prefill 集中到各 rank 同一批步、让中间步整段做 decode。",
         "用对 P/D 拆分配置来扩。单引擎调到最好并不等于分布式部署的延迟-成本最优点，加 GPU 或者做 disagg 也不会自己改善曲线：prefill 与 decode 得速率匹配。他们用可被 agentic 工作流自动化的两阶段标准法：第一阶段饱和画像，把 prefill-only 与 decode-only 各自单独打点，扫并行策略(TP 对宽 EP)与规模(8/16/32 GPU)并把并发抬到吞吐饱和，产出每配置的饱和表(最大 prefill/decode req/s)；第二阶段 P:D 扫描，从第一阶段饱和点推出 P/D 比，再在合体 disagg 部署上扫并发、在运作区间内取指标。"
       ],
       "fig_after": {
         "1": [
           {
-            "src": "fig05.png",
+            "src": "fig07.gif",
+            "caption": ""
+          }
+        ],
+        "3": [
+          {
+            "src": "fig08.gif",
             "caption": ""
           }
         ]
@@ -112,23 +132,37 @@
       "title": "回合闭环：模型专属 kernel 与社区贡献",
       "paras": [
         "agentic 负载把 kernel 瓶颈推向长上下文 attention、投机解码与通信。MiniMax M3：CuteDSL 长上下文 indexer 据报告在 GB300 上按形状把 indexer 延迟降约 3%-31%；上游化的 MSA top-k 路径把最坏情形 kernel 性能最多提升约 4x、AgentX 端到端吞吐大约 7%；投机验证路径在中 batch decode 性能报告中约提升 20%。Kimi K3：GEMM 与 reduce-scatter 融合改善 sequence-parallel 通信，latent-tail MoE 融合端到端延迟约降 5%。DeepSeek V4：社区贡献改善 MXFP4 MoE 与 HCA 压缩(#43584/#44230)、加多流 C4A、改进 cluster-based top-k。所有 kernel 全开源，一些已被其它开源引擎采用。"
-      ],
-      "fig_after": {
-        "0": [
-          {
-            "src": "fig06.png",
-            "caption": ""
-          }
-        ]
-      }
+      ]
     },
     {
       "type": "h2",
       "title": "性能：agentic 优先且公开可验",
       "paras": [
-        "vLLM 用从 300 万美元真实 agentic 编码轨迹(1M 上下文)构建的公开基准、跑在 1000+ 芯片约 2MW 上，展示它是 agentic-first。对三个开放前沿模型取的是 p90 交互度守住每秒每用户 50 token 高延迟 SLO 下的最高吞吐配置。DeepSeek V4 Pro：12 芯片 GB300 PD 部署服务 256 个并发 agent 会话、p90 下每人每秒 58.3 token，此工作点每 GPU 秒约 83K 总 token。MiniMax M3：仅 2 张 B300，p90 每秒每人 74.2 token、给到 70K 总 TPGS。Kimi K3：2.8 万亿参数的巨型前沿模型，常规单机装不下；16 张 GB300 在 p90 下每秒每人 62.7 token、处理 11.8K 总 TPGS。",
+        "vLLM 用从 300 万美元真实 agentic 编码轨迹(1M 上下文)构建的公开基准、跑在 1000+ 芯片约 2MW 上，展示它是 agentic-first。",
+        "对三个开放前沿模型取的是 p90 交互度守住每秒每用户 50 token 高延迟 SLO 下的最高吞吐配置。",
+        "DeepSeek V4 Pro：12 芯片 GB300 PD 部署服务 256 个并发 agent 会话、p90 下每人每秒 58.3 token，此工作点每 GPU 秒约 83K 总 token。MiniMax M3：仅 2 张 B300，p90 每秒每人 74.2 token、给到 70K 总 TPGS。Kimi K3：2.8 万亿参数的巨型前沿模型，常规单机装不下；16 张 GB300 在 p90 下每秒每人 62.7 token、处理 11.8K 总 TPGS。",
         "成本同样关键。理论前缀命中率高于 96% 其实是 agentic 流量给 vLLM 的成本来源：DeepSeek V4 Pro 用 GB300 基建 TCO 每小时约 28 美元跑完该工作负载；同样 token 量即便按每次理论上可复用的缓存读价都打折，Opus 5 也要约 2926 美元。MiniMax M3 在 B300 上是 85x 优势，Kimi K3 在 GB300 上即便模型大得多仍便宜 14.6x。数字报告到今天，但 dashboard 在线可交互，AgentX harness 在 SemiAnalysisAI/agentx-harness，每条结果链到 InferenceX 可复现。"
-      ]
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig09.png",
+            "caption": "图 9：Kimi K3 在不同硬件上、不同 p90 交互度下每 1 美元能产出的总 token 数。来源：Kimi K3 SemiAnalysis AgentX 仪表盘。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig10.png",
+            "caption": ""
+          }
+        ],
+        "2": [
+          {
+            "src": "fig11.png",
+            "caption": ""
+          }
+        ]
+      }
     },
     {
       "type": "h2",
@@ -137,15 +171,7 @@
         "第一，Pipeline parallelism(含 chunked CPP) 不适合“暖”的 agentic 轮次。PP 在又长又冷的新鲜 prompt 上好，大 prefill 能填满流水各级、吞吐几乎线性、通信少；但多数 agentic 轮已有 system prompt 与之前轮次被缓存，每新请求可能只加几百几千 token，鲜算的量填不满流水，bubble 吃光潜力。结论不是 PP 没效，而它是冷的大 prefill 有用，不该是占主导的暖且前缀重的轮次的默认。",
         "第二，DCP 不能干净迁移到 DeepSeek V4。对纯 MLA(如 R1、K2.5/K2.7)与混合 MLA(K3)都好用，V4 却因更复杂的 attention 栈而难兑现：压缩稀疏与高压缩 attention 有 indexer、额外 compressor 与主 attention，context parallelism 得切分并协调所有这些子层，引入可观通信与实现复杂度。即便大把做通信-计算重叠并优化 kernel，DCP 也只是追平 DEP 而非超越。结论强化执行面观点：并行必须跟随模型架构，一个 latent-attention 模型成立的策略未必迁移到另一个。",
         "第三，负载均衡不保证更好性能。DEP 聚合部署里 KV 使用明显失衡，自然反应是按队列深度、进行中 token 或当前 KV 占用去均衡请求；但 AgentX 上这些策略全部跑输简单的 session-aware sticky 路由。原因是 cache 局部性：很多 agentic 会话轮间延迟短，下一轮常在前序前缀仍驻原 GPU 时就到，把它挪到负载更低的 rank 虽前缀在分布式池里保留着，却要系统取回 KV；迁移本身异步并与计算重叠，仍不是免费的，预取的块临时占 GPU KV 容量、降低目标 rank 可接纳序列数。于是队列更平了，同时处理中的并发反而更少。对轮间延迟短的工作负载，留住 session 局部性比瞬时均衡更有价值：路由决策要看每 worker 上已驻留的状态，而不只看排队的工作量。"
-      ],
-      "fig_after": {
-        "1": [
-          {
-            "src": "fig07.png",
-            "caption": ""
-          }
-        ]
-      }
+      ]
     },
     {
       "type": "h2",
@@ -159,15 +185,7 @@
       "title": "致谢",
       "paras": [
         "这项工作由 inferact 主导、获 vLLM 社区大力支持；感谢 SemiAnalysis 开发并运维开放 AgentX 基准、使其方法可复现。"
-      ],
-      "fig_after": {
-        "0": [
-          {
-            "src": "fig08.png",
-            "caption": ""
-          }
-        ]
-      }
+      ]
     }
   ],
   "conclusion": [

@@ -1,0 +1,394 @@
+{
+  "summary": [
+    {
+      "key": "核心结论",
+      "body": "6 专家激活 2 个的 MoE 训了 8.9B token、八天，测试损失 3.254，优于全部 163M 基线，略逊于 345M 的 GPT-2 medium。"
+    },
+    {
+      "key": "关键数据",
+      "body": "辅助损失最后 75% 全程绿色，最后一个检查点所有迭代平均 24.0847，几乎正中理想值 24；IFT 评测排第 3。"
+    },
+    {
+      "key": "工程要点",
+      "body": "α = 0.005 让负载均衡和语言建模同时收敛；损失与 IFT 表现的相关性很松，OpenAI 权重始终更强这件事作者仍在追查。"
+    }
+  ],
+  "lead": [
+    "这是「从 GPT-2 到 MoE」系列的最后一篇，也是收尾：8.9B token、八天、90,823 个 global step，把 6 专家激活 2 个的 MoE 真正训完。",
+    "训练效果、与 GPT-2 small/medium 的对比、IFT 评测排名，以及作者对后续实验的想法都在这一篇。文末附上四篇关键论文的正式引用，以及作者对路由方案取舍的详细脚注。"
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "一、最终训练：8.9B token、八天",
+      "paras": [
+        "我决定不去纠结训练多少 token 合适。Chinchilla 的「参数量 20 倍」是针对密集模型的启发式，并不适用于 MoE。直觉上，一个总参数 446,410,752、每 token 激活 219,697,152 的模型，「理想」token 数应该落在两个参数量各自的 Chinchilla 最优点之间。",
+        "但过度训练本身不一定是坏事，只要数据不重复，或者说同一份数据不超过四个 epoch，而我之前那次实验已经准备好一份 10B token 的数据集。所以按「如果它只是一个 446M 参数密集模型」的 Chinchilla 最优 token 数来训，听起来不坏，只要时间可接受。",
+        "那意味着 8,928,215,040 个 token，用我常规的训练数据集就能覆盖，不需要多轮 epoch。",
+        "快速确认了一下：按这个 token 数配置训练脚本，需要 90,823 个 global step，大约八天。",
+        "每个检查点看起来要占 5.3GiB，而我的磁盘还有约 348GiB 空闲，所以算下来可以每 1,500 个 global step 存一次，大约三小时一次。不算理想，但断电，或者猫跳上电源键，最多损失三小时的工作，也不至于世界末日。",
+        "于是我按这份模型配置和训练配置准备好，在专用训练机 poppy 上启动：",
+        "__CODE__text::giles@poppy:~/Dev/ddp-base-model-from-scratch (main)$ uv run torchrun --nproc_per_node=1 ddp_train.py 1xrtx3090-moe-first-proper-run datasets/\nFetching 4 files: 100%|██████████| 4/4 [00:00<00:00, 3517.97it/s]\nmoe_router_loss_scale=0.005\nStarting rank 0 training at global step 0\n  0%|                    | 0/90823 [00:07<?, ?it/s, loss=10.963, tps=12,635]\n\n\nCheckpoint\n\nContinuing training\n  0%|                    | 155/90823 [19:32<190:23:52,  7.56s/it, loss=7.407, tps=12,999]",
+        "不到八天后，它跑完了：",
+        "__CODE__text::100%|██████████| 90823/90823 [190:13:38<00:00,  7.54s/it, loss=3.377, tps=13,040]\n\n\n\nTraining complete in 684,818.520 seconds\nTokens seen: 8,928,264,192\nThroughput: 13,037 tokens/second\nFinal train loss: 3.211",
+        "损失曲线长这样：",
+        "可以看到，普通的交叉熵损失，图上就标着 loss，从随机的约 10.82（GPT-2 分词器）平滑下降到最后的训练损失 3.211，中间只有几处很小的尖峰。",
+        "我还在右侧 Y 轴画了 MoE 路由的辅助损失：一开始有几个鼓包，单次迭代的最大值偶尔会飙一下，但平均值总体贴着 24 这个「理想值」。最后一个检查点上，所有迭代的平均值是几乎完美的 24.0847。",
+        "我画逐层「专家饥饿与过载」的 notebook 也回来了，一片漂亮的绿色，说明路由很均匀：",
+        "训练刚开始时有点小问题，但后 75% 全是绿色的海洋，很漂亮。",
+        "我跑了常规的冒烟测试，来自书里 Raschka 那个：让模型用 20 个 token、温度 1 补全「Every effort moves you」，会得到什么？",
+        "__CODE__text::Every effort moves you closer towards your goals and the results. But the good news is that you are more likely to get",
+        "相当连贯。是时候做些评测和对比了。"
+      ],
+      "fig_after": {
+        "9": [
+          {
+            "src": "fig36.png",
+            "caption": "有负载均衡的最终训练：损失与辅助损失随训练的变化"
+          }
+        ],
+        "12": [
+          {
+            "src": [
+              "fig37.png",
+              "fig38.png",
+              "fig39.png",
+              "fig40.png"
+            ],
+            "caption": "负载均衡训练：第 0 到 3 层的路由负载分布"
+          },
+          {
+            "src": [
+              "fig41.png",
+              "fig42.png",
+              "fig43.png",
+              "fig44.png"
+            ],
+            "caption": "负载均衡训练：第 4 到 7 层的路由负载分布"
+          },
+          {
+            "src": [
+              "fig45.png",
+              "fig46.png",
+              "fig47.png",
+              "fig48.png"
+            ],
+            "caption": "负载均衡训练：第 8 到 11 层的路由负载分布"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "二、结果对比",
+      "paras": [
+        "我跑了常规的损失评测：在 19,200 条、每条 1,024 token 的留出测试集上，模型的平均损失是多少？",
+        "__CODE__text::giles@perry:~/Dev/ddp-base-model-from-scratch (main)$ uv run test_loss.py datasets/ runs/1xrtx3090-moe-first-proper-run/model.json runs/1xrtx3090-moe-first-proper-run/checkpoints/latest/model.safetensors\nFetching 4 files: 100%|██████████| 4/4 [00:00<00:00, 1515.56it/s]\n100%|██████████| 3200/3200 [05:41<00:00,  9.38it/s]\nLoss against our test dataset: 3.253928",
+        "把它和我训练过的其他模型、以及 OpenAI 的 GPT-2 small 与 medium 权重对比，得到这张表，我们的模型在表中加粗："
+      ],
+      "table": {
+        "head": [
+          "模型",
+          "参数量",
+          "测试损失"
+        ],
+        "rows": [
+          [
+            "OpenAI 权重：medium",
+            "345M",
+            "3.231442"
+          ],
+          [
+            "<strong style=\"color:#0F4C81;\">PyTorch MoE，6 专家，每 token 激活 2 个</strong>",
+            "<strong style=\"color:#0F4C81;\">446M/220M</strong>",
+            "<strong style=\"color:#0F4C81;\">3.253928</strong>"
+          ],
+          [
+            "JAX，过训练一个长 epoch",
+            "163M",
+            "3.324953"
+          ],
+          [
+            "JAX，过训练两个常规 epoch",
+            "163M",
+            "3.326482"
+          ],
+          [
+            "JAX，带 MHA bias，无 dropout",
+            "163M",
+            "3.418784"
+          ],
+          [
+            "JAX，无 MHA bias，无 dropout",
+            "163M",
+            "3.420089"
+          ],
+          [
+            "JAX，无 MHA bias，带 dropout",
+            "163M",
+            "3.476802"
+          ],
+          [
+            "OpenAI 权重：small",
+            "124M",
+            "3.499677"
+          ],
+          [
+            "1xrtx3090-stacked-interventions",
+            "163M",
+            "3.538161"
+          ],
+          [
+            "8xa100m40-stacked-interventions-1",
+            "163M",
+            "3.577761"
+          ],
+          [
+            "Cloud FineWeb, 8x A100 40 GiB",
+            "163M",
+            "3.673623"
+          ],
+          [
+            "1xrtx3090-baseline",
+            "163M",
+            "3.683835"
+          ],
+          [
+            "8xa100m40-baseline",
+            "163M",
+            "3.691526"
+          ],
+          [
+            "Cloud FineWeb, 8x H100 80 GiB",
+            "163M",
+            "3.724507"
+          ],
+          [
+            "Cloud FineWeb, 8x A100 80 GiB",
+            "163M",
+            "3.729900"
+          ],
+          [
+            "Cloud FineWeb, 8x B200 160 GiB",
+            "163M",
+            "3.771478"
+          ],
+          [
+            "Local FineWeb train",
+            "163M",
+            "3.943522"
+          ],
+          [
+            "Local FineWeb-Edu extended train",
+            "163M",
+            "4.134991"
+          ],
+          [
+            "Local FineWeb-Edu train",
+            "163M",
+            "4.166892"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h3",
+      "title": "2.1 IFT 指令跟随评测",
+      "paras": [
+        "这个成绩不算差，也谈不上惊艳。它比我所有 163M 参数的模型和 OpenAI 的 GPT-2 small 都好，但比 OpenAI 的 345M 参数 GPT-2 medium 略差、很接近，而后者参数量更少，只是每 token 激活的更多。",
+        "我决定再做一次评测。我有一个叫 IFT 测试的流程：把模型在一个指令跟随数据集上微调，直到它在留出集上的损失开始上升为止，然后跑一个测试集，看模型对没见过的提问给出什么回答。接着我把来自多个模型的回答打包，交给 GPT 5.5 做比较。它是对书里第七章 Raschka 那个例子的扩展，改成更容易横向比较不同模型。",
+        "脚本在这里和这里，更多细节在这里。",
+        "我启动第一个脚本做微调并拿到回答，然后连同其他模型的回答一起交给 LLM 比较。结果如下，按损失排序，IFT rank 一列是它在评测里的相对名次："
+      ],
+      "table": {
+        "head": [
+          "模型",
+          "测试损失",
+          "IFT epochs",
+          "IFT 得分",
+          "IFT 名次"
+        ],
+        "rows": [
+          [
+            "OpenAI 权重：medium",
+            "3.231442",
+            "2",
+            "42.54",
+            "1"
+          ],
+          [
+            "<strong style=\"color:#0F4C81;\">PyTorch MoE，6 专家，每 token 激活 2 个</strong>",
+            "<strong style=\"color:#0F4C81;\">3.253928</strong>",
+            "4",
+            "22.71",
+            "<strong style=\"color:#0F4C81;\">3</strong>"
+          ],
+          [
+            "JAX，过训练一个长 epoch",
+            "3.324953",
+            "3",
+            "18.71",
+            "6"
+          ],
+          [
+            "JAX，过训练两个常规 epoch",
+            "3.326482",
+            "4",
+            "19.14",
+            "5"
+          ],
+          [
+            "JAX，带 MHA bias，无 dropout",
+            "3.418784",
+            "4",
+            "18.40",
+            "7"
+          ],
+          [
+            "JAX，无 MHA bias，无 dropout",
+            "3.420089",
+            "5",
+            "20.83",
+            "4"
+          ],
+          [
+            "JAX，无 MHA bias，带 dropout",
+            "3.476802",
+            "5",
+            "13.04",
+            "16"
+          ],
+          [
+            "OpenAI 权重：small",
+            "3.499677",
+            "2",
+            "24.95",
+            "2"
+          ],
+          [
+            "1xrtx3090-stacked-interventions",
+            "3.538161",
+            "4",
+            "13.30",
+            "15"
+          ],
+          [
+            "8xa100m40-stacked-interventions-1",
+            "3.577761",
+            "4",
+            "10.33",
+            "19"
+          ],
+          [
+            "Cloud FineWeb, 8x A100 40 GiB",
+            "3.673623",
+            "3",
+            "16.62",
+            "8"
+          ],
+          [
+            "1xrtx3090-baseline",
+            "3.683835",
+            "4",
+            "15.20",
+            "10"
+          ],
+          [
+            "8xa100m40-baseline",
+            "3.691526",
+            "3",
+            "14.15",
+            "11"
+          ],
+          [
+            "Cloud FineWeb, 8x H100 80 GiB",
+            "3.724507",
+            "4",
+            "13.76",
+            "14"
+          ],
+          [
+            "Cloud FineWeb, 8x A100 80 GiB",
+            "3.729900",
+            "3",
+            "10.98",
+            "18"
+          ],
+          [
+            "Cloud FineWeb, 8x B200 160 GiB",
+            "3.771478",
+            "4",
+            "14.07",
+            "13"
+          ],
+          [
+            "Local FineWeb train",
+            "3.943522",
+            "5",
+            "12.45",
+            "17"
+          ],
+          [
+            "Local FineWeb-Edu extended train",
+            "4.134991",
+            "5",
+            "14.11",
+            "12"
+          ],
+          [
+            "Local FineWeb-Edu train",
+            "4.166892",
+            "5",
+            "15.49",
+            "9"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h3",
+      "title": "2.2 这些结果意味着什么",
+      "paras": [
+        "可以看到，损失和这个评测上的表现之间的相关性松得很有意思，我有一个还在写的系列在试着弄清原因。特别地，OpenAI 的权重总是比我的好，我很想找出原因。",
+        "不过至少让人安心的是：这个新的、更大的模型排在第 3，赢过了我自己其他所有模型，虽然还是输给了那个讨厌的 124M 参数 GPT-2 small。",
+        "所以就这样：一个 GPT-2 small 被改成每层 6 个专家、每 token 激活 2 个的 MoE。它在测试集上的损失基本符合预期，IFT 评测也说得通，除了 OpenAI 权重那个奇怪现象。",
+        "那这意味着什么，接下来该做什么？"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "三、作者的总结与后续实验",
+      "paras": [
+        "这篇里，我从《Build a Large Language Model (from Scratch)》的 GPT-2 代码和我自己的训练脚本出发，后者最初也是基于书里的训练代码，加上了混合专家支持，包括让专家之间合理均衡负载所必需的辅助损失计算。八天训练之后，我们得到一个还不错、有能力的模型。",
+        "从智力上说，这挺让人满足的；至少从测试损失看，它基本落在你会预期的地方。而我很确定的一件事是：把这一串计算啃下来，对我的 PyTorch 和张量操作能力是一次极好的锻炼。",
+        "但 MoE 真正有意思的地方在于，它在理论上能以更低的推理算力提供和密集模型相近的性能。",
+        "我觉得接下来还能做一些有意思的后续实验。OpenAI 的权重总是打败我的，所以如果先把它们排除在比较之外，直到我弄明白原因，我可以试着建立一个心智模型：在学习 LLM 的过程中，MoE 是不是一种划算的算力用法。我可以：",
+        "用和这次 MoE 相同的算力训练一个小模型，比如我一直在折腾的 163M 规模，看它会表现如何。我猜会更差。",
+        "用相同算力训练一个 446M 参数的密集模型，看它比得怎么样。它会训练不足，因为每个 token 需要的计算更多，算力相同时我只能用更少的 token 训练它。我不知道它更好还是更差。",
+        "用相同算力训练一个 Chinchilla 最优的密集模型，看结果如何。",
+        "肯定还有别的选项，我也很想知道大家还能想到什么。",
+        "总之，希望这篇文章是一次有意思的旅程，也把事情讲清楚了。非常欢迎反馈，尤其是关于那些图有没有帮助。我最近才给自己的静态站点生成器加上 D2 支持，完全有可能是我在滥用新玩具。",
+        "所以，感谢阅读，一如既往，欢迎在评论区提出意见和问题。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "四、脚注与参考",
+      "paras": [
+        "为了防止链接失效，我把这些论文的正式引用放在这里，它们是重要的背景：Jacobs, Jordan, Nowlan, Hinton (1991). Adaptive Mixtures of Local Experts. Neural Computation 3(1), 79 到 87。Shazeer 等 (2017). Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer. ICLR 2017。Lepikhin 等 (2021). GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding. ICLR 2021。Fedus, Zoph, Shazeer (2022). Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity. JMLR 23(120), 1 到 39。",
+        "从实现上说，Mixtral 有点怪。它用了 Switch Transformers 那个「先 softmax 再把非 top-k 置零」的技巧，但接着又把得到的路由权重按它们的和做归一化，也就是每个值除以那个小于 1 的和。这么做的净效果，和《Outrageously Large Neural Networks》里「把非 top-k 替换成负无穷」完全一样。",
+        "还有一点：把非 top-k 之外的专家全部掩掉这件事让我有点怀疑。它隐约有点像我最早那种「死路」代码：路由器的输出没有用来给最终结果加权。而且看起来确实存在实打实的数学隐忧，虽然不完全一样。《Outrageously Large Neural Networks》里说：「虽然这种稀疏形式会在门控函数的输出上造成一些理论上吓人的不连续，实践中我们还没有观察到它成为问题。」我的直觉是：因为权重在计算流里，反向传播仍然可以试着降低一个本不该被用到的专家的权重。不过这也有点麻烦，因为受 softmax 影响，降低一个专家的权重会迫使其他专家的权重升高，softmax 的结果必须和为 1。考虑下来，我觉得 Switch Transformers 那种先 softmax 再掩码的方案更好：未选中专家的权重对反向传播是「不可见」的，而提高某个选中专家权重的梯度会自动降低其他所有未选中专家的权重，反之亦然。这一点我还得再想想，也许用 Switch 式的设置再训一次做对比。还有个随机的想法：先 softmax 的做法会让被选中专家的权重比原本更低，于是 FFN 加进上下文向量的信号变少，但也许 FFN 会被训练成输出更大的值。总之先放一边。",
+        "我试过的另一个方案能跑通，但有一个不明显的 bug。假设某个上下文向量的 logits 是 [0.4254, 0.1342, 0.5106, -0.1385]，两个激活专家时我们想把它变成 [0.4254, -inf, 0.5106, -inf]。默认情况下 topk 会按降序排列数值，并保持对应的下标顺序，所以 top-2 值是 [0.5106, 0.4254]。如果按「把所有小于 top-k 中最小值的 logits 替换成负无穷」来做，看起来挺巧妙。但并列会出问题：假设这个上下文向量的 logits 是 [0.4254, 0.4254, 0.5106, -0.1385]，最小的 top-2 值当然是 0.4254，可一旦把所有小于 0.4254 的值替换成负无穷，就会得到 [0.4254, 0.4254, 0.5106, -inf]，也就是三个激活专家而不是两个。这不行。虽然我认为实践中撞上这个问题的概率不高，但它确实是明确的错误，必须解决，于是有了我最终采纳的方案。",
+        "想象一个极端情况：256 个专家、每 token 激活一个。在一个 batch 里，token 基本会随机散落在各个专家上，所以你几乎要把所有专家都跑一遍。如果每个专家只用 GPU 的一小部分算力处理分给它的那点 token，而你一次只处理一个专家，GPU 利用率会严重不足。不过以我用的模型规模与激活、总专家数，这不是问题，等全部跑起来后 nvtop 也证实了。真正很大的模型还会有另一个问题：一个 batch 里可能有太多东西挤到同一个专家上。虽然我们后面会加代码保证平均而言每个专家收到的上下文向量数量差不多，但在单个 batch 内部仍可能不均衡。想象一个巨大到需要不同 GPU、甚至不同机器来承载不同专家的 LLM，比如万亿参数量级：如果你的 batch 里大部分上下文向量都落在专家 i 上，它所在的那块 GPU 就成了瓶颈。我在这篇里描述的这种设置有时叫「token 选择」路由，某种意义上每个 token 选择了它「想」去的专家，或者说路由器替它选了。「专家选择」路由则反过来：生成同样的 logits，但不在每个 token 上选 top-k 专家，而是在每个专家上选 top-k token，从而保证专家之间的均衡。这两条都值得将来研究。",
+        "这是一篇博客，想链接的话请随意。但如果你在写更学术的东西、需要正式引用，这里有个 BibTeX 块：",
+        "__CODE__bibtex::@misc{thomas2026sep-gpt-2-to-moe,\n  author       = {Thomas, Giles},\n  title        = {{Extending Raschka's GPT-2: an MoE trained from scratch on an RTX 3090}},\n  year         = {2026},\n  month        = sep,\n  howpublished = {Blog post},\n  url          = {https://www.gilesthomas.com/2026/09/gpt-2-to-moe},\n}"
+      ]
+    }
+  ],
+  "conclusion": [
+    "**把 GPT-2 改造成 MoE 的完整账，最后落在几个数字上：6 个专家、每 token 激活 2 个、446M 总参数、8.9B token、八天训练，测试损失 3.254。** 它赢过作者全部 163M 参数模型和 GPT-2 small，略逊于参数量更少的 GPT-2 medium，IFT 评测排第 3。负载均衡的辅助损失在最后 75% 的训练里全程绿色，最终平均值 24.0847，几乎正中理想值 24。",
+    "真正值得带走的不是这个分数，而是那条链路有多清晰：路由器输出权重、稀疏掩码把非 top-k 打成负无穷、掩码选出上下文向量送进专家、辅助损失把负载摊平、α 用来平衡均衡与语言建模。任何一环错位都会让 MoE 退化成随机分配或者偏食的专家集合。作者接下来想做的对比也很实在：同样算力下，小模型、等参数密集模型、Chinchilla 最优密集模型分别表现如何。"
+  ],
+  "reference_url": "https://www.gilesthomas.com/2026/09/gpt-2-to-moe",
+  "title": "从 GPT-2 到 MoE（六）：八天训练、3.254 测试损失与 IFT 评测排名"
+}

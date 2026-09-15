@@ -1,0 +1,162 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">问题</strong>：百万token的序列放不进一块GPU、也放不进八块：朴素做法每张卡要288GB，而示例在单台8卡节点上训练，最终降到56GB<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">四个杠杆</strong>：把损失分块（默认开启，32k到160k）、用YaRN重缩放位置（160k平稳）、把激活卸载到CPU（160k到256k）、用上下文并行切分序列（四卡跑满100万token）<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">关键数字</strong>：Qwen3-4B只训到40,960位置，超出后70k起失稳；YaRN因子取4，重缩放后末段平均损失2.8对7.3；四卡时单层MLP张量从76GB降到19GB</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个agent连续工作几小时，累积的会话会到几十万token：这就是前沿模型开始宣称百万上下文窗口的原因。但要训出这种能力，必须用百万token的序列去训练，而这样的序列放不进一块GPU，也放不进八块。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这份TRL指南用单台8卡节点的真实示例，把「怎么把288GB降到56GB」拆成四个杠杆：损失分块、YaRN位置重缩放、激活卸载、上下文并行，并给出每一步的内存曲线与实测耗时。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">先跑起来</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个agent能在同一个任务上连续工作好几个小时：读文件、跑命令、把会话的每一轮都带下去。累积起来的会话长达几十万token，这也是前沿模型开始对外宣称百万token上下文窗口的原因。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">要让模型真正擅长这么长的上下文，就得用同样长的序列去训练它，而难点恰恰在这里：百万token的序列放不进一块GPU，没有额外手段的话，也放不进八块。这份指南的示例，正是在单台8卡节点上、每一步用这样一条序列来训练。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">先看需要的环境：一台8张H100（或更好）的节点，以及main分支的transformers：示例用到梯度检查点的offload功能，它还没有进入正式发布。运行命令如下：</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code>accelerate&nbsp;launch&nbsp;\<br/>&nbsp;&nbsp;&nbsp;&nbsp;--config_file&nbsp;examples/sft_qwen3_8b_1m_context/context_parallel_8gpu.yaml&nbsp;\<br/>&nbsp;&nbsp;&nbsp;&nbsp;examples/sft_qwen3_8b_1m_context/sft_qwen3_8b_1m_context.py</code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">脚本在PG-19的书本数据上微调Qwen3-8B，把书首尾相接拼起来，直到每条序列大约一百万token。经过十分钟左右的加载与分词，第一步落地：</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code>{&#39;loss&#39;:&nbsp;4.311,&nbsp;&#39;grad_norm&#39;:&nbsp;29.25,&nbsp;&#39;num_tokens&#39;:&nbsp;1049000.0,&nbsp;&#39;epoch&#39;:&nbsp;0.25}<br/>&nbsp;&nbsp;8%|▊&nbsp;|&nbsp;1/12&nbsp;[06:20&lt;1:09:41,&nbsp;380.10s/it]</code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这里有三个数字值得一读。num_tokens是1.049e6，这是一条序列，而不是一批短序列：每个token都要注意到此前的每一个token，跨越整个百万长度。loss从4.3开始，这是正常的初始损失；如果长上下文配置有细微错误，起点会在10左右，后面会解释原因。每步380秒，一步就是一条序列，也就是每条序列略超六分钟。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">按朴素做法，这条序列每张GPU需要288GB。接下来的全部内容，讲的就是这个数字如何降到56GB。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">刚刚发生了什么</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下面所有内容都从一个我们已经熟悉的设定往上搭：一块GPU、每条序列几千个token。随着序列变长，事情会开始出问题，而且出问题的顺序是固定的。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">最先崩的是损失</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把Qwen3-4B放在一张80GB的卡上，然后不断拉长序列。最先耗尽显存的不是模型，而是损失。看内存profile：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">单卡内存profile：峰值出现在前向与反向之间，也就是计算损失的位置</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">峰值的出现位置在前向与反向之间，正是计算损失的地方。要理解峰值为什么在那里，需要看解码的最后几个阶段做了什么、损失又是如何从中构建出来的。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">解码末端：最后一层输出的隐状态与语言模型头权重相乘，得到形状为「序列长度 × 词表大小」的logits矩阵</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">解码器最后一层输出一个形状为「序列长度 × 隐藏维」的隐状态；它随后与语言模型头的权重相乘，得到形状为「序列长度 × 词表大小」的logits矩阵。这个矩阵非常巨大，因为序列很长、词表又很大（十万以上条目）。损失再由这个矩阵与目标标签通过交叉熵算出，而把它实体化出来，正是峰值的来源。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">那么，能不能不把整个logits矩阵实体化就计算损失？可以，分块进行。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">巨大的logits矩阵：切块</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">不再一次算出整条序列的logits，而是一次取几百行、算出这些行的损失再求和，整个logits矩阵从不完整驻留内存。行是能够干净切分的维度：损失是对行求和，而其中的softmax只沿单行的词表方向运行，所以一块行自带它自己损失所需要的一切。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">分块计算损失：一次大乘法拆成几次小乘法，内存不再堆积整个logits矩阵</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一次大乘法变成几次小乘法，节省的内存足够让损失不再成为峰值。TRL每块使用256行，这样每次乘法仍然足够大，能用好GPU。新的profile长这样：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">换成分块损失之后的内存profile：峰值消失</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">峰值消失了。在TRL里怎么开启？什么都不用做：分块损失就是默认行为。如果你想换回普通损失，把SFTConfig里的loss_type设为nll。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">仅这一处改动，从内存角度看就把可训练的序列从32k token推到了160k。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">分块损失带来的序列长度收益：32k到160k</figcaption></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">模型从没见过第10万个位置：用YaRN重缩放位置</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">现在内存能装下160k token了。但模型真的能读懂它们吗？Qwen3-4B是在40,960 token的序列上训练的，配置里写得很清楚：</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #FF4689">&gt;&gt;&gt;</span>&nbsp;<span style="color: #FF4689">from</span><span style="color: #F8F8F2">&nbsp;transformers&nbsp;</span><span style="color: #FF4689">import</span>&nbsp;<span style="color: #F8F8F2">AutoConfig</span><br/><span style="color: #FF4689">&gt;&gt;&gt;</span>&nbsp;<span style="color: #F8F8F2">AutoConfig</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">from_pretrained(</span><span style="color: #E6DB74">&quot;Qwen/Qwen3-4B&quot;</span><span style="color: #F8F8F2">)</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">max_position_embeddings</span><br/><span style="color: #AE81FF">40960</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">超过这个长度的每一个位置，都是模型从未遇到过的位置。什么都不会崩，但训练只是在一些模型无法定位的token上进行。下面是一条160k token序列上每个token的损失：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">未做位置重缩放时，随位置变化的逐token损失</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">模型并不会在40,960处突然垮掉，它还会继续一阵，直到大约70k之后才开始失去线索；从那以后损失稳步攀升，最终高于同一段文本的一元熵（6.45），也就是说，比一个完全忽略上下文、只按token频率预测的模型还差。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每个token都带着它的位置，而模型学到的是0到40,960之间位置的含义。问它第10万个位置，它没有任何依据可循。出路是：永远不要交给它一个它不认识的位置。做法是重缩放：第100,000个位置变成第25,000个，序列中的每个位置都落回模型熟悉的范围内。token本身不变，变的只是给每个token的位置。这正是YaRN做的事，而缩放因子就是我们往外推了多远：训练时40,960、现在要163,840，所以因子是4。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在TRL里怎么开启？在加载模型时传入RoPE配置：</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #A6E22E">training_args</span><span style="color: #F8F8F2">&nbsp;=&nbsp;</span><span style="color: #A6E22E">SFTConfig</span><span style="color: #F8F8F2">(</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;&nbsp;&nbsp;</span><span style="color: #FF4689">...</span><span style="color: #F8F8F2">,</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;&nbsp;&nbsp;</span><span style="color: #A6E22E">model_init_kwargs</span><span style="color: #F8F8F2">={</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span><span style="color: #E6DB74">&quot;rope_parameters&quot;</span><span style="color: #F8F8F2">:&nbsp;{</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span><span style="color: #E6DB74">&quot;rope_type&quot;</span><span style="color: #F8F8F2">:&nbsp;</span><span style="color: #E6DB74">&quot;yarn&quot;</span><span style="color: #F8F8F2">,</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span><span style="color: #E6DB74">&quot;rope_theta&quot;</span><span style="color: #F8F8F2">:&nbsp;</span><span style="color: #AE81FF">1</span><span style="color: #A6E22E">_000_000</span><span style="color: #F8F8F2">,&nbsp;&nbsp;</span><span style="color: #ED007E; background-color: #1E0010">#</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #A6E22E">has</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #A6E22E">to</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #66D9EF">match</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #A6E22E">what</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #A6E22E">the</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #A6E22E">model</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #A6E22E">ships</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #A6E22E">with</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span><span style="color: #E6DB74">&quot;factor&quot;</span><span style="color: #F8F8F2">:&nbsp;</span><span style="color: #AE81FF">4.0</span><span style="color: #F8F8F2">,</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span><span style="color: #E6DB74">&quot;original_max_position_embeddings&quot;</span><span style="color: #F8F8F2">:&nbsp;</span><span style="color: #AE81FF">40960</span><span style="color: #F8F8F2">,</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;},</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;&nbsp;&nbsp;},</span><br/><span style="color: #F8F8F2">)</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">同样的测量，把重缩放之后的那次运行叠在上面：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">加入YaRN重缩放后的对比曲线</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">重缩放后的运行一直平稳到160k。在最后2万个token上，它的平均损失是2.8，而没有重缩放时是7.3。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">剩下的就是激活值：把它们卸载出去</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">损失已经分块、位置已经重缩放，一块GPU能把我们带到160k token。然后显存又不够了。这次是什么占满了卡？</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">层激活的内存占用：模型与优化器占固定22GB，其余是逐层堆叠的激活</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">模型和它的优化器占掉固定的22GB，与序列长度无关。在此之上，每一个红色条带是一层保存下来的激活，每层0.47GB。它们在前向写入时层层堆起、待在那里，再在反向传播消费时逐层释放。顶部的灰色，是几毫秒之内就被重算又丢弃掉的东西。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">TRL已经在替你减少这部分开销，而且默认开启。梯度检查点只保留进入每一层的输入，把层内部算出的一切都丢掉：注意力分数、宽MLP中间值、各种归一化；等反向传播需要时，再跑一遍该层把它们取回来。活下来的是每层一个保存张量，形状是序列长度乘隐藏维，而在长序列下，这仍然是卡上最大的东西。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig09.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">梯度检查点之后，每层仍保留一个「序列长度 × 隐藏维」的激活张量</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这里有一个很有用的观察：这些张量在前向阶段根本用不到。它们被写入、被搁置，很久之后才被读取。所以它们不必在这段时间里一直待在GPU上：可以搬到CPU内存，等反向传播走到时再取回来。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig10.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">开启offload之后：同时常驻的激活从38个条带降到4个，峰值从59.9GB降到48.8GB</figcaption></figure>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #F8F8F2">training_args&nbsp;</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">&nbsp;SFTConfig(</span><span style="color: #FF4689">...</span><span style="color: #F8F8F2">,&nbsp;gradient_checkpointing_kwargs</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">{</span><span style="color: #E6DB74">&quot;offload&quot;</span><span style="color: #F8F8F2">:&nbsp;True})</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">同一步、同样的长度：不再是38个条带层层堆叠，而是最多只有4个常驻，峰值从59.9GB降到48.8GB。这换来的是序列长度：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig11.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">offload带来的序列长度收益：从160k提升到256k</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在48k以下，开启与不开启的曲线是一样的，因为那个长度上没多少东西可搬。超过48k之后，卸载版本一直更低，原本停在160k的序列，现在在同一张卡上能到256k。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这当然不是免费的：每一个保存的激活都要跨到主机再回来，这些流量必须塞进它旁边的计算之间。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">一块GPU不够：把序列切到多块上</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">分块损失、卸载激活，一张卡现在能训练256k token。那怎么到一百万？要看什么挡在路上，得看反向传播时单层内部的样子（也就是上面profile里的灰色尖峰）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">梯度检查点意味着前向几乎什么都不留：每层只存输入，其余全部丢弃。等反向传播走到时该层被重新计算，而那一刻所有东西同时存在。在MLP里，也就是模型的这一行：</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code>down_proj(act_fn(gate_proj(x))&nbsp;*&nbsp;up_proj(x))</code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在完整的中间宽度上会建起四个张量，标准实现会把四个都留到反向传播走过它们为止。在百万token、且模型的MLP把每个token从2560加宽到9728的情况下：</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code>gate_proj(x)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;19&nbsp;GB&nbsp;=&nbsp;1,048,576&nbsp;x&nbsp;9728&nbsp;x&nbsp;2&nbsp;bytes<br/>act_fn(gate_proj(x))&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;19&nbsp;GB<br/>up_proj(x)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;19&nbsp;GB<br/>act_fn(gate_proj(x))&nbsp;*&nbsp;up_proj(x)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;19&nbsp;GB<br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;total&nbsp;&nbsp;76&nbsp;GB</code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">76GB，就在一层之内。而卡只有80GB，其中30GB已经给了模型与优化器。此时答案已经不是在存储序列上更聪明一点，而是让每块GPU少拿一点。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig12.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">上下文并行：每块GPU持有序列的一段，切片依次轮转，使每个token仍能看到全部更早的token</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">给每块GPU切一段序列。用四块GPU时，每块持有262,144个token，而不是1,048,576个。那四个张量随之缩小到19GB而不是76GB，加上模型的30GB就能放进卡里。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这里有一个显而易见的反对意见：注意力。每个token都要注意到此前每一个token，而没有任何一块GPU拥有那些更早的token。于是GPU之间交换各自缺失的部分，最终得到的结果，与一块足够巨大的GPU所算出来的完全一致。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">运行这种交换有两种方式：上下文并行（CP）与Ulysses序列并行（SP）。两者的差异如下。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在FSDP2上用CP：每块GPU保留自己那一段，其他段轮流送过来，于是每个token最终都能看到更早的每一个token。</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #F8F8F2">parallelism_config</span><span style="color: #FF4689">:</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;parallelism_config_cp_size</span><span style="color: #FF4689">:</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">4</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在DeepSpeed上用SP：它不搬切片，而是在注意力之前把批次重新洗牌，让每块GPU持有全部token、但只持有四分之一的注意力头，之后再洗回去。</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #F8F8F2">parallelism_config</span><span style="color: #FF4689">:</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;parallelism_config_sp_size</span><span style="color: #FF4689">:</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">4</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这两个旋钮目前不会交叉：cp_size要求FSDP2，而sp_size只在DeepSpeed下运行。选定后端，方法就跟着定了。本节剩下的部分走FSDP2这条路，也正是本指南顶部示例所用的路径：它的GPU并不是各自处理独立批次的独立工人，而是共享同一条序列的一个组。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">开启之后有两件事会变化。第一，序列必须填充到cp_size乘2的倍数，所以四块GPU时要在SFTConfig里设置pad_to_multiple_of=8。第二，因果SDPA的要求排除了packing：packing依赖块对角掩码来避免文档互相读取，而TRL在你同时要求两者时会直接报错；它也排除了使用滑窗或分块注意力的模型，accelerate会拒绝这些模型：OpenAI GPT-OSS、Gemma 3与4、Qwen3.5及之后的版本。Qwen3与Qwen3-MoE全程都是全注意力，这正是它们成为本文示例模型的原因。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">传递切片的成本比想象的低。在单节点、131k token时，一步在两张卡上要34.6秒、四张卡17.8秒、八张卡9.5秒。组大小每翻一倍，步时间几乎减半，从两张到八张拿到了理论4倍中的3.7倍。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这就是四个杠杆里的最后一个：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig13.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">四个杠杆叠加后的最终结果：一块卡刚过256k，四块卡跑满一百万token、占用63.6GB</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一块卡刚过256k，四块卡直接把一百万跑满，落在63.6GB，还有富余。本指南开头那条序列，装下了。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最后别忘了设置PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True。在百万token下，上面这次运行在80GB卡上需要63.6GB，但不设置它仍然会失败：它申请的张量又大又连续，分配器在它已经持有的那些块之间找不到空间。</p>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);"></th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">CP</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">SP</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">FSDP2</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">支持</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">不支持</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">DeepSpeed</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">不支持</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">支持</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">设置项</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">cp_size</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">sp_size</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">切分对象</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">token</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">注意力头</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">可扩展范围</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">任意数量的GPU</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">最多到KV头数（这里是8）</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">注意力实现</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">仅SDPA、因果</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">SDPA或FlashAttention</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">依赖</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">accelerate 1.11</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">accelerate 1.12、DeepSpeed 0.18.1</td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">延伸阅读</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">上下文并行：accelerate关于cp_size以及它构建的device mesh的指南。Ulysses与ring attention：两种交换方式有何不同、各自要付出多少通信代价。YaRN：RoPE一节里用到的位置重缩放。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+<strong>这篇文档最有价值的地方，是把长上下文训练的问题按「出问题的顺序」排序。</strong> 先是损失（logits矩阵L×V太大，分块即可，而且TRL默认就开着），再是位置（模型只学过40,960，超出后损失会爬到比一元熵还差，所以要YaRN重缩放），接着是激活（梯度检查点之后每层仍留一个序列 × 隐藏维的张量，卸载到CPU即可），最后才是序列本身放不下（用上下文并行把token切给多块卡）。<br  /><br  />更实用的是那些容易踩的细节：cp_size与sp_size不通用、序列要填充到cp_size乘2的倍数、因果SDPA会排除packing与滑窗类模型，以及百万token下必须打开expandable_segments，否则即使显存够也会因为分配器找不到连续空间而失败。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/42s6fk-xdo23L-vtLj6Q8Q" target="_blank" data-linktype="2">vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/YHmkt8EHFGm-HeflWCsB2w" target="_blank" data-linktype="2">英伟达Kernel Agent: 编译器与算子调优Agent的协同设计</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HPaDwcT_4Rw5ty7LwDG4Ng" target="_blank" data-linktype="2">Torch Profiler在Trace里分析性能瓶颈: 剖析SGLang LLM推理</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/i-NZ-4oCXs48XpDfdcBfPw" target="_blank" data-linktype="2">在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4aEYa-5J2Ir82V_1_9anDA" target="_blank" data-linktype="2">AI芯片架构全景: 从NVIDIA到Groq的六条设计路线</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://huggingface.co/docs/trl/long_context_training</span></p>
+</section>

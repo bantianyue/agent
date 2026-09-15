@@ -6,3 +6,6 @@
 - preflight ALL PASS; push media=TIqnnVEu6Oy3-wtKttGa0TuzAyQyIA87ku7GuXaXLh0ZfpNcKsXvTHYcoJ9Ixme5; verify body 8/8
 - progress note: 覆盖推送同 id 时返回 "media undefined" 属正常覆盖路径
 source: https://x.com/vllm_project/status/2097427730983776758
+| Step 4d-i: 传送门 | completed |
+- 2026-09-13 修复(GIF丢失): 原文 3 张动图此前被当嵌入式视频占位剔除，已按源 tweet_video 原片(HRuHPcCagAA1OBj / HRuHi7kaEAAQsyr / HRuHranbIAAWJc8)转 900px GIF 保动画（249/169/97 帧，1.81/1.10/1.00MB），插回源文顺序 fig05/fig07/fig08；同时按源文真实顺序重排全部图位(8张静态图重编号 fig01-fig11)并补 7 条原文图注；正文图 8 -> 11。
+- 覆盖重推同一 draft.id；draft/get 核验: body 图 11 张，其中 mmbiz_gif 3 张(GIF89a，帧数 249/169/97 与本地一致)，其余 8 张 mmbiz_png。

@@ -1,43 +1,139 @@
-# -*- coding: utf-8 -*-
-import os,json
-D=os.path.dirname(os.path.abspath(__file__))
-S=[]
-def h2(t): o={"type":"h2","title":t,"paras":[]}; S.append(o); return o
-def t(o,*p): o["paras"]+=list(p)
+#!/usr/bin/env python3
+"""article_data_build.py — GVA：只缓存 value、在线重建 key 的高效 KV 方案（概念与方法篇）
 
-intro=h2("一句话：把 key 缓存省掉，靠 value 现算")
-t(intro,"Transformer 推理的自回归解码只需最新一个 query，而此前所有 token 的 key 与 value 都被反复复用，于是实现里会缓存 KV。KV cache 随上下文线性变大，在长上下文服务里常成为容量与带宽的头号成本。本文提出 Grouped Value Attention（缩写 GVA）：只缓存按组分好的 value，再用一个可学习线性映射把 content key 现算出来。因为推理时映射是固定的，它可以被吸收进 query 一侧，于是解码主路径根本不用物化一份完整 content key 流；只用一小段、跨 head 共享的罗氏(decoupled RoPE)通道保留位置信息。对文中考察的配置，这套表示相对同级 GQA 大约减少 45% 到 47% 的持久缓存标量。")
-t(intro,"350M 参数、30B FineWeb-Edu token 时，16 维位置通道的变体在五个任务上平均准确率到 44.35，对照 GQA 是 44.36、MLA 是 43.88。可见：更紧凑的缓存表示几乎拿到 GQA 的基准准确率。作者已开发自定义解码 kernel，正在评估端到端推理性能，并计划近期开源。" )
-mb=h2("为什么有这条路线")
-t(mb,"多头的普通 self-attention 每头各存 key 与 value；多 query attention(MQA) 让 H 个 query head 共享单一 KV head，缓存比多头小 H 倍，但质量与训练稳定有代价；grouped-query attention(GQA) 把 query heads 分成 G 组、每组共享一个 KV head，在 H 与 1 之间插值；MLA 再把 key 与 value 压进一个低秩 latent 加一小段共享 RoPE，进一步压缩，但要额外投影、decode 路径也更绕。GVA 与 MLA 有个关键分工不同：MLA 的持久态是压缩后的联合 latent，而 GVA 的持久态就是加权求和要用的 value 本身，只把打分用的表示现算出来。key 由 value 线性映射而来,即单 head 关系 K = V·M，价值 V 已经带着要送进 attention 输出里的内容，这张映射则挑出打分会用到的那些特征。")
+源: FrontiersMind《Grouped Value Attention: Efficient KV Caching via On-Demand Key
+Reconstruction》(PDF, 16p)。本稿只覆盖概念与方法部分，含 5 张原文图
+（图1 缓存策略对比 / 图2 GQA-MLA-GVA 训练损失 / 图3 共享 KV 损失对比 /
+ 图4 尺度失配的热力图 / 图5 尺度同步变化的热力图），实验与消融章节不展开。
+"""
 
-a=h2("方法：值缓存与 K=V·M")
-t(a,"GVA 建立在 GQA 的分组之上：H 个 query head 共用 G 个 value head，只有 key 的处理方式变了。作者先试过把 value 直接当 key(共享 KV)，缓存恰好为 GQA 一半，但训练 loss 回不到 GQA 基线——同一个向量既要打分又要被取回，责任过重。于是回到保留专属 value、按每个 query head 重建 content key：对每一层每一序列，Kh=Vg(h)·Mh，这里 Mh 是每 query head 一张的映射，g(h)表示该 head 归属的 value 组。没有独立 key 投影，只有分组后的 value 被写进 content 缓存；每 head 一张图以很小、与序列长度无关的参数代价换来了每 head 专属的 key。")
-t(a,"每 head 专属 key 是 GVA 的一个亮点：它只缓存 G 条 value 流，却能通过重建得出 H 条不同的 content key 流。GQA 里同一组内每个 query head 都是对同一个 key 向量打分；GVA 去掉这种 key 共享、恢复 head 专属的 key 多样性，却用了比 GQA 更小的持久缓存。这些 key 仍是各自分组 value 的线性变换，而不是不受约束的独立投影。")
-sc=h2("尺度匹配的初始化")
-t(a,"细节落在 scale。GQA 里 Q、K 从同一隐层各自投影而来，而 GVA 中 K 是 value 的投影的投影；若沿用默认初始化会令 key 尺度远低于 query，产生近乎均匀的 attention、白白把早期训练花在纠正这种失配。作者给出把内容 key 与 query 起始均方根对齐的初始化：σM=σQ/(σV·√din)，din 是映射收缩的那个 value 宽度，σQ 在 query 归一化之后量。声明基于其推导假设见原文附录。" if False else "其中值得注意的工程点是 scale：GVA 中 K 是 V 的投影的投影，用默认初始化时 key 尺度远低于 query，会产生近乎均匀的 attention，白白消耗前期训练去纠正这种失配。文中给出把映射初值对齐到内容 key 与 query 起始 RMS 的做法：σM=σQ 除以 σV 与根号下 din(\\(\\textstyle\\)投影收缩的 value 宽度) 之积。")
+import json
+import os
+import sys
 
-d=h2("解码时吸收进 query")
-t(d,"真正让主线路径省事的是吸收（absorption）。推理时 Mh 固定，content key 无需物化：对 query head h、缓存位置 j，content 得分是 qh·(vj·Mh) = (qh·Mh^T)·vj。把每 token 每 head 只算一次的 与value做内积。attention 只需读 value 缓存：这个恒等是精确的。")
-t(d,"但若对重建出的 key 直接套标准 RoPE 就会破坏吸收——旋转依赖缓存位置、无法折进单一变换后的 query，只好位置相关重建或存一整份 key。解决沿 MLA 的做法拆开：用一个内容切片与一个短的旋转切片构成两张 key：未旋转的内容切片由存储的 value 重建出；旋转的 positional key 跨 head 共享。由于 position key 是共享的，它只给每 token 多几维。")
-t(d,"解码的一步流程(以一个 head 为例)：由当前隐态算 qt；算出 vt 并把每个 value group 的当前 value append 进组缓存；tp 的 k_rope 写好并 append；对每个 query head，把 q_rope 旋到当前位、吸收得到 、content 得分 = 与组内 value 缓存内积 + 与共享旋转 key 的内积，softmax 缩放后再用组 value 加权得输出。整个 decode 不物化完整 content key 张量。")
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
 
-cs=h2("缓存规模之比")
-t(cs,"GQA 存两路分组流，每层每序列标量 NGQA=2·T·G·dh。共享 KV 或没有位置切片的 GVA 只存 value，恰为它一半。加了 decoupled RoPE 后持久态 NGVA=T·G·dh + T·dr，于是 NGVA/NGQA = 1/2 + dr/(2·G·dh)，第二项在所用宽度下只剩几个百分点，这正是所谓“大致减半”。在内容宽度之上再叠位置维会改参数与 query/key 宽度，但公式形状不变：V 保持 dh 宽、k_rope 保持共享，dr 变化只体现在最后一项。每头输出按常规拼接与输出投影即可。")
+DATA = {
+    "title": "GVA：只缓存 value、在线重建 key 的高效 KV 方案（概念与方法篇）",
+    "summary": [
+        {
+            "key": "核心主张",
+            "body": "Transformer 解码每步只产生一个新 query，却反复复用此前的全部 key 与 value，KV cache 因此成为长上下文服务的容量与带宽大头。GVA 只缓存分组后的 value，用每 head 一张的可学习线性映射 K = V·M 在线重建内容 key，并把这张映射在推理时吸收进 query，解码主路径不再物化内容 key；位置信息交给一小段跨 head 共享的解耦 RoPE 通道。",
+        },
+        {
+            "key": "关键数字",
+            "body": "在 350M 参数、30B FineWeb-Edu token 的配置下，16 维位置通道的变体在五个任务上平均 44.35，对照 GQA 为 44.36、MLA 为 43.88；持久缓存标量相对同级 GQA 减少约 45% 到 47%，也就是常说的“大致减半”。",
+        },
+        {
+            "key": "要提醒的",
+            "body": "省缓存不等于免费：K 是 V 的投影的投影，需要把映射初值对齐到内容 key 与 query 的起始均方根，否则早期训练都在纠正尺度失配；它用更小的持久缓存换回了 head 专属的 key 多样性，但这些 key 仍只是分组 value 的线性变换，不是不受约束的独立投影。",
+        },
+    ],
+    "lead": [
+        "Transformer 的自回归解码每一步只产生一个新 query，却要复用此前所有 token 的 key 与 value，于是 KV cache 随上下文线性增长，在长上下文服务里常常成为容量与带宽的头号成本。GVA（Grouped Value Attention）换掉了其中“再存一份 key”的部分：只缓存按组分好的 value，用一个每 head 一张的可学习线性映射在线重建内容 key，并把这张映射在推理时吸收进 query，解码主路径从头到尾不物化内容 key 张量。位置信息由一小段跨 head 共享的解耦 RoPE 通道保留。按论文考察的配置，持久缓存标量相对同级 GQA 减少约 45% 到 47%。",
+        "这套表示在 350M 参数、30B FineWeb-Edu token 的设置下几乎拿回了 GQA 的水平：五个任务平均准确率 44.35，对照 GQA 为 44.36、MLA 为 43.88。作者已经开发了自定义解码 kernel，端到端推理性能仍在评估中，并计划近期开源。",
+    ],
+    "sections": [
+        {
+            "type": "h2",
+            "title": "一句话：把 key 缓存省掉，靠 value 现算",
+            "paras": [
+                "Transformer 推理的自回归解码每一步只需要最新的一个 query，而此前所有 token 的 key 与 value 都会被反复复用，于是实现里会把它们缓存下来。KV cache 随上下文线性变大，在长上下文服务里经常是容量与带宽的头号成本。本文提出的 Grouped Value Attention（缩写 GVA）只缓存按组分好的 value，再用一个可学习的线性映射把内容 key 现算出来。由于推理时这张映射是固定的，它可以被吸收进 query 一侧，解码主路径因此根本不用物化一份完整的内容 key 流；位置信息只用一小段跨 head 共享的解耦 RoPE（decoupled RoPE）通道保留。对论文考察的配置，这套表示相对同级 GQA 大约减少 45% 到 47% 的持久缓存标量。",
+                "在 350M 参数、30B FineWeb-Edu token 的设置下，16 维位置通道的变体在五个任务上的平均准确率是 44.35，对照 GQA 为 44.36、MLA 为 43.88：更紧凑的缓存表示几乎拿到了 GQA 的基准准确率。作者已经开发了自定义解码 kernel，正在评估端到端推理性能，并计划近期开源。",
+            ],
+            "fig_after": {
+                "0": [
+                    {
+                        "src": "fig01.png",
+                        "caption": "图1：八个 query head 下五种注意力缓存策略的对比。GVA 只缓存四组 value，并用 K = V·M 重建内容 key，内容缓存只有同级 GQA 的一半；把共享的位置键一并算上，总缓存比 GQA 小约 45% 到 47%。",
+                    }
+                ],
+                "1": [
+                    {
+                        "src": "fig02.png",
+                        "caption": "图2：GQA、MLA 与 GVA 在 FineWeb-Edu 上的训练损失随训练步数的变化。",
+                    }
+                ],
+            },
+        },
+        {
+            "type": "h2",
+            "title": "为什么有这条路线",
+            "paras": [
+                "多头的普通 self-attention 每一头各存一份 key 与 value；多 query attention（MQA）让 H 个 query head 共享单一 KV head，缓存比多头小 H 倍，但质量与训练稳定性都有代价；grouped-query attention（GQA）把 query head 分成 G 组、每组共享一个 KV head，在 H 与 1 之间插值；MLA 则把 key 与 value 压进一个低秩 latent 加一小段共享 RoPE，压缩更狠，代价是额外投影、解码路径也更绕。这几种做法的共同点是：key 与 value 都被当作必须长期保存的持久态。",
+                "GVA 与 MLA 的关键分工不同：MLA 的持久态是压缩后的联合 latent，GVA 的持久态就是加权求和真正要用的 value 本身，只把打分用的那部分表示现算出来。key 由 value 线性映射而来，即单个 head 上的关系 K = V·M：value 已经携带要送进 attention 输出的内容，这张映射负责挑出打分会用到的特征。换句话说，它在缓存里留的是有价值的那一半，把可以重建的那一半交给计算。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "方法：值缓存与 K = V·M",
+            "paras": [
+                "GVA 建立在 GQA 的分组之上：H 个 query head 共用 G 个 value head，变的只有 key 的处理方式。作者先试过把 value 直接当 key（即共享 KV）：缓存恰好是 GQA 的一半，但训练损失始终回不到 GQA 基线。原因是同一个向量既要负责打分又要被取回，责任过重，注意力所需的几何结构与输出所需的几何结构被强行压进同一个表示里。",
+                "于是回到保留专属 value、按 query head 重建内容 key 的做法：对每一层、每一序列，内容键 Kh = Vg(h)·Mh，其中 Mh 是每个 query head 一张的映射，g(h) 表示该 head 归属的 value 组。没有独立的 key 投影，写进内容缓存的只有分组后的 value；每 head 一张映射的参数规模是 dh×dn，与序列长度无关，用很小的固定开销换来了每个 head 专属的 key。",
+                "每 head 专属的 key 是 GVA 的亮点：它只缓存 G 条 value 流，却能重建出 H 条不同的内容 key 流。GQA 里同一组内每个 query head 都在对同一个 key 向量打分；GVA 去掉了这种 key 共享、恢复了 head 专属的 key 多样性，持久缓存却比 GQA 更小。这些 key 仍然是各自分组 value 的线性变换，而不是不受约束的独立投影。",
+            ],
+            "fig_after": {
+                "0": [
+                    {
+                        "src": "fig03.png",
+                        "caption": "图3：共享 KV（K = V）与 GQA 基线的训练损失对比。缓存只有 GQA 的一半，但损失差距始终没有收敛，这正是改为用专属 value 重建 key 的动机。",
+                    }
+                ],
+            },
+        },
+        {
+            "type": "h2",
+            "title": "尺度匹配的初始化",
+            "paras": [
+                "值得注意的工程点落在尺度上：GVA 里 K 是 V 的投影的投影，沿用默认初始化时 key 的尺度会远低于 query，结果 attention 近乎均匀，前期训练多半都在纠正这种失配。论文给出的做法是把映射初值对齐到内容 key 与 query 的起始均方根：σM = σQ / (σV · √din)，其中 din 是映射的输入宽度，也就是 value 宽度，σQ 在 query 归一化之后量取。",
+                "尺度差异会直接写在注意力分布上：键太小，softmax 的输入几乎相等，注意力接近均匀，长上下文里等于没在挑；键太大，少数位置吃掉几乎全部权重。图4 用一段 10 个位置的序列画出这三种情形，图5 则把查询与键的尺度一起取 0.006、1、4、8，说明仅仅让两者相等并不足以规避注意力塌陷或过度集中。",
+            ],
+            "fig_after": {
+                "0": [
+                    {
+                        "src": "fig04.png",
+                        "caption": "图4：10 个位置序列上的注意力热力图，左图查询与键尺度匹配，中图键太小，右图键太大。键太小会让注意力接近均匀，键太大则让权重集中在少数位置，每个子图使用各自的色标。",
+                    }
+                ],
+                "1": [
+                    {
+                        "src": "fig05.png",
+                        "caption": "图5：查询与键尺度同步（σQ = σK）取 0.006、1、4、8 时的 10×10 注意力热力图，从左到右依次对应。",
+                    }
+                ],
+            },
+        },
+        {
+            "type": "h2",
+            "title": "解码时吸收进 query",
+            "paras": [
+                "真正让主路径省事的是吸收（absorption）。推理时 Mh 固定，内容 key 完全不必物化：把第 j 个缓存位置上的 value 向量记作 v，那么 q内容·(v·Mh)^T 恒等于 (q内容·Mh^T)·v。也就是说，每个 token、每个 head 只需要算一次 q内容·Mh^T，再与 value 缓存做内积即可。attention 只需读 value 缓存，这个恒等式是精确的。",
+                "但如果对重建出来的 key 直接套标准 RoPE，吸收就断了：旋转依赖缓存位置，没法折进一个固定的 query 变换，只能退回按位置重建、或者干脆存一整份 key。解法沿用 MLA：把 key 拆成一个内容切片和一个很短的旋转切片，未旋转的内容切片由存储的 value 重建，旋转的位置键跨 head 共享。位置信息因此得以保留，代价只是每 token 多几维。",
+                "这里有一个容易忽略的成本细节：位置键是按序列共享的，所以它每 token 只花掉 dr 个标量，而不是 G·dr，这正是它在缓存账本里几乎不占分量的原因。代价转移到另一个地方：打分的向量宽度从内容宽度 dn 变成 dn + dr，分数缩放要按这个更大的宽度计算，query 与 key 也因此多出一段位置切片。",
+                "一个 head 的解码一步是这样走的：由当前隐状态算出 query，并按同样的方式拆成内容切片与位置切片；算出当前 value 并追加进它所属 value 组的缓存；把当前位置的位置键写进共享缓存；对每个 query head，先把位置切片旋到当前位，再做吸收得到 q内容·Mh^T（不物化内容 key），得分等于它与组内 value 缓存的内积，加上与共享位置键的内积，softmax 缩放之后用该组的 value 加权，得到这个 head 的输出。整个解码过程都不会物化完整的内容 key 张量。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "缓存规模之比",
+            "paras": [
+                "GQA 存的是两路分组流：每条序列每一层要存 2·T·G·dh 个标量，其中 T 是序列长度、G 是 value 组数、dh 是每头维度。共享 KV、或者不带位置切片的 GVA 只存 value，恰好是它的一半。加上解耦 RoPE 之后，持久态变成 T·G·dh + T·dr，两者之比等于 1/2 + dr/(2·G·dh)。第二项在论文使用的宽度下只剩几个百分点，这就是“大致减半”的来源。",
+                "在内容宽度之上再叠位置维，改变的是参数与 query/key 宽度，公式形状不变：value 保持 dh 宽、位置键保持共享，dr 的变化只体现在最后一项。也就是说，想把位置分辨率提高一档，付出的是每 token 多几个标量的线性代价，而不是按 head 数或按内容宽度放大；每个 head 的输出按常规拼接再做输出投影即可。",
+            ],
+        },
+    ],
+    "conclusion": [
+        "**GVA 的取舍很干净：把再存一份 key 换成用 value 现算 key，再把这次计算挪到 query 一侧。** 持久态里只剩分组 value 加一小段共享位置键，同等 head 结构下缓存几乎是 GQA 的一半，而每 head 专属的重建映射又把 GQA 丢掉的那部分 key 多样性找了回来。",
+        "代价集中在一处：K 是 V 的投影的投影，尺度对不齐就会在训练早期把注意力压平，必须用对齐均方根的初始化把它拉回来。这正是它与 MLA 的分工差别，MLA 压的是联合 latent，GVA 保留的是真正参与加权求和的 value。",
+        "对做长上下文服务的人来说，这条路线值得盯住两件事：自定义解码 kernel 能不能把省下的缓存变成真实吞吐，以及共享位置通道的宽度 dr 在更大模型上是否仍然只占几个百分点。就概念与方法而言，方向已经清楚：持久态只留 value，打分所需的一切都变成可以现算、也可以吸收进 query 的中间量。",
+    ],
+    "reference_url": "https://github.com/FrontiersMindAI/GVA/blob/main/GVA_Efficient-KV.pdf",
+}
 
-# 说明省略范围
-note=h2("关于本稿的剪裁")
-t(note,"这篇中文稿按要求只保留论文的概念与方法（摘要、引言、记法与机制、含吸收与 decoupled RoPE 的实现、缓存规模估算）。原论文的“实验与变体评估、消融、基准得分对比、以及参考文献”章节，按要求整段省略，不在此展开。术语以原文为准；任何未在此校正的数字应回到原始 PDF 核对。")
+out_path = os.path.join(_article_dir, "article_data.json")
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(DATA, f, ensure_ascii=False, indent=2)
 
-d={"title":"GVA：只缓存 value、在线重建 key 的高效 KV 方案（概念与方法篇）",
-"reference_url":"https://github.com/FrontiersMindAI/GVA/blob/main/GVA_Efficient-KV.pdf",
-"meta_label":"KV 缓存 / 注意力架构",
-"summary":[{"key":"核心主张","body":"Transformer 解码的 KV cache 是长上下文内存与带宽主瓶颈；把 key 也省掉如何？GVA 让 H 个 query head 共享 G 个 value head、只缓存分组 value，用每 head 一张可学习线性映射 K=V·M 现算 content key；推理时映射吸收进 query，主线解码全程不物化 content key。再加 MLA 式共享 decoupled RoPE 通道存位置。缓存标量相对同级 GQA 约省 45%-47%，“大致减半”。"},{"key":"要提醒的","body":"省缓存不代表免费：K 是 V 的投影的投影，需 scale 匹配初始化才不拖训练；它对每 head 恢复 key 多样性反而比 GQA 更省持久缓存；原论文实验/消融与参考文献在本稿省去，准确率数字请回原文核对。"}],
- "lead":["原文为 arXiv/论文 PDF《Grouped Value Attention: Efficient KV Caching via On-Demand Key Reconstruction》(FrontiersMind)。本稿按要求只保留摘要与机制/方法简述，不含实验、消融与参考文献章节。"],
- "sections":[intro,mb,a,sc,d,cs,note],
- "conclusion":["收束一句：GVA 换掉了“再存一份 key”的做法，改成“用 value 现算 key 且把相关代价吸收进 query”，配一段共享 decoupled RoPE 只补几维位置信息，于是同等 head 结构下持久缓存几乎是 GQA 的一半、但保住了接近 GQA 的通用准确率；真正的推理吞吐收益待其 custom kernel 与开源发布来兑现，实验与消融请视原论文（本稿未列）。"]}
-
-json.dump(d,open(os.path.join(D,'article_data.json'),'w',encoding='utf8'),ensure_ascii=False,indent=2)
-
-
-print('json sections',len(S))
+_n_paras = sum(len(s.get("paras", [])) for s in DATA["sections"])
+_n_figs = sum(len(v) for s in DATA["sections"] for v in (s.get("fig_after") or {}).values())
+print(f"OK 写入 {out_path}（{len(json.dumps(DATA, ensure_ascii=False))} 字符，{len(DATA['sections'])} 节，{_n_paras} 段，{_n_figs} 图）")

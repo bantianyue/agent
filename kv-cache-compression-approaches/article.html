@@ -1,0 +1,135 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
+.portal-title { font-size:12px; color:#888; }
+.portal-links { font-size:12px; color:#888; }
+.portal-links a { color:#888; text-decoration:none; }
+</style>
+<div style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<div style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">为什么压</strong>：以Llama 2量级的配置算，一个token的KV cache就要0.5 MB：4000 token对话占2 GB，10万token文档占50 GB，还会随用户数线性叠加<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">四种方法</strong>：量化（更少比特）、Token驱逐（丢掉不重要的token）、跨头共享（MQA/GQA）、低秩压缩（MLA存潜向量）<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">怎么选</strong>：已有模型想快速省内存用量化；超长或无止境输入用带Attention Sink的驱逐；要精确回忆别用驱逐；训练新模型直接上GQA/MLA，追求极致就叠加使用</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">KV cache是模型用来「记住」对话的内存：每写一个新token，它都要回看此前所有token的Key和Value。问题是这份缓存会随对话变长和并发用户变多而快速膨胀，直接吃掉GPU显存，还拖慢生成速度。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这篇文章把KV cache压缩的四类方法讲清楚：量化、Token驱逐、跨头共享K/V、低秩压缩，并给出各自的压缩比、质量代价与适用场景。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">先看LLM怎么写文本</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">LLM（大语言模型）是能读文本、写文本的AI模型，ChatGPT、Claude、Gemini都基于它。模型通过阅读互联网上的海量文本学习，这个过程叫训练；训练完成后我们提问，它写出回答。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最要紧的一点是：模型不会一次写完整个回答，而是一小片一小片地写，这一小片叫token（可以粗略理解为一个词）。比如问「法国的首都是哪里」，它会先写「The」，然后回看目前所有内容写下「capital」，再回看一遍写「of」，接着「France」「is」「Paris」。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">也就是说，每写一个新token，模型都得回看此前所有token。这个回看动作，就由Attention完成。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">什么是Attention</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>Attention是模型判断「哪些历史token对写下一个token重要」的方式，简单说就是回看并挑出重点。比如模型在写「The dog was tired, so it went to sleep.」时遇到「it」，它需要知道「it」指的是「the dog」，于是会给「dog」更高的注意力，其它词则更低。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">那它是怎么做到的？每个token会被转换成三样东西：Query（当前token在找什么）、Key（每个历史token能提供什么，像标签）、Value（每个历史token实际携带的信息）。这三样都只是一串数字，在AI里叫作向量。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">可以用图书馆打比方：我们脑子里的问题是Query，每本书书脊上的标题是Key，书里的内容是Value。我们拿问题和每本书的标题比对，标题匹配得好的书获得更多注意力，然后阅读那些书的内容并汇总所学。Attention做的正是这件事：新token的Query与此前每个token的Key比对，按匹配程度把Value组合起来传给下一步。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">还有一点：模型不是只做一次Attention。它有很多层叠在一起，每层又有多个注意力头，每个头像一位独立的读者，有的关注语法、有的关注人名、有的负责判断「it」指代谁。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">什么是KV Cache</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">问题来了：每写一个新token，模型都需要此前所有token的Key和Value。假设已经写了100个token、正在写第101个，它需要前100个token的Key和Value；如果不做任何记忆，模型会把100个token的Key和Value重新算一遍，到第102个token时再把101个重算一遍，如此反复。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这是巨大的浪费：一个token的Key和Value一旦算出来就不会再变，为什么要反复计算？于是KV Cache出场了。Cache就是一块存储，把算过的东西存下来避免重算；KV Cache就是模型存放此前所有token的Key与Value的内存。有了它，写第101个token时只需计算最新token的Key和Value并追加到缓存，其余全部从缓存里读。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">但这里有个陷阱：这份缓存会随每一个token增长，而且长得非常快。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么KV Cache会变得巨大</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">先补两个小知识：bit是计算机最小的内存单位，非0即1；8个bit是1个byte。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">取一个接近Llama 2真实配置的模型：32层、每层32个注意力头、每个头的Key向量与Value向量各有128个数字、每个数字用16 bit（即2 byte）存储。先算一个token要占多少缓存：一个层的一个头存128个Key数字加128个Value数字，共256个；32个头就是8192个；32层就是262144个数字；每个数字2 byte，于是一个token需要524288 byte，也就是0.5 MB。</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #F8F8F2">layers</span>&nbsp;<span style="color: #FF4689">=</span>&nbsp;<span style="color: #AE81FF">32</span><br/><span style="color: #F8F8F2">heads</span>&nbsp;<span style="color: #FF4689">=</span>&nbsp;<span style="color: #AE81FF">32</span><br/><span style="color: #F8F8F2">head_dim</span>&nbsp;<span style="color: #FF4689">=</span>&nbsp;<span style="color: #AE81FF">128</span><br/><span style="color: #F8F8F2">bytes_per_number</span>&nbsp;<span style="color: #FF4689">=</span>&nbsp;<span style="color: #AE81FF">2</span><br/><br/><span style="color: #959077">#&nbsp;Key&nbsp;and&nbsp;Value,&nbsp;so&nbsp;multiply&nbsp;by&nbsp;2</span><br/><span style="color: #F8F8F2">per_token</span>&nbsp;<span style="color: #FF4689">=</span>&nbsp;<span style="color: #AE81FF">2</span>&nbsp;<span style="color: #FF4689">*</span>&nbsp;<span style="color: #F8F8F2">layers</span>&nbsp;<span style="color: #FF4689">*</span>&nbsp;<span style="color: #F8F8F2">heads</span>&nbsp;<span style="color: #FF4689">*</span>&nbsp;<span style="color: #F8F8F2">head_dim</span>&nbsp;<span style="color: #FF4689">*</span>&nbsp;<span style="color: #F8F8F2">bytes_per_number</span><br/><span style="color: #F8F8F2">print(per_token</span>&nbsp;<span style="color: #FF4689">/</span>&nbsp;<span style="color: #F8F8F2">(</span><span style="color: #AE81FF">1024</span>&nbsp;<span style="color: #FF4689">*</span>&nbsp;<span style="color: #AE81FF">1024</span><span style="color: #F8F8F2">))</span>&nbsp;&nbsp;<span style="color: #959077">#&nbsp;0.5&nbsp;MB</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这里把层数、头数、每个头的大小与每个数字的字节数相乘，最前面乘2是因为Key和Value都要存。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">0.5 MB一个token听起来不多，但把全局算一下：用户进行4000 token的对话，就是4000乘0.5 MB，等于2 GB；用户粘贴一份10万token的长文档，就是50 GB，而这只是一个用户的缓存。模型跑在GPU上，GPU显存通常是24 GB到80 GB，其中很大一部分还要留给模型本身；如果同一块GPU上有100个用户同时对话、每人一份缓存，所需内存远超任何GPU的容量。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">而且不止是内存问题：每生成一个新token，模型都要把整份缓存从内存里读一遍，缓存越大读取越久，生成就越慢。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">解决这个问题有两条路：一条是别再浪费已有内存（比如PagedAttention的做法），另一条是把缓存本身变小，也就是下面要讲的KV Cache压缩。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">什么是KV Cache压缩</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">KV Cache压缩是一组让缓存变小、同时尽量保持模型输出质量不变的技术。说白了，就是用更少的空间存下同样的对话记忆。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">做法有几种：有些可以直接用在已有模型上，有些必须在训练之前就设计进模型里。下面从最简单的开始，逐一说明。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">方法一：量化</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">量化的意思是：缓存里的每个数字用更少的比特来存。举个例子，一个人的身高可以写成175.4837 cm，也可以写成175 cm；后者占用更少，对多数用途也够用。量化做的就是这件事：正常情况下KV cache里每个数字用16 bit存储，量化后可以存成8 bit甚至4 bit。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">举个具体例子。假设Key向量里有这么几个数字：</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #F8F8F2">[</span><span style="color: #AE81FF">0.31</span><span style="color: #F8F8F2">,</span>&nbsp;<span style="color: #FF4689">-</span><span style="color: #AE81FF">0.72</span><span style="color: #F8F8F2">,</span>&nbsp;<span style="color: #AE81FF">0.05</span><span style="color: #F8F8F2">,</span>&nbsp;<span style="color: #AE81FF">0.98</span><span style="color: #F8F8F2">]</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">要压到更少的比特，先找出最大的值0.98，然后把每个数字缩放到 −127到127这个能用8 bit表示的小整数范围内。</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #F8F8F2">values</span>&nbsp;<span style="color: #FF4689">=</span>&nbsp;<span style="color: #F8F8F2">[</span><span style="color: #AE81FF">0.31</span><span style="color: #F8F8F2">,</span>&nbsp;<span style="color: #FF4689">-</span><span style="color: #AE81FF">0.72</span><span style="color: #F8F8F2">,</span>&nbsp;<span style="color: #AE81FF">0.05</span><span style="color: #F8F8F2">,</span>&nbsp;<span style="color: #AE81FF">0.98</span><span style="color: #F8F8F2">]</span><br/><span style="color: #F8F8F2">scale</span>&nbsp;<span style="color: #FF4689">=</span>&nbsp;<span style="color: #F8F8F2">max(abs(v)</span>&nbsp;<span style="color: #66D9EF">for</span>&nbsp;<span style="color: #F8F8F2">v</span>&nbsp;<span style="color: #FF4689">in</span>&nbsp;<span style="color: #F8F8F2">values)</span>&nbsp;<span style="color: #FF4689">/</span>&nbsp;<span style="color: #AE81FF">127</span><br/><br/><span style="color: #F8F8F2">quantized</span>&nbsp;<span style="color: #FF4689">=</span>&nbsp;<span style="color: #F8F8F2">[round(v</span>&nbsp;<span style="color: #FF4689">/</span>&nbsp;<span style="color: #F8F8F2">scale)</span>&nbsp;<span style="color: #66D9EF">for</span>&nbsp;<span style="color: #F8F8F2">v</span>&nbsp;<span style="color: #FF4689">in</span>&nbsp;<span style="color: #F8F8F2">values]</span><br/><span style="color: #F8F8F2">print(quantized)</span>&nbsp;&nbsp;<span style="color: #959077">#&nbsp;[40,&nbsp;-93,&nbsp;6,&nbsp;127]</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这里把每个数字除以缩放系数再四舍五入到最近的整数，于是每个数字都变成了能用8 bit而不是16 bit表示的小整数；只需要额外单独存下这个缩放系数，需要时就能近似还原原来的数值。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">从16 bit到8 bit，缓存变成原来的一半；从16 bit到4 bit，缓存变成原来的四分之一。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">优点：添加起来非常简单，不丢弃任何token，质量损失很小。缺点：低于4 bit之后舍入误差会变大，模型回答开始变差，所以能压到什么程度是有下限的。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">还有一点值得注意：Key和Value的表现并不一样。在Key中，少数位置总是携带特别大的数值，普通的四舍五入处理不好它们，因此像KIVI这类更好的方法会对Key和Value采用略有不同的量化方式，把误差压小。不必纠结细节，只要记住：为了效果最好，Key和Value要区别对待。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这个方法的问题是：即便用4 bit，缓存仍然会随每个token增长，超长对话下依然太大。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">方法二：Token驱逐</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Token驱逐的意思是：把不重要的token的Key和Value丢掉。Eviction就是「踢出去」，这里是把不重要的token从缓存里踢出去。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">打个比方：读一本500页的小说，我们不会记住每一句话，而是记住重要的角色、重要的事件，以及刚读过的最后几页，其余的都忘掉，但依然完全理解这个故事。同样的道理，并不是每个历史token对写下一个token都同等重要：模型计算Attention时，大部分注意力集中在少数token上，其余token几乎得不到注意力。既然如此，为什么还要把它们留在缓存里？</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>那怎么知道哪些token重要？答案就在Attention本身：模型每写一个新token，都会算出每个历史token获得了多少注意力。我们可以为每个token累计这个数值，累计最高的就是重要token，也就是所谓「heavy hitters」（高频命中者），这正是H2O（Heavy Hitter Oracle）技术做的事。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">规则因此很简单：固定一个预算，比如1000个token；永远保留最近的token，因为最近的上下文几乎总是重要的；在更早的token里只保留heavy hitters；其余的丢掉。这样无论对话多长，缓存都不会超过1000个token。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">但这里有个很有意思的发现：文本最开头的几个token总是获得大量注意力，无论它们本身是什么，哪怕第一个token只是一个没有意义的起始标记。为什么？因为Attention就像把100% 分配给所有历史token，总和必须永远是100%；当没有任何历史token真正有用时，模型也得把这份注意力放到某处，于是它学会了倾倒给第一个token：第一个token就像一个「水槽」，接收那些不需要的注意力，这就是Attention Sink。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如果把这个token丢掉，模型输出会变得毫无意义，这是StreamingLLM技术发现的。于是最终规则是：永远保留最前面几个token、永远保留最近的token，heavy hitters从中间选。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">优点：缓存大小固定，与对话长度无关，这是唯一真正解决「无上限增长」问题的方法。缺点：token一旦丢掉就永远没了；如果用户之后问到被驱逐token里的内容，模型就记不起来，这是真实的信息损失。它适合聊天、摘要一类任务，但不适合需要精确回忆的任务，比如「找出第40页提到的电话号码」。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">方法三：跨注意力头共享Key与Value</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">前面几种都是在模型训练完成之后压缩缓存，这个方法不同：它在训练之前就改变模型本身的设计。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">回想一下：每一层有很多注意力头，每个头都有自己的Key和Value；在例子中，32个头意味着每层有32套Key和Value。问题是，这32个头真的都需要各自独立的Key和Value吗？答案是不需要。研究发现很多头可以共享同一套Key和Value而效果依然很好，只有Query需要每个头各自保留。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">再用图书馆打比方：32个学生各自带着不同的问题（Query）走进图书馆，但图书馆不需要为每本书准备32份副本，所有学生看的是同一个书架、同样的书名与内容，区别只在各自的问题。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">具体有两种做法。多查询注意力（MQA）：所有头共享一套Key和Value，例子中32个头共用1套，缓存缩小32倍。分组查询注意力（GQA）：把头分组，每组共享一套Key和Value，例子中32个头分成8组就是8套而不是32套，缓存缩小4倍。MQA压得更狠但会损失一些质量，GQA是折中方案，拿到了大部分内存节省而几乎没有质量损失，这也是Llama 3、Mistral、Gemma等现代模型普遍采用GQA的原因。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">优点：不丢弃任何token、没有舍入误差；节省是内置在模型里的，运行时不需要额外工作。缺点：必须在训练模型之前决定，无法在不重训的前提下用于已有模型；而且缓存仍会随每个token增长，只是速度变慢。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">方法四：低秩压缩</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">低秩压缩的意思是：只存Key和Value的一个小型压缩版本，需要时再展开还原。低秩意味着同样的信息可以用更少的数字承载。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">打个比方：要给朋友发一张大照片，可以先把照片打包成压缩文件发过去，朋友想看时再解压；压缩文件占空间更小，照片本身几乎不变。这里模型不再为每个token存完整的Key和Value，而是存一个称为「潜向量」（latent vector）的小向量：latent就是「隐藏」的意思，它是Key与Value的一种隐藏压缩形式；需要Key和Value时，模型用训练中学到的一小组数字把潜向量展开回来。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">看具体数字：例子中每个头为Key存128个数字、为Value存128个数字，32个头就是每层每token 8192个数字。用低秩压缩后，模型每层每token只存一个比如512个数字的潜向量，小了16倍。这正是多头潜在注意力（MLA）做的事，它由DeepSeek在DeepSeek-V2中提出，DeepSeek-V3也在使用。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">你可能会问：先压缩再展开，难道不会损失质量？这正是这个方法的美妙之处：模型从一开始就带着这种压缩一起训练，于是它学会只把有用的信息放进潜向量，重要的东西并不会丢失。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">优点：内存节省巨大，不丢弃任何token，质量与完整Attention相当、某些情况下甚至更好。缺点：和GQA一样必须在训练前就设计进模型，无法用于已有模型；而且模型需要一点额外计算来展开潜向量。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">DeepSeek-V4把这一思路推得更远：把连续多个token合并成一条压缩后的缓存条目。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">四种方法对比</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">还有一点值得注意：这些方法并不是互相竞争，而是可以叠加使用。一个模型可以在设计上采用MLA，再对潜向量做量化，然后再叠加token驱逐。下表汇总了它们的差异。</p>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);"></th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">量化</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">Token驱逐</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">跨头共享</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">低秩压缩</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">省内存方式</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">每个数字用更少比特</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">少存一些token</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">每层更少的Key/Value</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">每个token更小的向量</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">需要重训</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">否</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">否</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">是</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">是</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">是否丢token</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">否</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">是</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">否</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">否</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">典型压缩比</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">2到4倍</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">固定缓存大小</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">4到8倍</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">10倍以上</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">质量损失</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">很小</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">取决于任务</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">很小</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">几乎没有</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">代表方法</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">KIVI</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">H2O、StreamingLLM</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">GQA、MQA</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">MLA（DeepSeek）</td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">什么时候用哪一种</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">按使用场景来选：如果在跑一个已有模型、想快速省内存，用量化，它最容易加。如果有超长对话、或者文本源源不断没有尽头，用带Attention Sink的Token驱逐。如果需要精确回忆长文档里的每一处内容，不要用Token驱逐，用量化，或者用内置GQA或MLA的模型。如果要训练一个新模型，从第一天起就在设计里加入GQA或MLA。如果想要最大程度的节省，就把它们组合起来：先选一个带MLA或GQA的模型，再对缓存做量化，最后在任务允许的情况下做驱逐。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<div style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</div>
+<div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+<strong>四种方法其实对应四种不同的「省法」：省比特、省token、省每层的Key/Value、省每个token的向量。</strong> 量化和驱逐可以后加，跨头共享与低秩压缩必须在训练前就设计进模型；前者简单但要留意低比特的舍入误差，后者收益更大但无法惠及已有模型。<br  /><br  />真正实用的一点是它们可以叠加：先用GQA或MLA把基础占用降下来，再量化缓存，最后在任务允许时做token驱逐。唯一要小心的是Token驱逐会永久丢信息：聊天和摘要没问题，需要「精确回忆起第40页的电话号码」这类任务就别用它。</div>
+</div>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<div style="text-align:center;">
+<span class="portal-title">【传送门】</span>
+<div style="text-align:left;display:inline-block;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4aEYa-5J2Ir82V_1_9anDA" target="_blank" data-linktype="2">AI芯片架构全景: 从NVIDIA到Groq的六条设计路线</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/YHmkt8EHFGm-HeflWCsB2w" target="_blank" data-linktype="2">英伟达Kernel Agent: 编译器与算子调优Agent的协同设计</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HPaDwcT_4Rw5ty7LwDG4Ng" target="_blank" data-linktype="2">Torch Profiler在Trace里分析性能瓶颈: 剖析SGLang LLM推理</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/42s6fk-xdo23L-vtLj6Q8Q" target="_blank" data-linktype="2">vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/i-NZ-4oCXs48XpDfdcBfPw" target="_blank" data-linktype="2">在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+</div>
+</div>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://outcomeschool.com/blog/kv-cache-compression</span></p>
+</section>

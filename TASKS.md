@@ -1312,3 +1312,230 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-09-09 20:22 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - cross-model-kv-cache-transfer
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-10 12:52 | ✅ 已推送 | 按论文精简提炼重写（非逐段直译）：9 张原图一张不少（含 5 张附录图）+ 6 张原表，正文 33 段；新建草稿 media_id: TIqnnVEu6Oy3-wtKttGa0UUyDdmqAlpjCorcaRAgn6CiZGo1cpnoc8LUrkiOmNZa |
+
+### #1 - gva-grouped-value-attention
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-10 13:06 | ✅ 已推送 | 补齐 5 张原文图（Fig.1 缓存策略 / Fig.2 GQA-MLA-GVA 损失 / Fig.3 共享 KV 损失 / Fig.4-5 尺度热力图，PyMuPDF clip 渲染）+ 修掉空章节、LaTeX 残留与断句、内部标记，封面换原文图1；覆盖草稿 media_id: TIqnnVEu6Oy3-wtKttGa0ci4836WGr4qvl59f6oOCfE6joq37Lud1YgOwZO-pi1O |
+
+### #1 - deepseek-v41-flash-tech-report
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-10 19:46 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - deepseek-v41-flash-whole
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-10 20:04 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - quantization-formats-explained
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-10 22:51 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - yoco-decoder-decoder
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-10 23:57 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - dflash2-training-draft-breaks
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-11 08:21 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - dont-drop-dropout-layer-sparsity
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-11 08:33 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - thunderkittens-vera-rubin-nvl72
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-11 12:27 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-11 12:36 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0W4X3svmXuLA06MIiRcA6lVJ2EXKpZQU_KsrDWvmNymq |
+| 2026-09-11 12:36 | ✅ 已推送 | 14 图核验通过（draft/get 回读 14 张，占位符 0），5 段代码空格未塌缩、3 张原表与 14 条图注齐全 |
+
+### #1 - lmsys-deepseek-v41
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-11 13:29 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-11 13:35 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0dQfPtJ9BffBdgCPz0AtdtXJhScLrCvk77bvHs_U7605 |
+| 2026-09-11 13:35 | ✅ 已推送 | 4 图核验通过（3 张 lmsys SVG 用 headless Chromium dsf=2 渲染、白边裁剪后降采样到 1900px），占位符 0；正文 35 段全覆盖，无代码/表格，6 h2 + 6 h3 |
+
+### #1 - gilesthomas-gpt2-to-moe
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-11 13:38 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-11 14:04 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0bxIdk1J3j51UxFQhfkyae1HjWx35sPni3hnh060NtEd |
+| 2026-09-11 14:04 | ✅ 已推送（分 6 篇） | 源文 89,325 英文字符 / 48 图 / 87 代码块，按 h3-h4 边界分 6 篇，图与代码 100% 保留；6 篇 draft.id 见 parts.md，正文图核验 5/10/12/13/5/13 全部通过 |
+
+### #1 - gilesthomas-gpt2-to-moe-whole
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-11 14:06 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-11 14:10 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0ey5x0HsmEzEmANfZNp-Lon8dhO4R4X5Cjr6shVsShUm |
+| 2026-09-11 14:10 | ✅ 已推送 | 单篇综合版：正文约 4.4k 中文字 + 15 图 + 13 代码块 + 2 张表；6 篇连载未改动，综合版为额外的可单篇读完版本 |
+
+### #1 - openai-agents-api
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-11 14:23 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-11 14:30 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0dfuPb4Y0DbaMaleS0Dhcwyvl5UMFSdHrc-Bmt5lrTvy |
+| 2026-09-11 14:30 | ✅ 已推送 | 全量直译模式：正文/8 段客户评价逐段翻译、3 段代码原样（含缩进）、2 张原文配图保留；2 图核验通过，占位符 0 |
+
+### #1 - making-gemv-fast
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-12 09:06 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - deepseek-v41-sglang-kernel-optimization
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-12 09:15 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - one-sandbox-per-rollout
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-12 09:19 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - managed-agent-architectures
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-12 09:31 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-12 09:33 | ✅ 已推送 | X Article《Managed Agent Architectures》全量直译，9 节 41 段，原文 0 正文图，draft_id=TIqnnVEu6Oy3-wtKttGa0Srv0BMHcgXt7x9Exs1vHqwUUVoY1g7oEyMcty3X6bE7 |
+
+### #1 - jalapeno-system-architecture-breakdown
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-12 22:13 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - recurrent-looped-transformer
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-13 09:29 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - kv-cache-compression-approaches
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-13 11:50 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - system-architecture-of-hbm
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-14 14:25 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - llm-watermarking-explained
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-14 14:39 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - trl-training-beyond-1m-tokens
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-14 14:45 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - world-models-multiverse
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-14 20:21 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - q2d-web-retrieval-benchmark
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-14 20:29 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - continuous-batching-explained
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-14 20:34 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - maxkernel-tpu-agentic
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-14 20:40 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - deepseek-v41-flash-architecture-visual
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-14 20:46 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - tritonblas-analytical-gemm
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-14 21:51 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - tensor-parallel-vs-replica-throughput
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-15 12:17 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-15 12:24 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0W3XI7svbSR0NgAiSqw3PmNxP8gwpUuYqLKNqgjSkgn8 |
+
+### #1 - speculative-decoding-vllm
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-15 15:09 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-15 15:17 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0R14dSjvg4gT1dd0IB4nauJjTTRAgY5p94nrZJBXqPNC |
+
+### #1 - chinmaykarkar-opd-blog
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-15 19:57 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - sas-attention-sparsification
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-15 20:13 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-15 20:20 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0T5oy3xN-ToMihtSHsndvWlCinh_Yr5jAkB0BeFfSVk0 |
+
+### #1 - mooncake-in-approaching-ai
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-15 20:24 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-15 20:30 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0RVOr5j9JUw7cCc7AyZgHfj5HOYmqN4s95Lk416pIwH_ |
+
+### #1 - speculative-decoding-neurips2026
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-15 20:58 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-15 21:19 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0Yc19w2NIfJb23RYHxTtEscmkZPXqY3VZ48w4G-fW8t2 |
+| 2026-09-15 21:38 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0c3jsTmWAUv0DNpA4rXFcCN3TGSYfJujRiDpzaRYVxV8 |

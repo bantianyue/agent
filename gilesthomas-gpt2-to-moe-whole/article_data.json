@@ -1,0 +1,390 @@
+{
+  "summary": [
+    {
+      "key": "核心结论",
+      "body": "把 GPT-2 的 FFN 换成多个专家，参数量上去了而单 token 算力降下来；难点是让路由器进入反向传播、让路由真正稀疏、让专家不偏食。"
+    },
+    {
+      "key": "关键机制",
+      "body": "路由器出 logits，取 top-k 后把非 top-k 打成负无穷再过 softmax 得到稀疏权重；用布尔掩码把上下文向量送进专家，按权重累加回原位。"
+    },
+    {
+      "key": "关键数据",
+      "body": "6 专家激活 2 个，446M 总参数，α = 0.005，8.9B token、八天后测试损失 3.254，辅助损失 24.0847 逼近理想值 24，IFT 评测第 3。"
+    }
+  ],
+  "lead": [
+    "这是一次从零开始的改造实验：作者在 Raschka《Build a Large Language Model (from Scratch)》的 GPT-2 代码上，自己加了一套混合专家（MoE）支持，包括让它真正能均衡负载的辅助损失，然后用一张 RTX 3090 从零训练。六篇连载的要点压缩在这一篇里。",
+    "最终模型是 6 个专家、每 token 激活 2 个，446M 总参数、每 token 激活 220M，训练 8.9B token、耗时八天，测试损失 3.254，IFT 指令跟随评测排第 3。下面按「为什么要改、路由器怎么设计、怎么把 token 送进专家、怎么让专家不偏食、结果如何」走一遍完整链路。"
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "一、为什么要动 FFN",
+      "paras": [
+        "MoE 里的「专家」不是分领域的子模型，而是把每个 Transformer 块里的前馈网络（FFN）换成多个彼此独立的 FFN。在 GPT-2 里，FFN 的参数量是注意力机制的两倍：注意力负责想清楚该思考什么，FFN 才是真正思考的地方。而这些 FFN 本身简单得意外，就是两层线性层中间夹一个 GELU，先把维度扩大四倍再投影回来。",
+        "每个上下文向量只激活其中一部分专家，所以参数量上去了、单 token 算力却降下来了。代价是所有专家都得留在内存里，因为路由是按上下文向量做的，一个 batch 里大概率会用到大部分甚至全部专家。",
+        "「混合专家」这个词容易让人想到一堆各自精通某个领域的子模型，但这里不是：专家的层级低得多，各自擅长的往往是训练中它们自己发现的、说不出名目的东西。这条路线可以追到 1991 年的《Adaptive Mixtures of Local Experts》，以及后来的《Outrageously Large Neural Networks》、《GShard》和《Switch Transformers》。",
+        "结构和收益都清楚了，难的是实现：路由器具体怎么挑专家、怎么挑得高效，以及最关键的，怎么把它训练得会挑。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "fig03.png",
+            "caption": "图3：一个 MoE 块的轮廓"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "二、路由器的第一版，与一个反向传播的死角",
+      "paras": [
+        "路由器其实就是一层线性层：输入维度 d_emb，输出维度等于专家总数 n：",
+        "__CODE__python::self.router = nn.Linear(cfg[\"emb_dim\"], self.num_experts, bias=False)",
+        "对每个上下文向量，它输出 n 个原始打分，也就是 logits。线性层作用在张量的最后一维上，也就是对每个上下文向量独立运算：",
+        "理解这些张量是后面的关键。把形状为 batch_size、sequence_length、d_emb 的三阶张量想象成一个长方体：正视图是 batch × 序列长度的网格，每个格子对应一个上下文向量；从格子往回扎进长方体的那条「芯」，就是这个上下文向量在各专家上的那串 logits。后面所有的掩码、切片、广播，都能在这张图上验证形状对不对。",
+        "拿到 logits 之后，取其中最大的 k 个，把上下文向量送去对应的专家，再把它们的输出合并。",
+        "但「挑 top-k 再相加」有个致命问题：路由器那一步计算不在从损失回溯的计算图上。反向传播从输出上下文向量出发，穿过合并步骤、穿过被选中的专家，回到输入上下文向量，然后就继续往前一层走了；选专家的那一步是一条死路，拿不到任何梯度。于是一个随机初始化的模型会一直随机分配专家。",
+        "解决办法第一次出现在 1991 年的《Adaptive Mixtures of Local Experts》：把路由器的输出当作权重，对全部专家的输出加权求和。这样权重就成了回传路径的一部分，路由器能被训练。",
+        "不过那篇论文的动机和现在完全不同：他们关心的不是省算力，而是让网络的不同部分各自专精于特定任务，所以对每个输入都会跑完所有专家。他们也意识到这么做会让「责任」变得模糊：如果某个专家真正懂一项任务，其余专家也都在出力，除非能把它们的权重训练到恰好为零，否则为了损失好看，它们就得学着互相抵消。他们的方案是在输出上加一个门控函数，把未选中专家的结果直接丢掉。",
+        "代价也很清楚：每个 token 都要跑完所有专家，稀疏省算力的好处就没了。真正让 MoE 变稀疏的，是 2017 年那篇论文。"
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": "fig06.png",
+            "caption": "图6：xs 的两个二维视角，正视图对应一个上下文向量，侧视图的每一行是一个上下文向量的整个特征维度"
+          }
+        ],
+        "6": [
+          {
+            "src": "fig04.png",
+            "caption": "图4：所有专家都激活的 MoE"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "三、让路由稀疏：负无穷 + softmax",
+      "paras": [
+        "真正想要的是一个部分为零的权重向量：除 top-k 之外全为零，这样运行时就能跳过这些专家，而结果与不跳过完全一致。",
+        "2017 年的《Outrageously Large Neural Networks》给了做法：既然某个值经过 softmax 后要为零，那它进来时就得是负无穷。于是先建一个全负无穷的同形状张量，再把 top-k 的原始 logits 散布回去，最后过 softmax。整个流程在代码里只有几行：",
+        "__CODE__python::top_k_values, top_k_indices = torch.topk(\n            routing_logits,\n            k=self.num_active_experts,\n            dim=-1\n        )",
+        "__CODE__python::top_k_routing_logits = torch.full_like(routing_logits, -torch.inf)",
+        "__CODE__python::top_k_routing_logits.scatter_(dim=-1, index=top_k_indices, src=top_k_values)",
+        "__CODE__python::expert_weights = torch.softmax(top_k_routing_logits, dim=-1)",
+        "这里的形状关系值得留意：routing_logits 是「batch × 序列长度 × 专家数」，topk 沿最后一维取出 k 个最大值与下标，得到两个「batch × 序列长度 × k」的张量；它们的前两维与 routing_logits 完全对齐，scatter_ 正是靠这个对齐把值填回正确位置。",
+        "得到的 expert_weights 就是稀疏路由权重：未选中的专家为零，被选中的专家是零到一之间的正数。",
+        "这里有个必须防的坑：如果 k = 1，非 top-k 全被掩成负无穷，softmax 的结果恒为 1，与原始 logits 无关；导数恒为零，路由器等于没学。Switch Transformers 换了顺序，先 softmax 再置零，来绕开这个问题；作者选择沿用「先负无穷再 softmax」，并在代码里加断言禁止 num_active_experts 小于 2。",
+        "他自己试过的另一条路，也就是「把所有小于 top-k 最小值的 logits 都替换成负无穷」，有一个隐蔽的 bug：一旦出现并列，比如某个上下文向量的 logits 是 0.4254、0.4254、0.5106、-0.1385，最小的 top-2 值也是 0.4254，按这个规则会得到三个激活专家而不是两个。这就是最终改用 full_like 加 scatter_ 的原因。"
+      ],
+      "fig_after": {
+        "7": [
+          {
+            "src": "fig13.png",
+            "caption": "图13：expert_weights 的两个二维视角"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "四、把上下文向量送进专家",
+      "paras": [
+        "实现上作者选了最直白的做法：逐个专家遍历，而不是试图把不同专家并行调度。先建一个与输入同形状的全零累加器：",
+        "__CODE__python::all_outputs = torch.zeros_like(xs)",
+        "然后对每个专家，用它的权重切片做比较，得到一个布尔掩码：",
+        "__CODE__python::this_expert_mask = expert_weights[:, :, expert_ix] > 0",
+        "这个掩码标出哪些上下文向量要跑这个专家：True 表示该专家对这个上下文向量是激活的。",
+        "接着用掩码从 xs 里把对应的上下文向量取出来。注意这一步之后，张量变成了一列形状为选中数量乘 d_emb 的数据，与原始 xs 的形状对应关系就丢了：",
+        "__CODE__python::this_expert_results, _ = expert(xs[this_expert_mask])",
+        "同一个掩码还能取出该专家的权重，取出来是一列数；要乘到结果上，必须先 unsqueeze 成列向量，因为 PyTorch 的广播是从右往左对齐维度的：",
+        "__CODE__python::this_expert_weights = expert_weights[this_expert_mask, expert_ix].unsqueeze(1)",
+        "最后一步最关键：布尔掩码不仅能取值，也能赋值，而 all_outputs 与 xs 同形，所以同一个掩码作用上去就能把结果加回原位：",
+        "__CODE__python::all_outputs[this_expert_mask] += this_expert_results * this_expert_weights",
+        "一行完成加权累加，形状对应关系自动恢复。所有专家跑完之后，all_outputs 里就是每个上下文向量在各激活专家上的加权求和结果。",
+        "顺带两个实现细节：router 不带偏置，作者说只是「感觉现在流行这样」；专家必须放进 nn.ModuleList，否则 PyTorch 不会把它们注册为包含参数的子模块，优化器用 model.parameters() 时就永远更新不到它们。"
+      ],
+      "fig_after": {
+        "4": [
+          {
+            "src": "fig16.png",
+            "caption": "图16：某个专家的 this_expert_mask 可能长成的样子"
+          }
+        ],
+        "6": [
+          {
+            "src": "fig17.png",
+            "caption": "图17：被「选中」的上下文向量"
+          }
+        ],
+        "8": [
+          {
+            "src": "fig19.png",
+            "caption": "图19：该专家在被选中上下文向量上的权重"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "五、第一次训练：专家偏食",
+      "paras": [
+        "作者先做了一次没有辅助损失的实验性训练：6 个专家、每 token 激活 2 个，batch 只能开到 3，用 32 步梯度累积维持全局 batch 96，3.2B token 跑了两天半多，共 217,540 秒、约 15k token/s。",
+        "最终运行损失降到 3.211 附近，测试损失 3.502。这个成绩比他训过的 163M 密集模型好，但按 Chinchilla 视角明显训练不足：3.2B token 对 163M 模型刚好，而这个是 446M 总参数、每 token 激活 220M。",
+        "更重要的是专家负载。作者把路由 logits 和权重记进检查点，画成逐层的「饥饿、合理、过载」图：低于均匀值三分之一画白、介于三分之一到两倍之间画绿、高于两倍画红。",
+        "第 0 层一开始还挺均衡，很快就偏向专家 5，剩下的概率散在别的专家上、略微偏向专家 3。",
+        "其余层也一样，某些专家被强烈偏爱，另一些被饿着。结论很清楚：必须显式干预。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig23.png",
+            "caption": "非负载均衡训练：损失随训练的下降曲线"
+          }
+        ],
+        "3": [
+          {
+            "src": "fig24.png",
+            "caption": "非负载均衡训练：第 0 层的路由负载分布"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "六、Switch 式辅助损失：让专家不偏食",
+      "paras": [
+        "辅助损失的定义来自 Switch Transformers：为每个专家定义 fᵢ，也就是被派发给专家 i 的 token 占比：",
+        "fᵢ = (1/T) Σₓ∈ℬ 1{i ∈ top-k(p(x))}",
+        "以及 Pᵢ，分配给专家 i 的平均路由概率：",
+        "Pᵢ = (1/T) Σₓ∈ℬ pᵢ(x)",
+        "把两者做点积、乘以专家数 N、再乘以缩放系数 α，加到正常的交叉熵损失上一起反向传播：",
+        "L_aux = α · N · Σᵢ fᵢ · Pᵢ",
+        "一个很有用的判据是：当专家完全均衡时，fᵢ 与 Pᵢ 都等于 1/N，点积结果是 1/N，乘上 N 得 1。单激活专家时理想值是 1；作者这边每 token 激活 k = 2 个，所以理想值是 2，12 层相加后是 24。α 的大小也要跟着调整：理想值越大，越需要把辅助损失压小，免得它淹没真实训练损失的信号。",
+        "实现是纯向量化的：把「batch × 序列长度 × 专家数」用 view 摊平成二维，用大于零得到激活掩码并沿列求和，得到每个专家被激活的次数，除以总数就是 fᵢ；softmax 之后的原始概率沿列求和再除以总数就是 Pᵢ：",
+        "__CODE__python::flattened_expert_weights = expert_weights.view((batch_size * seq_len, num_experts))\n        expert_active_counts = (flattened_expert_weights > 0).sum(dim=0)\n        expert_frequencies = expert_active_counts / (batch_size * seq_len)",
+        "__CODE__python::raw_routing_weights = torch.softmax(routing_logits, dim=-1)\n        flattened_raw_routing_weights = raw_routing_weights.view((batch_size * seq_len, num_experts))\n        expert_prob_allocation = flattened_raw_routing_weights.sum(dim=0) / (batch_size * seq_len)",
+        "__CODE__python::layer_routing_loss = num_experts * torch.dot(expert_frequencies, expert_prob_allocation)",
+        "之所以用「权重大于零」来数激活次数，是因为它就是加权求和时用的那份权重：大于零等价于「这个专家对这个上下文向量是激活的」，而且这套写法天然覆盖了每 token 激活 k 个的情况。",
+        "两个细节值得记住：fᵢ 那一侧本身不可微，argmax 这类操作没有梯度，Switch Transformers 论文直接把它当常数，靠 P 向量提供梯度；层间合并则是各层的辅助损失直接相加。",
+        "作者还指出自己的实现与 Hugging Face 版 Mixtral 有一处不同：Mixtral 把所有层的同名专家当成同一个来计算，于是「第 1 层专家 1 饥饿、第 2 层专家 1 过载」会互相抵消。他觉得这可疑，但没时间再去验证。",
+        "他也怀疑过「把非 top-k 全部掩掉」这件事本身，因为它隐约有点像最开始那条死路。不同的是权重仍在计算流里，反向传播至少能试着压低不该被用到的专家的权重；但受 softmax 约束，压低一个就会抬高其他。相比之下，Switch Transformers 的「先 softmax 再置零」让未选中专家的权重对反向传播完全不可见，提高选中专家的梯度会自动降低其他专家，作者认为这个方案更干净。"
+      ],
+      "fig_after": {
+        "10": [
+          {
+            "src": "fig22.png",
+            "caption": "图22：expert_active_counts 的二维视角，记录每个专家在本 batch 被激活的次数"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "七、α 到底取多少",
+      "paras": [
+        "Switch Transformers 用的是 α = 10⁻²，但他们的理想辅助损失是 1，而作者这边是 2，层数也不同。α 太小，负载均衡的优先级不够；太大，训练会为了均衡牺牲语言建模质量。作者不想照抄，于是做了四组一小时的扫描，每组比较训练损失（交叉熵，衡量语言建模质量）与辅助损失（衡量均衡程度）："
+      ],
+      "table": {
+        "head": [
+          "α",
+          "训练损失",
+          "辅助损失"
+        ],
+        "rows": [
+          [
+            "0",
+            "6.152867",
+            "53.38285"
+          ],
+          [
+            "0.001",
+            "6.166725",
+            "30.00601"
+          ],
+          [
+            "0.005",
+            "<strong style=\"color:#0F4C81;\">6.106290</strong>",
+            "25.21015"
+          ],
+          [
+            "0.01",
+            "6.160989",
+            "24.78106"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h3",
+      "title": "7.1 扫描结论",
+      "paras": [
+        "α = 0 时专家很快偏食，辅助损失高到 53.4；α = 0.001 时负载图里有零星红点，长时间训练下能否保持均衡不好说。",
+        "α = 0.005 的训练损失最低，为 6.106，辅助损失 25.21 只比理想值 24 高 1.2，负载图非常干净。",
+        "到 α = 0.01，也就是 Switch Transformers 用的值，辅助损失继续下降（24.78），但训练损失开始变差，说明训练已经在牺牲语言建模换均衡。最终作者选了 α = 0.005。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "八、最终训练与结果",
+      "paras": [
+        "最终训练的决定也值得一说：作者没有纠结「最优 token 数」，因为 Chinchilla 的参数量 20 倍是给密集模型的启发式，对 MoE 不适用。他索性按「如果它只是一个 446M 密集模型」的 Chinchilla 最优值来算，也就是 8.9B token，正好用手上的 10B 数据集单轮覆盖，不必重复数据。",
+        "这次训练跑了 90,823 个 global step，在专用训练机上花了八天，共 684,818 秒、约 13k token/s，每 1,500 步存一次检查点，约三小时一次、单份 5.3GiB。",
+        "跑完后最终训练损失 3.211；在 19,200 条、每条 1,024 token 的留出测试集上，损失为 3.254。",
+        "辅助损失的表现更直观：后 75% 的训练里逐层负载图全程是绿色，最后一个检查点上所有迭代的平均值是 24.0847，几乎正中理想值 24。",
+        "书里那个冒烟测试也正常：让模型用 20 个 token、温度 1 补全「Every effort moves you」，得到的是「Every effort moves you closer towards your goals and the results. But the good news is that you are more likely to get」。",
+        "把它与作者训练过的其他模型、以及 OpenAI 的 GPT-2 权重对比，结果如下："
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": "fig36.png",
+            "caption": "有负载均衡的最终训练：损失与辅助损失随训练的变化"
+          }
+        ],
+        "3": [
+          {
+            "src": [
+              "fig37.png",
+              "fig38.png",
+              "fig39.png",
+              "fig40.png"
+            ],
+            "caption": "最终训练：第 0 到 3 层的路由负载分布（其余层同样全程绿色）"
+          }
+        ]
+      },
+      "table": {
+        "head": [
+          "模型",
+          "参数量",
+          "测试损失"
+        ],
+        "rows": [
+          [
+            "OpenAI 权重：medium",
+            "345M",
+            "3.231442"
+          ],
+          [
+            "<strong style=\"color:#0F4C81;\">PyTorch MoE，6 专家，每 token 激活 2 个</strong>",
+            "<strong style=\"color:#0F4C81;\">446M/220M</strong>",
+            "<strong style=\"color:#0F4C81;\">3.253928</strong>"
+          ],
+          [
+            "JAX，过训练一个长 epoch",
+            "163M",
+            "3.324953"
+          ],
+          [
+            "JAX，过训练两个常规 epoch",
+            "163M",
+            "3.326482"
+          ],
+          [
+            "JAX，带 MHA bias，无 dropout",
+            "163M",
+            "3.418784"
+          ],
+          [
+            "JAX，无 MHA bias，无 dropout",
+            "163M",
+            "3.420089"
+          ],
+          [
+            "JAX，无 MHA bias，带 dropout",
+            "163M",
+            "3.476802"
+          ],
+          [
+            "OpenAI 权重：small",
+            "124M",
+            "3.499677"
+          ],
+          [
+            "1xrtx3090-stacked-interventions",
+            "163M",
+            "3.538161"
+          ],
+          [
+            "8xa100m40-stacked-interventions-1",
+            "163M",
+            "3.577761"
+          ],
+          [
+            "Cloud FineWeb, 8x A100 40 GiB",
+            "163M",
+            "3.673623"
+          ],
+          [
+            "1xrtx3090-baseline",
+            "163M",
+            "3.683835"
+          ],
+          [
+            "8xa100m40-baseline",
+            "163M",
+            "3.691526"
+          ],
+          [
+            "Cloud FineWeb, 8x H100 80 GiB",
+            "163M",
+            "3.724507"
+          ],
+          [
+            "Cloud FineWeb, 8x A100 80 GiB",
+            "163M",
+            "3.729900"
+          ],
+          [
+            "Cloud FineWeb, 8x B200 160 GiB",
+            "163M",
+            "3.771478"
+          ],
+          [
+            "Local FineWeb train",
+            "163M",
+            "3.943522"
+          ],
+          [
+            "Local FineWeb-Edu extended train",
+            "163M",
+            "4.134991"
+          ],
+          [
+            "Local FineWeb-Edu train",
+            "163M",
+            "4.166892"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "h3",
+      "title": "8.1 结果怎么读",
+      "paras": [
+        "这个成绩优于作者全部 163M 参数模型和 GPT-2 small（3.4997），略逊于参数量更少、但每 token 激活更多的 GPT-2 medium（3.2314）。",
+        "在 IFT 指令跟随评测里它排第 3，得分 22.71。这个评测的流程是：先在指令数据集上微调，直到留出集损失开始上升，再让模型回答一批没见过的提问，最后把多个模型的回答交给 GPT 5.5 横向比较。",
+        "它赢过作者其他所有模型，但仍落后于 GPT-2 medium（42.54）和 GPT-2 small（24.95）。作者注意到损失与 IFT 表现之间的相关性相当松，还在追查为什么 OpenAI 的权重始终更强。",
+        "对一个 6 专家、每层都重新路由的玩具级 MoE 来说，损失落在预期区间、评测名次说得通，已经是一次成功的复现。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "九、接下来可以做什么",
+      "paras": [
+        "MoE 理论上能以更低的推理算力提供与密集模型相近的性能，这让它值得继续研究。作者列了三个同算力对比实验：训练一个 163M 的小模型看表现；用相同算力训练一个 446M 密集模型，但它会训练不足，因为每个 token 需要的计算更多、能喂的 token 更少；以及训练一个 Chinchilla 最优的密集模型。",
+        "他也想知道还有别的什么选项，欢迎读者提出想法。这场实验最有价值的部分也许不是分数，而是整条链路每一步都摊开写了：路由器怎么进入反向传播、稀疏怎么做、掩码怎么配合广播、辅助损失怎么向量化、α 怎么扫。"
+      ]
+    }
+  ],
+  "conclusion": [
+    "**把一个 GPT-2 改造成 MoE，难点从来不在「多个专家」这个想法，而在三处必须接对的连线。** 路由器的输出要进入反向传播，否则它永远学不会挑专家；稀疏掩码要让未选中专家的权重恰好为零，否则省不下算力；辅助损失要真的起作用，否则模型会偏食到只用少数专家。",
+    "具体到这个实验：6 专家、每 token 激活 2 个，446M 总参数，α = 0.005，8.9B token、八天训练之后测试损失 3.254，辅助损失稳定在 24.0847、逼近理想值 24，IFT 评测排第 3。数字算不上惊艳，但整条链路每一步都是可复现的工程取舍，这比分数更值得带走。"
+  ],
+  "reference_url": "https://www.gilesthomas.com/2026/09/gpt-2-to-moe",
+  "title": "把 GPT-2 改造成 MoE：从路由器设计到 8.9B token 训练的完整路径"
+}
