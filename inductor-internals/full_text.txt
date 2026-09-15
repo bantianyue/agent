@@ -1,0 +1,73 @@
+In the last 3 blog posts, we have understood fx graphs, how TorchDynamo captures an FX graph and how AOTAutograd splits it into forward/backward graphs. The final piece of the compile stack is TorchInductor which is the compiler that takes those FX graphs and turns them into efficient Triton kernels.
+
+Inductor works in three phases. First, it lowers the FX graph into its own IR (a recipe for computing each element). Then it schedules and fuses those IR nodes. Finally, it walks through the IR and generates Triton code.
+
+Let's understand the IR
+
+The first thing inductor does is to lower the FX graph produced by TorchDynamo into its own IR. So it's very important to try and understand what it looks like.
+
+For the above function, let's see how each line gets lowered into an IR.
+
+1. Placeholders/Inputs
+
+The input x is converted into an IR that looks like this -
+
+InputBuffer stores metadata about the input tensor like device, dtype, shape etc but no computation happens here. Think of it as a reference to data that already exists in memory.
+
+2. Pointwise Operations
+
+torch.floor(x) becomes:
+
+For pointwise operations, inductor stores a recipe for computing one output element but it never actually computes it. The function that holds this recipe is called the inner_fn.
+
+You can read the function and see the logic to load the element across the stride and compute floor.
+
+3. Pointwise Fusion
+
+Cool, that was for pointwise operations. What about pointwise fusion? For example floor(x) + ceil(x)
+
+Ah, instead of having individual inner_fn, both of them got rolled into a single function.
+
+4. Reduction Operations
+
+Reduction operations are expressed in a different way since unlike pointwise operators, they depends on many other elements.
+
+Conceptually this is:
+
+Remember we are trying to express this line c = b.sum(dim=-1), so we have the floor, ceil, and add computations appear again inside the reduction. This is not recomputation rather those recipes are simply copied into this reduction recipe.
+
+Also notice, the reduction result is wrapped in a ComputedBuffer(name="buf0"). This means the result is now a logical tensor that future operations can read. It does not mean memory has been allocated and whether it lives in registers, shared memory, or global memory is decided later by the scheduler.
+
+The last pointwise operation
+
+The last line in the function c + 1 becomes -
+
+Unlike the earlier pointwise nodes, this one loads from buf0 (the reduction result) instead of the input tensor.
+
+The output node wraps the final computation inside another ComputedBuffer(name="buf1") and it is the final tensor returned by the compiled function.
+
+How Lowering Happens
+
+Great! We have now seen some of the common IRs for some important operations. Let's now look at how lowering actually happens.
+
+We've seen that inner_fn is a Python function full of ops.load, ops.floor, etc. But these aren't really pytorch ops, rather they're abstract ops that gets replaced depending on what handler is installed during codegen.
+
+ops.* like ops.floor, ops.load, ops.add are defined on a class called OpOverrides. Take a look at this -
+
+So basically what happens is when the inner_fn is executed during codegen, they return these hardcoded code strings but they don't compute anything.
+
+Here's an example.
+
+Cool, but where did these intermediate tmp0, tmp1 etc come from?
+
+Common Subexpression Elimination
+
+If you remember in the IR, inner_fn loads the same input twice (once for floor, once for ceil). But in the generated Triton code, it loads this only once.
+
+This happens because Inductor's CSE class deduplicates identical expressions:
+
+The two loads have the same address expression, so the second one returns the same tmp0 variable.
+
+Wrapping Up
+
+This wraps up the torch.compile internals series. We covered the entire stack starting from FX graphs, Dynamo, AOTAutograd, and finally Inductor. Hopefully, you now have a better intuition to how things work and the codebase is a lot less intimidating to read.

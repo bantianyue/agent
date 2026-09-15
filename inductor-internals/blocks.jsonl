@@ -1,0 +1,48 @@
+{"type": "text", "content": "In the last 3 blog posts, we have understood fx graphs, how TorchDynamo captures an FX graph and how AOTAutograd splits it into forward/backward graphs. The final piece of the compile stack is TorchInductor which is the compiler that takes those FX graphs and turns them into efficient Triton kernels."}
+{"type": "text", "content": "Inductor works in three phases. First, it lowers the FX graph into its own IR (a recipe for computing each element). Then it schedules and fuses those IR nodes. Finally, it walks through the IR and generates Triton code."}
+{"type": "text", "content": "Let's understand the IR"}
+{"type": "text", "content": "The first thing inductor does is to lower the FX graph produced by TorchDynamo into its own IR. So it's very important to try and understand what it looks like."}
+{"type": "code", "content": "@torch.compile\ndef f(x):\n    b = torch.floor(x) + torch.ceil(x)\n    c = b.sum(dim=-1)\n    d = c + 1\n    return d"}
+{"type": "text", "content": "For the above function, let's see how each line gets lowered into an IR."}
+{"type": "text", "content": "1. Placeholders/Inputs"}
+{"type": "text", "content": "The input x is converted into an IR that looks like this -"}
+{"type": "code", "content": "TensorBox(\n    StorageBox(\n        InputBuffer(\n            name=\"arg0\",\n            layout=FixedLayout(\n                device=\"cuda:0\",\n                dtype=torch.float32,\n                size=[32, 512, 1024],\n                stride=[524288, 1024, 1]\n            )\n        )\n    )\n)"}
+{"type": "text", "content": "InputBuffer stores metadata about the input tensor like device, dtype, shape etc but no computation happens here. Think of it as a reference to data that already exists in memory."}
+{"type": "text", "content": "2. Pointwise Operations"}
+{"type": "text", "content": "torch.floor(x) becomes:"}
+{"type": "code", "content": "TensorBox(\n    StorageBox(\n        Pointwise(\n            device='cuda:0',\n            dtype=torch.float32,\n\n            def inner_fn(index):\n                i0, i1, i2 = index\n                tmp0 = ops.load(arg0_1, i2 + 1024*i1 + 524288*i0)\n                tmp1 = ops.floor(tmp0)\n                return tmp1\n\n            ranges=[32, 512, 1024]\n        )\n    )\n)"}
+{"type": "text", "content": "For pointwise operations, inductor stores a recipe for computing one output element but it never actually computes it. The function that holds this recipe is called the inner_fn."}
+{"type": "text", "content": "You can read the function and see the logic to load the element across the stride and compute floor."}
+{"type": "text", "content": "3. Pointwise Fusion"}
+{"type": "text", "content": "Cool, that was for pointwise operations. What about pointwise fusion? For example floor(x) + ceil(x)"}
+{"type": "code", "content": "TensorBox(\n    StorageBox(\n        Pointwise(\n            def inner_fn(index):\n                i0, i1, i2 = index\n\n                tmp0 = ops.load(arg0_1, i2 + 1024*i1 + 524288*i0)\n                tmp1 = ops.floor(tmp0)\n\n                tmp2 = ops.load(arg0_1, i2 + 1024*i1 + 524288*i0)\n                tmp3 = ops.ceil(tmp2)\n\n                tmp4 = tmp1 + tmp3\n                return tmp4\n        )\n    )\n)"}
+{"type": "text", "content": "Ah, instead of having individual inner_fn, both of them got rolled into a single function."}
+{"type": "text", "content": "4. Reduction Operations"}
+{"type": "text", "content": "Reduction operations are expressed in a different way since unlike pointwise operators, they depends on many other elements."}
+{"type": "code", "content": "TensorBox(\n    StorageBox(\n        ComputedBuffer(\n            name=\"buf0\",\n            data=Reduction(\n                ranges=[32, 512],\n                reduction_ranges=[1024],\n\n                def inner_fn(index, rindex):\n                    i0, i1 = index\n                    r0 = rindex\n\n                    tmp0 = ops.load(arg0_1, r0 + 1024*i1 + 524288*i0)\n                    tmp1 = ops.floor(tmp0)\n\n                    tmp2 = ops.load(arg0_1, r0 + 1024*i1 + 524288*i0)\n                    tmp3 = ops.ceil(tmp2)\n\n                    tmp4 = tmp1 + tmp3\n                    return tmp4\n            )\n        )\n    )\n)"}
+{"type": "text", "content": "Conceptually this is:"}
+{"type": "code", "content": "for i0 in range(32):\n    for i1 in range(512):\n        total = 0\n        for r0 in range(1024):\n            total += floor(x[i0,i1,r0]) + ceil(x[i0,i1,r0])\n        output[i0,i1] = total"}
+{"type": "text", "content": "Remember we are trying to express this line c = b.sum(dim=-1), so we have the floor, ceil, and add computations appear again inside the reduction. This is not recomputation rather those recipes are simply copied into this reduction recipe."}
+{"type": "text", "content": "Also notice, the reduction result is wrapped in a ComputedBuffer(name=\"buf0\"). This means the result is now a logical tensor that future operations can read. It does not mean memory has been allocated and whether it lives in registers, shared memory, or global memory is decided later by the scheduler."}
+{"type": "text", "content": "The last pointwise operation"}
+{"type": "text", "content": "The last line in the function c + 1 becomes -"}
+{"type": "code", "content": "TensorBox(\n    StorageBox(\n        Pointwise(\n            def inner_fn(index):\n                i0, i1 = index\n                tmp0 = ops.load(buf0, i1 + 512*i0)\n                tmp1 = ops.constant(1, torch.float32)\n                tmp2 = tmp0 + tmp1\n                return tmp2\n        )\n    )\n)"}
+{"type": "text", "content": "Unlike the earlier pointwise nodes, this one loads from buf0 (the reduction result) instead of the input tensor."}
+{"type": "text", "content": "The output node wraps the final computation inside another ComputedBuffer(name=\"buf1\") and it is the final tensor returned by the compiled function."}
+{"type": "text", "content": "How Lowering Happens"}
+{"type": "text", "content": "Great! We have now seen some of the common IRs for some important operations. Let's now look at how lowering actually happens."}
+{"type": "text", "content": "We've seen that inner_fn is a Python function full of ops.load, ops.floor, etc. But these aren't really pytorch ops, rather they're abstract ops that gets replaced depending on what handler is installed during codegen."}
+{"type": "text", "content": "ops.* like ops.floor, ops.load, ops.add are defined on a class called OpOverrides. Take a look at this -"}
+{"type": "code", "content": "class TritonOverrides(OpOverrides):\n    @staticmethod\n    def floor(x):\n        return f\"tl.math.floor({x})\"\n\n    @staticmethod\n    def ceil(x):\n        return f\"tl.math.ceil({x})\"\n\n    @staticmethod\n    def add(x, y):\n        return f\"({x} + {y})\"\n\n    @staticmethod\n    def load(name, index):\n        return f\"tl.load({name} + ({index}), None)\""}
+{"type": "text", "content": "So basically what happens is when the inner_fn is executed during codegen, they return these hardcoded code strings but they don't compute anything."}
+{"type": "text", "content": "Here's an example."}
+{"type": "code", "content": "\ndef inner_fn(index):\n    tmp0 = ops.load(\"in_ptr0\", \"x0\")       # \"tl.load(in_ptr0 + (x0), None)\"\n    tmp1 = ops.floor(tmp0)                 # \"tl.math.floor(tl.load(...))\"\n    tmp2 = ops.ceil(tmp0)                  # \"tl.math.ceil(tl.load(...))\"\n    tmp3 = ops.add(tmp1, tmp2)             # \"(tl.math.floor(...) + tl.math.ceil(...))\"\n    return tmp3"}
+{"type": "text", "content": "Cool, but where did these intermediate tmp0, tmp1 etc come from?"}
+{"type": "text", "content": "Common Subexpression Elimination"}
+{"type": "text", "content": "If you remember in the IR, inner_fn loads the same input twice (once for floor, once for ceil). But in the generated Triton code, it loads this only once."}
+{"type": "code", "content": "tmp0 = tl.load(in_ptr0 + (x0), None)\ntmp1 = tl.math.floor(tmp0)\ntmp2 = tl.math.ceil(tmp0)          # reuses tmp0, no second load"}
+{"type": "text", "content": "This happens because Inductor's CSE class deduplicates identical expressions:"}
+{"type": "code", "content": "class CSE:\n    def generate(self, buffer, expr):\n        var = self.cache.get(expr)\n        if not var:\n            var = self.newvar()\n            self.cache[expr] = var\n            buffer.writeline(f\"{var} = {expr}\")\n        return var"}
+{"type": "text", "content": "The two loads have the same address expression, so the second one returns the same tmp0 variable."}
+{"type": "text", "content": "Wrapping Up"}
+{"type": "text", "content": "This wraps up the torch.compile internals series. We covered the entire stack starting from FX graphs, Dynamo, AOTAutograd, and finally Inductor. Hopefully, you now have a better intuition to how things work and the codebase is a lot less intimidating to read."}
