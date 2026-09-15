@@ -8,41 +8,13 @@ aot_function
 
 Let's start with the simplest possible example using aot_function from functorch.compile. We define a function that multiplies two tensors, then wrap it with a compiler that just prints the graph:
 
-import torch
-from functorch.compile import aot_function, make_boxed_func
-
-def fn(a, b):
-    return a * b
-
-def compiler_fn(fx_module, _):
-    print(fx_module.code)
-    return make_boxed_func(fx_module.forward)
-
-a, b = [torch.randn(2, 4, requires_grad=True, device="cuda")
-        for _ in range(2)]
-
-aot_fn = aot_function(fn, fw_compiler=compiler_fn,
-                      bw_compiler=compiler_fn)
-res = aot_fn(a, b)
-loss = res.sum()
-loss.backward()
-
 This prints two graphs - the forward and the backward. Let's read them carefully
-
-def forward(self, primals_1, primals_2):
-    mul = torch.ops.aten.mul.Tensor(primals_1, primals_2)
-    return (mul, primals_1, primals_2)
 
 What is a primal? primals are the original inputs to the function or in autograd terminology, primals are the tensors you apply an operation to. Here primals_1 = a and primals_2 = b.
 
 The forward returns (mul, primals_1, primals_2) Why are we returning three values?. The first is the actual output (a * b). The other two tensors are saved for backward.
 
 Let's look at the backward graph now.
-
-def forward(self, primals_1, primals_2, tangents_1):
-    mul_1 = torch.ops.aten.mul.Tensor(tangents_1, primals_1)
-    mul_2 = torch.ops.aten.mul.Tensor(tangents_1, primals_2)
-    return (mul_2, mul_1)
 
 The first two parameters primals_1, primals_2 are the saved tensors from the forward pass. tangents are simply the incoming gradients you calculate during the backward pass.
 
@@ -76,34 +48,9 @@ torch.fx has something called make_fx, which unlike regular symbolic_trace, is i
 
 Take a look at the example below.
 
-import torch
-from torch.fx.experimental.proxy_tensor import make_fx
-
-
-def f(x, y):
-    return x + y
-
-x = torch.randn(8)
-y = torch.randn(8)
-
-g = make_fx(f)(x, y)
-print(g.code)
-
 make_fx traces via the dispatcher and captures the low-level ATen operator torch.ops.aten.add.Tensor.
 
-def forward(self, x_1, y_1):
-    add = torch.ops.aten.add.Tensor(x_1, y_1)
-    return add
-
 Symbolic tracing on the other hand is a lot more high level.
-
-from torch.fx import symbolic_trace
-h = symbolic_trace(f)
-print(h.code)
-
-def forward(self, x, y):
-    add = x + y
-    return add
 
 Okay perfect, now that we have seen why torch dispatcher is important, we can move onto joint graphs and how to create them.
 
@@ -112,13 +59,6 @@ The Joint Graph
 The idea of having a single FX graph covering both forward and backward gives us the potential to optimize across the entire boundary instead of looking at forward and backward separately.
 
 Here's the idea in pseudocode.
-
-def joint_forward_backward(*inputs):
-    outputs = forward_fn(*inputs)
-    grads = torch.autograd.grad(
-        outputs, inputs, grad_outputs=...
-    )
-    return outputs, grads
 
 During tracing, every operator is intercepted by __torch_dispatch__ and for each operator, AOTAutograd -
 
@@ -136,32 +76,11 @@ Partitioning the Joint Graph
 
 Once we have the joint graph, we need to split it back into separate forward and backward graphs. AOTAutograd's partition_fn does this, and has two built-in strategies. Let's compare them with a concrete example:
 
-def fn(a, b, c, d):
-    x = a + b + c + d
-    return x.cos().cos()
-
 default_partition
 
 This is the default behavior we saw in the first example where we finds all operator outputs from input to forward output. The tensors that are needed for the backward are also included as forward outputs and all the intermediate results are preserved.
 
-def forward(self, primals_1, primals_2, primals_3, primals_4):
-    add   = torch.ops.aten.add.Tensor(primals_1, primals_2)
-    add_1 = torch.ops.aten.add.Tensor(add, primals_3)
-    add_2 = torch.ops.aten.add.Tensor(add_1, primals_4)
-    cos   = torch.ops.aten.cos.default(add_2)
-    cos_1 = torch.ops.aten.cos.default(cos)
-    return (cos_1, add_2, cos)    # saves add_2 and cos for backward
-
 The backward receives these saved tensors as inputs
-
-def forward(self, add_2, cos, tangents_1):
-    sin   = torch.ops.aten.sin.default(cos)
-    neg   = torch.ops.aten.neg.default(sin)
-    mul   = torch.ops.aten.mul.Tensor(tangents_1, neg)
-    sin_1 = torch.ops.aten.sin.default(add_2)
-    neg_1 = torch.ops.aten.neg.default(sin_1)
-    mul_1 = torch.ops.aten.mul.Tensor(mul, neg_1)
-    return (mul_1, mul_1, mul_1, mul_1)
 
 Background: Memory bound operations
 
@@ -187,33 +106,9 @@ Cool, now that we have laid out that we don't need to save all the intermediate 
 
 Let's look at the same code with the min-cut partitioner:
 
-from functorch.compile import min_cut_rematerialization_partition
-
-aot_fn = aot_function(fn, fw_compiler=compiler_fn,
-                      bw_compiler=compiler_fn,
-                      partition_fn=min_cut_rematerialization_partition)
-
 Look at the forward graph and note that cos is no longer saved:
 
-def forward(self, primals_1, primals_2, primals_3, primals_4):
-    add   = torch.ops.aten.add.Tensor(primals_1, primals_2)
-    add_1 = torch.ops.aten.add.Tensor(add, primals_3)
-    add_2 = torch.ops.aten.add.Tensor(add_1, primals_4)
-    cos   = torch.ops.aten.cos.default(add_2)
-    cos_1 = torch.ops.aten.cos.default(cos)
-    return (cos_1, add_2)    # only saves add_2, NOT cos
-
 Now in the backward graph cos is recomputed from add_2 instead of being saved.
-
-def forward(self, add_2, tangents_1):
-    cos   = torch.ops.aten.cos.default(add_2)  # recomputed!
-    sin   = torch.ops.aten.sin.default(cos)
-    neg   = torch.ops.aten.neg.default(sin)
-    mul   = torch.ops.aten.mul.Tensor(tangents_1, neg)
-    sin_1 = torch.ops.aten.sin.default(add_2)
-    neg_1 = torch.ops.aten.neg.default(sin_1)
-    mul_1 = torch.ops.aten.mul.Tensor(mul, neg_1)
-    return (mul_1, mul_1, mul_1, mul_1)
 
 Wrapping Up
 
