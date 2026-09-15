@@ -1552,3 +1552,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-09-15 22:09 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-15 22:14 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0fQ47bEGhGzQN4qnt6LJaJddseKqErOGNcKMHML9D6i2 |
