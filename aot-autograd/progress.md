@@ -1,25 +1,21 @@
 # 进度追踪 - aot-autograd
 
+✅ 完成 (aot-autograd) — 2026-09-15 按今日标准刷新重推
+
+- 全步骤 completed（step0 提取 → step1 封面 → step2 写文章 → step3 baseline → step4 预检 → step5 推送），状态快照见同目录 progress.json
+- source: https://jino-rohit.github.io/blogs/14_aot_autograd.html
+- 结构：8 个 h2 + 3 个 h3；正文 62 段（含 14 个代码块，逐字原样）；正文图 3 张（fig00/fig01/fig02）
+- preflight-check.py: ALL CHECKS PASSED（exit 0）
+- 推送：覆盖草稿成功（旧 draft.id 不变），draft/get 回读 body 图 3 张、WECHATIMGPH 占位符 0
+
 | Step | 状态 |
 |------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | completed |
-| Step 6: 推送草稿 | pending |
+| Step 0: 提取原文+下载图片 | completed |
+| Step 1: 生成封面 | completed |
+| Step 2: 写文章（含翻译+结语+参考区+传送门） | completed |
+| Step 3: Humanizer 润色 | completed |
+| Step 4: 预发布检查 | completed |
+| Step 5: 推送草稿 | completed |
 
-创建时间: 2026-07-11
+创建时间: 2026-07-11（2026-09-15 刷新重推）
 来源: https://jino-rohit.github.io/blogs/14_aot_autograd.html
-| Step 4d-i: 传送门 | completed |
