@@ -1,0 +1,143 @@
+Model Parallelism: Running One Model Across GPUs
+
+Some AI applications need models that are too large to run on one GPU. Model parallelism lets several GPUs run one model together. This article explains how it works, when to use it, and how to test its effect on response time and cost, with examples from vLLM and PyTorch.
+
+It builds on A Beginner’s Guide to Inference Engineering, which introduces the field, why it matters, and how software engineers can get started.
+
+The service we need to deliver
+
+Consider a document assistant. A customer uploads a policy document and asks a question. The assistant returns an answer with references to the document.
+
+The team operates its own model. The vLLM document question-answering example splits web documents, retrieves relevant text, and generates answers. File upload and source citations require additional application code.
+
+The team evaluates candidate models on representative documents and questions. It selects a model that meets the answer-quality requirement. It must serve the expected document lengths and request volume within agreed response-time and cost limits.
+
+ The vLLM document question-answering example shows document splitting, retrieval, and answer generation. It loads web documents and does not implement this illustration’s upload interface or citation requirement.
+
+What runs behind the API
+
+A model uses learned numerical values called weights. A language model processes input through a sequence of layers: groups of operations that transform numerical representations. The output of one layer becomes input to later operations. See LlamaDecoderLayer.forward() for the sequence of operations within a layer. Intermediate values are often called activations.
+
+The runtime is the software that loads the model and executes those operations. In this example, it uses a graphics processing unit, or GPU. GPUs can perform many numerical operations in parallel and have their own device memory.
+
+Text is converted into tokens, such as words, word parts, or punctuation. The model first processes the input. It then continues generating output in steps. Cached attention data, called the key-value cache or KV cache, lets later steps reuse state from earlier tokens.
+
+The GPU needs memory for both model weights and active requests.
+
+Where tensors fit in the model
+
+In machine-learning software, a tensor is a numerical array with a defined shape. Scalars, vectors, and matrices are special cases:
+
+Scalar: one number, such as 3. It has no axes.
+
+Vector: a list such as [2, 4, 6]. It has one axis and shape [3].
+
+Matrix: a grid such as [[1, 2, 3], [4, 5, 6]]. It has two axes and shape [2, 3]: two rows and three columns.
+
+Tensors can have more axes. Shape records the size of each axis. For the document assistant, one possible representation has shape [2, 100, 768]: two input sequences, 100 token positions per sequence, and 768 numerical features per position. These illustrative values describe an arrangement, not a particular model. The PyTorch tensor tutorial code shows construction, shape, data type, and device inspection. Here, a feature is one component of the token’s numerical representation.
+
+A model contains layers. Each layer performs operations on tensors. Weight tensors hold learned parameters. Activation tensors hold intermediate results for the current input. The KV cache also stores tensors. A tensor describes how values are organized; “weight,” “activation,” and “cache” describe their roles.
+
+A tensor also has a data type, such as a 16-bit floating-point format, and is stored on a device such as a CPU or GPU. Shape determines the number of values. Data type determines their storage size. Device placement determines where the operations run. See the PyTorch tensor guide.
+
+Tensor parallelism divides selected tensors and their operations across GPUs within model layers. For example, a weight matrix can be split along an axis so each GPU stores and computes one part. The split must preserve the layer’s calculation.
+
+Why one GPU may be insufficient
+
+Long documents and multiple active questions can increase request-state memory. The deployment also needs temporary workspace and room for runtime overhead. A model that loads successfully can still run out of memory when customer requests arrive. In vLLM, Worker.determine_available_memory() profiles memory use and calculates the remaining KV-cache budget. Allocations depend on input length and concurrency: the number of requests active at once.
+
+ In vLLM, Worker.determine_available_memory() profiles memory use and calculates the remaining KV-cache budget. Actual allocations depend on the model, runtime, input lengths, and concurrency: the number of requests active at once.
+
+If the selected model cannot run within one GPU’s capacity, the engineer can evaluate a smaller model, reduced precision, a device with more memory, or execution across devices. Each option must still meet the answer-quality and service requirements.
+
+Model parallelism divides storage and computation across devices, but adds communication and coordination costs.
+
+Three ways to use two GPUs
+
+A replica is one complete runnable instance of a model. It can occupy one GPU or span several GPUs. Two independent replicas can process different questions separately. The vLLM multi-instance example configures two data-parallel instances with tensor-parallel size one and sends requests to a selected instance. Each replica must have enough memory for its own model and requests.
+
+With tensor parallelism, each GPU stores and computes selected parts of the tensors within model layers. The GPUs exchange or combine results as required by the implementation.
+
+Pipeline parallelism places groups of layers on different GPUs. One GPU runs the earlier layers and passes intermediate results to the GPU with the later layers. The same request travels through both stages. In vLLM’s LlamaModel, start_layer and end_layer select the local layers; non-final stages return intermediate tensors.
+
+ Replicas can add capacity for more questions when each complete model fits. Model parallelism can help a selected model fit, or improve performance in a suitable setup. Neither arrangement establishes a speedup without measurements.
+
+Follow one calculation into vLLM
+
+vLLM is an open-source model-serving runtime.  A linear operation multiplies input values by weights and sums contributions. A full linear layer performs many such calculations and may add a bias, an additional learned value.
+
+For a calculation without bias: 2 × 3 + 4 × 5 = 26. Split the input and weights into two parts. GPU 0 calculates 2 × 3 = 6. GPU 1 calculates 4 × 5 = 20. Adding their contributions recovers 26.
+
+ 
+
+An all-reduce combines contributions and makes the combined result available to every participating device. The central sum in the diagram describes the logical operation; it does not imply a separate central server. Real implementations communicate arrays rather than this single number. The vLLM all-reduce entry point dispatches the tensor operation to the selected communication path.
+
+In the pinned vLLM implementation, RowParallelLinear.forward() follows this pattern:
+
+Use the input partition already assigned to this worker, or split the input and select its part. A worker’s rank identifies its position in the group.
+
+Apply the local linear operation with the worker’s weight partition.
+
+When result reduction is enabled and multiple partitions participate, call tensor_model_parallel_all_reduce() to combine the partial outputs.
+
+The implementation also prevents a fused bias from being added once per worker. ColumnParallelLinear.forward() uses a different split: workers produce different output features. The runtime can gather those features or keep them partitioned for a compatible next operation. Tensor parallelism does not require every exchange to be a sum.
+
+Communication and waiting
+
+After partitioning, GPUs need to transfer data. Bandwidth limits how much data a link can move per second. Transfer latency and synchronization also matter, especially for frequent small exchanges. Faster local arithmetic can be offset by time spent communicating or waiting. 
+
+The engineer must inspect the actual GPU connections and measure the communication path used by the runtime. Devices in the same machine do not necessarily have equivalent connections. 
+
+Later layers cannot process a request until earlier layers produce their results. With independent work available, the stages can overlap different requests. Idle intervals are called pipeline bubbles. Uneven stage times, startup, and draining can leave devices unused. During autoregressive generation, each new token depends on the preceding token’s completed model path. More stages do not remove that dependency. The vLLM pipeline worker code receives intermediate tensors, executes the model, and sends results to the next stage.
+
+ GPU 1 initially waits for GIdle intervals are called pipeline bubbles. Uneven stage times, startup, and draining can leave devices unused. During autoregressive generation, each new token depends on the preceding token’s completed model path. More stages do not remove that dependency. The vLLM pipeline worker code receives intermediate tensors, executes the model, and sends results to the next stage.
+
+More active questions may provide work to overlap, but they also need memory and can increase waiting time. The business pays for allocated GPUs during idle periods as well as computation. 
+
+Compare deployments for the same assistant
+
+Begin with fixed documents, questions, expected source references, and answer-quality checks. Define acceptable response time, peak request volume, and cost per accepted answer. Keep a separate quality test set for final acceptance. For performance measurements, inspect vLLM’s request generator and metric calculation. Answer quality and source accuracy need separate checks.
+
+Estimate weight storage as parameter count × bits per weight ÷ 8. Then include request state, activations, temporary workspaces, communication buffers, allocation overhead, and operating margin. Use measured per-device memory to refine the estimate. Distributed layouts can retain some replicated state, so memory does not necessarily divide evenly.
+
+If the model fits on one GPU, compare the first two layouts above: two independent one-GPU replicas versus one two-GPU tensor-parallel replica. Use the same total hardware and incoming request pattern. 
+
+If the model does not fit on one GPU, mark that baseline as infeasible. Compare supported layouts that do fit, such as tensor and pipeline arrangements when both are supported. Record any unavoidable configuration differences.
+
+The vLLM deployment guide at the same revision documents configuration and execution backends. Check model compatibility and partition constraints against the version being tested.
+
+Record the model, runtime revision, numerical format, GPU layout, prompt, input limits, and output settings. Keep unrelated optimizations fixed.
+
+Load each feasible configuration. Check per-device memory and room for requests.
+
+Run one question. Check answer quality, source references, time to first output, and total response time.
+
+Replay the fixed workload at increasing bounded arrival rates. Record completed requests per second, queue time, communication time, memory, errors, and P95 response time. P95 is the value at or below which 95 percent of observed response times fall.
+
+Test long inputs and the intended concurrency. Separate cold starts from warmed operation. Include sample counts and input/output lengths beside timing results.
+
+Calculate cost per accepted answer from all allocated devices and their occupied time. Include failed requests and retries. Keep the quality criteria fixed so shorter but incomplete answers cannot appear to be a performance gain.
+
+Decide what to operate
+
+Adopt a layout only if it meets the assistant’s quality, memory, response-time, traffic, and cost requirements. If communication dominates, investigate the links or a smaller parallel group. If one pipeline stage dominates, inspect its assigned work. If the complete model fits and independent replicas meet the requirements more efficiently, use them. 
+
+A distributed replica depends on multiple workers; a worker failure can interrupt the whole instance. Test failure and recovery in an isolated environment. Check how traffic is drained, rerouted, and restored. Preserve a known-good deployment for rollback.
+
+Repeat acceptance checks when the model, runtime, hardware connections, document lengths, or traffic change. 
+
+Extension: expert parallelism
+
+Some models contain groups of specialized neural-network components called experts. A routing mechanism selects experts for each token. Expert parallelism distributes those experts across devices. It adds routing, transfer, and load-balance concerns and can be combined with other layouts.  In vLLM’s MixtralMoE, the gate produces routing scores and the expert module processes the hidden-state tensors. The code also derives a local expert count from the expert-parallel group size.
+
+Sources and test status
+
+Primary conceptual source: Philip Kiely, Inference Engineering, Baseten Books, printed pp. 142–148. The document assistant, arithmetic example, memory bars, and timeline are teaching examples.
+
+Philip Kiely: Inference Engineering
+
+vLLM parallel linear layers — pinned source
+
+vLLM parallelism and scaling — pinned documentation
+
+Megatron-LM: tensor-parallel design
