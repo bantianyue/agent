@@ -12,3 +12,5 @@ source: https://x.com/_avichawla/status/2087831170423906621
 | Step 3: Humanizer 润色 | completed |
 | Step 4: 预发布检查 | completed |
 | Step 5: 推送草稿 | completed |
+| Step 4d-i: 传送门 | completed |
+| Step 5: 预发布检查 | completed |
