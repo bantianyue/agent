@@ -1,0 +1,1263 @@
+{
+ "ok": true,
+ "items": [
+  {
+   "k": "T",
+   "text": "maharshi"
+  },
+  {
+   "k": "T",
+   "text": "@maharshii"
+  },
+  {
+   "k": "IMG",
+   "src": "https://pbs.twimg.com/media/HSR1kdla0AA1L4M?format=jpg&name=900x900",
+   "media_id": "2099932595538808832",
+   "w": 900,
+   "h": 360
+  },
+  {
+   "k": "T",
+   "text": "gpu kernel porting with agents"
+  },
+  {
+   "k": "T",
+   "text": "4"
+  },
+  {
+   "k": "T",
+   "text": "52"
+  },
+  {
+   "k": "T",
+   "text": "3,548"
+  },
+  {
+   "k": "T",
+   "text": "Few weeks ago, my AI agent ported and then optimized a CUDA C++ attention kernel to CuTeDSL in an afternoon. The resulting kernel was 1.2x faster than the original and 2.8x faster than the cuDNN version. I think a killer usecase for agentic kernel development is"
+  },
+  {
+   "k": "T",
+   "text": "porting"
+  },
+  {
+   "k": "T",
+   "text": "."
+  },
+  {
+   "k": "T",
+   "text": "When I say \"porting\" I mean two things:"
+  },
+  {
+   "k": "T",
+   "text": "Different GPU versions"
+  },
+  {
+   "k": "T",
+   "text": ": When you need to convert a kernel that runs on one GPU type to another GPU type, with architecture specific features. let's say converting from H100s (hopper) to B200s (blackwell)."
+  },
+  {
+   "k": "T",
+   "text": "Different abstraction levels"
+  },
+  {
+   "k": "T",
+   "text": ": When you need to convert a kernel from one abstraction level to other. Let's say converting from low-level NVIDIA CuTe C++ to a high level DSL (domain specific language) like Triton."
+  },
+  {
+   "k": "T",
+   "text": "Agentic kernel development seems to be great for both. Let me talk about my experience with porting and then optimizing Sage Attention 3 kernel from CuTe C++ to CuteDSL."
+  },
+  {
+   "k": "IMG",
+   "src": "https://pbs.twimg.com/media/HSSC2iQbQAA7Lsz?format=jpg&name=900x900",
+   "media_id": "2099947199681740800",
+   "w": 900,
+   "h": 600
+  },
+  {
+   "k": "T",
+   "text": "ported vs. other versions"
+  },
+  {
+   "k": "T",
+   "text": "Sage Attention 3"
+  },
+  {
+   "k": "T",
+   "text": "To make the attention operation more efficient on NVIDIA's consumer blackwell GPUs, Sage attention 3 leverages quantization and low-bit tensor cores to accelerate the inference of the GEMMs (matrix multiplications) within the operation. FP4 tensor cores on GPUs like RTX 5090 and 6000 PROs offer much higher performance compared to FP16 tensor cores. So, we must utilize them smartly for the GEMMs wi"
+  },
+  {
+   "k": "T",
+   "text": "https://arxiv.org/pdf/2505.11594"
+  },
+  {
+   "k": "T",
+   "text": "Sage attention 3 also proposes a method to mitigate the severe accuracy loss when values are quantized to FP4 e2m1, since it has only 15 representable values:"
+  },
+  {
+   "k": "IMG",
+   "src": "https://pbs.twimg.com/media/HSVFCqxbYAA_hwu?format=jpg&name=900x900",
+   "media_id": "2100160713381863424",
+   "w": 900,
+   "h": 282
+  },
+  {
+   "k": "T",
+   "text": "sage3 method"
+  },
+  {
+   "k": "T",
+   "text": "FP4 attention has two major challenges:"
+  },
+  {
+   "k": "T",
+   "text": "Both per-tensor and per-token quantization approaches are inadequate for preserving model accuracy. So,"
+  },
+  {
+   "k": "T",
+   "text": "restricting the quantization group size to 1x16 is needed, which is the NVFP4 format"
+  },
+  {
+   "k": "T",
+   "text": "."
+  },
+  {
+   "k": "T",
+   "text": "The attention map P consists primarily of small values in the range [0, 1]. When directly quantized to FP4, these values force the scaling factors into an extremely narrow dynamic range. Hardware requires the quantization factors to be in FP8 e4m3 data type. This leads to significant accuracy loss when presenting these scale factors in FP8."
+  },
+  {
+   "k": "T",
+   "text": "For the second challenge, the method proposed is using a"
+  },
+  {
+   "k": "T",
+   "text": "two-level quantization approach"
+  },
+  {
+   "k": "T",
+   "text": ". Basically, this approach first normalizes each token’s range to [0, 448 x 6] through per-token (i.e. each row) quantization to utilize the range of FP8 e4m3 scaling factors, then applies FP4 microscaling quantization."
+  },
+  {
+   "k": "IMG",
+   "src": "https://pbs.twimg.com/media/HSVHcLfbUAAm2DV?format=jpg&name=900x900",
+   "media_id": "2100163350684717056",
+   "w": 900,
+   "h": 212
+  },
+  {
+   "k": "T",
+   "text": "Analysis of the benefit of two-level quantization"
+  },
+  {
+   "k": "T",
+   "text": "The process"
+  },
+  {
+   "k": "T",
+   "text": "The original implementation of Sage attention 3 is written in CUDA C++ which spans around 20 files of templating and NVIDIA's CuTe abstractions. Merely understanding the entire thing would take me days. The code is here:"
+  },
+  {
+   "k": "T",
+   "text": "https://github.com/thu-ml/SageAttention"
+  },
+  {
+   "k": "T",
+   "text": "bash"
+  },
+  {
+   "k": "T",
+   "text": "sageattention3_blackwell"
+  },
+  {
+   "k": "T",
+   "text": "I wanted to port this to CuTeDSL to get the benefits of fast JIT compilation, and easier maintenance without having to go through the C++ template hell. Not just that, I wanted to iteratively optimize the kernel to squeeze out the last bit of performance which the C++ implementation may have overlooked."
+  },
+  {
+   "k": "T",
+   "text": "The optimized CuTeDSL port has only 4 main files. Rest of the files consist of the actual harness (testing correctness and benchmarking), and some probe files which Claude generated to check the behaviour of APIs specific to CuTeDSL not present in the original C++ implementation"
+  },
+  {
+   "k": "T",
+   "text": "bash"
+  },
+  {
+   "k": "T",
+   "text": "sage3_sm120"
+  },
+  {
+   "k": "T",
+   "text": "The process for porting was largely similar to what I discuss in a previous article of mine:"
+  },
+  {
+   "k": "T",
+   "text": "https://x.com/maharshii/status/2086442755748970889"
+  },
+  {
+   "k": "T",
+   "text": "For the context directory, I only gave Claude access to NVIDIA's cutlass and SageAttention repositories, with a locally installed version of CuTeDSL as well. I also asked it to maintain an"
+  },
+  {
+   "k": "T",
+   "text": "INDEX.md"
+  },
+  {
+   "k": "T",
+   "text": "file which specifies what each directory in context can be used for which looks something like:"
+  },
+  {
+   "k": "T",
+   "text": "folder"
+  },
+  {
+   "k": "T",
+   "text": "what it is"
+  },
+  {
+   "k": "T",
+   "text": "authoritative for"
+  },
+  {
+   "k": "T",
+   "text": "read for"
+  },
+  {
+   "k": "T",
+   "text": "size"
+  },
+  {
+   "k": "T",
+   "text": "cutlass/"
+  },
+  {
+   "k": "T",
+   "text": "(v4.8.0,"
+  },
+  {
+   "k": "T",
+   "text": "include/cutlass/version.h"
+  },
+  {
+   "k": "T",
+   "text": ")"
+  },
+  {
+   "k": "T",
+   "text": "NVIDIA CUTLASS, whole checkout. Only"
+  },
+  {
+   "k": "T",
+   "text": "examples/python/CuTeDSL/"
+  },
+  {
+   "k": "T",
+   "text": "and"
+  },
+  {
+   "k": "T",
+   "text": "python/CuTeDSL/"
+  },
+  {
+   "k": "T",
+   "text": "matter: the first is the example corpus a port starts from, the second is"
+  },
+  {
+   "k": "T",
+   "text": "the DSL's own source"
+  },
+  {
+   "k": "T",
+   "text": ", which is worth more than the examples — signatures,"
+  },
+  {
+   "k": "T",
+   "text": "LaunchConfig"
+  },
+  {
+   "k": "T",
+   "text": "fields and env-var handling are all readable there, and guessing at them costs a GPU run each."
+  },
+  {
+   "k": "T",
+   "text": "the CuTe DSL API surface at 4.8, the Blackwell example kernels (dense/blockscaled/grouped GEMM, attention), the"
+  },
+  {
+   "k": "T",
+   "text": "cute_ext"
+  },
+  {
+   "k": "T",
+   "text": "pipeline + epilogue helpers,"
+  },
+  {
+   "k": "T",
+   "text": "blockscaled_layout.BlockScaledBasicChunk"
+  },
+  {
+   "k": "T",
+   "text": "(the ue8m0 / nvfp4 scale atom), and"
+  },
+  {
+   "k": "T",
+   "text": "utils/blackwell_helpers.py"
+  },
+  {
+   "k": "T",
+   "text": "sage_sm120"
+  },
+  {
+   "k": "T",
+   "text": "and any future CuTeDSL kernel"
+  },
+  {
+   "k": "T",
+   "text": "265 MB."
+  },
+  {
+   "k": "T",
+   "text": "examples/python/CuTeDSL/"
+  },
+  {
+   "k": "T",
+   "text": "is ~4 MB and"
+  },
+  {
+   "k": "T",
+   "text": "python/CuTeDSL/cutlass/"
+  },
+  {
+   "k": "T",
+   "text": "~10 MB;"
+  },
+  {
+   "k": "T",
+   "text": "include/"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "test/"
+  },
+  {
+   "k": "T",
+   "text": "and"
+  },
+  {
+   "k": "T",
+   "text": "tools/"
+  },
+  {
+   "k": "T",
+   "text": "are the rest and are C++ that informs nothing here."
+  },
+  {
+   "k": "T",
+   "text": "SageAttention/"
+  },
+  {
+   "k": "T",
+   "text": "("
+  },
+  {
+   "k": "T",
+   "text": "main"
+  },
+  {
+   "k": "T",
+   "text": ", shallow)"
+  },
+  {
+   "k": "T",
+   "text": "thu-ml's official SageAttention / SageAttention2++ / SageAttention3 — quantized attention as hand-written CUDA ("
+  },
+  {
+   "k": "T",
+   "text": "mma.sync"
+  },
+  {
+   "k": "T",
+   "text": "+"
+  },
+  {
+   "k": "T",
+   "text": "cp.async"
+  },
+  {
+   "k": "T",
+   "text": "+ swizzled smem), plus Triton fallbacks and the fused quantizers."
+  },
+  {
+   "k": "T",
+   "text": "the SageAttention3 arithmetic and CuTe layout abstractions"
+  },
+  {
+   "k": "T",
+   "text": "sage3_sm120"
+  },
+  {
+   "k": "T",
+   "text": "and any quantized fp4/fp8/int8 attention work"
+  },
+  {
+   "k": "T",
+   "text": "106 MB checkout;"
+  },
+  {
+   "k": "T",
+   "text": "388 KB of"
+  },
+  {
+   "k": "T",
+   "text": "csrc/"
+  },
+  {
+   "k": "T",
+   "text": "is the whole kernel."
+  },
+  {
+   "k": "T",
+   "text": "assets/"
+  },
+  {
+   "k": "T",
+   "text": "is 42 MB and"
+  },
+  {
+   "k": "T",
+   "text": "example/"
+  },
+  {
+   "k": "T",
+   "text": "12 MB — both are noise."
+  },
+  {
+   "k": "T",
+   "text": "Throughout the porting process, I asked my agent to note down any CuTeDSL gotchas and pitfalls it encountered in a"
+  },
+  {
+   "k": "T",
+   "text": "README.md"
+  },
+  {
+   "k": "T",
+   "text": "file. This helps it retain the knowledge related to DSL specific things and not forget it."
+  },
+  {
+   "k": "T",
+   "text": "Testing"
+  },
+  {
+   "k": "T",
+   "text": "The harness file follows from my previous article as well, which was also iteratively improved based on the phase of the porting process. It runs a ladder of tests ordered in such a way that failures, if any, localize. It starts with the"
+  },
+  {
+   "k": "T",
+   "text": "host-side code"
+  },
+  {
+   "k": "T",
+   "text": "and then goes on to the"
+  },
+  {
+   "k": "T",
+   "text": "kernel-side"
+  },
+  {
+   "k": "T",
+   "text": "tests, ending with comparison vs. references."
+  },
+  {
+   "k": "IMG",
+   "src": "https://pbs.twimg.com/media/HSVUCCYbIAAo_Vh?format=jpg&name=900x900",
+   "media_id": "2100177195213987840",
+   "w": 900,
+   "h": 343
+  },
+  {
+   "k": "T",
+   "text": "reference test ladder"
+  },
+  {
+   "k": "T",
+   "text": "PTX/SASS dumps"
+  },
+  {
+   "k": "T",
+   "text": "The harness file also makes the agent dump PTX, SASS, and CUBIN files which lets it check for any kind of register spilling, instruction counts, vectorization, and other optimization opportunities. It creates"
+  },
+  {
+   "k": "T",
+   "text": "asm_info.json"
+  },
+  {
+   "k": "T",
+   "text": "where it writes the information related to the kernel from the dump files and it looks something like below:"
+  },
+  {
+   "k": "T",
+   "text": "json"
+  },
+  {
+   "k": "T",
+   "text": "{"
+  },
+  {
+   "k": "T",
+   "text": "\"backend\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "\"cutedsl\""
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"arch\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "\"sm_120\""
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"ptx_lines\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "4500"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"launch_directives\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "["
+  },
+  {
+   "k": "T",
+   "text": "\".reqntid 384, 1, 1\""
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\".minnctapersm 1\""
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"setmaxnreg.dec.sync.aligned.u32 \\t24;\""
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"setmaxnreg.inc.sync.aligned.u32 \\t232;\""
+  },
+  {
+   "k": "T",
+   "text": "]"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"ptx_target\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "\"sm_120a\""
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"ptxas\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "{"
+  },
+  {
+   "k": "T",
+   "text": "\"registers\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "168"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"spill_stores\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "0"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"spill_loads\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "0"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"smem\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "0"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"cmem\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "0"
+  },
+  {
+   "k": "T",
+   "text": "}"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"cuobjdump\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "{"
+  },
+  {
+   "k": "T",
+   "text": "\"registers\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "168"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"spill_bytes\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "0"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"stack\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "0"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"smem\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "1024"
+  },
+  {
+   "k": "T",
+   "text": "}"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"sass_counts\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "{"
+  },
+  {
+   "k": "T",
+   "text": "\"shared load\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "116"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"shared store\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "16"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"global load\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "7"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"global store\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "2"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"ldmatrix\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "66"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"stmatrix\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "16"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"blockscaled MMA\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "128"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"transcendental\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "170"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"barrier\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "6"
+  },
+  {
+   "k": "T",
+   "text": ","
+  },
+  {
+   "k": "T",
+   "text": "\"narrowing convert\""
+  },
+  {
+   "k": "T",
+   "text": ":"
+  },
+  {
+   "k": "T",
+   "text": "104"
+  },
+  {
+   "k": "T",
+   "text": "}"
+  },
+  {
+   "k": "T",
+   "text": "}"
+  },
+  {
+   "k": "T",
+   "text": "Optimization log"
+  },
+  {
+   "k": "T",
+   "text": "The agent also kept a running log of the optimizations it tried in the same"
+  },
+  {
+   "k": "T",
+   "text": "README.md"
+  },
+  {
+   "k": "T",
+   "text": "file. The highest gains were observed from increasing/decreasing registers from the TMA/MMA warps and some deliberate departures the agent took compared to the C++ implementation:"
+  },
+  {
+   "k": "T",
+   "text": "- masking compares token indices, not tile column indices,"
+  },
+  {
+   "k": "T",
+   "text": "The optimization log table in the README file is:"
+  },
+  {
+   "k": "T",
+   "text": "change"
+  },
+  {
+   "k": "T",
+   "text": "spill"
+  },
+  {
+   "k": "T",
+   "text": "ld.shared"
+  },
+  {
+   "k": "T",
+   "text": "baseline (12 warps,"
+  },
+  {
+   "k": "T",
+   "text": "setmaxnreg"
+  },
+  {
+   "k": "T",
+   "text": ")"
+  },
+  {
+   "k": "T",
+   "text": "456"
+  },
+  {
+   "k": "T",
+   "text": "194 scalar"
+  },
+  {
+   "k": "T",
+   "text": "drop"
+  },
+  {
+   "k": "T",
+   "text": "tOrO_tmp"
+  },
+  {
+   "k": "T",
+   "text": ", rescale O in place"
+  },
+  {
+   "k": "T",
+   "text": "304"
+  },
+  {
+   "k": "T",
+   "text": "194"
+  },
+  {
+   "k": "T",
+   "text": "autovec_copy"
+  },
+  {
+   "k": "T",
+   "text": "for the SF copies"
+  },
+  {
+   "k": "T",
+   "text": "296"
+  },
+  {
+   "k": "T",
+   "text": "98"
+  },
+  {
+   "k": "T",
+   "text": "12 → 10 warps,"
+  },
+  {
+   "k": "T",
+   "text": "setmaxnreg"
+  },
+  {
+   "k": "T",
+   "text": "removed"
+  },
+  {
+   "k": "T",
+   "text": "296"
+  },
+  {
+   "k": "T",
+   "text": "98"
+  },
+  {
+   "k": "T",
+   "text": "min_blocks_per_mp=1"
+  },
+  {
+   "k": "T",
+   "text": "272"
+  },
+  {
+   "k": "T",
+   "text": "98"
+  },
+  {
+   "k": "T",
+   "text": ".align(16)"
+  },
+  {
+   "k": "T",
+   "text": "on the"
+  },
+  {
+   "k": "T",
+   "text": "delta_s"
+  },
+  {
+   "k": "T",
+   "text": "loads"
+  },
+  {
+   "k": "T",
+   "text": "—"
+  },
+  {
+   "k": "T",
+   "text": "50 (48"
+  },
+  {
+   "k": "T",
+   "text": "v4"
+  },
+  {
+   "k": "T",
+   "text": ")"
+  },
+  {
+   "k": "T",
+   "text": "rcp.approx"
+  },
+  {
+   "k": "T",
+   "text": "+ mask only the peeled block"
+  },
+  {
+   "k": "T",
+   "text": "104"
+  },
+  {
+   "k": "T",
+   "text": "50"
+  },
+  {
+   "k": "T",
+   "text": "quantize interleaved under the PV MMA"
+  },
+  {
+   "k": "T",
+   "text": "280"
+  },
+  {
+   "k": "T",
+   "text": "50"
+  },
+  {
+   "k": "T",
+   "text": "12 warps +"
+  },
+  {
+   "k": "T",
+   "text": "setmaxnreg"
+  },
+  {
+   "k": "T",
+   "text": "24/232"
+  },
+  {
+   "k": "T",
+   "text": "0"
+  },
+  {
+   "k": "T",
+   "text": "50"
+  },
+  {
+   "k": "T",
+   "text": "These implementation differences resulted in the CuTeDSL kernel being 1.2x faster than the original C++ implementation."
+  },
+  {
+   "k": "T",
+   "text": "Conclusion"
+  },
+  {
+   "k": "T",
+   "text": "All in all, I feel that porting kernels quickly is a very good usecase of agentic kernel development. I wrote zero lines of CuTeDSL code during this porting process and still was able to get a kernel faster than the original implementation, condensing days of work to only hours. Some back and forth was still required to steer the agent to a better path, and it resulted in faster development compar"
+  },
+  {
+   "k": "T",
+   "text": "想发布自己的文章？"
+  },
+  {
+   "k": "T",
+   "text": "升级为 Premium"
+  },
+  {
+   "k": "T",
+   "text": "·"
+  },
+  {
+   "k": "T",
+   "text": "3,548"
+  },
+  {
+   "k": "T",
+   "text": "查看"
+  },
+  {
+   "k": "T",
+   "text": "4"
+  },
+  {
+   "k": "T",
+   "text": "52"
+  },
+  {
+   "k": "T",
+   "text": "46"
+  }
+ ],
+ "images": [
+  {
+   "media_id": "2099932595538808832",
+   "src": "https://pbs.twimg.com/media/HSR1kdla0AA1L4M?format=jpg&name=900x900",
+   "w": 900,
+   "h": 360,
+   "text_before": 2,
+   "next_text": "gpu kernel porting with agents"
+  },
+  {
+   "media_id": "2099947199681740800",
+   "src": "https://pbs.twimg.com/media/HSSC2iQbQAA7Lsz?format=jpg&name=900x900",
+   "w": 900,
+   "h": 600,
+   "text_before": 15,
+   "next_text": "ported vs. other versions"
+  },
+  {
+   "media_id": "2100160713381863424",
+   "src": "https://pbs.twimg.com/media/HSVFCqxbYAA_hwu?format=jpg&name=900x900",
+   "w": 900,
+   "h": 282,
+   "text_before": 20,
+   "next_text": "sage3 method"
+  },
+  {
+   "media_id": "2100163350684717056",
+   "src": "https://pbs.twimg.com/media/HSVHcLfbUAAm2DV?format=jpg&name=900x900",
+   "w": 900,
+   "h": 212,
+   "text_before": 29,
+   "next_text": "Analysis of the benefit of two-level quantization"
+  },
+  {
+   "media_id": "2100177195213987840",
+   "src": "https://pbs.twimg.com/media/HSVUCCYbIAAo_Vh?format=jpg&name=900x900",
+   "w": 900,
+   "h": 343,
+   "text_before": 110,
+   "next_text": "reference test ladder"
+  }
+ ],
+ "error": ""
+}
