@@ -1,0 +1,79 @@
+gpu kernel porting with agents
+
+Few weeks ago, my AI agent ported and then optimized a CUDA C++ attention kernel to CuTeDSL in an afternoon. The resulting kernel was 1.2x faster than the original and 2.8x faster than the cuDNN version. I think a killer usecase for agentic kernel development is porting.
+
+When I say "porting" I mean two things:
+
+Different GPU versions: When you need to convert a kernel that runs on one GPU type to another GPU type, with architecture specific features. let's say converting from H100s (hopper) to B200s (blackwell).
+
+Different abstraction levels: When you need to convert a kernel from one abstraction level to other. Let's say converting from low-level NVIDIA CuTe C++ to a high level DSL (domain specific language) like Triton.
+
+Agentic kernel development seems to be great for both. Let me talk about my experience with porting and then optimizing Sage Attention 3 kernel from CuTe C++ to CuteDSL.
+
+ 
+
+Sage Attention 3
+
+To make the attention operation more efficient on NVIDIA's consumer blackwell GPUs, Sage attention 3 leverages quantization and low-bit tensor cores to accelerate the inference of the GEMMs (matrix multiplications) within the operation. FP4 tensor cores on GPUs like RTX 5090 and 6000 PROs offer much higher performance compared to FP16 tensor cores. So, we must utilize them smartly for the GEMMs within the attention kernel. Here's the paper: https://arxiv.org/pdf/2505.11594
+
+Sage attention 3 also proposes a method to mitigate the severe accuracy loss when values are quantized to FP4 e2m1, since it has only 15 representable values:
+
+ 
+
+FP4 attention has two major challenges:
+
+Both per-tensor and per-token quantization approaches are inadequate for preserving model accuracy. So, restricting the quantization group size to 1x16 is needed, which is the NVFP4 format.
+
+The attention map P consists primarily of small values in the range [0, 1]. When directly quantized to FP4, these values force the scaling factors into an extremely narrow dynamic range. Hardware requires the quantization factors to be in FP8 e4m3 data type. This leads to significant accuracy loss when presenting these scale factors in FP8.
+
+For the second challenge, the method proposed is using a two-level quantization approach. Basically, this approach first normalizes each token’s range to [0, 448 x 6] through per-token (i.e. each row) quantization to utilize the range of FP8 e4m3 scaling factors, then applies FP4 microscaling quantization.
+
+ 
+
+The process
+
+The original implementation of Sage attention 3 is written in CUDA C++ which spans around 20 files of templating and NVIDIA's CuTe abstractions. Merely understanding the entire thing would take me days. The code is here: https://github.com/thu-ml/SageAttention
+
+ 
+
+I wanted to port this to CuTeDSL to get the benefits of fast JIT compilation, and easier maintenance without having to go through the C++ template hell. Not just that, I wanted to iteratively optimize the kernel to squeeze out the last bit of performance which the C++ implementation may have overlooked.
+
+The optimized CuTeDSL port has only 4 main files. Rest of the files consist of the actual harness (testing correctness and benchmarking), and some probe files which Claude generated to check the behaviour of APIs specific to CuTeDSL not present in the original C++ implementation
+
+ 
+
+The process for porting was largely similar to what I discuss in a previous article of mine: https://x.com/maharshii/status/2086442755748970889
+
+For the context directory, I only gave Claude access to NVIDIA's cutlass and SageAttention repositories, with a locally installed version of CuTeDSL as well. I also asked it to maintain an INDEX.md file which specifies what each directory in context can be used for which looks something like:
+
+ 
+
+Throughout the porting process, I asked my agent to note down any CuTeDSL gotchas and pitfalls it encountered in a README.md file. This helps it retain the knowledge related to DSL specific things and not forget it.
+
+Testing
+
+The harness file follows from my previous article as well, which was also iteratively improved based on the phase of the porting process. It runs a ladder of tests ordered in such a way that failures, if any, localize. It starts with the host-side code and then goes on to the kernel-side tests, ending with comparison vs. references.
+
+ 
+
+PTX/SASS dumps
+
+The harness file also makes the agent dump PTX, SASS, and CUBIN files which lets it check for any kind of register spilling, instruction counts, vectorization, and other optimization opportunities. It creates asm_info.json where it writes the information related to the kernel from the dump files and it looks something like below:
+
+ 
+
+Optimization log
+
+The agent also kept a running log of the optimizations it tried in the same README.md file. The highest gains were observed from increasing/decreasing registers from the TMA/MMA warps and some deliberate departures the agent took compared to the C++ implementation:
+
+ 
+
+The optimization log table in the README file is:
+
+ 
+
+These implementation differences resulted in the CuTeDSL kernel being 1.2x faster than the original C++ implementation.
+
+Conclusion
+
+All in all, I feel that porting kernels quickly is a very good usecase of agentic kernel development. I wrote zero lines of CuTeDSL code during this porting process and still was able to get a kernel faster than the original implementation, condensing days of work to only hours. Some back and forth was still required to steer the agent to a better path, and it resulted in faster development compared to letting the agent figure everything out on its own. However, I'd bet that gap, where a human still has to step in, will keep closing as the models get better.
