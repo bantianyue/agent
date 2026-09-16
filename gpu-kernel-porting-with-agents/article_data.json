@@ -1,70 +1,222 @@
 {
+  "title": "智能体时代的 kernel 移植：把 Sage Attention 3 从 CUDA C++ 搬到 CuTeDSL",
   "summary": [
     {
-      "key": "要点关键词1",
-      "body": "核心内容。替换本占位。"
+      "key": "一个下午的移植",
+      "body": "AI 智能体在一个下午里，把 CUDA C++ 写的 attention kernel 移植并优化成 CuTeDSL 版本：比原版 C++ 实现快 1.2 倍，比 cuDNN 版本快 2.8 倍。"
     },
     {
-      "key": "要点关键词2",
-      "body": "核心内容。替换本占位。"
+      "key": "移植的两种含义",
+      "body": "一是跨 GPU 架构（Hopper 到 Blackwell 这类），二是跨抽象层次（底层 CuTe C++ 到 CuTeDSL、Triton 这类 DSL）。两种场景智能体都做得不错。"
     },
     {
-      "key": "要点关键词3",
-      "body": "核心内容。替换本占位。"
+      "key": "靠什么跑通",
+      "body": "上下文只给两个必要仓库加一份 INDEX.md 目录说明，把踩到的 CuTeDSL 坑记进 README.md，再用 PTX/SASS 的寄存器溢出与指令数这些硬指标指导下一轮优化。"
     }
   ],
+  "lead": [],
   "sections": [
     {
-      "type": "h2",
-      "title": "正文第一章标题",
+      "type": "p",
+      "title": "",
       "paras": [
-        "第一段正文文字。",
-        "第二段正文文字。"
+        "几周前，我的 AI 智能体在一个下午里，把一个 CUDA C++ 的 attention kernel 移植成 CuTeDSL 版本，随后又做了优化。最终这个 kernel 比原版快 1.2 倍，比 cuDNN 版本快 2.8 倍。我认为智能体做 kernel 开发，最有杀伤力的用例就是移植。",
+        "我所说的「移植」包含两种情形：",
+        "<span style=\"color:#0F4C81;font-size:7px;line-height:1;vertical-align:middle;\">●</span>&nbsp;**不同的 GPU 版本**：把一个跑在某类 GPU 上的 kernel 改到另一类 GPU 上，并用上目标架构特有的能力。比如从 H100（Hopper）迁到 B200（Blackwell）。",
+        "<span style=\"color:#0F4C81;font-size:7px;line-height:1;vertical-align:middle;\">●</span>&nbsp;**不同的抽象层次**：把一个 kernel 从一种抽象层次换到另一种。比如从底层的 NVIDIA CuTe C++ 换到 Triton 这类高层 DSL（领域特定语言）。",
+        "智能体在这两种移植上都表现很好。下面讲讲我把 Sage Attention 3 这个 kernel 从 CuTe C++ 移植到 CuTeDSL、再做优化的经历。"
       ],
-      "figs": [
-        {
-          "src": "fig1.png",
-          "caption": "图片说明文字"
-        }
-      ]
-    },
-    {
-      "type": "h3",
-      "title": "子标题示例",
-      "paras": [
-        "子标题下的段落。"
-      ]
+      "fig_after": {
+        "4": [
+          {
+            "src": "fig01.png",
+            "caption": "图1：移植版本与其他版本的对比"
+          }
+        ]
+      }
     },
     {
       "type": "h2",
-      "title": "含表格的章节",
+      "title": "Sage Attention 3",
       "paras": [
-        "下面是一张示例表格。"
+        "为了让 attention 运算在 NVIDIA 消费级 Blackwell GPU 上更高效，Sage Attention 3 引入了量化和低比特张量核心，用来加速运算内部 GEMM（矩阵乘法）的推理。RTX 5090、6000 PRO 这类 GPU 上的 FP4 张量核心，性能远高于 FP16 张量核心，所以得聪明地把它们用到 attention kernel 的 GEMM 里。论文在这里：https://arxiv.org/pdf/2505.11594",
+        "数值量化到 FP4 e2m1 时会出现严重的精度损失（这种格式只有 15 个可表示数值），Sage Attention 3 也提出了一种方法缓解它：",
+        "FP4 attention 有两个主要挑战：",
+        "<span style=\"color:#0F4C81;font-size:7px;line-height:1;vertical-align:middle;\">●</span>&nbsp;逐张量（per-tensor）和逐 token（per-token）量化都不足以保住模型精度，所以要把量化分组大小限制在 1x16，也就是 NVFP4 格式。",
+        "<span style=\"color:#0F4C81;font-size:7px;line-height:1;vertical-align:middle;\">●</span>&nbsp;attention map P 的数值主要落在 [0, 1] 这个小区间里。直接量化到 FP4 时，这些数值会把缩放因子压进极窄的动态范围，而硬件要求量化因子必须是 FP8 e4m3 类型，用 FP8 表示这些缩放因子会带来明显的精度损失。",
+        "针对第二个挑战，作者提出的方法是两级量化。它先用逐 token（也就是逐行）量化，把每个 token 的取值范围归一化到 [0, 448 x 6]，从而吃满 FP8 e4m3 缩放因子的范围，然后再做 FP4 微观缩放量化。"
       ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "fig02.png",
+            "caption": "图2：sage3 的方法"
+          }
+        ],
+        "5": [
+          {
+            "src": "fig03.png",
+            "caption": "图3：两级量化收益分析"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "移植过程",
+      "paras": [
+        "Sage Attention 3 的原始实现是 CUDA C++，大约 20 个文件，全是模板和 NVIDIA 的 CuTe 抽象。光是读懂整个实现就得花我几天时间。代码在这里：https://github.com/thu-ml/SageAttention",
+        "__CODE__bash::sageattention3_blackwell\n├── README.md\n├── sageattn3\n│   ├── __init__.py\n│   ├── api.py\n│   ├── blackwell\n│   │   ├── __init__.py\n│   │   ├── api.cu\n│   │   ├── block_info.h\n│   │   ├── blockscaled_layout.h\n│   │   ├── cute_extension.h\n│   │   ├── epilogue_tma_ws.h\n│   │   ├── kernel_traits.h\n│   │   ├── kernel_ws.h\n│   │   ├── launch.h\n│   │   ├── mainloop_tma_ws.h\n│   │   ├── named_barrier.h\n│   │   ├── params.h\n│   │   ├── softmax_fused.h\n│   │   ├── static_switch.h\n│   │   ├── tile_scheduler.h\n│   │   └── utils.h\n│   └── quantization\n│       ├── __init__.py\n│       ├── cuda_utils.h\n│       └── fp4_quantization_4d.cu\n└── setup.py",
+        "我想把它移植到 CuTeDSL，享受 JIT 编译快、维护更省事、不用再受 C++ 模板折磨的好处。而且我还想迭代优化这个 kernel，把 C++ 实现可能漏掉的那点性能榨出来。",
+        "优化后的 CuTeDSL 版本只有 4 个主要文件。其余文件是真正的 harness（测正确性和跑 benchmark），以及一些探针文件，那是 Claude 为了确认原 C++ 实现里没有、CuTeDSL 特有的 API 行为而生成的。",
+        "__CODE__bash::sage3_sm120\n├── api.py\n├── attn.py\n├── ptx.py\n└── quant.py",
+        "这次移植的流程，和我之前一篇文章里讲的基本一致：https://x.com/maharshii/status/2086442755748970889",
+        "上下文目录里，我只给了 Claude 两个仓库：NVIDIA 的 cutlass 和 SageAttention，另外本地装了 CuTeDSL。我还让它维护一个 <code style=\"background:#f3f4f5;padding:2px 5px;border-radius:3px;color:#0F4C81;\">INDEX.md</code>，说明 context 里每个目录能拿来做什么，大概长这样："
+      ],
+      "fig_after": {},
       "table": {
         "head": [
-          "列1",
-          "列2",
-          "列3"
+          "目录",
+          "是什么",
+          "权威依据",
+          "用来看什么",
+          "体积"
         ],
         "rows": [
           [
-            "A",
-            "B",
-            "C"
+            "cutlass/（v4.8.0，include/cutlass/version.h）",
+            "NVIDIA CUTLASS 的完整检出。真正有用的只有 examples/python/CuTeDSL/ 和 python/CuTeDSL/：前者是移植起步时的示例集，后者是 DSL 自身源码，价值高于示例，签名、LaunchConfig 字段和环境变量处理都能直接读到，靠猜的话每猜错一次都要多花一轮 GPU 运行。",
+            "4.8 版本的 CuTe DSL API 面、Blackwell 示例 kernel（dense/blockscaled/grouped GEMM、attention）、cute_ext 的 pipeline 与 epilogue 辅助、blockscaled_layout.BlockScaledBasicChunk（ue8m0 / nvfp4 缩放单元），以及 utils/blackwell_helpers.py",
+            "sage_sm120 以及未来任何一个 CuTeDSL kernel",
+            "265 MB。examples/python/CuTeDSL/ 约 4 MB，python/CuTeDSL/cutlass/ 约 10 MB；剩下的是 include/、test/ 和 tools/，都是 C++，在这里提供不了任何有用信息。"
           ],
           [
-            "D",
-            "<strong style=\"color:#0F4C81;\">E</strong>",
-            "F"
+            "SageAttention/（main 分支，浅克隆）",
+            "thu-ml 官方的 SageAttention / SageAttention2++ / SageAttention3，量化 attention 的手写 CUDA 实现（mma.sync + cp.async + swizzled smem），另有 Triton 回退版本和融合量化器。",
+            "SageAttention3 的算术逻辑与 CuTe layout 抽象",
+            "sage3_sm120，以及任何 fp4/fp8/int8 量化 attention 相关工作",
+            "检出 106 MB；csrc/ 里 388 KB 就是整个 kernel。assets/ 有 42 MB、example/ 有 12 MB，都是噪音。"
           ]
         ]
       }
+    },
+    {
+      "type": "p",
+      "title": "",
+      "paras": [
+        "整个移植过程中，我让智能体把它遇到的 CuTeDSL 坑和陷阱都记进一个 <code style=\"background:#f3f4f5;padding:2px 5px;border-radius:3px;color:#0F4C81;\">README.md</code>。这样它就能把和 DSL 特性相关的知识留住，不会忘掉。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "测试",
+      "paras": [
+        "harness 文件也沿用了我上一篇文章的做法，并随移植阶段不断迭代。它跑的是一个测试阶梯，顺序安排得让任何失败都能就地定位：先从 host 侧代码开始，再到 kernel 侧的测试，最后和参考实现对比。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig04.png",
+            "caption": "图4：参考测试阶梯"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "PTX/SASS dump",
+      "paras": [
+        "harness 还会让智能体把 PTX、SASS 和 CUBIN 文件 dump 出来，借此检查寄存器溢出、指令数量、向量化，以及其他优化机会。它会把 dump 文件里读到的 kernel 信息写进 <code style=\"background:#f3f4f5;padding:2px 5px;border-radius:3px;color:#0F4C81;\">asm_info.json</code>，大概长这样：",
+        "__CODE__json::{\n  \"backend\": \"cutedsl\",\n  \"arch\": \"sm_120\",\n  \"ptx_lines\": 4500,\n  \"launch_directives\": [\n    \".reqntid 384, 1, 1\",\n    \".minnctapersm 1\",\n    \"setmaxnreg.dec.sync.aligned.u32 \\t24;\",\n    \"setmaxnreg.inc.sync.aligned.u32 \\t232;\"\n  ],\n  \"ptx_target\": \"sm_120a\",\n  \"ptxas\": {\n    \"registers\": 168,\n    \"spill_stores\": 0,\n    \"spill_loads\": 0,\n    \"smem\": 0,\n    \"cmem\": 0\n  },\n  \"cuobjdump\": {\n    \"registers\": 168,\n    \"spill_bytes\": 0,\n    \"stack\": 0,\n    \"smem\": 1024\n  },\n  \"sass_counts\": {\n    \"shared load\": 116,\n    \"shared store\": 16,\n    \"global load\": 7,\n    \"global store\": 2,\n    \"ldmatrix\": 66,\n    \"stmatrix\": 16,\n    \"blockscaled MMA\": 128,\n    \"transcendental\": 170,\n    \"barrier\": 6,\n    \"narrowing convert\": 104\n  }\n}"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "优化日志",
+      "paras": [
+        "智能体还把试过的每项优化都记在同一个 <code style=\"background:#f3f4f5;padding:2px 5px;border-radius:3px;color:#0F4C81;\">README.md</code> 里，形成一份持续更新的日志。收益最大的是对 TMA/MMA warp 的寄存器做增减，以及它有意偏离 C++ 实现的几处做法：",
+        "__CODE__text::- masking compares token indices, not tile column indices,\n- causal masking also applies the unpadded-length limit, which the C++ drops\n- ``AbsMaxP`` is seeded from -inf rather than from uninitialised registers\n- the O accumulator is zeroed before the first PV MMA accumulates onto it\n- O is rescaled in place and accumulated onto directly, dropping the C++'s second accumulator -- 64 registers against a 456-byte spill\n- a causal tile with no work runs one fully masked block instead of taking the C++ early-exit, which would desynchronise the epilogue handshake",
+        "README 里的优化日志表格如下："
+      ],
+      "fig_after": {},
+      "table": {
+        "head": [
+          "改动",
+          "溢出寄存器数",
+          "ld.shared 指令数"
+        ],
+        "rows": [
+          [
+            "基线（12 warps，setmaxnreg）",
+            "456",
+            "194（scalar）"
+          ],
+          [
+            "去掉 tOrO_tmp，就地重算 O",
+            "304",
+            "194"
+          ],
+          [
+            "SF 拷贝改用 autovec_copy",
+            "296",
+            "98"
+          ],
+          [
+            "12 → 10 warps，去掉 setmaxnreg",
+            "296",
+            "98"
+          ],
+          [
+            "min_blocks_per_mp=1",
+            "272",
+            "98"
+          ],
+          [
+            "在 delta_s 的读取上加 .align(16)",
+            "无",
+            "50（48 v4）"
+          ],
+          [
+            "rcp.approx，并且只对剥出的 block 做 mask",
+            "104",
+            "50"
+          ],
+          [
+            "把量化交织到 PV MMA 之下",
+            "280",
+            "50"
+          ],
+          [
+            "12 warps + setmaxnreg 24/232",
+            "0",
+            "50"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "p",
+      "title": "",
+      "paras": [
+        "这些实现上的差异，让 CuTeDSL kernel 比原始 C++ 实现快 1.2 倍。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "结论",
+      "paras": [
+        "整体看，快速移植 kernel 是智能体做 kernel 开发相当好的一个用例。这次移植过程中我一行 CuTeDSL 代码都没写，却拿到了比原始实现更快的 kernel，把几天的工作量压缩到几个小时。过程中仍然需要一些来回沟通，把智能体引到更好的路子上，但这比让它自己从头摸索要快。我敢打赌，随着模型变强，需要人介入的这段差距会持续收窄。"
+      ],
+      "fig_after": {}
     }
   ],
   "conclusion": [
-    "结语分析内容1。",
-    "结语分析内容2。"
+    "**智能体真正改变的不是写 kernel，而是搬运 kernel。** 跨 GPU 架构、跨抽象层次的移植原本是最枯燥、最靠人逐行对照的活，现在可以整包交给一个能读仓库、能跑测试阶梯、还能自己看 PTX/SASS 指标的智能体。",
+    "跑通它的关键不在模型多聪明，而在工程约束搭得好不好：上下文只放必要的两个仓库并写清 INDEX.md，让踩过的 DSL 坑沉淀成 README.md 里的长期记忆，再用寄存器溢出和指令数这类硬指标决定下一步往哪优化，而不是靠感觉。",
+    "对做 GPU kernel 的人来说，手里那些只在某一代架构、某一层抽象上跑得动的实现，从此多了一条低成本的再版路径；人的位置也从逐行改写前移到了定路线和审指标。"
   ],
-  "reference_url": "https://arxiv.org/html/XXXX.XXXXX"
+  "reference_url": "https://x.com/maharshii/status/2100193318277890174"
 }
