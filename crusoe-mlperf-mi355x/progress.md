@@ -1,25 +1,16 @@
-# 进度追踪 - crusoe-mlperf-mi355x
-
-| Step | 状态 |
-|------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json 选最多8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
-| Step 6: 推送草稿 | pending |
-
-创建时间: 2026-09-17
-来源: https://www.crusoe.ai/resources/blog/serving-5-75-million-tokens-per-second-crusoes-mlperf-inference-v6-1-results-on-amd-mi355x
+✅ 完成 (crusoe-mlperf-mi355x) — 2026-09-17 推送草稿
+- 源: Crusoe 官方技术博客《Serving 5.75 million tokens per second: Crusoe's MLPerf Inference v6.1 results on AMD MI355X》
+- 结构: 512 张 MI355X 上的 MLPerf Inference v6.1 结果 / 软件配置 / 生产环境：从 8 卡到 512 卡的线性扩展 / 降低总体拥有成本（288GB HBM3E 留在单节点、中尺寸模型服务余量、不需要专用网络）/ 为什么在 Kubernetes 上跑 MLPerf（含 Crusoe Command Center 实战）/ MLPerf 被测系统 SUT 方法论（含测试场景）/ 自己复现 / 接下来
+- 正文图: 4（fig01-04，按原文 DOM 顺序，中文图注；含原文 featured 图）
+- 表格: 2（结果吞吐表、软件与节点配置表，均由原文 HTML table 逐格还原）
+- 代码块: 0
+- 封面: 原文 featured 图（等距服务器机架示意），make-cover-from-original.py 生成 900×383 + 500×500
+- preflight ALL PASS；verify body 4 图（mmbiz 4，占位符 0）；传送门 8 链接，位置正确（正文→结语→传送门→参考）
+source: https://www.crusoe.ai/resources/blog/serving-5-75-million-tokens-per-second-crusoes-mlperf-inference-v6-1-results-on-amd-mi355x
+| Step 0: 提取原文+下载图片 | completed |
+| Step 1: 生成封面 | completed |
+| Step 2: 写文章（含翻译+结语+参考区+传送门） | completed |
+| Step 3: Humanizer 润色 | completed |
+| Step 4: 预发布检查 | completed |
+| Step 5: 推送草稿 | completed |
 | Step 4d-i: 传送门 | completed |
