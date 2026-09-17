@@ -1,0 +1,113 @@
+Serving 5.75 million tokens per second: Crusoe's MLPerf Inference v6.1 results on AMD MI355X
+
+Crusoe's MLPerf Inference v6.1 submission ran gpt-oss-120b and DeepSeek-R1 on 512 AMD Instinct MI355X GPUs, the largest MI355X inference entry by GPU count in MLPerf history. Throughput scaled linearly from 8 to 512 GPUs over Ethernet on Crusoe Managed Kubernetes.
+
+Last month, Crusoe submitted results to MLPerf®  Inference v6.1 for gpt-oss-120b and DeepSeek-R1, running at 512-GPU scale on AMD Instinct MI355X inside Crusoe Managed Kubernetes. To date, this is the largest MI355X inference submission by GPU count in MLPerf history.
+
+Three results are notable for inference workloads more than the raw numbers:
+
+Throughput scales linearly from 8 to 512 GPUs at over 90% of ideal, which means workloads can be autoscaled deterministically depending on expected load.
+
+No exotic RDMA interconnect was required. Inference at this scale does not necessarily require cross-node collectives. The entire 512-GPU run was coordinated over standard 400 Gb Ethernet, with no InfiniBand or RoCE and no cross-node all-reduce.
+
+The benchmark ran as a typical Kubernetes workload on the same Crusoe Managed Kubernetes platform our customers use in production, with the same observability and the same failure handling. We have open-sourced the manifests so you can reproduce any of it.
+
+This blog covers the results, analysis, and the methodology used to conduct these benchmarks,  so you can reproduce the results yourself. The full repo reproduction can be found in GitHub here.
+
+MLPerf Inference v6.1 results on 512 AMD Instinct MI355X GPUs
+
+All results are MLPerf Inference v6.1, closed division, 512x AMD Instinct MI355X across 64 nodes with Crusoe Managed Kubernetes as the main orchestrator.
+
+Server results were measured under the v6.1 latency SLAs: for gpt-oss-120b, p99 time-to-first-token under 3.0 s and p99 time-per-output-token under 80 ms. For DeepSeek-R1, p99 TTFT under 2.0 s and p99 TPOT under 80 ms. Both runs passed with headroom (gpt-oss measured 2.69 s TTFT and 36.5 ms TPOT; DeepSeek 1.85 s TTFT and 79.98 ms TPOT), which suggests we could have pushed QPS higher to get even more throughput.
+
+Both models cleared closed-division accuracy: gpt-oss-120b at 83.7% exact-match against an 82.3% reference floor, and DeepSeek-R1 at 80.7% exact-match (80.54% floor) with a mean output length of 3,898 tokens per sample, inside the required 3,497.6 to 4,274.85 range.
+
+Published results are available in the MLCommons MLPerf Inference v6.1 closed-division results.
+
+Software configuration
+
+Production Linear scaling from 8 to 512 GPUs
+
+To simulate production inference workloads, it is typical to have an autoscaling application that scales from tens, to hundreds, to even thousands of GPUs. The reason scaling holds is that inference at this shape is massively parallel and inference engines like vLLM and SGLang are designed for concurrency. Since both gpt-oss and deepseek-r1 could fit within the HBM memory of a single Mi355x node, replicas never need to synchronize with one another, so there are no all-reduce cross node communication costs that grow with node count. The only inter-node traffic is frontend input and output streams.
+
+For customers this provides determinism for capacity planning. If your production deployment sustains a given tokens-per-second at 64 GPUs, you can size the 512-GPU deployment through straightforward multiplication. Combining an autoscaler with Crusoe Managed Kubernetes, that means capacity can track demand - scale out for peak traffic, scale back in when it subsides, and pay for the difference rather than provisioning for the peak permanently.
+
+Lowering total cost of ownership
+
+Two properties of this configuration drive down total cost of ownership at scale: memory capacity that keeps every model within a single node, and the absence of any requirement for a premium scale-out RDMA fabric.
+
+288 GB of HBM3E keeps large MoE models inside one node
+
+DeepSeek-R1 is a 671B-parameter MoE with roughly 37B parameters active per token. At FP8 the weights alone are approximately 671 GB, which does not fit within a typical accelerator once you account for KV cache. On MI355X the same model sits comfortably inside a single 8-GPU platform with 2.3 TB of HBM3E, leaving over a terabyte for KV cache re-use.
+
+That capacity is what eliminates the sharding overhead. DeepSeek-R1 is distributed across the 8 GPUs of one node, but every byte of that communication stays on the in-node AMD Infinity Fabric (XGMI). There is no all-reduce leaving the chassis, no pipeline stage boundary crossing a network hop, and no GPU sitting partially idle while collective communications run .
+
+In this configuration, attention also runs data-parallel rather than tensor-parallel because DeepSeek's Multi-head Latent Attention caches a single compressed latent KV head. Sharding that head with tensor parallelism would replicate the KV cache on every rank, consuming memory that should be holding concurrent requests. Keeping attention data-parallel gives each rank one KV cache serving its own requests, which preserves batch size and total throughput. The expert layers are partitioned across GPUs because the expert weights dominate the memory footprint and only a small subset activates per token, so each rank computes only for the tokens routed to the experts it owns.
+
+The same capacity buys serving headroom for mid-size models
+
+The gpt-oss-120b model, with its MoE weights in MXFP4, occupies roughly 65 GB. It runs at tensor-parallel size 1 meaning the full model weights are stored in vRAM, so we deploy 512 fully independent single-GPU replicas. This prevented any sharding or tensor parallelism, no collectives in the forward pass, and no coordination between replicas at all. Every GPU in the fleet is an independent serving unit.
+
+What 288 GB changes here is not only whether the model fits, but what fits alongside it. After weights and activations, each MI355X has over 200 GB available for KV cache, compared with roughly 15 GB on an 80 GB card. KV cache capacity is what caps concurrent sequences per replica, and concurrent sequences are what produce the per-GPU throughput in the results table above. Capacity headroom converts directly into tokens per second per dollar of GPU, and increases total token performance per Watt.
+
+Inference at scale does not require a premium fabric
+
+Because replicas never synchronize with one another, the 512-GPU runs coordinated entirely over RoCE Ethernet. There is no InfiniBand in this configuration and no throughput left on the table for its absence.
+
+For customers building inference-primary fleets, that removes a substantial line item from the cluster bill of materials with no measured performance penalty. The scale-up fabric inside the node does the work that matters, and the scale-out fabric only needs to move tokens.
+
+Why we ran MLPerf on Kubernetes
+
+MLPerf Inference's reference harnesses are built to run as a Docker container on a single machine, bare metal, or a VM. That model does not scale well with a 512-GPU run across 64 nodes, and more importantly it is not how production inference is actually operated on Crusoe.
+
+Rather than hand-orchestrate 64 SSH sessions, we re-expressed the benchmark as Kubernetes-native manifests.
+
+That choice gave us three things directly:
+
+Scaling. The same worker Job runs at parallelism=1 or parallelism=64 by changing one argument. The 8-GPU smoke test and the 512-GPU submission run are the same manifest.
+
+Observability. Pod logs, events, and resource metrics arrive through the standard Kubernetes surface, with no bespoke setup. We publish and maintain a Grafana solution backed by Crusoe's Managed Metrics so customers get the same view on day one.
+
+Fault tolerance. A crashed replica is a restarted pod, not a dead run. Stragglers are visible in per-replica throughput and can be evicted gracefully.
+
+Crusoe Command Center in practice
+
+The screenshot above is a Grafana dashboard built with Crusoe Managed Metrics. We expose a managed PromQL endpoint that collects infrastructure logs across compute, storage, and network resources in your Crusoe VPC that can be used to populate third party observability dashboards. During evaluations, we used these metrics to track the performance and state of running workloads.
+
+The metrics can also be used to set up custom alerts for infrastructure failures like GPU faults, storage bottlenecks, or VPC and RDMA Network contention. The Crusoe Watch Agent now ships by default across infrastructure resources, which streamlines the path to production for managing AI workloads.
+
+MLPerf system under test (SUT) methodology
+
+MLPerf's LoadGen binary must see a single system under test. At 512 GPUs we built that SUT as a ZeroMQ (ZMQ)-connected head plus workers.
+
+When scaling the inference tests, we ran into bottlenecks at the orchestration layer where workers could not reliably register with the head node at scale. This is why our final design resulted in one dedicated head pod which does only dispatch and LoadGen. It hosts no model, so it does not become a compute bottleneck. Each of the 64 worker pods owns one node's 8 GPUs, and how those 8 GPUs are used is model-specific:
+
+gpt-oss-120b: 8 independent single-GPU replicas per node at tensor-parallel size 1, for 512 replicas total. The model fits in one GPU at MXFP4, so no sharding is needed.
+
+DeepSeek-R1: one replica sharded across all 8 GPUs of a node (TP8, EP8, 8-way DP-attention), for 64 replicas total. The 671B MoE is too large for a single 288 GB GPU, so it is sharded, but only within the node, over XGMI.
+
+There are no cross-node collectives. The only inter-node traffic is tokenized input and output streams over ZMQ on the front-end ethernet fabric.
+
+Scenarios
+
+Offline measures raw batch throughput with no latency constraint. device_count is 8 times the node count, and target_qps is tuned high enough that LoadGen issues sufficient samples to fill the 20-minute minimum-duration window.
+
+Server measures throughput under a p99 latency SLA covering time to first token and time per output token. target_qps is tuned to the highest value that still passes the SLA. Pushing it beyond that point creates a scheduling backlog and blows p99. For gpt-oss-120b the sustainable point is target_qps 4000, while for DeepSeek-R1 it is target_qps 688.
+
+Reproduce this yourself
+
+Everything above is open source in the crusoe-mlperf-mi355x-inference-v6.1 repo.
+
+Start small to validate the pipeline, then scale: N=1 (8 GPUs), then N=8 (64 GPUs), then N=64 (512 GPUs). Accuracy and compliance are scale-independent, so correctness can be confirmed at N=1 and the full fleet spent only on throughput numbers. Per-model commands are in the top-level README.
+
+What comes next
+
+Although this is Crusoe's first MLPerf Inference submission, it will not be our last. We publish these results and the code behind them to provide tangible benchmarks that our customers and partners can use to see first hand how we validate performance at scale. Every Crusoe cluster is validated end to end during bring-up before a customer touches it. This includes workload validation under sustained load, GPU and HBM stress testing, Infiniband / RoCE fabric validation, and reference workload benchmarks. MLPerf is one instrument in that process. When a customer takes delivery of a cluster, the performance characteristics have already been measured against a public, peer-reviewed standard.
+
+At Crusoe, we partner closely with AMD on hardware performance and software co-design, from ROCm and inference engine tuning down to cluster bring-up and network validation. That partnership is how we build the most reliable and performant AMD clusters, and public benchmarks like MLPerf are how we prove it. Every number in this post is peer-reviewed and reproducible: the largest MI355X inference submission in MLPerf history. We will keep deepening this work with AMD and our partners, and we will keep publishing results for both Inference and Training workloads, so the numbers we quote are always numbers anyone can verify.
+
+Ready to serve at this scale? Talk to our team about running inference on AMD Instinct MI355X with Crusoe Managed Kubernetes. Already on Crusoe? The Crusoe Managed Kubernetes documentation will get you started.
+
+Latest articles
+
+Are you ready to build something amazing?
