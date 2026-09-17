@@ -1,90 +1,171 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""mKernel 文章数据（arXiv 2609.13585v1）。
+范围：摘要 + 引言 + 背景与动机 + 设计 + 相关工作 + 结论。
+按用户要求忽略 4 Implementation 与 5 Evaluation。
 """
-article_data_build.py 模板
-=====================
-写新文章时：cp 到文章目录下，填入 DATA 字典内容，然后：
-    python write-article-data.py <文章目录>
-    python render-article.py <文章目录>
-    python add-portal.py <文章目录>
-
-字段说明：
-  - summary: 要点速览，列表格式 [{key, body}]。每条 key 是一两个词的标题，body 是一条结论（≤50字）。
-            ⚠️ 必须为 [{key, body}] 列表，不能是字符串！template.html 用 {% for item in summary %} 遍历。
-  - lead: 导语段落列表，每段用 **加粗** 标核心句
-  - sections: 正文章节。type 为 'h2'（大标题）或 'h3'（子标题）。
-              figs 可选，每个 {src: 文件名, caption: 图注文字}
-  - conclusion: 结语段落列表。**铁律**：① 不出现"本文""这篇""本博客"等自称/元引用前缀——直接陈述结论，读者知道在说谁。② 每段不超过180 token。③ 不出现"独立观点""我的看法""个人见解"等废话标记——结语本身就是观点。④ 每段首句直接是结论，不是"本文提出了…"。
-  - reference_url: 原文出处 URL
-"""
-
 import json, os, sys
 
-# 获取文章目录（兼容 write-article-data.py 的 exec 调用）
 _article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
 
+_F = '<span style="font-size:12px;color:rgb(153,153,153);">'
+_BLL = '<span style="color:#0F4C81;font-size:7px;line-height:1;vertical-align:middle;">●</span>&nbsp;'
+_BOX = '<span style="display:block;background:#f5f8fb;border-left:3px solid #0F4C81;padding:10px 14px;border-radius:4px;font-family:Consolas,Monaco,monospace;">'
+
 DATA = {
-    # ⚠️ 要点速览：必须为 [{key, body}] 列表，不可为字符串。**必须恰好 3 条**（write-article-data.py 三重校验要求 len(summary) == 3）
+    "title": "mKernel：把计算、NVLink 与跨节点 RDMA 融进一个内核",
+
     "summary": [
-        {"key": "核心观点", "body": "一句话说清论文/文章最关键的结论"},
-        {"key": "关键数据", "body": "支撑核心结论的具体数字或对比"},
-        {"key": "方法创新", "body": "区别于已有工作的核心创新点"},
+        {"key": "核心突破", "body": "融合内核第一次跨出单机 NVLink 域：计算、节点内 NVLink 与跨节点 RDMA 在同一个持久内核里按 tile 粒度重叠，而不是排成流水线或交给独立的集合通信。"},
+        {"key": "设计主线", "body": "SM 角色专精、分层搬运把跨节点流量压到最小、由 GPU 发布命令而主机代理提交 RDMA、运行时自适应调整 SM 划分。"},
+        {"key": "实测数字", "body": "两个 16 卡 H200 集群上，GEMM+AllReduce 最高 1.72 倍、Ring Attention 1.88 倍；作者还发现 GPUDirect Async 相对主机代理几乎没有额外收益。"},
     ],
 
     "lead": [
-        "引导段第一句。介绍背景和问题定位。",
-        "引导段第二句。点明本文核心内容。",
+        "通信已经是大模型训练和推理的主要开销。mKernel 把计算、节点内 NVLink 传输和跨节点 RDMA 放进同一个持久内核，让三者在 tile 粒度上彼此重叠，而不是各跑各的。",
     ],
 
     "sections": [
         {
             "type": "h2",
-            "title": "第一节标题",
+            "title": "通信正在吃掉训练时间",
             "paras": [
-                "段落一正文。**加粗** 标核心结论。",
-                "段落二正文。",
+                "大模型训练和推理要么把模型层切开，要么把输入序列切开，摊到很多张 GPU 上，这就是张量并行、序列并行和专家并行。在生产环境的混合专家（MoE）训练里，通信占前向计算的 43.6%、占端到端训练时间的 32%；在主流 MoE 模型和框架中，设备间通信最多能吃掉 47% 的执行时间。",
+                "这个失衡还在扩大。加速器算力的涨速快过网络带宽：一台 GB300 NVL72 机柜能提供 720 PFLOP/s 的 FP8 算力，但机柜里每张 GPU 只有一块 400 到 800 Gb/s 的网卡通向外部。",
+                "以往的工作在不同粒度上重叠计算与通信。节点内融合可以让计算和本地传输重叠，跨节点通信仍然交给一次独立的集合通信，见图 1(a)。双流流水线会把已算完的 chunk 发出去，同时继续算后面的 chunk，但每个 chunk 只能在自己的 kernel 边界释放，见图 1(b)。tile 级融合更进一步，把 tile 的就绪状态暴露到内核内部，换来更细的重叠。",
+                "这些工作大多局限在单节点，而且不少系统只融合了计算、节点内通信、跨节点通信中的某几段，剩下的仍然单独执行。mKernel 把三者都塞进一个融合内核，统一协调三个阶段的 tile 级进度，见图 1(c)。",
             ],
-            # ⚠️ ⚠️ ⚠️ 图必须放在 section 内部，绝不能放在 DATA 顶层！
-            #    模板只遍历 sec.figs / sec.fig_after，顶层 figs 被静默忽略。
-            #    推送前务必 grep -c '<img' article.html 确认 > 0。
-            # 可选：图嵌入。src 是文件名（相对文章目录），caption 是图注文字
-            # ⚠️ 铁律：正文中引用的每个"图 N"都必须有对应的 fig 条目，不能少。
-            #    blocks.jsonl 中标记 hero=true 的图只用作封面，不会嵌入正文。
-            #    如果正文引用该图，必须同时 embed 一份（不能只做封面）。
-            "figs": [
-                {"src": "fig01.png", "caption": "图 1：说明文字"},
-            ],
-            # 进阶：使用 fig_after 实现段落级内联（比 figs 更精确，图挂在指定段落之后）
-            # 格式：{"para_index": [{"src": "figN.png", "caption": "图注"}]}
-            # 推荐 5 图以上的文章使用 fig_after，render-article.py 自动内联
+            "fig_after": {"3": [{"src": "fig01.png", "caption": "图 1：计算与通信的三种调度方式。(a) 先做节点内融合，再单独做一次跨节点集合通信；(b) 双流重叠，以两个 tile 组成的 chunk 为单位，每个生产端 kernel 边界释放一个 chunk；(c) mKernel 在内核内同时调度两级通信，暴露 tile 级就绪信号。已有的计算内核本身就工作在 tile 粒度上，因此 GEMM 效率不受影响。图中数字标识输出 tile，宽度只是示意，不是实测值。"}]},
         },
         {
-            "type": "h3",
-            "title": "子节标题",
+            "type": "h2",
+            "title": "跨节点比节点内难得多",
             "paras": [
-                "子节段落。",
+                "把融合扩展到跨节点，比在单节点内融合难得多。在我们的集群上，跨节点网络给到每张 GPU 的带宽大约只有 NVLink 的九分之一，两级链路不能一视同仁。网卡是独立的 PCIe 设备，有自己的工作队列，GPUDirect Async 还要求网卡的工作队列能被 GPU 直接访问。各家的传输语义也不一样：InfiniBand 的可靠连接会按序送达 RDMA 写，而 AWS EFA 的可扩展可靠数据报（SRD）不保证顺序，跟在数据后面写的完成标志可能比数据先可见。节点内通信和跨节点通信都要占用 SM，而 SM 还要跟计算抢。",
+                "我们用了两个独立集群，一个节点间走 InfiniBand，一个走 AWS EFA，见表 1。两个集群的节点内都是 8 张 GPU 通过 NVLink 和 NVSwitch 互联。跨节点带宽明显低于节点内。节点内的 tile 抽象、异步传输和通信原语，ThunderKittens 和 ParallelKittens 已经提供了；跨节点则靠 GPUDirect RDMA 让网卡直接在 GPU 显存之间搬数据。剩下的问题是，这些路径的带宽差了一个量级，内核却必须同时给计算、本地通信和网络协调分配 SM。",
+                _F + "表 1：两个独立 H200 集群的通信层级：一个走 InfiniBand（IB），一个走 AWS EFA。两者共用表中列出的 GPU 内部与节点内层级。跨越节点边界会改变由哪些 SM 协调数据搬运。NVLink 和网络带宽都是每张 GPU、每个方向的数值。</span>",
+            ],
+            "table": {
+                "head": ["层级", "链路", "带宽", "SM 角色", "传输机制"],
+                "rows": [
+                    ["GPU 内部", "HBM3e", "4.8 TB/s", "计算", "load/store、TMA"],
+                    ["节点内", "NVLink + NVSwitch", "450 GB/s", "本地通信", "TMA、NVSwitch"],
+                    ["跨节点（IB）", "InfiniBand（CX7）", "50 GB/s", "发送与接收", "网卡 RDMA"],
+                    ["跨节点（EFA）", "AWS EFA（SRD）", "50 GB/s", "发送与接收", "网卡 RDMA"],
+                ],
+            },
+        },
+        {
+            "type": "h2",
+            "title": "计算与通信重叠：SM 怎么分",
+            "paras": [
+                "tile 级融合把计算与通信的重叠做到了内核内部：算出一个输出 tile 就立刻可以参与通信，输入 tile 一到就可以参与计算。FLUX 把通信塞进 GEMM 的 epilogue、把就绪检查塞进 prologue，还支持通过 NVSHMEM 做跨节点写。Comet 和 MegaScale-MoE 把细粒度重叠用到 MoE 负载上。TileLink、Triton-distributed 和 Mercury 则把计算与通信暴露成编译器原语。",
+                "**SM 分配是核心权衡。** 设一张 GPU 有 S 个 SM，其中 S_c 个分给通信。如果计算吞吐大致随计算 SM 数变化，且三个阶段在稳态下重叠，执行时间可以近似写成：",
+                _BOX + "T_fused ≈ max( T_compute × S / (S - S_c), T_NVLink, T_network ) + T_fill/drain + T_sync</span>",
+                "其中 T_compute 是全部 S 个 SM 都用于计算所需的时间，传输时间取决于选定的分配方案，最后两项是流水线的填充与排空以及同步开销。核心权衡在于：给通信多分 SM 能缩短通信时间，但会拖慢计算。",
+                "从这个观察出发，mKernel 选择自适应地分配 SM，并用分层通信把 T_network 压下去。",
             ],
         },
         {
             "type": "h2",
-            "title": "第二节标题",
+            "title": "五个必须先解决的约束",
             "paras": [
-                "段落正文。",
+                "**C1 节点内与跨节点的带宽不对称。** NVLink 域与跨节点网络之间的带宽差，会让 T_network 成为上式中的主导项。这就要求尽量在 NVLink 上做本地聚合与复制，减少重复的跨节点传输，并让这些传输尽早发起。在如今常见的 rail 优化拓扑里，让本地序号相同的 GPU 之间交换跨节点数据效率更高，节点内数据则走 NVLink。我们把这类远端 GPU 称为 rail peer。",
+                "**C2 传输粒度不对称。** 节点内通信暴露的是对等端内存操作，跨节点走的是显式的、面向消息的 RDMA 请求：虽然 RDMA 寻址的是远端内存，但每个请求都要指定缓冲区范围与完成机制。也就是说，节点内是内存语义，跨节点是消息语义。融合内核必须桥接这两种接口：把细粒度的本地 tile 攒成网络 chunk，摊薄每条消息的开销，同时尽早暴露已就绪的工作。",
+                "**C3 各平台的传输顺序语义不同。** 到达标志绝不能先于它对应的数据可见。InfiniBand 的可靠连接保证同一条连接上写的顺序，而 EFA 的可扩展可靠数据报传输、以及近期的 OpenAI MRC 协议并不提供同样的保证。共享的内核接口必须能容纳不同的完成机制。",
+                "**C4 跨设备同步。** 网络完成和 GPU 显存可见性本身也会引入开销。持久内核需要就绪检查与内存序保证，让它在不引入全局同步的前提下安全消费远端数据。难点在于用有限的轮询和同步开销提供这些保证。",
+                "**C5 SM 分配要跟着负载变。** 节点内和跨节点通信需要的 SM 资源，会随输入形状、负载组合和内核类型变化。静态扫描能找到有效的划分，但输入形状一旦变化就要重新 profile 和维护，何况输入形状本身可能就是不均匀的。我们的节点内扫描中，最佳分配从 2 个通信 SM 一直跨到 64 个。而且最佳平衡点在同一内核内部也会移动，比如计算和通信之间出现负载不均，或者工作量无法在可用 SM 上整齐划分的时候。自适应调优必须在不引入过大开销的前提下跟上这些变化。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "设计总览",
+            "paras": [
+                "图 2 画的是 mKernel 如何在持久内核内部把计算、NVLink 传输和跨节点 RDMA 重叠起来。核心设计难点是让 tile 级进度跨越节点内与跨节点两条边界：一个本地已就绪的 tile，不一定能直接发成一条完整的网络消息；一条已提交的消息，也还不一定能被远端计算安全消费。mKernel 用显式的就绪交接把这几段分开。计算部分复用 ThunderKittens 的原语，设计重点放在如何把它们与节点内、跨节点通信协调起来。",
+                "线程块按角色分工：计算、节点内通信、跨节点提交、接收侧处理。专门的角色块负责提交就绪的工作，计算块继续产出 tile。主机上的代理把命令转交给网卡，数据本身始终留在 GPU 显存里。",
+            ],
+            "fig_after": {"1": [{"src": "fig02.png", "caption": "图 2：mKernel 的架构（两个节点，每个节点详细画出一张 GPU）。每张 GPU 执行一个持久内核，线程块被分配不同角色。① 计算块把完成的 tile 写入显存并设置就绪标志。② 节点内通信块通过 NVLink 与同一节点另外 7 张 GPU 交换 tile，广播和归约借助 NVSwitch。③ 跨节点发送块把传输命令写入主机内存中的命令队列。④ 主机代理线程把命令批量提交给网卡。⑤ 网卡把数据传输到节点 1 上的 rail peer；由网卡还是接收端代理发信号，取决于传输方式。⑥ 接收块观察到标志后消费数据。可选的控制器读取进度计数器，并发布目标通信块数量（虚线）。"}]},
+        },
+        {
+            "type": "h2",
+            "title": "把两级通信的粒度解耦",
+            "paras": [
+                "**先在本地归约或广播，再跨节点交换。** mKernel 用 NVSwitch 做本地归约与广播，把冗余的跨节点流量压到最小（C1）。以 GEMM+AllReduce 为例，节点内每张 GPU 负责八分之一的输出 tile；NVSwitch 把 8 张本地 GPU 对每个 tile 的贡献归约起来；负责该 tile 的 GPU 再和它的 rail peer 交换这个部分和，合并本地与远端结果，然后把完整的 tile 广播回本节点。这些步骤对每个 tile 都是独立进行的。AllGather+GEMM 则是每个分片只向每个目标节点发一次，接收端的 rail peer 再通过 NVLink 广播给本节点其他 GPU。",
+                "**区分 tile 就绪和消息就绪。** 节点内的通信是对 tile 做对等端内存操作，跨节点则要用显式请求指定缓冲区范围和完成信息。如果把每个本地 tile 都映射成一条网络请求，本地并行度就会被每条消息的开销绑死（C2）。mKernel 让计算 tile、本地传输和网络 chunk 各自独立定尺寸：网络 chunk 越大，提交与通知的开销被摊得越薄，但要等更多数据，流水线的填充和排空也会拉长。",
+                "以 GEMM+AllReduce 为例，它把 4 个本地归约后的 tile 组成一个 256 KiB 的网络 chunk。本地线程块各自独立处理 tile，一个按 chunk 计数的计数器让最后完成的 tile 触发就绪发布，于是这个 chunk 不必等 GEMM 全部算完就能发出去，无论走节点内还是跨节点。接收侧的映射同样重要：Dispatch+GEMM 在加载某个 token 前，会检查与它字节范围相交的每一个 512 KiB 网络 chunk，跨 chunk 边界的 token 必须等两条远端消息都到达。计算与通信之间本来就是数据依赖关系，在这个场景里要么是通信给计算供数据，要么反过来。",
+                "**要点一。** 分层通信把流量从更慢的跨节点网络挪走，而把本地 tile 与网络 chunk 分开定尺寸，是在尽早发送和摊薄每条消息开销之间取得平衡。",
+            ],
+        },
+        {
+            "type": "h2",
+            "title": "SM 划分与运行时自适应",
+            "paras": [
+                "前面的机制决定了工作什么时候就绪，SM 划分决定的则是每个阶段能推进多快。固定配置下线程块按 block 序号分配角色，自适应模式下可以在任务边界处换角色。角色分开之后，mKernel 调整分配时不需要改动计算块的 warp 布局。",
+                "**自适应调优。** 静态扫描能找到高效的 SM 划分，但每种负载都要重新 profile 并维护（C5）。mKernel 的自适应模式能在一次执行过程中更新分配：每个块在两次计算或通信任务之间，比如一个 tile 或一条消息，检查共享的目标通信块数量，当前实际分配与目标不一致时就切换角色。图 3 用 4 个节点内内核把这一策略和静态扫描做了对比。",
+                "控制器根据各线程块累计的周期计数器估计每种角色的单任务开销，再把目标值设在让两种角色预测完成时间相等的点上：",
+                _BOX + "n_s* = B × (R_s × C_s) / (R_p × C_p + R_s × C_s)</span>",
+                "其中 R_p 和 R_s 是剩余的计算与通信任务量，C_p 和 C_s 是它们各自的开销估计。数据依赖决定初始分配以及阻塞工作的处理方式：当通信为计算提供输入时，等待输入的算块即使目标已经达成，也可以临时去帮通信。",
+            ],
+            "fig_after": {"4": [{"src": "fig03.png", "caption": "图 3：SM 划分的静态扫描（单节点，8 张 H100）。每条曲线是某个问题规模下延迟随通信 SM 数的变化，按该规模的最佳固定划分归一化（虚线）。各面板右侧的星形标记是自适应控制器在同一批规模上的延迟。"}]},
+        },
+        {
+            "type": "h2",
+            "title": "可移植的跨节点通信",
+            "paras": [
+                "主机辅助的 GPU 发起通信路径，把 GPU 生产出来的工作翻译成显式 RDMA 消息。代理跑在 libibverbs 上，负责提交与传输相关的通知，沿用 UEP 提出的 GPU 命令加 CPU 代理设计。",
+                "**命令发布与反压。** 发送块在主机 pinned 内存的环形缓冲区里发布 48 字节命令，每条命令写明对端、源与目标偏移、字节数以及 chunk 标识。GPU 先写命令体再提交头部，代理轮询到头部之后才读记录。队列信用与未完成请求上限，约束了交给主机和网卡的工作量。网卡直接从注册过的 GPU 显存里读数据，当网络侧布局与计算侧布局不一致时，还会经过 staging buffer。",
+                "**批量提交，但不牺牲逐 chunk 完成。** 代理会把同一条连接上最多 8 条就绪命令合成一次提交。这和拼一个更大的网络 chunk 不是一回事：每条命令仍然保留自己的数据传输和到达通知。如果硬性要求凑满一批才提交，稀疏到达的命令和最后几个 chunk 都会被拖住，所以代理会提交部分批次，比如用一个有界的轮询窗口再收几条传输命令。提交批量跟随内核产出就绪工作的速率，chunk 大小决定的则是这些工作最早什么时候变得可传输。",
+            ],
+        },
+        {
+            "type": "h3",
+            "title": "传输语义随平台而异",
+            "paras": [
+                "到达信号必须能标识一份完整的数据，而不只是一条已提交的请求（C3）。InfiniBand 和 EFA 需要不同的通知路径，见表 2。",
+                _BLL + "**InfiniBand（ConnectX-7）：** 代理在同一条可靠连接（RC）上先发数据写，再发一个小标志写。接收块直接在显存里轮询这个标志，不需要接收侧的主机代理。这个协议要求目标端满足数据先于标志的顺序。",
+                _BLL + "**AWS EFA（SRD）：** SRD 不保证独立写的顺序。基于完成的路径因此使用带 immediate 数据的 RDMA 写：immediate 值标识 chunk，接收端代理在写完成接收之后才发布到达标志。这样就不必用一条单独标志写的到达顺序去推断数据是否完整。",
+                _F + "表 2：跨节点的到达通知路径（表中是 EFA 基于完成的变体）。传输完成与 GPU 显存可见性是两个独立的要求。</span>",
+            ],
+            "table": {
+                "head": ["", "ConnectX-7（InfiniBand）", "AWS EFA（SRD）"],
+                "rows": [
+                    ["传输顺序", "按 RC 连接保序", "不保序"],
+                    ["通知路径", "先数据写，后标志写", "带 immediate 的写；由代理设置标志"],
+                ],
+            },
+        },
+        {
+            "type": "h3",
+            "title": "主机辅助与 GPUDirect Async 的对比",
+            "paras": [
+                "我们也在 ConnectX-7 上用 IBGDA 实现了 GPUDirect Async，对外暴露与主机辅助路径相同的设备接口。图 4 对比了两种后端：在我们测试的场景里，GPUDirect Async 相对主机辅助的 GPU 发起通信几乎没有性能收益。",
+                "原因是主机辅助路径让代理把提交与计算重叠起来，还能批量化多条命令；而 GPUDirect Async 后端每个 chunk 都要发一次昂贵的系统级 GPU fence 和 doorbell。IBGDA 更适合小消息、对延迟敏感的工作负载。",
+            ],
+            "fig_after": {"1": [{"src": "fig04.png", "caption": "图 4：在 ConnectX-7 测试床（2 节点 × 8 张 H200）上，GPUDirect Async（IBGDA）相对主机辅助的 GPU 发起通信的吞吐比，两侧使用相同内核。柱状值是吞吐比，GPUDirect Async 位于分子；虚线是持平线。"}]},
+        },
+        {
+            "type": "h2",
+            "title": "相关工作",
+            "paras": [
+                "**内核框架与分布式融合。** CUTLASS、Triton 和 ThunderKittens 提供了分块 GPU 计算抽象，mKernel 的计算块用的就是 ThunderKittens。ParallelKittens 在这些抽象之上补齐了节点内通信与同步。FLUX 把通信和就绪检查融进 GEMM，也支持通过 NVSHMEM 做跨节点写。TileLink、Triton-distributed 和 Mercury 把计算与通信暴露给编译器优化。mKernel 走的是另一条路：在持久内核里用显式调度协调 NVLink 传输、RDMA chunk 和 SM 角色。",
+                "**重叠调度与 SM 分配。** Megatron-LM 和 Transformer Engine 在算子层面重叠通信与计算；工作分解与 Centauri 为相互依赖的算子暴露更小的调度单元；CoCoNet 做编译期的融合与重叠变换，T3 则用硬件跟踪与触发；NanoFlow 联合选择 batch 分解与 GPU 资源分配，COMET 依据负载元数据挑选 profile 过的计算与通信配置。mKernel 专门针对跨节点融合内核，并在内核执行过程中用实测进度和剩余工作量更新目标 SM 划分。",
+                "**通信接口与拓扑。** NVSHMEM 支持设备端单边操作，可以通过 GPUDirect Async 或主机辅助的 GPU 发起通信实现，其 libfabric 后端支持 EFA。MSCCL++ 提供对等端内存访问和代理中介的网络；NCCL 的设备 API 与 GIN 同样支持设备通信，包含直连和代理两种网络后端。UCCL-Tran 把传输控制放到 CPU 上，UEP 用 GPU 下发的命令加主机代理实现可移植的专家并行通信。mKernel 把紧凑的命令队列、直接的 verbs 实现与融合调度结合起来，同时支持 InfiniBand 和 EFA。TACCL 合成拓扑感知的集合通信，mKernel 用的则是受 tile 就绪约束的分层传输调度。",
+                "**持久内核与巨型内核。** Llama megakernel 和 MPK 用持久执行来调度模型算子，其中 MPK 支持多 GPU 推理。mKernel 关注的是每个分布式内核内部的计算与通信。",
             ],
         },
     ],
 
     "conclusion": [
-        "结语第一段。直接陈述结论，不出现「本文」「这篇」等前缀。不超过180 token。",
-        "结语第二段。行业影响或展望。不超过180 token。",
+        "mKernel 把 SM 当成唯一可编程的共享资源来经营：节点内通信、跨节点通信和计算都要抢 SM，那就在内核内部给它们分好角色，再让片上控制器按实测进度和剩余工作量实时调整比例。它的价值不在某个具体内核，而在于把融合从单机 NVLink 域推进到了整个机架。",
+        "几个数字值得记住：GEMM+AllReduce 最高 1.72 倍，Ring Attention 1.88 倍，节点内最佳 SM 分配在 2 到 64 之间浮动。最后这个跨度说明在这类问题上静态调优没有出路，自适应控制器不是锦上添花，而是必需品。",
+        "对做分布式训练基础设施的人，它释放的信号是跨节点通信不再只能交给独立的集合通信库，而是可以被折叠进计算内核，代价是你得自己管 SM 预算、命令队列和各家的传输语义差异。另一个反直觉的结论是，主机代理这条看起来更土的路径在测试里和 GPUDirect Async 打平，甚至在批量化上更省心，选型时不必为最激进的硬件路径买单。",
     ],
 
-    "reference_url": "https://arxiv.org/html/XXXX.XXXXXv1",
-    # ⚠️ 必须设置！push-draft.py 从此字段读取公众号标题
-    "title": "公众号文章标题",
+    "reference_url": "https://arxiv.org/html/2609.13585v1",
 }
 
-# ── 写入 article_data.json ──
-out_path = os.path.join(_article_dir, "article_data.json")
-with open(out_path, "w", encoding="utf-8") as f:
-    json.dump(DATA, f, ensure_ascii=False, indent=2)
-print(f"✅ 写入 {out_path} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA.get('sections', []))} sections)")
+if __name__ == '__main__':
+    out = os.path.join(_article_dir, 'article_data.json')
+    with open(out, 'w', encoding='utf-8') as f:
+        json.dump(DATA, f, ensure_ascii=False, indent=2)
+    print('wrote', out)
