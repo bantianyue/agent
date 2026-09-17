@@ -1,90 +1,108 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""article_data_build.py — trace-as-state-long-context
+
+文本 DSL 行文件模式：正文内容在 content1.txt（S#/T/F/TB/TR 行），本文件只做解析与组装。
+被 write-article-data.py 用 exec() 执行 → 运行时没有 __file__，因此路径写死。
 """
-article_data_build.py 模板
-=====================
-写新文章时：cp 到文章目录下，填入 DATA 字典内容，然后：
-    python write-article-data.py <文章目录>
-    python render-article.py <文章目录>
-    python add-portal.py <文章目录>
+import os
 
-字段说明：
-  - summary: 要点速览，列表格式 [{key, body}]。每条 key 是一两个词的标题，body 是一条结论（≤50字）。
-            ⚠️ 必须为 [{key, body}] 列表，不能是字符串！template.html 用 {% for item in summary %} 遍历。
-  - lead: 导语段落列表，每段用 **加粗** 标核心句
-  - sections: 正文章节。type 为 'h2'（大标题）或 'h3'（子标题）。
-              figs 可选，每个 {src: 文件名, caption: 图注文字}
-  - conclusion: 结语段落列表。**铁律**：① 不出现"本文""这篇""本博客"等自称/元引用前缀——直接陈述结论，读者知道在说谁。② 每段不超过180 token。③ 不出现"独立观点""我的看法""个人见解"等废话标记——结语本身就是观点。④ 每段首句直接是结论，不是"本文提出了…"。
-  - reference_url: 原文出处 URL
-"""
+HERE = r"D:\06_Hermes\articles\trace-as-state-long-context"
 
-import json, os, sys
 
-# 获取文章目录（兼容 write-article-data.py 的 exec 调用）
-_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+def read_lines(path):
+    out = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n").rstrip("\r")
+            if line.strip():
+                out.append(line)
+    return out
+
+
+S = []
+cur = None
+tbl_head = None
+tbl_rows = []
+fig_count = 0
+
+
+def flush_table():
+    global tbl_head, tbl_rows
+    if cur is not None and tbl_head is not None:
+        width = len(tbl_head)
+        for r in tbl_rows:
+            assert len(r) == width, f"表格列数不一致: {cur['title']} / {r}"
+        # 模板每个 section 只渲染一张表（sec.table 单值）→ 一节两张表会静默覆盖
+        assert "table" not in cur, f"同一节出现两张表会被覆盖: {cur['title']}"
+        cur["table"] = {"head": tbl_head, "rows": tbl_rows}
+    tbl_head = None
+    tbl_rows = []
+
+
+for ln in read_lines(os.path.join(HERE, "content1.txt")):
+    if ln.startswith("S# "):
+        flush_table()
+        cur = {"type": "h2", "title": ln[3:].strip(), "paras": [], "fig_after": {}}
+        S.append(cur)
+    elif ln.startswith("T "):
+        flush_table()
+        assert cur is not None, "T 行出现在任何 S# 之前"
+        cur["paras"].append(ln[2:].strip())
+    elif ln.startswith("F "):
+        assert cur is not None and cur["paras"], "F 行出现时前面没有正文段落"
+        name, _, caption = ln[2:].partition("|")
+        name = name.strip()
+        idx = len(cur["paras"]) - 1
+        cur["fig_after"].setdefault(str(idx), []).append(
+            {"src": name, "caption": caption.strip()}
+        )
+        fig_count += 1
+    elif ln.startswith("TB "):
+        flush_table()
+        tbl_head = [c.strip() for c in ln[3:].split("|")]
+        tbl_rows = []
+    elif ln.startswith("TR "):
+        tbl_rows.append([c.strip() for c in ln[3:].split("|")])
+    else:
+        raise ValueError("无法识别的行: " + ln[:60])
+
+flush_table()
+
+# ── 组装自检：fig_after 越界 / 图数 / 表格列数 ──
+paras_total = 0
+tables_total = 0
+for sec in S:
+    paras_total += len(sec["paras"])
+    for k in list(sec["fig_after"].keys()):
+        assert int(k) < len(sec["paras"]), f"fig_after 越界: {sec['title']} key={k} paras={len(sec['paras'])}"
+    if "table" in sec:
+        tables_total += 1
+disk_figs = sorted(f for f in os.listdir(HERE) if f.startswith("fig") and f.endswith(".png"))
+used_figs = sorted({g["src"] for sec in S for lst in sec["fig_after"].values() for g in lst})
+print(f"[build] sections={len(S)} paras={paras_total} tables={tables_total} figs={fig_count}")
+print(f"[build] disk figs={disk_figs}")
+print(f"[build] used figs={used_figs}")
+assert fig_count == len(used_figs), "有图被重复引用"
+assert used_figs == disk_figs, f"磁盘图与引用图不一致: {set(disk_figs) ^ set(used_figs)}"
 
 DATA = {
-    # ⚠️ 要点速览：必须为 [{key, body}] 列表，不可为字符串。**必须恰好 3 条**（write-article-data.py 三重校验要求 len(summary) == 3）
+    "title": "推理轨迹前置到长上下文之前：Trace as State 把 GraphWalks 准确率从 29.2% 提到 81.8%",
     "summary": [
-        {"key": "核心观点", "body": "一句话说清论文/文章最关键的结论"},
-        {"key": "关键数据", "body": "支撑核心结论的具体数字或对比"},
-        {"key": "方法创新", "body": "区别于已有工作的核心创新点"},
+        {"key": "核心机制", "body": "把第一遍的推理轨迹序列化成文本状态代理，放在长上下文之前重读一遍，让第一遍才发现的任务状态在第二遍开始时就能用。"},
+        {"key": "关键数据", "body": "三个模型乘三个长上下文数据集共 27 组组合，trace as state 有 26 组高于 trace append；GraphWalks Parents 上 GLM-5.2 的精确匹配从 66.4% 直接到 100%。"},
+        {"key": "理论依据", "body": "条件状态更新任务中，条件在前与条件在后在最坏情况下相差指数级的工作记忆，顺序本身就是一个可优化的变量。"},
     ],
-
     "lead": [
-        "引导段第一句。介绍背景和问题定位。",
-        "引导段第二句。点明本文核心内容。",
+        "长上下文推理的瓶颈未必是窗口长度。解题需要的任务状态，常常要到读完整段上下文之后才出现，而因果注意力让这个状态无法回头影响前面已经形成的表示。把第一遍的推理轨迹放到长上下文之前再读一遍，DeepSeek V4 Pro 在 GraphWalks Parents 上的精确匹配从 29.2% 提升到 81.8%。",
     ],
-
-    "sections": [
-        {
-            "type": "h2",
-            "title": "第一节标题",
-            "paras": [
-                "段落一正文。**加粗** 标核心结论。",
-                "段落二正文。",
-            ],
-            # ⚠️ ⚠️ ⚠️ 图必须放在 section 内部，绝不能放在 DATA 顶层！
-            #    模板只遍历 sec.figs / sec.fig_after，顶层 figs 被静默忽略。
-            #    推送前务必 grep -c '<img' article.html 确认 > 0。
-            # 可选：图嵌入。src 是文件名（相对文章目录），caption 是图注文字
-            # ⚠️ 铁律：正文中引用的每个"图 N"都必须有对应的 fig 条目，不能少。
-            #    blocks.jsonl 中标记 hero=true 的图只用作封面，不会嵌入正文。
-            #    如果正文引用该图，必须同时 embed 一份（不能只做封面）。
-            "figs": [
-                {"src": "fig01.png", "caption": "图 1：说明文字"},
-            ],
-            # 进阶：使用 fig_after 实现段落级内联（比 figs 更精确，图挂在指定段落之后）
-            # 格式：{"para_index": [{"src": "figN.png", "caption": "图注"}]}
-            # 推荐 5 图以上的文章使用 fig_after，render-article.py 自动内联
-        },
-        {
-            "type": "h3",
-            "title": "子节标题",
-            "paras": [
-                "子节段落。",
-            ],
-        },
-        {
-            "type": "h2",
-            "title": "第二节标题",
-            "paras": [
-                "段落正文。",
-            ],
-        },
-    ],
-
+    "sections": S,
     "conclusion": [
-        "结语第一段。直接陈述结论，不出现「本文」「这篇」等前缀。不超过180 token。",
-        "结语第二段。行业影响或展望。不超过180 token。",
+        "**长上下文推理的瓶颈常常不在窗口长度，而在顺序**：同一份推理轨迹、同一段上下文，把轨迹挪到上下文之前，GraphWalks Parents 上的精确匹配就从 29.2% 升到 81.8%。",
+        "**① 顺序决定信息何时可用。** 因果注意力让已经形成的表示无法回头修改，把第一遍才发现的任务状态前置，等于让第二遍从更高的起点重新读一遍上下文。",
+        "**② 起作用的是同一道题的轨迹，不是脚手架。** 随机轨迹比不给轨迹更差，只反馈答案也远不如反馈推理过程，说明收益来自题目相关的状态信息，而不是文本格式本身。",
+        "**③ 代价同样明确。** 多一遍传递意味着更多 token 与更长延迟，状态前置还会削弱多轮场景下的键值缓存复用，轨迹本身有错时反馈也会失真。",
+        "对做长上下文推理的人来说，值得先试的不是继续加长窗口，而是给已有的推理产物换一个位置：轨迹前置、问题前置、答案前置各试一遍，成本只是一次额外传递，收益却可能是一个档位。",
     ],
-
-    "reference_url": "https://arxiv.org/html/XXXX.XXXXXv1",
-    # ⚠️ 必须设置！push-draft.py 从此字段读取公众号标题
-    "title": "公众号文章标题",
+    "reference_url": "https://arxiv.org/html/2609.02702v1",
 }
-
-# ── 写入 article_data.json ──
-out_path = os.path.join(_article_dir, "article_data.json")
-with open(out_path, "w", encoding="utf-8") as f:
-    json.dump(DATA, f, ensure_ascii=False, indent=2)
-print(f"✅ 写入 {out_path} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA.get('sections', []))} sections)")
