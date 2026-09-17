@@ -1,90 +1,177 @@
 #!/usr/bin/env python3
-"""
-article_data_build.py 模板
-=====================
-写新文章时：cp 到文章目录下，填入 DATA 字典内容，然后：
-    python write-article-data.py <文章目录>
-    python render-article.py <文章目录>
-    python add-portal.py <文章目录>
+# -*- coding: utf-8 -*-
+# 命令式 builder：逐节 append，避免巨型 dict 字面量的结构性语法错。
+# 产出 DATA 后由 write-article-data.py 执行并序列化为 article_data.json。
 
-字段说明：
-  - summary: 要点速览，列表格式 [{key, body}]。每条 key 是一两个词的标题，body 是一条结论（≤50字）。
-            ⚠️ 必须为 [{key, body}] 列表，不能是字符串！template.html 用 {% for item in summary %} 遍历。
-  - lead: 导语段落列表，每段用 **加粗** 标核心句
-  - sections: 正文章节。type 为 'h2'（大标题）或 'h3'（子标题）。
-              figs 可选，每个 {src: 文件名, caption: 图注文字}
-  - conclusion: 结语段落列表。**铁律**：① 不出现"本文""这篇""本博客"等自称/元引用前缀——直接陈述结论，读者知道在说谁。② 每段不超过180 token。③ 不出现"独立观点""我的看法""个人见解"等废话标记——结语本身就是观点。④ 每段首句直接是结论，不是"本文提出了…"。
-  - reference_url: 原文出处 URL
-"""
+DOT = '<span style="color:#0F4C81;font-size:7px;line-height:1;vertical-align:middle;">●</span>&nbsp;'
 
-import json, os, sys
+S = []
 
-# 获取文章目录（兼容 write-article-data.py 的 exec 调用）
-_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
 
-DATA = {
-    # ⚠️ 要点速览：必须为 [{key, body}] 列表，不可为字符串。**必须恰好 3 条**（write-article-data.py 三重校验要求 len(summary) == 3）
-    "summary": [
-        {"key": "核心观点", "body": "一句话说清论文/文章最关键的结论"},
-        {"key": "关键数据", "body": "支撑核心结论的具体数字或对比"},
-        {"key": "方法创新", "body": "区别于已有工作的核心创新点"},
+def h2(t):
+    S.append({"type": "h2", "title": t, "paras": [], "fig_after": {}})
+    return S[-1]
+
+
+def h3(t):
+    S.append({"type": "h3", "title": t, "paras": [], "fig_after": {}})
+    return S[-1]
+
+
+def fig(sec, name, caption, idx=-1):
+    i = idx if idx >= 0 else max(0, len(sec["paras"]) - 1)
+    sec.setdefault("fig_after", {}).setdefault(str(i), []).append(
+        {"src": name, "caption": caption})
+
+
+# ── 一、结果 ─────────────────────────────────────────────
+sec = h2('512 张 AMD Instinct MI355X 上的 MLPerf Inference v6.1 结果')
+sec["paras"] += [
+    '上个月，Crusoe 向 MLPerf Inference v6.1 提交了 gpt-oss-120b 与 DeepSeek-R1 的结果，在 AMD Instinct MI355X 上以 512 卡规模运行，平台是 Crusoe Managed Kubernetes。这是迄今为止 MLPerf 历史上按 GPU 数量计规模最大的 MI355X 推理提交。',
+]
+fig(sec, "fig01.png", "图 1：代表 Crusoe AMD Instinct MI355X 集群的等距视角服务器机架示意", 0)
+sec["paras"] += [
+    '有三件事对推理负载的意义超过了原始数字本身。',
+    DOT + '**吞吐从 8 卡到 512 卡线性扩展**，达到理想值的 90% 以上，这意味着负载可以按预期压力确定性地自动伸缩。',
+    DOT + '**不需要任何特殊 RDMA 互连。**这个规模的推理并不必然要求跨节点集合通信。整个 512 卡运行在标准 400Gb 以太网上完成协调，没有 InfiniBand、没有 RoCE，也没有跨节点 all-reduce。',
+    DOT + '**基准测试作为典型的 Kubernetes 工作负载运行**，用的就是客户在生产中使用的同一套 Crusoe Managed Kubernetes 平台，同样的可观测性、同样的故障处理。相关清单已经开源，任何人都可以复现。',
+    '这篇文章覆盖结果、分析以及开展这些基准测试所用的方法论，读者可以据此自行复现。完整的复现仓库已开源于 GitHub。',
+    '所有结果均为 MLPerf Inference v6.1 闭源组（closed division），512 张 AMD Instinct MI355X，跨 64 个节点，由 Crusoe Managed Kubernetes 作为主要编排器。',
+    'Server 场景的结果在 v6.1 的延迟 SLA 下测得：gpt-oss-120b 的 p99 首 token 时延（TTFT）低于 3.0 秒、p99 每输出 token 时延（TPOT）低于 80 毫秒；DeepSeek-R1 的 p99 TTFT 低于 2.0 秒、p99 TPOT 低于 80 毫秒。两个运行都以余量通过（gpt-oss 实测 2.69 秒 TTFT 与 36.5 毫秒 TPOT，DeepSeek 实测 1.85 秒 TTFT 与 79.98 毫秒 TPOT），说明我们本可以推高 QPS 拿到更高吞吐。',
+    '两个模型都通过了闭源组的精度要求：gpt-oss-120b 精确匹配率 83.7%，参考下限 82.3%；DeepSeek-R1 精确匹配率 80.7%（下限 80.54%），平均输出长度 3,898 token，落在要求的 3,497.6 至 4,274.85 区间内。',
+    '已发布的完整结果可以在 MLCommons 的 MLPerf Inference v6.1 闭源组结果中查询。',
+]
+sec["table"] = {
+    "head": ["模型", "场景", "总吞吐", "单卡吞吐"],
+    "rows": [
+        ["gpt-oss-120b", "Offline", '<strong style="color:#0F4C81;">~5.75M tok/s</strong>', "~11.2k tok/s"],
+        ["gpt-oss-120b", "Server", "~5.39M tok/s", "~10.5k tok/s"],
+        ["DeepSeek-R1", "Offline", "~2.90M tok/s", "~5.7k tok/s"],
+        ["DeepSeek-R1", "Server", "~2.40M tok/s", "~4.7k tok/s"],
     ],
-
-    "lead": [
-        "引导段第一句。介绍背景和问题定位。",
-        "引导段第二句。点明本文核心内容。",
-    ],
-
-    "sections": [
-        {
-            "type": "h2",
-            "title": "第一节标题",
-            "paras": [
-                "段落一正文。**加粗** 标核心结论。",
-                "段落二正文。",
-            ],
-            # ⚠️ ⚠️ ⚠️ 图必须放在 section 内部，绝不能放在 DATA 顶层！
-            #    模板只遍历 sec.figs / sec.fig_after，顶层 figs 被静默忽略。
-            #    推送前务必 grep -c '<img' article.html 确认 > 0。
-            # 可选：图嵌入。src 是文件名（相对文章目录），caption 是图注文字
-            # ⚠️ 铁律：正文中引用的每个"图 N"都必须有对应的 fig 条目，不能少。
-            #    blocks.jsonl 中标记 hero=true 的图只用作封面，不会嵌入正文。
-            #    如果正文引用该图，必须同时 embed 一份（不能只做封面）。
-            "figs": [
-                {"src": "fig01.png", "caption": "图 1：说明文字"},
-            ],
-            # 进阶：使用 fig_after 实现段落级内联（比 figs 更精确，图挂在指定段落之后）
-            # 格式：{"para_index": [{"src": "figN.png", "caption": "图注"}]}
-            # 推荐 5 图以上的文章使用 fig_after，render-article.py 自动内联
-        },
-        {
-            "type": "h3",
-            "title": "子节标题",
-            "paras": [
-                "子节段落。",
-            ],
-        },
-        {
-            "type": "h2",
-            "title": "第二节标题",
-            "paras": [
-                "段落正文。",
-            ],
-        },
-    ],
-
-    "conclusion": [
-        "结语第一段。直接陈述结论，不出现「本文」「这篇」等前缀。不超过180 token。",
-        "结语第二段。行业影响或展望。不超过180 token。",
-    ],
-
-    "reference_url": "https://arxiv.org/html/XXXX.XXXXXv1",
-    # ⚠️ 必须设置！push-draft.py 从此字段读取公众号标题
-    "title": "公众号文章标题",
 }
 
-# ── 写入 article_data.json ──
-out_path = os.path.join(_article_dir, "article_data.json")
-with open(out_path, "w", encoding="utf-8") as f:
-    json.dump(DATA, f, ensure_ascii=False, indent=2)
-print(f"✅ 写入 {out_path} ({len(json.dumps(DATA, ensure_ascii=False))} chars, {len(DATA.get('sections', []))} sections)")
+# ── 二、软件配置 ─────────────────────────────────────────
+sec = h3('软件配置')
+sec["paras"] += [
+    '两次提交所用的软件与节点配置如下。两个模型都跑在 8 卡 MI355X 节点上，每张卡 288GB HBM3E，配 2 颗 AMD EPYC 9575F，操作系统 Ubuntu 24.04；节点间是 8 条 400Gb RoCE，单节点聚合 3200 Gbps。差异集中在推理引擎：gpt-oss-120b 用 vLLM 0.22.1，DeepSeek-R1 用 SGLang 0.5.15.post1，两者都启用了 AITER 与 hipBLASLt，后者还用了 MoRI-EP。',
+]
+sec["table"] = {
+    "head": ["组件", "gpt-oss-120b", "DeepSeek-R1"],
+    "rows": [
+        ["推理引擎", "vLLM 0.22.1（AITER、hipBLASLt）", "SGLang 0.5.15.post1（AITER、hipBLASLt、MoRI-EP）"],
+        ["AMD ROCm", "7.2.2", "7.2.0"],
+        ["容器镜像", "rocm/amd-mlperf (v6.1)", "rocm/sgl-dev:v0.5.15.post1-rocm720-mi35x"],
+        ["节点类型", "mi355x-288gb-roce.8x：8 张 MI355X（每卡 288GB HBM3E），2 颗 AMD EPYC 9575F，Ubuntu 24.04", "mi355x-288gb-roce.8x：8 张 MI355X（每卡 288GB HBM3E），2 颗 AMD EPYC 9575F，Ubuntu 24.04"],
+        ["网络", "400Gb 以太网，每节点 8 条 400Gb RoCE（聚合 3200 Gbps）", "400Gb 以太网，每节点 8 条 400Gb RoCE（聚合 3200 Gbps）"],
+    ],
+}
+
+# ── 三、线性扩展 ─────────────────────────────────────────
+sec = h2('生产环境：从 8 卡到 512 卡的线性扩展')
+sec["paras"] += [
+    '为了模拟生产推理负载，通常需要有一个自动伸缩的应用，规模在几十卡到几百卡、乃至几千卡之间变化。扩展之所以成立，是因为这个形态下的推理高度并行，vLLM、SGLang 这类推理引擎本身就是为并发设计的。由于 gpt-oss 与 DeepSeek-R1 都能装进单个 MI355X 节点的 HBM，副本之间从不需要互相同步，也就没有随节点数增长的跨节点 all-reduce 通信开销。节点间唯一的流量是前端的输入与输出流。',
+]
+fig(sec, "fig02.png", "图 2：聚合输出吞吐量随 GPU 数量从 8 张扩展到 512 张的变化", 0)
+sec["paras"] += [
+    '对客户而言，这意味着容量规划具有确定性。如果你的生产部署在 64 卡上稳定跑到某个每秒 token 数，就可以通过简单乘法推算 512 卡部署的规模。把自动伸缩器与 Crusoe Managed Kubernetes 配合起来，容量就能跟着需求走：流量高峰时扩容，回落时缩容，只为差额付费，而不是为峰值长期预留资源。',
+]
+
+# ── 四、TCO ─────────────────────────────────────────────
+sec = h2('降低总体拥有成本')
+sec["paras"] += [
+    '这套配置从两个方面压低规模化之后的总体拥有成本：一是让每个模型都留在单节点内的显存容量，二是完全不需要昂贵的横向扩展 RDMA 网络。',
+]
+
+sec = h3('288GB HBM3E 把大型 MoE 模型留在单节点内')
+sec["paras"] += [
+    'DeepSeek-R1 是一个 671B 参数的 MoE，每个 token 大约激活 37B 参数。在 FP8 下光权重就约 671GB，算上 KV cache 之后，典型加速卡根本放不下。在 MI355X 上，同一个模型可以舒服地待在单个 8 卡平台里，合计 2.3TB HBM3E，还剩下超过 1TB 给 KV cache 复用。',
+    '正是这份容量消掉了分片开销。DeepSeek-R1 分布在单个节点的 8 张 GPU 上，但这部分通信的每一个字节都留在节点内的 AMD Infinity Fabric（XGMI）上。没有跨机箱的 all-reduce，没有跨越网络跳的流水线阶段边界，也没有 GPU 在集合通信进行时空转。',
+    '在这套配置里，注意力层还采用数据并行而非张量并行，因为 DeepSeek 的多头潜在注意力只缓存一个压缩后的潜在 KV 头。用张量并行切分这个头，会让每个 rank 都复制一份 KV cache，占掉本该用来承载并发请求的显存。让注意力保持数据并行，每个 rank 用一份 KV cache 服务自己的请求，批大小与总吞吐都得以保住。专家层则跨 GPU 分区，因为专家权重占了显存的大头，而每个 token 只激活其中一小部分，于是每个 rank 只为自己负责的专家所接收的 token 做计算。',
+]
+
+sec = h3('同样的容量为中尺寸模型留出服务余量')
+sec["paras"] += [
+    'gpt-oss-120b 的 MoE 权重以 MXFP4 存储，约占 65GB。它以张量并行度 1 运行，也就是完整权重都放在显存里，于是我们部署了 512 个完全独立的单卡副本。这就不需要任何分片或张量并行，前向传播中没有集合通信，副本之间也完全没有协调。整个集群里每张 GPU 都是一个独立的服务单元。',
+    '288GB 带来的改变不只是模型装不装得下，还有它旁边能装什么。扣掉权重与激活之后，每张 MI355X 仍有超过 200GB 可用于 KV cache，而 80GB 卡上大约只有 15GB。KV cache 容量决定每个副本能并发多少条序列，而并发序列数正是结果表里单卡吞吐的来源。这份容量余量会直接变成每美元 GPU 的每秒 token 数，也提高每瓦的总 token 性能。',
+]
+
+sec = h3('大规模推理不需要昂贵的专用网络')
+sec["paras"] += [
+    '因为副本之间从不互相同步，这次 512 卡的运行完全在 RoCE 以太网上完成协调。这套配置里没有 InfiniBand，也没有因为缺少它而损失任何吞吐。',
+    '对以推理为主业构建集群的客户来说，这从集群物料清单里去掉了一大笔开支，而且实测没有任何性能代价。真正重要的是节点内的纵向扩展网络，横向扩展网络只需要把 token 搬出去。',
+]
+
+# ── 五、Kubernetes ──────────────────────────────────────
+sec = h2('为什么我们在 Kubernetes 上跑 MLPerf')
+sec["paras"] += [
+    'MLPerf Inference 的参考测试框架是为在单机、裸金属或虚拟机上以 Docker 容器运行而设计的。这套模型放到跨 64 节点的 512 卡运行上既不好扩展，更重要的是，它并不是 Crusoe 上生产推理的真实运行方式。',
+    '与其手工编排 64 个 SSH 会话，我们把基准测试重新表达成了 Kubernetes 原生清单。',
+    '这个选择直接带来三件事。',
+    DOT + '**扩展性。**同一个 worker Job 只要改一个参数，就能在 parallelism=1 或 parallelism=64 下运行。8 卡冒烟测试与 512 卡正式提交用的是同一份清单。',
+    DOT + '**可观测性。**Pod 日志、事件与资源指标都通过标准 Kubernetes 接口获取，不需要任何定制搭建。我们发布并维护一套基于 Crusoe Managed Metrics 的 Grafana 方案，客户第一天就能获得同样的视图。',
+    DOT + '**容错。**一个副本崩溃只是一个被重启的 Pod，而不是一次失败的运行。拖后腿的副本在单副本吞吐中清晰可见，可以被优雅地驱逐。',
+]
+
+sec = h3('Crusoe Command Center 实战')
+sec["paras"] += [
+    '下图是用 Crusoe Managed Metrics 搭建的 Grafana 面板，可以看到 512 卡 gpt-oss-120b offline 运行期间 GPU 与显存的利用率。我们提供一个托管的 PromQL 端点，用来收集客户 Crusoe VPC 内计算、存储与网络资源的基础设施日志，可直接用于填充第三方可观测性面板。评测期间，我们用这些指标跟踪运行中负载的性能与状态。',
+]
+fig(sec, "fig03.png", "图 3：一次 512 卡 gpt-oss-120b offline 运行中的聚合 GPU 与显存利用率，来自 Crusoe Managed Metrics 的 Grafana 面板", 0)
+sec["paras"] += [
+    '这些指标还可以用来针对基础设施故障设置自定义告警，比如 GPU 故障、存储瓶颈，或者 VPC 与 RDMA 网络争用。Crusoe Watch Agent 现在默认随各类基础设施资源一起交付，为管理 AI 负载铺平了通往生产的道路。',
+]
+
+# ── 六、SUT 方法论 ──────────────────────────────────────
+sec = h2('MLPerf 被测系统（SUT）方法论')
+sec["paras"] += [
+    'MLPerf 的 LoadGen 二进制必须看到单一的被测系统。在 512 卡规模上，我们把这个 SUT 构建成由 ZeroMQ（ZMQ）连接的 head 加 workers。',
+]
+fig(sec, "fig04.png", "图 4：512 卡分布式 SUT。一个专用 head pod 运行 LoadGen 与调度，64 个 worker pod 各拥有一个节点的 8 张 GPU，通过 ZMQ 连接", 0)
+sec["paras"] += [
+    '在放大推理测试的过程中，我们在编排层遇到瓶颈：规模一上来，worker 就无法可靠地向 head 节点注册。这也是最终设计成一个专用 head pod 的原因，它只做调度与 LoadGen。它不承载任何模型，因此不会成为计算瓶颈。64 个 worker pod 每个拥有一个节点的 8 张 GPU，而这 8 张卡怎么用取决于模型。',
+    DOT + '**gpt-oss-120b：**每个节点 8 个独立的单卡副本，张量并行度为 1，共 512 个副本。模型以 MXFP4 装进单张 GPU，因此不需要分片。',
+    DOT + '**DeepSeek-R1：**一个副本分片到节点的全部 8 张 GPU 上（TP8、EP8、8 路 DP 注意力），共 64 个副本。671B 的 MoE 对单张 288GB GPU 来说太大，所以必须分片，但只在节点内部、走 XGMI。',
+    '没有任何跨节点集合通信。节点间唯一的流量，是前端以太网上由 ZMQ 承载的分词输入与输出流。',
+]
+
+sec = h3('测试场景')
+sec["paras"] += [
+    '**Offline** 测的是没有延迟约束的原始批处理吞吐。device_count 是节点数的 8 倍，target_qps 调得足够高，让 LoadGen 发出足够多的样本填满 20 分钟的最小持续时间窗口。',
+    '**Server** 测的是在 p99 延迟 SLA 约束下的吞吐，SLA 同时覆盖首 token 时延与每输出 token 时延。target_qps 调到仍能通过 SLA 的最高值。再往上推会形成调度积压并打爆 p99。gpt-oss-120b 的可持续点是 target_qps 4000，DeepSeek-R1 是 target_qps 688。',
+]
+
+# ── 七、复现 ────────────────────────────────────────────
+sec = h2('自己复现')
+sec["paras"] += [
+    '以上所有内容都开源在 crusoe-mlperf-mi355x-inference-v6.1 仓库中。',
+    '先小规模验证流水线再放大：N=1（8 卡），然后 N=8（64 卡），最后 N=64（512 卡）。精度与合规性和规模无关，所以正确性可以在 N=1 上确认，整个集群只用来跑吞吐数字。各模型的命令在顶层 README 中。',
+]
+
+# ── 八、接下来 ──────────────────────────────────────────
+sec = h2('接下来')
+sec["paras"] += [
+    '虽然这是 Crusoe 第一次提交 MLPerf Inference，但不会是最后一次。我们公开这些结果与背后的代码，是为了给客户和伙伴提供可触摸的基准，让他们亲眼看到我们如何在规模上验证性能。每个 Crusoe 集群在交付到客户手上之前都会做端到端验证，包括持续负载下的工作负载验证、GPU 与 HBM 压力测试、InfiniBand / RoCE 网络验证以及参考工作负载基准。MLPerf 只是这套流程中的一件工具。客户拿到集群时，性能特征已经对照一个公开、经过同行评审的标准被测过。',
+    '在 Crusoe，我们与 AMD 在硬件性能与软硬协同设计上紧密合作，从 ROCm 与推理引擎调优，一直到集群交付与网络验证。这种合作是我们能构建最可靠、最出色的 AMD 集群的原因，而 MLPerf 这样的公开基准是我们证明它的方式。这篇文章里的每个数字都经过同行评审且可复现：MLPerf 历史上规模最大的 MI355X 推理提交。我们会继续与 AMD 及伙伴深化这项工作，并持续公布推理与训练两类负载的结果，让我们引用的数字始终是任何人都能验证的数字。',
+    '准备好在这样的规模上做服务了？可以联系 Crusoe 团队，了解如何在 Crusoe Managed Kubernetes 上用 AMD Instinct MI355X 运行推理。已经在用 Crusoe 的话，Crusoe Managed Kubernetes 文档可以带你上手。',
+]
+
+DATA = {
+    "title": "512 张 MI355X 跑出每秒 575 万 token：Crusoe 的 MLPerf 推理成绩单",
+    "summary": [
+        {"key": "吞吐规模", "body": "512 张 MI355X 上 gpt-oss-120b offline 跑到约每秒 575 万 token，DeepSeek-R1 约 290 万 token，是 MLPerf 历史上按 GPU 数计规模最大的 MI355X 推理提交"},
+        {"key": "线性扩展", "body": "从 8 卡到 512 卡吞吐线性增长、达到理想值的 90% 以上，全程只用 400Gb 以太网，没有 InfiniBand、没有 RoCE、没有跨节点 all-reduce"},
+        {"key": "成本含义", "body": "每卡 288GB HBM3E 让 671B 的 DeepSeek-R1 留在单节点内、分片只走 XGMI，省掉昂贵的 RDMA 组网与跨机箱集合通信"},
+    ],
+    "lead": [
+        "512 张 AMD Instinct MI355X、64 个节点、Crusoe Managed Kubernetes，一次提交同时跑 gpt-oss-120b 与 DeepSeek-R1：这是 MLPerf 历史上按 GPU 数量计规模最大的 MI355X 推理提交。",
+        "比数字更值得看的是扩展方式。吞吐从 8 卡到 512 卡保持线性，全程只用经过 RoCE 的 400Gb 以太网，没有 InfiniBand，也没有跨节点 all-reduce，而且整套基准测试就是一个普通的 Kubernetes 工作负载，用的是客户在生产里跑的那套平台。",
+    ],
+    "sections": S,
+    "conclusion": [
+        "**每秒 575 万 token 的意义不在数字本身，而在于它拆掉了「大规模推理必须配一套昂贵的 RDMA 网络」这个默认假设。**让这件事成立的机制只有两条：模型小到能装进单节点，副本之间就永远不必同步；不必同步，就没有随节点数增长的跨节点集合通信。扩展性由此从一个网络工程问题退化成一次乘法，容量规划也就有了确定性。",
+        "288GB HBM3E 的另一半价值容易被忽略：它决定的不只是模型放不放得下，还决定了权重旁边能留多少 KV cache。gpt-oss-120b 每卡留给 KV cache 的空间超过 200GB，而 80GB 卡上大约只有 15GB。在按并发调度的推理引擎里，KV 池就是并发上限，并发上限就是单卡吞吐，显存容量于是被直接换算成每瓦 token 数。",
+        "对做推理集群选型的人来说，判断顺序应该是先算模型能否留在单节点内，再决定要不要为横向扩展网络付钱。gpt-oss-120b 以 MXFP4 只占 65GB，于是每张卡都是一个独立服务单元；DeepSeek-R1 需要 2.3TB 的单节点显存，于是分片只发生在 XGMI 上，不跨机箱。两种形态的共同点，是网络只负责搬 token，不参与计算。",
+    ],
+    "reference_url": "https://www.crusoe.ai/resources/blog/serving-5-75-million-tokens-per-second-crusoes-mlperf-inference-v6-1-results-on-amd-mi355x",
+}
