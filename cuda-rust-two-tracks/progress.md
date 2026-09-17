@@ -22,3 +22,4 @@
 
 创建时间: 2026-09-17
 来源: https://developer.nvidia.com/blog/introducing-cuda-rust-two-tracks-for-writing-gpu-kernels/?ncid=so-twit-835567
+| Step 4d-i: 传送门 | completed |
