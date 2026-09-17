@@ -1,25 +1,21 @@
 # 进度追踪 - cuda-rust-two-tracks
 
-| Step | 状态 |
-|------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json 选最多8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | completed |
-| Step 6: 推送草稿 | pending |
+✅ 完成 (cuda-rust-two-tracks)
+
+- Step 0: 提取原文+下载图片 — completed
+- Step 1: 生成封面 — completed
+- Step 2: 写文章（含要点速览/正文/结语/参考区/传送门） — completed
+- Step 3: Humanizer 机械兜底（无破折号/AI 词残留） — completed
+- Step 4: 预发布检查（preflight --fix，ALL CHECKS PASSED） — completed
+- Step 5: 推送草稿 — completed
+
+推送结果:
+- draft.id: TIqnnVEu6Oy3-wtKttGa0Z2q21dkbxKTn3SVXOpMeMK36arKiiKDLuSYYvaEZO1l
+- 图数核验: 正文 1 张（引用 1 / 草稿 mmbiz 1 / 占位符 0）
+- 标题: 引入 CUDA Rust：编写 GPU 内核的两条路线
+- 来源: https://developer.nvidia.com/blog/introducing-cuda-rust-two-tracks-for-writing-gpu-kernels/
+- 备注: 源文正文仅 1 张配图（featured image1-1）；其余页面图片为相关文章缩略图/作者头像/邮件横幅，已排除。代码块 7 个（源页 SyntaxHighlighter 渲染后 <pre> 消失，改从原始 HTML 逐字提取）。blocks.jsonl 已按手动 fig 规范改名为 blocks.jsonl.bak。
 
 创建时间: 2026-09-17
 来源: https://developer.nvidia.com/blog/introducing-cuda-rust-two-tracks-for-writing-gpu-kernels/?ncid=so-twit-835567
-| Step 4d-i: 传送门 | completed |
+| Step 5: 预发布检查 | completed |
