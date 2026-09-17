@@ -1,0 +1,8434 @@
+Content selection saved. Describe the issue below:
+
+Kernelized Linear Attention: Breaking the Capacity Wall with Symmetric Cones
+
+Abstract
+
+Linear attention promises constant-time recurrent inference but degrades sharply on associative recall. We formulate attention recall as a spherical-packing problem and introduce Kernelized Linear Attention Activations (KATA), a framework whose feature maps are derived from first principles by certifying nonnegative attention weights through a self-dual homogeneous cone. Building on this observation, we show that rank-one positive semi-definite (PSD) features offer a favorable capacity--interference tradeoff. KATA recovers a parameter-free convex output gate and characterizes associative capacity through the Welch interference floor. For tolerances above this floor, KATA enlarges the state without adding parameters and admits spherical codes with exponentially many keys in the projection dimension. We implement KATA as fused Triton kernels1 at two operating points: a flash-attention-style forward up to 
+∼
+1.6
+×
+ FlashAttention-2 throughput, and an exact 
+𝑂
+⁡
+(
+𝑇
+)
+ chunked-state form that reaches 
+∼
+11
+×
+ FlashAttention-2 forward throughput at 
+131
+k tokens. An associative scan of the first-order feature lowers the inter-chunk recurrence depth to 
+𝑂
+⁡
+(
+log
+⁡
+(
+𝑇
+/
+𝐶
+)
+)
+ for chunk size 
+𝐶
+ and averages 
+∼
+2.4
+×
+ the throughput of a matched sequential linear-attention baseline. On long-range MQAR and repeated-key overwrite, several KATA variants outperform Gated DeltaNet, with parameter counts and state sizes reported alongside accuracy. Induction preserves near-perfect recall, while kernel benchmarks show that the maps can be implemented efficiently. KATA retains 
+0.985
+ MQAR at a 
+16
+×
+ out-of-distribution length, approaching the softmax with roughly one quarter of the KV-cache entries. Experiments on 340M-parameter LLMs reveal a feature-dependent fluency trade-off and clarify how positional embeddings, delta rules, and decay gates interact with feature geometry.
+
+1Introduction
+
+Transformer architectures (Vaswani et al., 2017) owe their dominance to softmax attention, whose exponential kernel supports near-perfect associative recall. The price is the 
+𝒪
+⁡
+(
+𝑇
+2
+)
+ training cost and the 
+𝒪
+⁡
+(
+𝑇
+)
+ KV cache at sequence length 
+𝑇
+, which has motivated a sustained body of linear-time alternatives and fixed-size recurrent states (Katharopoulos et al., 2020; Choromanski et al., 2021; Peng et al., 2021; Sun et al., 2023; Gu and Dao, 2024; Dao and Gu, 2024). Linear attention replaces the infinite feature map of 
+exp
+⁡
+(
+⟨
+𝒒
+,
+𝒌
+⟩
+)
+ with a finite 
+𝜓
+:
+ℝ
+𝑑
+→
+ℝ
+𝑛
+𝜓
+ and exposes the recurrent update 
+𝑺
+𝑡
+=
+𝑺
+𝑡
+−
+1
++
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+​
+𝒗
+𝑡
+⊤
+. The price of constant state is memory collision: many key–value bindings must share a single fixed state, and retrieval degrades sharply on associative-recall tasks at long contexts (Schlag et al., 2021; Jelassi et al., 2024; Du et al., 2025).
+
+Recent gated linear RNNs, including DeltaNet (Yang et al., 2024b), Mamba2 (Dao and Gu, 2024), and Gated DeltaNet (Yang et al., 2025b), close part of the gap with learned forget gates, unnormalized linear writes, and content-addressed erase operations. Yet the geometry driving their feature maps remains opaque: what limits recall capacity at a fixed state size, and which post-Transformer designs operate below that limit? Must feature maps be nonnegative? Which finite maps preserve the isotropy of the softmax? Without principled answers, new linear attention architectures sit one ablation away from the existing menagerie of variants.
+
+Central finding.
+
+Memory collision is, at heart, the saturation of a spherical-packing problem. Once nonnegative attention weights are certified by a self-dual homogeneous cone and the latent geometry is required to be isometrically invariant, the Koecher–Vinberg classification (Koecher, 1957; Vinberg, 1963; Faraut and Korányi, 1994) organizes the admissible feature geometries into irreducible factors. We study the ordinary real families: the positive orthant, the Lorentz cone, and the symmetric positive semidefinite (PSD) cone. Their feature maps form the basis of our KATA (Kernelized Linear Attention Activations) framework. The denominator of normalized linear attention emerges natively as a parameter-free, token-conditioned convex output gate, so part of the structure typically introduced through explicit gating is already inherent to the normalized formulation. The choice of cone then determines the interference geometry and, through it, the associative capacity.
+
+To compare these geometries, we develop a power signal-to-noise ratio (pSNR) analysis based on the optimal interference attainable within each cone. Applying the same analysis to an exponential readout also yields a capacity law for softmax at arbitrary temperature. We support these predictions with efficient Triton implementations across a wide range of context lengths and with pretraining experiments on 340M-parameter language models. Together, the theory and experiments clarify how feature geometry interacts with positional embeddings, gating, the delta rule, and softmax attention.
+
+Working on the unit sphere.
+
+Throughout, we analyze query and key directions on the unit sphere. Explicit 
+ℓ
+2
+ normalization enforces this constraint directly. Under RMSNorm, the per-channel gains can instead be absorbed into a learned diagonal bilinear form and an inverse-temperature scale, leaving normalized directions in a lifted representation (Section A.1). This setting covers the query–key normalization used in Qwen3 (Yang et al., 2025a), Gemma 3 (Team et al., 2025), and MiniMax-class (MiniMax et al., 2026) models, as well as DeltaNet (Yang et al., 2024b) and Gated DeltaNet (Yang et al., 2025b). The capacity bounds therefore describe the normalized address geometry used by these architectures.
+
+Contributions.
+
+1.
+
+A cone classification for nonnegative linear attention. We characterize the ordinary real symmetric-cone feature geometries considered here under nonnegative attention weights, isometric invariance, and homogeneous latent geometry.
+
+A cone classification for nonnegative linear attention. We characterize the ordinary real symmetric-cone feature geometries considered here under nonnegative attention weights, isometric invariance, and homogeneous latent geometry.
+
+2.
+
+A capacity theory for associative recall. Casting recall as discrete spherical packing, we prove the Lorentz Rankin wall (Theorem 13) and dimension-dependent packing bounds for PSD rank-one rays (Theorem 4), give explicit finite dictionaries from mutually unbiased bases and DeVore frames, and derive an optimal-packing pSNR ladder whose geometric argument also applies to temperature-scaled softmax attention.
+
+A capacity theory for associative recall. Casting recall as discrete spherical packing, we prove the Lorentz Rankin wall (Theorem 13) and dimension-dependent packing bounds for PSD rank-one rays (Theorem 4), give explicit finite dictionaries from mutually unbiased bases and DeVore frames, and derive an optimal-packing pSNR ladder whose geometric argument also applies to temperature-scaled softmax attention.
+
+3.
+
+Hardware-aligned kernels. We release fused Triton kernels for the gate-free, delta-rule-free KATA-M
+𝑔
+ recurrence at two operating points. Its quadratic 
+𝒪
+⁡
+(
+𝑇
+2
+)
+ forward reaches up to 
+∼
+1.6
+×
+ FlashAttention-2 throughput (Dao, 2023) and remains competitive on the training step. In the linear-state 
+𝒪
+⁡
+(
+𝑇
+)
+ form, KATA-M2 reaches parity with its quadratic counterpart near 
+16
+k tokens, is faster by 
+32
+k, and reaches 
+∼
+11
+×
+ FlashAttention-2’s forward throughput at 
+131
+k; KATA-M1 is faster by 
+128
+k. For the linear feature, an associative scan lowers the inter-chunk depth to 
+𝒪
+⁡
+(
+log
+⁡
+𝑁
+𝐶
+)
+ for 
+𝑁
+𝐶
+≔
+⌈
+𝑇
+/
+𝐶
+⌉
+ chunks and averages 
+∼
+2.4
+×
+ the throughput of a matched sequential linear-attention chunk.
+
+Hardware-aligned kernels. We release fused Triton kernels for the gate-free, delta-rule-free KATA-M
+𝑔
+ recurrence at two operating points. Its quadratic 
+𝒪
+⁡
+(
+𝑇
+2
+)
+ forward reaches up to 
+∼
+1.6
+×
+ FlashAttention-2 throughput (Dao, 2023) and remains competitive on the training step. In the linear-state 
+𝒪
+⁡
+(
+𝑇
+)
+ form, KATA-M2 reaches parity with its quadratic counterpart near 
+16
+k tokens, is faster by 
+32
+k, and reaches 
+∼
+11
+×
+ FlashAttention-2’s forward throughput at 
+131
+k; KATA-M1 is faster by 
+128
+k. For the linear feature, an associative scan lowers the inter-chunk depth to 
+𝒪
+⁡
+(
+log
+⁡
+𝑁
+𝐶
+)
+ for 
+𝑁
+𝐶
+≔
+⌈
+𝑇
+/
+𝐶
+⌉
+ chunks and averages 
+∼
+2.4
+×
+ the throughput of a matched sequential linear-attention chunk.
+
+4.
+
+Experimental evidence across scales. In the Zoology playground (Arora et al., 2023), we evaluate multi-query associative recall, repeated-key overwrite, and induction under matched training configurations, reporting both parameter counts and state sizes. KATA-M1 retains 
+0.985
+ MQAR accuracy at 
+16
+×
+ the training context with roughly one quarter of softmax’s KV-cache entries at that length. We then pretrain matched 340M-parameter language models for 
+15
+B tokens and evaluate both standard language-model benchmarks and in-context recall. The PSD variants remain broadly comparable on zero-shot accuracy while showing a meaningful perplexity spread, and they retain much more high-entropy needle signal than Gated DeltaNet, whose UUID recall falls to 
+0.004
+.
+
+Experimental evidence across scales. In the Zoology playground (Arora et al., 2023), we evaluate multi-query associative recall, repeated-key overwrite, and induction under matched training configurations, reporting both parameter counts and state sizes. KATA-M1 retains 
+0.985
+ MQAR accuracy at 
+16
+×
+ the training context with roughly one quarter of softmax’s KV-cache entries at that length. We then pretrain matched 340M-parameter language models for 
+15
+B tokens and evaluate both standard language-model benchmarks and in-context recall. The PSD variants remain broadly comparable on zero-shot accuracy while showing a meaningful perplexity spread, and they retain much more high-entropy needle signal than Gated DeltaNet, whose UUID recall falls to 
+0.004
+.
+
+2Reproducing Kernel Hilbert Spaces for Linear Attention
+
+Linear attention (Shen et al., 2021; Katharopoulos et al., 2020) rests on a single algebraic substitution: replacing the exponential kernel of softmax with an inner product of finite features. This substitution allows the quadratic mixing of tokens to collapse into a recurrence on a fixed-size state. We make this substitution explicit and identify the geometric assumptions it imposes on the feature map. Constraining the feature image to a symmetric cone then resolves two design questions typically addressed through ad hoc heuristics: which finite maps are admissible and how normalization produces an output gate.
+
+Throughout, sequences have length 
+𝑇
+, with 
+𝒒
+𝑡
+,
+𝒌
+𝑡
+∈
+ℝ
+𝑑
+ and 
+𝒗
+𝑡
+∈
+ℝ
+𝑑
+𝑣
+ denoting the query, key, and value at token 
+𝑡
+. Their stacked tensors are 
+𝑸
+,
+𝑲
+∈
+ℝ
+𝑇
+×
+𝑑
+ and 
+𝑽
+∈
+ℝ
+𝑇
+×
+𝑑
+𝑣
+. We write 
+𝜓
+:
+ℝ
+𝑑
+→
+ℝ
+𝑛
+𝜓
+ for the feature map and 
+Ψ
+⁡
+(
+𝑲
+)
+ for its row-wise application. Causal softmax attention computes, per head:
+
+Substituting the softmax kernel 
+exp
+⁡
+(
+⟨
+𝒒
+,
+𝒌
+⟩
+)
+ with a finite inner product 
+⟨
+𝜓
+⁡
+(
+𝒒
+)
+,
+𝜓
+⁡
+(
+𝒌
+)
+⟩
+ and using bilinearity yields the linearized form:
+
+with state pair 
+(
+𝑺
+𝑡
+,
+𝒁
+𝑡
+)
+ of size 
+𝑛
+𝜓
+​
+(
+𝑑
+𝑣
++
+1
+)
+ for all 
+𝑡
+, and additive recurrence 
+𝑺
+𝑡
+=
+𝑺
+𝑡
+−
+1
++
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+​
+𝒗
+𝑡
+⊤
+, 
+𝒁
+𝑡
+=
+𝒁
+𝑡
+−
+1
++
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+. The normalized readout is defined whenever its denominator 
+𝜓
+​
+(
+𝒒
+𝑡
+)
+⊤
+​
+𝒁
+𝑡
+ is positive.
+
+2.1Symmetric cones
+
+Let 
+𝒦
+⊂
+ℝ
+𝑛
+𝜓
+ be a closed convex cone. Its dual cone is defined as 
+𝒦
+∗
+=
+{
+𝒚
+∈
+ℝ
+𝑛
+𝜓
+:
+⟨
+𝒙
+,
+𝒚
+⟩
+≥
+0
+​
+∀
+𝒙
+∈
+𝒦
+}
+ under the Euclidean inner product. 
+𝒦
+ is pointed if 
+𝒦
+∩
+(
+−
+𝒦
+)
+=
+{
+0
+}
+, full-dimensional if 
+int
+⁡
+(
+𝒦
+)
+≠
+∅
+, self-dual if 
+𝒦
+=
+𝒦
+∗
+, and homogeneous if its automorphism group acts transitively on 
+int
+⁡
+(
+𝒦
+)
+. 
+𝒦
+ is a symmetric cone if it is self-dual and homogeneous. Throughout this paper, we work under the following three assumptions:
+
+Assumption 1 (Self-dual nonnegative geometry).
+
+𝜓
+⁡
+(
+ℝ
+𝑑
+)
+⊂
+𝒦
+=
+𝒦
+∗
+. Consequently, 
+⟨
+𝜓
+⁡
+(
+𝒙
+)
+,
+𝜓
+⁡
+(
+𝒚
+)
+⟩
+≥
+0
+ for all 
+𝒙
+,
+𝒚
+.
+
+Assumption 2 (Isometric invariance).
+
+For every 
+𝑼
+∈
+𝒪
+⁡
+(
+ℝ
+𝑑
+)
+ there exists an inner-product-preserving map 
+𝒯
+𝑼
+ on 
+𝒦
+ such that 
+𝜓
+⁡
+(
+𝑼
+​
+𝒙
+)
+=
+𝒯
+𝑼
+​
+𝜓
+​
+(
+𝒙
+)
+.
+
+Assumption 3 (Homogeneity).
+
+Aut
+⁡
+(
+𝒦
+)
+ acts transitively on 
+int
+⁡
+(
+𝒦
+)
+.
+
+2.2The denominator is a parameter-free convex gate
+
+Earlier work on linear attention enforced the nonnegativity in Assumption 1 through the feature map 
+𝜓
+⁡
+(
+𝒙
+)
+=
+ELU
+⁡
+(
+𝒙
+)
++
+1
+ (Katharopoulos et al., 2020), whereas Efficient Attention (Shen et al., 2021) omitted the denominator 
+𝜓
+​
+(
+𝒒
+𝑡
+)
+⊤
+​
+𝒁
+𝑡
+. Later recurrent architectures instead introduced explicit recurrence-level gates, including the hardware-friendly vector gate of Gated Linear Attention (GLA) (Yang et al., 2024a) and the scalar decay of Mamba2 (Dao and Gu, 2024).
+
+Under Assumption 1, we show that the discarded denominator already supplies a token-conditioned output gate.
+
+Proposition 1 (Output-level gating).
+
+Fix 
+𝐪
+𝑡
+ and write:
+
+Suppose 
+𝐷
+𝑡
+>
+0
+. If 
+𝐷
+𝑡
+−
+1
+>
+0
+, define 
+𝐳
+¯
+𝑡
+|
+𝑡
+−
+1
+=
+𝜓
+​
+(
+𝐪
+𝑡
+)
+⊤
+​
+𝐒
+𝑡
+−
+1
+/
+𝐷
+𝑡
+−
+1
+. Then:
+
+with 
+𝛼
+𝑡
+,
+𝛽
+𝑡
+≥
+0
+ and 
+𝛼
+𝑡
++
+𝛽
+𝑡
+=
+1
+. If 
+𝐷
+𝑡
+−
+1
+=
+0
+, including 
+𝑡
+=
+1
+, then 
+𝐳
+𝑡
+=
+𝐯
+𝑡
+⊤
+ and the same weights reduce to 
+(
+𝛼
+𝑡
+,
+𝛽
+𝑡
+)
+=
+(
+0
+,
+1
+)
+.
+
+The normalized readout is therefore a convex interpolation between the previous readout and the current value, with query-dependent weights and no additional learned parameters. The gate acts at readout, leaving the state update commutative and additive. Gated DeltaNet controls memory through the rank-one state transition (Yang et al., 2025b):
+
+which uses extra projections and produces a noncommutative transition.
+
+2.3Koecher–Vinberg classification
+
+Isometric invariance from Assumption 2 promotes the softmax identity 
+exp
+⁡
+(
+⟨
+𝑼
+​
+𝒙
+,
+𝑼
+​
+𝒚
+⟩
+)
+=
+exp
+⁡
+(
+⟨
+𝒙
+,
+𝒚
+⟩
+)
+ to the kernel space. On its own, it does not single out 
+𝒦
+ but guarantees that 
+𝜓
+ is 
+𝒯
+𝑼
+-equivariant: the input-space isometry 
+𝑼
+∈
+𝒪
+⁡
+(
+ℝ
+𝑑
+)
+ and the cone-space isometry 
+𝒯
+𝑼
+∈
+𝒪
+⁡
+(
+ℝ
+𝑛
+𝜓
+)
+|
+𝒦
+ intertwine through 
+𝜓
+.
+
+Homogeneity in Assumption 3 means that any interior point can be mapped to any other by a cone automorphism. Thus the latent geometry has no privileged interior region or structural bottleneck, a useful symmetry when learning a map into 
+𝒦
+.
+
+Assumptions 1 and 3 place 
+𝒦
+ within the scope of the classical Koecher–Vinberg theorem, while Assumption 2 constrains how input rotations act on its factors. The full classification also contains complex Hermitian, quaternionic Hermitian, and exceptional factors. We restrict this work to the ordinary real factors listed below.
+
+Theorem 2 (Koecher–Vinberg decomposition (Koecher, 1957; Vinberg, 1963; Faraut and Korányi, 1994)).
+
+Let 
+𝒦
+⊂
+ℝ
+𝑛
+𝜓
+ be a pointed, full-dimensional closed convex cone. If 
+𝒦
+ is self-dual and homogeneous, then it is a symmetric cone and decomposes uniquely, up to isometry and factor order, as a Cartesian product of irreducible symmetric cones. The irreducible factors studied here are:
+
+Classical feature maps
+
+We can map raw projected keys and queries to the positive orthant via 
+ReLU
+⁡
+(
+𝒙
+)
++
+𝜖
+ for some 
+𝜖
+>
+0
+, or via 
+ELU
+⁡
+(
+𝒙
+)
++
+1
+ as in linear attention (Katharopoulos et al., 2020). For the Lorentz cone, 
+𝜓
+𝐿
+​
+(
+𝒚
+)
+=
+(
+𝒚
+,
+∥
+𝒚
+∥
+2
+)
+ lies on the boundary of 
+ℒ
++
+𝑑
++
+1
+ for 
+𝒚
+≠
+0
+, and Cauchy–Schwarz inequality yields:
+
+If 
+∥
+𝒙
+∥
+2
+=
+1
+, then 
+∥
+𝜓
+𝐿
+​
+(
+𝒙
+)
+∥
+2
+2
+=
+⟨
+𝜓
+𝐿
+​
+(
+𝒙
+)
+,
+𝜓
+𝐿
+​
+(
+𝒙
+)
+⟩
+=
+2
+​
+∥
+𝒙
+∥
+2
+2
+=
+2
+. Thus 
+2
+−
+1
+/
+2
+𝜓
+𝐿
+(
+𝒙
+)
+ lies on the unit sphere.
+
+For the PSD cone 
+𝕊
++
+𝑚
+, a classical choice is the LDL parameterization, which represents any 
+𝑨
+∈
+𝕊
++
+𝑚
+ as 
+𝑨
+=
+𝑳
+𝐴
+​
+𝑫
+𝐴
+​
+𝑳
+𝐴
+⊤
+, where 
+𝑫
+𝐴
+ is diagonal and 
+𝑳
+𝐴
+ is unit lower triangular. Then:
+
+These canonical maps establish nonnegative kernels for each real factor considered here. We next turn from admissible feature geometry to the number of key addresses that each cone can separate.
+
+3Capacity of Symmetric Cones
+
+The cone classification identifies admissible nonnegative feature geometries, but not how many key addresses a fixed feature dimension can distinguish. Let 
+𝒦
+⊂
+ℝ
+𝑑
+ be a cone and place 
+𝑇
+ unit-norm feature vectors on 
+𝒦
+∩
+𝒮
+𝑑
+−
+1
+. We quantify their worst collision by the interference:
+
+and define the 
+𝜖
+-capacity:
+
+This is precisely the mutual coherence of the feature dictionary (Donoho and Elad, 2003). It isolates the geometry of distinguishable key addresses before specifying values or retrieval dynamics.
+
+Theorem 3 (Welch bound (Welch, 1974)).
+
+The 
+𝑑
+ coordinate rays of 
+ℝ
++
+𝑑
+ are pairwise orthogonal, so zero interference is attainable for 
+𝑇
+≤
+𝑑
+. For any 
+𝑇
+>
+𝑑
+ unit vectors in 
+ℝ
+𝑑
+:
+
+Consequently, if 
+𝜇
+≤
+𝜖
+<
+1
+/
+𝑑
+, then 
+𝑇
+≤
+𝑑
+⁡
+(
+1
+−
+𝜖
+2
+)
+/
+(
+1
+−
+𝑑
+​
+𝜖
+2
+)
+.
+
+For 
+𝑇
+>
+𝑑
+, equality in the Welch inequality holds precisely when the vectors form an equiangular tight frame (ETF): tightness minimizes the average squared off-diagonal Gram entry, and equiangularity makes every off-diagonal modulus attain that average. The bound is therefore generally unattained. Real ETFs exist only for special pairs 
+(
+𝑑
+,
+𝑇
+)
+ and satisfy 
+𝑇
+≤
+𝑑
+⁡
+(
+𝑑
++
+1
+)
+/
+2
+ (Fickus and Mixon, 2016). Over 
+ℂ
+𝑑
+, the corresponding ceiling is 
+𝑑
+2
+, although the representation uses 
+2
+​
+𝑑
+ real scalars. We restrict the present analysis to real cones and leave complex extensions to future work.
+
+The orthant inherits the ordinary Welch floor after its 
+𝑑
+ coordinate rays. For the Lorentz cone 
+ℒ
++
+𝑑
+, a normalized extreme ray has the form 
+𝜓
+=
+2
+−
+1
+/
+2
+(
+𝒚
+,
+1
+)
+ with 
+𝒚
+∈
+𝒮
+𝑑
+−
+2
+, and its kernel is 
+𝐹
+Lor
+​
+(
+𝑧
+)
+=
+(
+1
++
+𝑧
+)
+/
+2
+. For 
+0
+≤
+𝜖
+<
+1
+/
+2
+, requiring feature interference at most 
+𝜖
+ forces 
+⟨
+𝒚
+𝑖
+,
+𝒚
+𝑗
+⟩
+≤
+−
+(
+1
+−
+2
+​
+𝜖
+)
+. Rankin’s bound therefore gives:
+
+The formal statement and proof appear as Theorem 13 in Appendix C.
+
+3.1Rank-one packing into the PSD cone
+
+The LDL construction in Section 2 represents an arbitrary matrix in 
+𝕊
++
+𝑝
+ using:
+
+free coordinates. Directly parameterizing an arbitrary PSD atom would therefore require a learned query/key projection of width 
+𝑛
+. Packing does not require covering the entire cone: we can project once to 
+𝒖
+∈
+𝒮
+𝑝
+−
+1
+ and apply the deterministic rank-one lift:
+
+The learned projection emits only 
+𝑝
+ coordinates, while the lifted feature still occupies the 
+𝑛
+-dimensional symmetric ambient space. Proposition 11 shows that, among unit-Frobenius PSD atoms, rank-one matrices uniquely minimize the expected overlap under a Haar-random relative eigenbasis. This average-case optimality motivates the rank-one family; the following theorem gives its worst-case packing guarantee.
+
+Theorem 4 (PSD rank-one packing).
+
+Let 
+𝑝
+≥
+2
+, 
+𝑛
+=
+𝑝
+⁡
+(
+𝑝
++
+1
+)
+/
+2
+, and 
+0
+≤
+𝜖
+<
+1
+. Identify 
+𝕊
++
+𝑝
+ with its 
+𝑛
+-dimensional Euclidean ambient space under the Frobenius inner product. The unit-Frobenius representatives of its extreme rays are rank-one matrices 
+𝐮
+​
+𝐮
+⊤
+ with 
+𝐮
+∈
+𝒮
+𝑝
+−
+1
+, and their pairwise inner products satisfy:
+
+Hence PSD interference at most 
+𝜖
+ is equivalent to 
+|
+⟨
+𝐮
+𝑖
+,
+𝐮
+𝑗
+⟩
+|
+≤
+𝜖
+, and a maximal greedy spherical-cap construction yields:
+
+Applying Theorem 3 to the raw vectors shows that PSD interference 
+𝜖
+<
+1
+/
+𝑝
+ forces 
+𝑇
+≤
+𝑝
+⁡
+(
+1
+−
+𝜖
+)
+/
+(
+1
+−
+𝑝
+​
+𝜖
+)
+. Rank-one PSD features therefore do not provide exponential capacity below the Welch floor. For any fixed tolerance 
+𝜖
+∈
+(
+0
+,
+1
+)
+, once 
+𝑝
+>
+1
+/
+𝜖
+ the spherical-cap lower bound in Theorem 4 is exponential in 
+𝑝
+.
+
+Squaring the raw inner product replaces the mutually obtuse constraint induced by the Lorentz lift with an unsigned near-orthogonal spherical code. The same 
+𝑝
+-dimensional projection can generate higher even-order features:
+
+whose symmetric ambient dimension is 
+(
+𝑝
++
+2
+​
+𝑟
+−
+1
+2
+​
+𝑟
+)
+. We use the first nontrivial order, 
+𝑟
+=
+1
+: as Section 4 shows, the quadratic expanded state already dominates the hardware budget.
+
+3.2Constructive packing
+
+We give two deterministic finite dictionaries with explicit interference guarantees. The first realifies complete sets of complex mutually unbiased bases (MUBs), producing a dense dictionary whose size is quadratic in its real ambient dimension.
+
+Theorem 5 (MUB-derived real dictionary).
+
+For any prime power 
+𝑠
+=
+ℓ
+𝑘
+, realification of a complete set of complex MUBs gives 
+𝑇
+=
+𝑠
+⁡
+(
+𝑠
++
+1
+)
+ unit vectors in 
+ℝ
+𝑑
+, where 
+𝑑
+=
+2
+​
+𝑠
+, with:
+
+This construction is useful when 
+𝑇
+=
+Θ
+⁡
+(
+𝑑
+2
+)
+ is sufficient and a uniform deterministic worst-case guarantee matters more than sparsity. The prime-power condition restricts the available dimensions. The full construction is given in Section C.5. When higher interference is tolerated, DeVore’s polynomial construction provides a larger and sparser dictionary.
+
+Theorem 6 (DeVore polynomial construction).
+
+For any prime power 
+𝑠
+ and integer 
+0
+≤
+𝑟
+<
+𝑠
+, there is a sparse deterministic construction of 
+𝑇
+=
+𝑠
+𝑟
++
+1
+ unit vectors in 
+ℝ
+𝑑
+, where 
+𝑑
+=
+𝑠
+2
+, with maximum interference 
+𝜇
+≤
+𝑟
+/
+𝑠
+.
+
+This construction is preferable when sparse storage or fast overlap computation matters more than the tighter interference of the MUB-derived dictionary. The proof is in Section C.6.
+
+The Johnson–Lindenstrauss (JL) lemma gives a related randomized asymptotic statement: 
+𝑇
+ prescribed points can be embedded into 
+𝑑
+=
+𝒪
+⁡
+(
+𝜂
+−
+2
+​
+log
+⁡
+(
+𝑇
+/
+𝛿
+)
+)
+ dimensions while preserving all pairwise distances within 
+1
+±
+𝜂
+ with failure probability at most 
+𝛿
+  (Johnson and Lindenstrauss, 1984; Achlioptas, 2003). The same concentration argument yields random spherical dictionaries with interference at most 
+𝜇
+ in 
+𝑑
+=
+𝒪
+⁡
+(
+𝜇
+−
+2
+​
+(
+log
+⁡
+𝑇
++
+log
+⁡
+(
+1
+/
+𝛿
+)
+)
+)
+ dimensions, or equivalently an achievable 
+𝑇
+=
+exp
+⁡
+(
+Ω
+⁡
+(
+𝜇
+2
+​
+𝑑
+)
+)
+ at fixed success probability. These asymptotic random-projection guarantees are often loose at the dimensions of individual attention heads. Deterministic constructions give exact finite dictionaries and worst-case interference guarantees in the regimes where they apply. The bounds and finite-size comparison are collected in Sections A.3 and 1. These constructions illustrate the available finite regimes, and better real spherical packings may exist. Determining which packings are best suited to attention heads is left to future work.
+
+3.3Signal-to-noise analysis
+
+Packing controls the score margin between a matched key and its distractors. Whether that margin is sufficient for retrieval depends on the readout. To isolate key interference, hold the attention coefficients fixed and take independent isotropic values 
+𝒗
+𝑗
+∼
+𝒩
+⁡
+(
+0
+,
+𝑰
+𝑑
+𝑣
+/
+𝑑
+𝑣
+)
+. Then 
+𝔼
+​
+∥
+𝒗
+𝑗
+∥
+2
+=
+1
+, the cross terms vanish in expectation, and for 
+𝒐
+⁡
+(
+𝒒
+)
+=
+∑
+𝑗
+𝑎
+𝑗
+​
+(
+𝒒
+)
+​
+𝒗
+𝑗
+ with matched index 
+⋆
+:
+
+We call the readout ideally retrievable when 
+pSNR
+>
+1
+, so the matched value has more power than the aggregate distractors. This criterion gives the expected power ratio under the isotropic-value model. Exact recall also depends on the realized values. Deterministic orthogonal unit values give the same identity when 
+𝑑
+𝑣
+≥
+𝑇
+.
+
+Theorem 7 (Idealized Welch-scale retrieval).
+
+Let 
+𝑝
+≥
+2
+ and 
+𝑇
+>
+𝑝
+. Suppose the 
+𝑇
+−
+1
+ distractors have squared correlations:
+
+with the matched query. Then:
+
+The criterion 
+pSNR
+>
+1
+ gives linear retrieval only for 
+𝑇
+<
+2
+​
+𝑝
+, hence capacity 
+Θ
+⁡
+(
+𝑝
+)
+. The PSD map squares distractor interference and extends the idealized threshold to 
+Θ
+⁡
+(
+𝑝
+2
+)
+, showing how the rank-one lift converts the same address geometry into a larger retrieval regime. This comparison also exposes what changes when the readout is nonlinear: applying softmax to the same Welch-scale margin yields the following proposition.
+
+Proposition 8 (Softmax sharpening at the Welch scale).
+
+Under the setup of Theorem 7, let 
+𝜇
+⋆
+=
+𝜖
+⋆
+ and take the harmful distractor sign 
++
+𝜇
+⋆
+. Temperature-
+𝜏
+ softmax satisfies:
+
+It is therefore ideally retrievable precisely when:
+
+For 
+𝑇
+≫
+𝑝
+, this gives the approximate capacity:
+
+Equivalently, any finite target length with 
+𝜇
+⋆
+<
+1
+ satisfies the criterion whenever:
+
+The softmax partition is common to all coefficients and cancels from pSNR; exponentiation then sharpens the remaining angular margin. Every fixed positive temperature gives a finite idealized capacity; for a fixed positive score margin, this capacity is exponential in 
+1
+/
+𝜏
+. Conversely, writing 
+𝛽
+𝑇
+=
+1
+/
+𝜏
+, an unconstrained inverse temperature removes any finite dimension-only ceiling, with 
+𝛽
+𝑇
+=
+Θ
+⁡
+(
+log
+⁡
+𝑇
+)
+ for a fixed positive margin. This recovers, from a complementary retrieval perspective, the critical logarithmic scale identified for long-context softmax dynamics by Chen et al. (2025). In our framework the law follows directly from Welch-scale interference and the pSNR criterion: the matched score must be amplified logarithmically to remain above the aggregate power of a growing number of distractors. Proofs are given in Sections C.7 and C.8.
+
+An alternative perspective on capacity comes from associative-memory theory, which asks how many patterns remain stable and retrievable under a specified update rule, noise model, and success criterion (Krotov et al., 2025). Higher-order and exponential interactions can raise these dynamical storage thresholds from polynomial to exponential regimes  (Krotov and Hopfield, 2016; Demircigil et al., 2017; Lucibello and Mézard, 2024). Our 
+𝜖
+-capacity measures the quality of the address packing at a fixed interference tolerance. Under the idealized orthogonal-value readout above, that packing directly determines pSNR and hence whether associative recall succeeds. A nonlinear readout can amplify any positive target–distractor margin, while an exact collision remains irreducible. The specified update rule, noise model, and optimization then determine how closely empirical recall realizes this geometric capacity.
+
+4Hardware-Aligned Implementation
+
+The capacity story of Section 3 is geometric, but its practical reach depends on how cleanly the feature map maps onto modern accelerators. Chunkwise parallel training is the standard scaffold for linear-time recurrent attention: split a length-
+𝑇
+ sequence into chunks of size 
+𝐶
+, yielding 
+𝑁
+𝐶
+≔
+⌈
+𝑇
+/
+𝐶
+⌉
+ chunks with the final chunk padded when necessary, run intra-chunk attention on tensor cores, and propagate the inter-chunk state by a sequential prefix sum (Hua et al., 2022). FLA’s chunk-parallel linear attention (Yang and Zhang, 2024) and Gated DeltaNet’s non-commutative Householder transition in the compact WY representation (Schreiber and Van Loan, 1989; Yang et al., 2025b) share this decomposition; what differs is the inter-chunk update. GDN requires a 
+𝐶
+×
+𝐶
+ triangular solve per chunk, expanding the per-token state into high-bandwidth memory (HBM) and tying chunk size to the solve’s conditioning. Mamba2’s data-dependent transition is likewise sequential at the chunk level. An additive feature-state recurrence avoids both costs and admits a parallel scan that lowers inter-chunk depth from 
+Θ
+⁡
+(
+𝑁
+𝐶
+)
+ to 
+𝒪
+⁡
+(
+log
+⁡
+𝑁
+𝐶
+)
+.
+
+4.1From rank-one rays to low-rank PSD packing
+
+From this point onward, unqualified references to a KATA mixer or KATA kernel denote PSD-resident features. Orthant and Lorentz variants are named explicitly. The full construction uses the rank-one map 
+𝜓
+⁡
+(
+𝒖
+)
+=
+𝒖
+​
+𝒖
+⊤
+. A direct outer-product layout has 
+𝑑
+2
+ entries for head dimension 
+𝑑
+, or 
+𝑛
+=
+𝑑
+⁡
+(
+𝑑
++
+1
+)
+/
+2
+ unique coordinates after symmetry packing. Thus 
+𝑛
+𝜓
+=
+𝑛
+ for the full PSD map. Linear attention must retain the feature–value state:
+
+so its dominant storage is 
+𝑛
+​
+𝑑
+𝑣
+; the feature width alone understates the memory cost. At 
+𝑑
+=
+64
+, the direct and packed widths are already 
+4096
+ and 
+2080
+, respectively. Multiplication by 
+𝑑
+𝑣
+ places the full PSD map at the edge of hardware-friendly state sizes even at this standard head dimension.
+
+We therefore test two reduced PSD families. Let 
+𝑔
+∈
+ℕ
+ divide 
+𝑑
+, set 
+𝑚
+=
+𝑑
+/
+𝑔
+, and partition each projected query or key into 
+𝑔
+ blocks 
+𝒖
+=
+(
+𝒖
+1
+,
+…
+,
+𝒖
+𝑔
+)
+ with 
+𝒖
+𝑎
+∈
+ℝ
+𝑚
+. KATA-
+Σ
+​
+𝑔
+ sums the block outer products into one PSD feature:
+
+Its dominant state size is:
+
+Thus KATA-
+Σ
+​
+𝑔
+ compresses 
+𝑔
+ outer products into a single low-rank PSD factor.
+
+KATA-M
+𝑔
+ instead retains one PSD factor per block. The raw inner product decomposes as 
+𝒒
+⊤
+​
+𝒌
+=
+∑
+𝑎
+=
+1
+𝑔
+𝒒
+𝑎
+⊤
+​
+𝒌
+𝑎
+, while the blockwise PSD map is:
+
+This maps into the Cartesian product of 
+𝑔
+ copies of 
+𝕊
++
+𝑑
+/
+𝑔
+ and has dominant state size:
+
+Both families recover the full rank-one PSD map at 
+𝑔
+=
+1
+. A Delta prefix adds the delta rule, a Gated prefix adds the learned gate, and GatedDelta combines both without changing the underlying PSD feature geometry. Their recurrences and implementation details are specified in Appendices D, D.3 and F.4.
+
+Chunkwise forward.
+
+Let 
+𝑛
+𝜓
+ denote the active feature dimension. We partition the sequence into chunks of size 
+𝐶
+ and write the per-chunk feature matrices as 
+Ψ
+⁡
+(
+𝑸
+[
+𝑡
+]
+)
+,
+Ψ
+⁡
+(
+𝑲
+[
+𝑡
+]
+)
+∈
+ℝ
+𝐶
+×
+𝑛
+𝜓
+ and 
+𝑽
+[
+𝑡
+]
+∈
+ℝ
+𝐶
+×
+𝑑
+𝑣
+. The inter-chunk state update reads:
+
+With 
+𝑴
+∈
+{
+0
+,
+1
+}
+𝐶
+×
+𝐶
+ the lower-triangular causal mask and 
+𝑷
+=
+(
+Ψ
+⁡
+(
+𝑸
+[
+𝑡
+]
+)
+​
+Ψ
+​
+(
+𝑲
+[
+𝑡
+]
+)
+⊤
+)
+⊙
+𝑴
+, the chunk output is:
+
+Every operation in this pass is a dense general matrix multiplication (GEMM), an element-wise op, or a warp reduction. Relative to Gated DeltaNet’s WY representation, which forms and inverts a 
+𝐶
+×
+𝐶
+ unitriangular matrix per chunk, the inter-chunk cost drops from 
+𝒪
+⁡
+(
+𝐶
+​
+𝑑
+𝑘
+2
++
+𝑑
+𝑘
+2
+​
+𝑑
+𝑣
+)
+ to 
+𝒪
+⁡
+(
+𝐶
+​
+𝑛
+𝜓
+​
+𝑑
+𝑣
+)
+, and available SRAM sets the chunk-size limit. Triangular-solve conditioning no longer constrains it. The full pass is summarized in Algorithm 1.
+
+4.2Tree-scan inter-chunk reduction
+
+A useful observation is that the recurrence Equation 17 is an associative prefix sum across the 
+𝑁
+𝐶
+ chunks. Existing chunk-parallel implementations, including the FLA and Gated DeltaNet chunk paths, traverse this prefix sequentially with depth 
+Θ
+⁡
+(
+𝑁
+𝐶
+)
+. Because 
+(
+𝑺
+loc
+,
+𝒁
+loc
+)
+ is a vector-space cumulative sum, however, the same prefix admits a parallel scan with depth 
+𝒪
+⁡
+(
+log
+2
+⁡
+𝑁
+𝐶
+)
+. Our forward decomposes into three Triton kernels dispatched in series: a per-chunk state kernel with 
+𝐵
+⋅
+𝐻
+⋅
+𝑁
+𝐶
+ programs in parallel, a cumulative pass that performs a associative scan in 
+⌈
+log
+2
+⁡
+𝑁
+𝐶
+⌉
+ rounds with 
+𝑁
+𝐶
+-wide parallelism per round, and a per-chunk output kernel that combines the inter-chunk prefix with the local 
+𝐶
+×
+𝐶
+ causal pattern. The resulting wall-clock model is:
+
+replacing the linear-scan baseline’s 
+𝒪
+⁡
+(
+𝑁
+𝐶
+​
+𝑑
+𝑣
+)
+ middle term. The 
+𝑛
+𝜓
+ feature slices are independent and execute in parallel.
+
+At 
+𝑇
+=
+2048
+ and 
+𝐶
+=
+32
+, the scan depth shrinks from 
+𝑁
+𝐶
+=
+64
+ to 
+log
+2
+⁡
+𝑁
+𝐶
+=
+6
+. Its arithmetic cost is negligible relative to the HBM write of 
+𝑺
+loc
+ at chunk boundaries, which is the actual bottleneck.
+
+Occupancy at small batch.
+
+The advantage is largest precisely where a sequential scan starves the GPU. At 
+𝐵
+=
+1
+, the 
+𝐵
+⋅
+𝐻
+=
+16
+ programs of a sequential chunked scan, as in FLA or Gated DeltaNet, cannot fill the H100’s 
+132
+ SMs, so the forward is occupancy-bound and plateaus near 
+25
+ Mtok/s. The tree scan instead exposes 
+𝐵
+⋅
+𝐻
+⋅
+𝑁
+𝐶
+ programs, which scale with the actual work. Figures 3 and 11 report the full 
+𝐵
+×
+𝑇
+ grid and its 
+𝐵
+=
+1
+ slice, respectively. For the linear feature (
+𝜓
+⁡
+(
+𝒙
+)
+=
+𝒙
+, with a matched 
+𝑑
+×
+𝑑
+ state), the associative scan delivers 
+1.9
+–
+2.9
+×
+ the throughput of the sequential linear-chunk kernel from 
+2048
+ to 
+131
+k tokens, and up to 
+7.5
+×
+ the throughput of Gated DeltaNet at 
+𝑇
+=
+2048
+.
+
+Why the PSD feature keeps to 
+𝒪
+⁡
+(
+𝑇
+)
+ or 
+𝒪
+⁡
+(
+𝑇
+2
+)
+.
+
+The tree scan is viable only for the linear feature. A PSD block of width 
+𝑚
+=
+𝑑
+/
+𝑔
+ has a direct outer-product feature dimension 
+𝑚
+2
+, so a chunk’s local state 
+𝜓
+​
+(
+𝑲
+[
+𝑐
+]
+)
+⊤
+​
+𝑽
+[
+𝑐
+]
+ is an 
+𝑚
+2
+×
+𝑑
+𝑣
+ tile. It occupies 
+128
+ KB at 
+𝑔
+=
+2
+ (
+𝑚
+2
+=
+1024
+) and already exceeds the H100’s 
+228
+ KB shared-memory budget once the query feature and matrix-multiplication accumulators are resident. At 
+𝑔
+=
+1
+ (
+𝑚
+2
+=
+4096
+), it occupies 
+1.5
+ MB. A scan must moreover materialize every chunk’s state to HBM, requiring 
+𝒪
+⁡
+(
+𝑁
+𝐶
+​
+𝑚
+2
+​
+𝑑
+𝑣
+)
+ storage traffic. We therefore do not tree-scan the PSD recurrence. KATA-M
+𝑔
+ runs either as a quadratic 
+𝒪
+⁡
+(
+𝑇
+2
+)
+ kernel, which never forms the 
+𝑚
+2
+ state, or as a linear-state 
+𝒪
+⁡
+(
+𝑇
+)
+ kernel, whose 
+𝑚
+2
+×
+𝑑
+𝑣
+ state lives in HBM and is streamed in feature blocks. Realizing the parallel-prefix speedup for PSD features would require this feature blocking within the scan and is left to future work. Full timings and SRAM budgets are reported in Sections E.1 and E.3.
+
+4.3Synthetic induction and hardware microbenchmarks
+
+KATA-
+Σ
+​
+2
+ solves a 
+𝑉
+=
+256
+ induction-head probe at every distance up to 
+2048
+ tokens within an 
+8
+k-step budget, matching or nearly matching softmax with FlashAttention-2 at every scale tested while avoiding the 
+𝒪
+⁡
+(
+𝑇
+2
+)
+ memory of dense attention (Section E.2). The fused rank-two KATA-
+Σ
+​
+2
+ forward scales linearly with 
+𝑇
+ at near-peak bandwidth without writing the per-token 
+𝜓
+ tensor to HBM; full timings appear in Section E.3.
+
+Kernel latency and throughput ratios.
+
+Figure 4 sweeps sequence length on an NVIDIA H100 for the two computational forms of the KATA-M
+𝑔
+ kernel. Across the tested lengths, the quadratic KATA-M1 forward delivers 
+1.3
+–
+1.6
+×
+ the throughput of FlashAttention-2, while KATA-M2 delivers 
+1.2
+–
+1.4
+×
+ the throughput. Both retain the same 
+𝒪
+⁡
+(
+𝑇
+2
+)
+ scaling. The exact linear-state PSD kernel instead trades an 
+𝑚
+2
+×
+𝑑
+𝑣
+ recurrent state, with 
+𝑚
+=
+𝑑
+/
+𝑔
+, for 
+𝒪
+⁡
+(
+𝑇
+)
+ compute. KATA-M2 reaches parity with its quadratic counterpart near 
+16
+K and is faster by 
+32
+K; KATA-M1 is faster by 
+128
+K. At 
+131
+K, linear-state KATA-M2 reaches 
+11
+×
+ FlashAttention-2’s forward throughput while implementing the exact PSD recurrence. Gated DeltaNet remains faster, but its raw-key feature loses high-entropy needle information (Table 4). The measured latency scaling approaches 
+2
+×
+ per doubling for the linear kernels and 
+4
+×
+ for the quadratic kernels.
+
+5Experiments
+
+The theory of Section 3 predicts that associative-recall behavior separates by cone, and the kernel of Section 4 makes the corresponding feature maps cheap to run. We test both predictions on three synthetic tasks that isolate distinct failure modes: multi-query associative recall (MQAR) with controlled length extrapolation, a repeated-key overwrite probe, and a long-range induction-head probe. We then scale the recall test to pretrained 340M-parameter language models with a needle-in-a-haystack suite. Only KATA variants instantiated on the PSD cone as described in Section 4.1 are compared against vanilla linear attention (Katharopoulos et al., 2020), Performer (Choromanski et al., 2021), DeltaNet (Yang et al., 2024b), Gated DeltaNet (Yang et al., 2025b), Mamba2 (Dao and Gu, 2024), and softmax attention. Concrete KATA configurations are named by feature family, KATA-
+Σ
+​
+𝑔
+ or KATA-M
+𝑔
+. The prefixes Delta, Gated, and GatedDelta add the content erase, multiplicative state gate, or both; for example, GatedDeltaKATA-M2 places PSD features inside the Gated DeltaNet raw-key recurrence. Per-architecture details and reproduction recipes are in Sections F.4 and F. Experimental configurations and the early-stopping criterion are matched across methods.
+
+5.1Multi-query associative recall (MQAR)
+
+We use the canonical Zoology MQAR setup (Arora et al., 2023). Training mixes streams up to 
+𝐾
+train
+=
+64
+ at 
+𝑇
+=
+256
+; evaluation grids the OOD slice 
+𝐾
+∈
+{
+128,256,512,768
+,
+1024
+}
+ over 
+𝑇
+∈
+{
+512
+,
+…
+,
+4096
+}
+, so the largest evaluation slice is 
+𝟏𝟔
+×
+ the longest training sequence and the largest training 
+𝐾
+. We report the best accuracy across the three-point sweep 
+lr
+∈
+{
+10
+−
+3
+,
+×
+10
+−
+3
+,
+10
+−
+2
+}
+. KATA-Orthant and KATA-Lorentz drop into the same backbone as every other row, varying only the feature map.
+
+In-distribution accuracy saturates for every fixed-state row, so the differences arise entirely on the out-of-distribution slices. The orthant and Lorentz baselines collapse just past 
+𝐾
+≈
+𝑑
+head
+, where the linear Welch and Rankin ceilings of Theorems 13 and 3 predict. The PSD variants extend recall into the 
+16
+×
+-extrapolation regime. At the largest slice, KATA-M1 retains 
+0.985
+ accuracy with a 
+266,240
+-entry fixed state, roughly one quarter of softmax’s 
+1,048,576
+ KV-cache entries; DeltaKATA-M1 reaches 
+0.999
+ at the same state size. GatedDeltaKATA-M2 exposes the recurrence trade-off: its average overwrite accuracy rises to 
+0.960
+, while its MQAR average falls to 
+0.423
+. The convex-gate ablation, which caps 
+∥
+𝑺
+𝑡
+∥
+𝐹
+ inside the convex hull of instantaneous bindings, halves the OOD accuracy of the additive form (full table in Appendix F).
+
+5.2Repeated-key overwrite
+
+Each of 
+𝐾
+ unique keys is written twice with two different values, and the model must retrieve the most recent binding. Training mixes 
+𝐾
+∈
+{
+4
+,
+8
+,
+16
+,
+32
+}
+ at sequence lengths up to 
+256
+; evaluation extends to 
+𝐾
+∈
+{
+64,128,256,384
+}
+ with 
+𝑇
+≤
+3072
+. The backbone is the two-layer Zoology transformer with a width-
+3
+ convolutional mixer, parameter-matched across rows.
+
+For a repeated key, an additive state writes both values along the same feature direction and therefore contains a term proportional to 
+𝜓
+⁡
+(
+𝒌
+)
+​
+(
+𝒗
+old
++
+𝒗
+new
+)
+⊤
+. The readout at that address sees their superposition without temporal information. RoPE resolves the ambiguity in-distribution by assigning the two writes different position-dependent features. Because this benchmark always targets the latest write, the model learns to favor the most recent association. In a general retrieval problem, the earlier association may remain correct, and this learned recency preference can select the newer value. The positional shortcut also extrapolates poorly in Table 2, where both softmax+RoPE and KATA-M2+RoPE deteriorate rapidly beyond the training distribution.
+
+The convex output gate of Proposition 1 acts at readout and leaves the relative contributions stored in 
+𝑺
+𝑡
+ unchanged. GatedKATA places its learned scalar inside the recurrence. Unrolling 
+𝑺
+𝑡
+=
+𝛾
+𝑡
+​
+𝑺
+𝑡
+−
+1
++
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+​
+𝒗
+𝑡
+⊤
+ gives:
+
+The recurrent gate assigns every write a multiplicative, token-dependent positional weight. At 
+𝐾
+=
+64
+, this weighting raises overwrite accuracy from 
+0.521
+ for KATA-M2 to 
+0.991
+ for GatedKATA-M2. The result supports a positional interpretation of the scalar gate, while state magnitude control plays a secondary role. Since the product usually shrinks with age, the gate favors recent writes.
+
+The delta rule corrects the value stored at the current content address. For a unit-norm feature, let 
+𝒗
+^
+𝑡
+=
+𝑺
+𝑡
+−
+1
+⊤
+​
+𝜓
+​
+(
+𝒌
+𝑡
+)
+ be the value currently retrieved at 
+𝒌
+𝑡
+. The update is:
+
+When 
+𝛽
+𝑡
+=
+1
+, reading the same address after the update returns 
+𝒗
+𝑡
+ exactly. When the earlier association should be preserved, a learned 
+𝛽
+𝑡
+ can suppress the correction. The update strength therefore controls content-dependent replacement at each write. DeltaKATA-M1 is nearly perfect across the overwrite sweep, while GatedDeltaKATA-M2 reaches 
+0.960
+ average overwrite accuracy. Full recurrence details are given in Section D.3.
+
+5.3Pretraining 340M-parameter language models
+
+To test whether the synthetic results persist under realistic pretraining, we train a family of 340M-parameter models (
+24
+ layers, 
+𝑑
+model
+=
+1024
+, 
+16
+ heads) for 
+15
+B tokens of SlimPajama (Soboleva et al., 2023) with the TinyLlama tokenizer (Zhang et al., 2024) at a 
+2048
+-token context, holding everything fixed and swapping only the token-mixing layer: softmax attention, Gated DeltaNet, KATA-M1 and KATA-M2 (RoPE positions, RMSNorm on 
+𝒒
+,
+𝒌
+), DeltaKATA-M1 (KATA-M1 with a DeltaNet content erase), and 
+ℓ
+2
+-norm and short-conv ablations. The models remain broadly comparable on zero-shot accuracy, while perplexity reveals a meaningful fluency spread (Table 3). KATA-M1 trails softmax attention, Gated DeltaNet, and DeltaKATA-M1 on both perplexity datasets; KATA-M2 is higher still. The recall evaluations therefore separate direct association from contextual retrieval: NIAH primarily probes stored bindings, while FDA and SQuAD also require context interpretation and candidate selection.
+
+Why the delta rule remains useful with RoPE.
+
+RoPE assigns repeated occurrences of the same key different phases, so it can in principle resolve overwrite within the 
+2048
+-token training window. The resulting separation depends on the attention kernel. Consider an aligned unit query and key in one rotary plane with angular rate 
+𝜔
+ and relative offset 
+Δ
+=
+|
+𝑗
+−
+𝑖
+|
+. Relative to 
+Δ
+=
+0
+, the KATA and softmax factors are:
+
+For 
+𝑑
+head
+=
+64
+, RMS-normalized query and key vectors have norm approximately 
+𝑑
+head
+ before learned per-channel gains. Combined with the standard 
+1
+/
+𝑑
+head
+ logit scaling, this gives an effective 
+𝜏
+≈
+1
+/
+𝑑
+head
+=
+1
+/
+8
+ on normalized directions (Section A.1). Taking the nominal slow rotary rate 
+𝜔
+=
+1
+/
+𝜃
+RoPE
+, with 
+𝜃
+RoPE
+=
+10
+4
+ and 
+Δ
+=
+1024
+, gives:
+
+The KATA score loses about 
+1.0
+%
+ across this offset, while the exponential softmax weight loses about 
+4.1
+%
+. Squaring also removes the sign of the rotated inner product, further weakening phase discrimination. The full RoPE map averages across a spectrum of rates, and this single-plane calculation isolates the effect of the kernel nonlinearity. The delta correction directly updates the content address and can therefore improve recall even inside the training window.
+
+The multiplicative state weights of GatedKATA provide another source of learned positional decay and should strengthen this separation. The 340M-model sweep leaves GatedKATA pretraining and its interaction with RoPE for future work.
+
+5.4Needle-in-a-haystack recall
+
+Using the same pretrained models, we evaluate the three RULER single-needle tasks S-NIAH-1/2/3 (Hsieh et al., 2024), which hide a word, a 
+7
+-digit number, and a 
+128
+-bit UUID at a random depth in a distractor haystack and query it with a cloze prompt. The tasks form an increasing-entropy ladder: a UUID is a high-entropy exact string, the regime that most stresses a fixed-size recurrent state. We score the full 
+500
+ samples per length with greedy decoding and normalized substring matching at 1K and 2K, both within the 
+2048
+-token training horizon. We restrict the main capacity comparison to these in-window lengths because the RoPE-based softmax and KATA models collapse once evaluation moves beyond the training horizon. This protocol isolates retrieval capacity from positional length extrapolation; OOD lengths are reported in Appendix F.
+
+Table 4 places softmax attention at the recall ceiling (
+≥
+0.93
+ on every task), while Gated DeltaNet degrades sharply as needle entropy grows: word, number, and UUID recall fall 
+→
+→
+0.004
+ at 1K. The PSD maps retain much more high-entropy signal. KATA-M1 remains strong on word and number recall, but its UUID accuracy falls from 
+0.758
+ at 1K to 
+0.458
+ at 2K; KATA-M2 reaches 
+0.910
+ and 
+0.616
+, respectively.
+
+At equal head width, the geometric packing argument favors KATA-M1’s full 64-dimensional factor for pure associative recall. Its recurrent state has 
+266,240
+ entries, compared with 
+135,168
+ for KATA-M2, so KATA-M2 obtains the stronger hard-needle result with approximately half the state. We interpret this reversal as a learnability effect: KATA-M1 learns one 64-dimensional spherical address factor, while KATA-M2 learns a product of two 32-dimensional factors. Realized recall therefore depends on both the available feature geometry and how readily the projections learn to use it.
+
+The delta erase provides a complementary gain. DeltaKATA-M1 raises UUID recall from 
+0.758
+ to 
+0.908
+ at 1K and from 
+0.458
+ to 
+0.584
+ at 2K without changing the KATA-M1 feature width, approaching KATA-M2’s 
+0.910
+ and 
+0.616
+. Two ablations on KATA-M2 isolate the remaining design choices: RMSNorm on 
+𝒒
+,
+𝒌
+ improves 2K UUID recall from 
+0.224
+ to 
+0.616
+, and replacing RoPE with a GDN-style short convolution preserves much of the in-window recall.
+
+Length extrapolation exhibits a different ordering. Gated DeltaNet’s multiplicative recurrent gate generalizes more reliably beyond 
+2048
+ tokens and leads the OOD-length evaluations. Its finite address capacity remains visible on the hard needles within the training horizon: UUID recall is 
+0.004
+ at both 1K and 2K despite strong word recall. Strong OOD length generalization and hard-needle recall therefore expose complementary properties of the mixer.
+
+5.5In-context recall on the Based cloze suite
+
+Complementing the controlled NIAH probe (Table 4), we also run the pretrained 340M models on the Based in-context recall suite (Arora et al., 2024), comprising SWDE, FDA, SQuAD, TriviaQA, and NQ. Each task provides a document in context and a cloze query, scored by normalized substring matching on the full dataset. Table 4 reports the results.
+
+SWDE is closest to a direct key–value association. KATA-M1 reaches 
+0.375
+, the best fixed-state result, consistent with the pure-recall advantage of its larger feature space. FDA and SQuAD require contextual interpretation and selection among correlated candidates. In this regime, KATA-M1 falls to 
+0.061
+ and 
+0.041
+, while KATA-M2 reaches 
+0.118
+ and 
+0.240
+ and DeltaKATA-M1 reaches 
+0.148
+ and 
+0.353
+. The reversal supports the same learnability interpretation: the single 64-dimensional spherical address factor is harder to train for contextual routing than the product of two 32-dimensional factors. KATA-M1’s weaker pretraining perplexity relative to softmax attention, Gated DeltaNet, and DeltaKATA-M1 compounds this difficulty. KATA-M2 improves contextual selection despite its higher perplexity, indicating that factorization and general fluency contribute separately.
+
+Normalized substring matching also rewards verbose generations, so KATA-M1’s terse answers are under-credited relative to models that surface several candidate spans. We therefore treat NIAH as the primary capacity result and the Based suite as a joint probe of retrieval, contextual routing, and generation style.
+
+Verbosity and fluency.
+
+Because normalized substring matching credits any generation that includes the gold span, it rewards length. Table 5 reports the average generated length per model: on SQuAD it ranges from 
+∼
+11
+ tokens (KATA-M1, which commits to a single terse answer) to 
+∼
+202
+ (DeltaKATA-M1), an 
+18.6
+×
+ spread that mirrors the SQuAD accuracies. Table 6 shows example completions on a shared prompt: every model is fluent, but the terse KATA-M1 model is penalized whenever its short answer is wrong, whereas more verbose models surface the gold span by volume. On the copy-style SWDE task the effect vanishes because all five emit the same short field value. This indicates that the SQuAD/FDA ordering reflects generation style as much as retrieval, a further reason we take NIAH (short, exact needles) as the primary recall measure.
+
+5.6Training compute
+
+Table 7 converts the measured end-to-end throughput into accelerator time using 
+15
+×
+10
+9
+/
+(
+𝑟
+×
+3600
+)
+ GPU-hours for throughput 
+𝑟
+ in tokens/s/GPU. Under near-linear four-GPU scaling, the H100 totals correspond to approximately 
+5.5
+ hours for softmax attention, 
+7.2
+ hours for Gated DeltaNet, 
+5.5
+ hours for either Flash KATA model, and 
+13.5
+ hours for DeltaKATA-M1. The softmax run reaches approximately 
+760
+k tokens/s across four H100 GPUs.
+
+Kernel-level attention gains are amortized across the full model, whose runtime also includes the MLPs, projections, RMSNorm, and optimizer work. Where applicable, we use FLA’s fused recurrent kernels (Yang and Zhang, 2024), including the Gated DeltaNet and delta-rule recurrences, to reduce launch and intermediate-materialization overhead. The complete MQAR and overwrite benchmark suite is much smaller, requiring approximately 
+4
+ A100 GPU-hours in total.
+
+6Related Work
+
+We organize prior work along the four axes that Sections 2, 3 and 4 unify: feature geometry, state recurrence, capacity diagnostics, and hardware mapping. For each, we indicate where existing linear-attention designs fall short.
+
+Feature geometry.
+
+Katharopoulos et al. (2020) replace softmax with 
+𝜓
+⁡
+(
+𝒙
+)
+=
+ELU
+⁡
+(
+𝒙
+)
++
+1
+ and exploit the recurrence 
+𝑺
+𝑡
+=
+𝑺
+𝑡
+−
+1
++
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+​
+𝒗
+𝑡
+⊤
+ to recurse in 
+𝒪
+⁡
+(
+𝑛
+𝜓
+​
+𝑑
+𝑣
+)
+. Performers (Choromanski et al., 2021), RFA (Peng et al., 2021), cosFormer (Qin et al., 2022), and the fast-weight view of Schlag et al. (2021) use random, trigonometric, or other finite features to approximate 
+exp
+⁡
+(
+⟨
+𝒒
+,
+𝒌
+⟩
+)
+. When nonnegative attention weights are required, such constructions use orthant-valued maps. The orthant is the simplicial member of the real self-dual cones admitted by the Koecher–Vinberg classification  (Koecher, 1957; Vinberg, 1963; Faraut and Korányi, 1994). The Welch bound (Theorem 3) then gives 
+𝜇
+​
+(
+ℝ
++
+𝑛
+𝜓
+,
+𝑇
+)
+2
+≥
+(
+𝑇
+−
+𝑛
+𝜓
+)
+/
+(
+𝑛
+𝜓
+​
+(
+𝑇
+−
+1
+)
+)
+. At 
+𝑛
+𝜓
+=
+128
+, requiring 
+𝜇
+≤
+10
+−
+2
+ limits the dictionary to 
+𝑇
+≲
+130
+ keys. These works do not analyze the orthant restriction as a capacity bottleneck.
+
+State recurrence.
+
+S4 (Gu et al., 2022), RWKV (Peng et al., 2023), RetNet (Sun et al., 2023), and Mamba (Gu and Dao, 2024) generalize the recurrence to a data-dependent transition 
+𝑺
+𝑡
+=
+𝑨
+𝑡
+​
+𝑺
+𝑡
+−
+1
++
+𝒃
+𝑡
+​
+𝒄
+𝑡
+⊤
+. The State-Space Duality of Mamba2 (Dao and Gu, 2024) restricts 
+𝑨
+𝑡
+=
+𝛼
+𝑡
+​
+𝑰
+, exposing the algebraic equivalence with causal linear attention but compressing per-token selectivity into a single scalar; the resulting decay is empirically too coarse on retention probes (S-NIAH degrades past 
+2
+K tokens (Yang et al., 2025b)). DeltaNet (Yang et al., 2024b) treats 
+𝑺
+𝑡
+ as a fast-weight matrix updated by online ridge regression, and Gated DeltaNet (Yang et al., 2025b) adds an explicit forget gate:
+
+Proposition 1 shows that normalized linear attention produces the parameter-free convex coefficient 
+𝛼
+𝑡
+=
+𝐷
+𝑡
+−
+1
+/
+𝐷
+𝑡
+ at readout while leaving the stored state unchanged. Recurrent gates act directly on memory and therefore provide a distinct control point. When the raw-key substrate in Equation 21 is constrained to the nonnegative geometry studied here, its Lorentz lift meets the 
+1
+/
+2
+-interference Rankin wall of Theorem 13  (Rankin, 1955), giving an 
+𝒪
+⁡
+(
+𝑑
+)
+ address regime. Content erase and learned decay can improve overwrite and retention without enlarging the raw feature space. These models tune the recurrence while leaving 
+𝜓
+ implicit. Channel-wise refinements (Qiu et al., 2025) and test-time-regression variants (Behrouz et al., 2024; Zuo et al., 2025) operate on the same raw-key substrate; their recurrence mechanisms are complementary to the feature geometry studied here.
+
+Capacity diagnostics.
+
+Zoology (Arora et al., 2023) and MQAR/needle-in-a-haystack benchmarks expose the recall–memory trade-off (Jelassi et al., 2024; Du et al., 2025). Based (Arora et al., 2024) approximates 
+exp
+⁡
+(
+⟨
+𝒒
+,
+𝒌
+⟩
+)
+ by a degree-
+2
+ Taylor map paired with sliding-window attention; LoLA (McDermott et al., 2025), the Associative Memory layer (Krotov et al., 2025), and the GatedDeltaNet-H1/H2 stacks (Yang et al., 2025b) concede the pure linear path and reintroduce a small KV cache. Modern Hopfield networks (Krotov and Hopfield, 2016; Demircigil et al., 2017; Ramsauer et al., 2021; Zhong et al., 2025) establish that exponential energy admits exponentially many stable patterns, and Section A.4 places KATA’s rank-one PSD map at degree 
+2
+ in this hierarchy with 
+𝒪
+⁡
+(
+𝑑
+2
+)
+ feature state. The map 
+𝜓
+𝑆
+​
+(
+𝒖
+)
+=
+vec
+⁡
+(
+𝒖
+​
+𝒖
+⊤
+)
+ squares the inner product: 
+⟨
+𝜓
+𝑆
+​
+(
+𝒖
+𝑖
+)
+,
+𝜓
+𝑆
+​
+(
+𝒖
+𝑗
+)
+⟩
+=
+⟨
+𝒖
+𝑖
+,
+𝒖
+𝑗
+⟩
+2
+. Below the Welch threshold 
+𝜖
+⋆
+=
+1
+/
+𝑝
+, Theorem 3 gives a finite rational ceiling. For any fixed 
+𝜖
+∈
+(
+0
+,
+1
+)
+, once 
+𝑝
+>
+1
+/
+𝜖
+, the greedy spherical-cap construction packs 
+𝑇
+≥
+1
+2
+(
+1
+−
+𝜖
+)
+−
+(
+𝑝
+−
+1
+)
+/
+2
+ near-orthogonal keys in 
+𝑝
+⁡
+(
+𝑝
++
+1
+)
+/
+2
+ feature coordinates, which grows exponentially in 
+𝑝
+ (Theorem 4).
+
+Hardware mapping.
+
+Chunkwise parallel training is the standard scaffold for linear-time recurrent attention, with the inter-chunk state propagated by a sequential prefix sum in, for example, the FLA kernels (Yang and Zhang, 2024). For Gated DeltaNet, the non-commutative Householder transition in Equation 21 requires a 
+𝐶
+×
+𝐶
+ triangular solve per chunk under the WY representation (Schreiber and Van Loan, 1989) and materializes per-token state intermediates in HBM. Mamba2’s data-dependent transition instead requires a multiplicative selective scan rather than a vector-space cumulative sum. An additive feature-state recurrence admits a parallel scan that lowers the inter-chunk depth from 
+Θ
+⁡
+(
+𝑁
+𝐶
+)
+ to 
+𝒪
+⁡
+(
+log
+⁡
+𝑁
+𝐶
+)
+ (Section 4.2). KATA combines Koecher–Vinberg geometry with Welch–Rankin packing to certify exponential capacity at a fixed tolerable interference using a finite, hardware-aligned feature map.
+
+7Discussion and Limitations
+
+The results separate three aspects of associative attention that are often grouped under capacity: the geometry available for storing bindings, the ability of training to realize that geometry, and the contextual fluency needed to construct the correct association from language. KATA provides a theory and hardware realization for the first, exposes architectural controls for the second, and tests the third through 340M-parameter pretraining.
+
+Geometric capacity.
+
+For normalized query and key directions, associative capacity is a packing problem. Within the ordinary real symmetric-cone family, Sections 2 and 3 identifies the available nonnegative geometries and bounds their attainable interference. The rank-one PSD map squares directional overlap and expands a 
+𝑝
+-dimensional address into 
+𝑝
+⁡
+(
+𝑝
++
+1
+)
+/
+2
+ features. KATA-M1 realizes the full map, while KATA-M
+𝑔
+ and KATA-
+Σ
+​
+𝑔
+ reduce the recurrent state through block factorization. MQAR and NIAH validate the resulting capacity advantage over raw-key recurrences, and the same pSNR framework explains temperature sharpening in softmax. These bounds describe an achievable ceiling under the real, unit-direction, degree-two model.
+
+Learnability.
+
+Training determines how much of that ceiling is realized, so empirical associative-recall performance reflects the quality of the packing learned by the model. KATA-M1 has the larger geometric packing budget and a 
+266,240
+-entry state, yet KATA-M2 obtains stronger hard-needle recall with 
+135,168
+ entries. In this regime, the model learns two 32-dimensional factors more effectively than one 64-dimensional factor. Normalization and recurrence design provide additional controls: RMSNorm improves the learned KATA-M2 geometry, the delta rule replaces stale content at repeated addresses, and multiplicative gating supplies learned positional weighting distinct from RoPE. Gated DeltaNet’s length extrapolation shows that such gating can generalize beyond the RoPE training horizon.
+
+Contextual fluency.
+
+Direct recall begins after the model has formed the relevant query, key, and value. FDA and SQuAD also require context interpretation and selection among correlated candidates. KATA-M1 is strong on NIAH and direct-copy SWDE but degrades on these contextual tasks; KATA-M2 and DeltaKATA-M1 recover part of the gap. Pretraining perplexity contributes separately, since KATA-M2 improves contextual selection despite higher perplexity. The combined synthetic, exact-string, and cloze evaluations therefore distinguish storage capacity from the broader language-modeling behavior of the mixer.
+
+Future work.
+
+Four directions follow directly. First, packing theory and constructive dictionaries should be extended to complex spaces, where spherical codes and ETFs may offer more capacity at equal dimension. Second, GatedKATA and GatedDeltaKATA should be pretrained systematically, while DeltaKATA should be evaluated beyond M1; all three require dedicated fused GPU kernels. Third, the learnability of the full KATA-M1 geometry should be tested beyond 
+𝑑
+head
+=
+64
+, together with kernels that make its quadratic feature state practical at wider heads. Finally, tensor-train factorizations  (Oseledets, 2011) offer a path to higher even-order outer-product features without materializing the full tensor state. These studies will determine whether the geometric gains persist as feature order, model scale, and contextual demands increase.
+
+Acknowledgments
+
+We thank the Research Computing staff at the University of Colorado Boulder for providing access to GH200 nodes and for their prompt support in diagnosing and resolving system issues. We also thank Modal for free-tier compute credits that accelerated kernel tuning and development. We are grateful to the GPU MODE community, whose tutorials, competitions, forums, and open technical discussions created a welcoming environment for learning and mastering GPU programming. The answers shared by community members on those forums were crucial to developing the kernels in this work.
+
+References
+
+Achlioptas (2003)
+D. Achlioptas
+Database-friendly random projections: Johnson–Lindenstrauss with binary coins.
+Journal of Computer and System Sciences 66 (4), pp. 671–687.
+External Links: Document
+Cited by: §3.2.
+
+Alon (2009)
+N. Alon
+Perturbed identity matrices have high rank: proof and applications.
+Combinatorics, Probability and Computing 18 (1–2), pp. 3–15.
+External Links: Document
+Cited by: §A.3.
+
+Arora et al. (2023)
+S. Arora, S. Eyuboglu, A. Timalsina, I. Johnson, M. Poli, J. Zou, A. Rudra, and C. Ré
+Zoology: measuring and improving recall in efficient language models.
+External Links: 2312.04927, Link
+Cited by: §E.2, item 4, §5.1, §6.
+
+Arora et al. (2024)
+S. Arora, S. Eyuboglu, M. Zhang, A. Timalsina, S. Alberti, D. Zinsley, J. Zou, A. Rudra, and C. Ré
+Simple linear attention language models balance the recall-throughput tradeoff.
+External Links: 2402.18668, Link
+Cited by: §5.5, §6.
+
+Bandyopadhyay et al. (2002)
+S. Bandyopadhyay, P. O. Boykin, V. Roychowdhury, and F. Vatan
+A new proof for the existence of mutually unbiased bases.
+Algorithmica 34 (4), pp. 512–528.
+External Links: Document
+Cited by: §C.5.
+
+Behrouz et al. (2024)
+A. Behrouz, P. Zhong, and V. Mirrokni
+Titans: learning to memorize at test time.
+External Links: 2501.00663, Link
+Cited by: §6.
+
+Chen et al. (2025)
+S. Chen, Z. Lin, Y. Polyanskiy, and P. Rigollet
+Critical attention scaling in long-context transformers.
+External Links: 2510.05554, Link
+Cited by: §3.3.
+
+Choromanski et al. (2021)
+K. M. Choromanski, V. Likhosherstov, D. Dohan, X. Song, A. Gane, T. Sarlos, P. Hawkins, J. Q. Davis, A. Mohiuddin, L. Kaiser, D. B. Belanger, L. J. Colwell, and A. Weller
+Rethinking attention with performers.
+In International Conference on Learning Representations,
+External Links: Link
+Cited by: §1, §5, §6.
+
+Dao and Gu (2024)
+T. Dao and A. Gu
+Transformers are ssms: generalized models and efficient algorithms through structured state space duality.
+In Proceedings of the 41st International Conference on Machine Learning,
+ICML’24.
+Cited by: §1, §1, §2.2, §5, §6.
+
+Dao (2023)
+T. Dao
+FlashAttention-2: faster attention with better parallelism and work partitioning.
+External Links: 2307.08691, Link
+Cited by: item 3.
+
+Demircigil et al. (2017)
+M. Demircigil, J. Heusel, M. Löwe, S. Upgang, and F. Vermet
+On a model of associative memory with huge storage capacity.
+Journal of Statistical Physics 168 (2), pp. 288–299.
+External Links: Document
+Cited by: §3.3, §6.
+
+DeVore (2007)
+R. A. DeVore
+Deterministic constructions of compressed sensing matrices.
+Journal of Complexity 23 (4–6), pp. 918–925.
+External Links: Document
+Cited by: §C.6.
+
+Donoho and Elad (2003)
+D. L. Donoho and M. Elad
+Optimally sparse representation in general (nonorthogonal) dictionaries via 
+ℓ
+1
+ minimization.
+Proceedings of the National Academy of Sciences 100 (5), pp. 2197–2202.
+External Links: Document
+Cited by: §3.
+
+Du et al. (2025)
+J. Du, W. Sun, D. Lan, J. Hu, and Y. Cheng
+Mom: linear sequence modeling with mixture-of-memories.
+arXiv preprint arXiv:2502.13685.
+Cited by: §1, §6.
+
+Faraut and Korányi (1994)
+J. Faraut and A. Korányi
+Analysis on symmetric cones.
+Oxford Mathematical Monographs, Oxford University Press, Oxford.
+External Links: ISBN 9780198534778
+Cited by: §A.2, §1, §6, Theorem 2.
+
+Fickus and Mixon (2016)
+M. Fickus and D. G. Mixon
+Tables of the existence of equiangular tight frames.
+External Links: 1504.00253, Link
+Cited by: §A.3, §3.
+
+Gu and Dao (2024)
+A. Gu and T. Dao
+Mamba: linear-time sequence modeling with selective state spaces.
+In First Conference on Language Modeling (COLM),
+External Links: Link
+Cited by: §1, §6.
+
+Gu et al. (2022)
+A. Gu, K. Goel, and C. Re
+Efficiently modeling long sequences with structured state spaces.
+In International Conference on Learning Representations,
+External Links: Link
+Cited by: §6.
+
+Hsieh et al. (2024)
+C. Hsieh, S. Sun, S. Kriman, S. Acharya, D. Rekesh, F. Jia, and B. Ginsburg
+RULER: what’s the real context size of your long-context language models?.
+In First Conference on Language Modeling,
+External Links: Link
+Cited by: §5.4.
+
+Hua et al. (2022)
+W. Hua, Z. Dai, H. Liu, and Q. V. Le
+Transformer quality in linear time.
+In Proceedings of the 39th International Conference on Machine Learning (ICML),
+Cited by: §4.
+
+Jelassi et al. (2024)
+S. Jelassi, D. Brandfonbrener, S. M. Kakade, and E. Malach
+Repeat after me: transformers are better than state space models at copying.
+arXiv preprint arXiv:2402.01032.
+Cited by: §1, §6.
+
+Johnson and Lindenstrauss (1984)
+W. B. Johnson and J. Lindenstrauss
+Extensions of lipschitz mappings into a hilbert space.
+Contemporary Mathematics 26, pp. 189–206.
+External Links: Document
+Cited by: §3.2.
+
+Katharopoulos et al. (2020)
+A. Katharopoulos, A. Vyas, N. Pappas, and F. Fleuret
+Transformers are rnns: fast autoregressive transformers with linear attention.
+In Proceedings of the 37th International Conference on Machine Learning,
+ICML’20.
+Cited by: §1, §2.2, §2.3, §2, §5, §6.
+
+Koecher (1957)
+M. Koecher
+Positivitätsbereiche im 
+ℝ
+𝑛
+.
+American Journal of Mathematics 79 (3), pp. 575–596.
+External Links: Document
+Cited by: §A.2, §1, §6, Theorem 2.
+
+Krotov et al. (2025)
+D. Krotov, B. Hoover, P. Ram, and B. Pham
+Modern methods in associative memory.
+External Links: 2507.06211, Link
+Cited by: §3.3, §6.
+
+Krotov and Hopfield (2016)
+D. Krotov and J. J. Hopfield
+Dense associative memory for pattern recognition.
+In Advances in Neural Information Processing Systems 29 (NIPS),
+Cited by: §3.3, §6.
+
+Lucibello and Mézard (2024)
+C. Lucibello and M. Mézard
+Exponential capacity of dense associative memories.
+Physical Review Letters 132 (7), pp. 077301.
+External Links: Document, Link
+Cited by: §3.3.
+
+McDermott et al. (2025)
+L. McDermott, R. W. Heath Jr, and R. Parhi
+Lola: low-rank linear attention with sparse caching.
+arXiv preprint arXiv:2505.23666.
+Cited by: §6.
+
+MiniMax et al. (2026)
+MiniMax, :, A. Chen, A. Li, B. Zhou, B. Gong, B. Jiang, B. Dan, C. Yu, C. Wang, C. Ma, C. Zhong, C. Zhu, C. Xiao, C. Yang, C. Du, C. Zhang, C. Zhang, C. Huang, C. Zhang, C. Du, C. Zhao, C. Guo, D. Chen, D. Ding, D. Sun, D. Zhang, E. Yang, F. Yu, G. Zheng, G. Zheng, G. Li, H. Zhu, H. Zhou, H. Zhang, H. Ding, H. Zhang, H. Sun, H. Lyu, H. Lu, H. Wang, H. Shi, H. Li, J. Chen, J. Zhang, J. Zhuang, J. Cai, J. Pan, J. Li, J. Song, J. Zhang, J. Wang, J. Gu, J. Zhu, J. Dong, J. Li, J. Zhang, J. Zhuang, J. Tian, J. Liu, J. Hu, J. Tao, J. Zhang, J. Ruan, J. Xu, J. Yan, J. Liu, J. He, K. Xu, K. Ji, K. Yang, K. Xiao, K. Duan, K. Li, L. Han, L. Ruan, L. Yuan, L. Yu, L. Feng, L. Mo, L. Li, L. Bao, L. Yang, L. Zhou, Loki, L. Chen, L. Ceng, M. Li, M. Zhong, M. Tao, M. Chi, M. Lin, N. Hu, N. Chen, P. Zhu, P. Gao, P. Gao, P. Li, P. Li, P. Zhao, Q. Ren, Q. Xu, Q. Ren, Q. Li, Q. Wang, Q. Chen, Q. Ceng, R. Tian, R. Dong, R. Leng, R. Zhang, S. Liu, S. Chen, S. Jia, S. Yao, S. Zhao, S. Yu, S. Li, S. Pan, S. Zhu, T. Li, T. Xie, T. Qin, T. Liang, W. Liu, W. Xu, W. Li, W. Chen, W. Cheng, W. Zhang, W. Chen, W. Zhao, X. Chen, X. Song, X. Wang, X. Luo, X. Su, X. Li, X. Han, X. Wu, X. Song, X. Han, X. Guan, X. Lu, X. Zou, X. Lai, X. Li, Y. Gong, Y. Wang, Y. Xu, Y. Wang, Y. Tang, Y. Chen, Y. Qiu, Y. Shi, Y. Guo, Y. Huang, Y. Wang, Y. Hu, Y. Gao, Y. Zhang, Y. Ying, Y. Zhang, Y. Wang, Y. Song, Y. Yang, Y. Meng, Y. Miao, Y. Li, Y. Liu, Y. Hu, Y. Huang, Y. Li, Y. Huang, Y. Zhang, Y. Hong, Y. Xie, Y. Zhang, Y. Liao, Y. Shi, Y. Wenren, Z. Li, Z. Li, Z. Luo, Z. Jin, Z. Sun, Z. Zhou, Z. Su, Z. Li, Z. Zhu, Z. Peng, Z. Fan, Z. Zhang, Z. Xu, Z. Lv, Z. Xu, Z. He, Z. He, Z. Li, Z. Gao, Z. Wu, Z. Song, Z. Zhou, Z. Sun, Z. Huang, Z. Chen, and Z. Ge
+The minimax-m2 series: mini activations unleashing max real-world intelligence.
+External Links: 2605.26494, Link
+Cited by: §1.
+
+Oseledets (2011)
+I. V. Oseledets
+Tensor-train decomposition.
+SIAM Journal on Scientific Computing 33 (5), pp. 2295–2317.
+Cited by: §A.4, §7.
+
+Peng et al. (2023)
+B. Peng, E. Alcaide, Q. Anthony, A. Albalak, S. Arcadinho, S. Biderman, H. Cao, X. Cheng, M. Chung, L. Derczynski, X. Du, M. Grella, K. Gv, X. He, H. Hou, P. Kazienko, J. Kocon, J. Kong, B. Koptyra, H. Lau, J. Lin, K. S. I. Mantri, F. Mom, A. Saito, G. Song, X. Tang, J. Wind, S. Woźniak, Z. Zhang, Q. Zhou, J. Zhu, and R. Zhu
+RWKV: reinventing RNNs for the transformer era.
+In Findings of the Association for Computational Linguistics: EMNLP 2023,
+Singapore, pp. 14048–14077.
+External Links: Link
+Cited by: §6.
+
+Peng et al. (2021)
+H. Peng, N. Pappas, D. Yogatama, R. Schwartz, N. A. Smith, and L. Kong
+Random feature attention.
+In 9th International Conference on Learning Representations (ICLR),
+External Links: Link
+Cited by: §1, §6.
+
+Qin et al. (2022)
+Z. Qin, W. Sun, H. Deng, D. Li, Y. Wei, B. Lv, J. Yan, L. Kong, and Y. Zhong
+CosFormer: rethinking softmax in attention.
+In The Tenth International Conference on Learning Representations (ICLR),
+External Links: Link
+Cited by: §6.
+
+Qiu et al. (2025)
+Z. Qiu, Z. Wang, B. Zheng, Z. Huang, K. Wen, S. Yang, R. Men, L. Yu, F. Huang, S. Huang, D. Liu, J. Zhou, and J. Lin
+Gated attention for large language models: non-linearity, sparsity, and attention-sink-free.
+In Advances in Neural Information Processing Systems (NeurIPS),
+Cited by: §6.
+
+Ramsauer et al. (2021)
+H. Ramsauer, B. Schäfl, J. Lehner, P. Seidl, M. Widrich, L. Gruber, M. Holzleitner, T. Adler, D. P. Kreil, M. K. Kopp, G. Klambauer, J. Brandstetter, and S. Hochreiter
+Hopfield networks is all you need.
+In 9th International Conference on Learning Representations (ICLR),
+External Links: Link
+Cited by: §6.
+
+Rankin (1955)
+R. A. Rankin
+The closest packing of spherical caps in 
+𝑛
+ dimensions.
+Proceedings of the Glasgow Mathematical Association 2 (3), pp. 139–144.
+Cited by: §C.2, §6.
+
+Schlag et al. (2021)
+I. Schlag, K. Irie, and J. Schmidhuber
+Linear transformers are secretly fast weight programmers.
+In Proceedings of the 38th International Conference on Machine Learning (ICML),
+Proceedings of Machine Learning Research, Vol. 139, pp. 9355–9366.
+External Links: Link
+Cited by: §1, §6.
+
+Schreiber and Van Loan (1989)
+R. Schreiber and C. Van Loan
+A storage-efficient WY representation for products of Householder transformations.
+SIAM Journal on Scientific and Statistical Computing 10 (1), pp. 53–57.
+External Links: Document
+Cited by: §4, §6.
+
+Shen et al. (2021)
+Z. Shen, M. Zhang, H. Zhao, S. Yi, and H. Li
+Efficient attention: attention with linear complexities.
+In Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision (WACV),
+pp. 3531–3539.
+External Links: Document
+Cited by: §2.2, §2.
+
+Soboleva et al. (2023)
+D. Soboleva, F. Al-Khateeb, R. Myers, J. R. Steeves, J. Hestness, and N. Dey
+SlimPajama: a 627b token cleaned and deduplicated version of redpajama.
+Note: https://www.cerebras.net/blog/slimpajama-a-627b-token-cleaned-and-deduplicated-version-of-redpajama
+Cited by: §5.3.
+
+Sun et al. (2023)
+Y. Sun, L. Dong, S. Huang, S. Ma, Y. Xia, J. Xue, J. Wang, and F. Wei
+Retentive network: a successor to transformer for large language models.
+arXiv preprint arXiv:2307.08621.
+External Links: 2307.08621
+Cited by: §1, §6.
+
+Team et al. (2025)
+G. Team, A. Kamath, J. Ferret, S. Pathak, N. Vieillard, R. Merhej, S. Perrin, T. Matejovicova, A. Ramé, M. Rivière, L. Rouillard, T. Mesnard, G. Cideron, J. Grill, S. Ramos, E. Yvinec, M. Casbon, E. Pot, I. Penchev, G. Liu, F. Visin, K. Kenealy, L. Beyer, X. Zhai, A. Tsitsulin, R. Busa-Fekete, A. Feng, N. Sachdeva, B. Coleman, Y. Gao, B. Mustafa, I. Barr, E. Parisotto, D. Tian, M. Eyal, C. Cherry, J. Peter, D. Sinopalnikov, S. Bhupatiraju, R. Agarwal, M. Kazemi, D. Malkin, R. Kumar, D. Vilar, I. Brusilovsky, J. Luo, A. Steiner, A. Friesen, A. Sharma, A. Sharma, A. M. Gilady, A. Goedeckemeyer, A. Saade, A. Feng, A. Kolesnikov, A. Bendebury, A. Abdagic, A. Vadi, A. György, A. S. Pinto, A. Das, A. Bapna, A. Miech, A. Yang, A. Paterson, A. Shenoy, A. Chakrabarti, B. Piot, B. Wu, B. Shahriari, B. Petrini, C. Chen, C. L. Lan, C. A. Choquette-Choo, C. Carey, C. Brick, D. Deutsch, D. Eisenbud, D. Cattle, D. Cheng, D. Paparas, D. S. Sreepathihalli, D. Reid, D. Tran, D. Zelle, E. Noland, E. Huizenga, E. Kharitonov, F. Liu, G. Amirkhanyan, G. Cameron, H. Hashemi, H. Klimczak-Plucińska, H. Singh, H. Mehta, H. T. Lehri, H. Hazimeh, I. Ballantyne, I. Szpektor, I. Nardini, J. Pouget-Abadie, J. Chan, J. Stanton, J. Wieting, J. Lai, J. Orbay, J. Fernandez, J. Newlan, J. Ji, J. Singh, K. Black, K. Yu, K. Hui, K. Vodrahalli, K. Greff, L. Qiu, M. Valentine, M. Coelho, M. Ritter, M. Hoffman, M. Watson, M. Chaturvedi, M. Moynihan, M. Ma, N. Babar, N. Noy, N. Byrd, N. Roy, N. Momchev, N. Chauhan, N. Sachdeva, O. Bunyan, P. Botarda, P. Caron, P. K. Rubenstein, P. Culliton, P. Schmid, P. G. Sessa, P. Xu, P. Stanczyk, P. Tafti, R. Shivanna, R. Wu, R. Pan, R. Rokni, R. Willoughby, R. Vallu, R. Mullins, S. Jerome, S. Smoot, S. Girgin, S. Iqbal, S. Reddy, S. Sheth, S. Põder, S. Bhatnagar, S. R. Panyam, S. Eiger, S. Zhang, T. Liu, T. Yacovone, T. Liechty, U. Kalra, U. Evci, V. Misra, V. Roseberry, V. Feinberg, V. Kolesnikov, W. Han, W. Kwon, X. Chen, Y. Chow, Y. Zhu, Z. Wei, Z. Egyed, V. Cotruta, M. Giang, P. Kirk, A. Rao, K. Black, N. Babar, J. Lo, E. Moreira, L. G. Martins, O. Sanseviero, L. Gonzalez, Z. Gleicher, T. Warkentin, V. Mirrokni, E. Senter, E. Collins, J. Barral, Z. Ghahramani, R. Hadsell, Y. Matias, D. Sculley, S. Petrov, N. Fiedel, N. Shazeer, O. Vinyals, J. Dean, D. Hassabis, K. Kavukcuoglu, C. Farabet, E. Buchatskaya, J. Alayrac, R. Anil, Dmitry, Lepikhin, S. Borgeaud, O. Bachem, A. Joulin, A. Andreev, C. Hardin, R. Dadashi, and L. Hussenot
+Gemma 3 technical report.
+External Links: 2503.19786, Link
+Cited by: §1.
+
+Vaswani et al. (2017)
+A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez, Ł. Kaiser, and I. Polosukhin
+Attention is all you need.
+Advances in neural information processing systems 30.
+Cited by: §1.
+
+Vinberg (1963)
+E. B. Vinberg
+The theory of homogeneous convex cones.
+Trudy Moskovskogo Matematicheskogo Obshchestva 12, pp. 303–358.
+External Links: Link
+Cited by: §A.2, §1, §6, Theorem 2.
+
+Welch (1974)
+L. R. Welch
+Lower bounds on the maximum cross correlation of signals.
+IEEE Transactions on Information Theory 20 (3), pp. 397–399.
+Cited by: Theorem 3.
+
+Wootters and Fields (1989)
+W. K. Wootters and B. D. Fields
+Optimal state-determination by mutually unbiased measurements.
+Annals of Physics 191 (2), pp. 363–381.
+External Links: Document
+Cited by: §C.5.
+
+Yang et al. (2025a)
+A. Yang, A. Li, B. Yang, B. Zhang, B. Hui, B. Zheng, B. Yu, C. Gao, C. Huang, C. Lv, C. Zheng, D. Liu, F. Zhou, F. Huang, F. Hu, H. Ge, H. Wei, H. Lin, J. Tang, J. Yang, J. Tu, J. Zhang, J. Yang, J. Yang, J. Zhou, J. Zhou, J. Lin, K. Dang, K. Bao, K. Yang, L. Yu, L. Deng, M. Li, M. Xue, M. Li, P. Zhang, P. Wang, Q. Zhu, R. Men, R. Gao, S. Liu, S. Luo, T. Li, T. Tang, W. Yin, X. Ren, X. Wang, X. Zhang, X. Ren, Y. Fan, Y. Su, Y. Zhang, Y. Zhang, Y. Wan, Y. Liu, Z. Wang, Z. Cui, Z. Zhang, Z. Zhou, and Z. Qiu
+Qwen3 technical report.
+External Links: 2505.09388, Link
+Cited by: §1.
+
+Yang et al. (2025b)
+S. Yang, J. Kautz, and A. Hatamizadeh
+Gated delta networks: improving mamba2 with delta rule.
+In The Thirteenth International Conference on Learning Representations,
+External Links: Link
+Cited by: §1, §1, §2.2, §4, §5, §6, §6.
+
+Yang et al. (2024a)
+S. Yang, B. Wang, Y. Shen, R. Panda, and Y. Kim
+Gated linear attention transformers with hardware-efficient training.
+In Proceedings of the 41st International Conference on Machine Learning,
+ICML’24.
+Cited by: §2.2.
+
+Yang et al. (2024b)
+S. Yang, B. Wang, Y. Zhang, Y. Shen, and Y. Kim
+Parallelizing linear transformers with the delta rule over sequence length.
+In Advances in Neural Information Processing Systems, A. Globerson, L. Mackey, D. Belgrave, A. Fan, U. Paquet, J. Tomczak, and C. Zhang (Eds.),
+Vol. 37, pp. 115491–115522.
+External Links: Document, Link
+Cited by: §1, §1, §5, §6.
+
+Yang and Zhang (2024)
+S. Yang and Y. Zhang
+FLA: a triton-based library for hardware-efficient implementations of linear attention mechanism.
+External Links: Link
+Cited by: §E.1, §4, §5.6, §6.
+
+Zhang et al. (2024)
+P. Zhang, G. Zeng, T. Wang, and W. Lu
+TinyLlama: an open-source small language model.
+External Links: 2401.02385
+Cited by: §5.3.
+
+Zhong et al. (2025)
+S. Zhong, M. Xu, T. Ao, and G. Shi
+Understanding transformer from the perspective of associative memory.
+External Links: 2505.19488, Link
+Cited by: §6.
+
+Zuo et al. (2025)
+Y. Zuo, Y. Yin, Z. Zeng, A. Li, B. Zhu, and Z. Wang
+Local linear attention: an optimal interpolation of linear and softmax attention for test-time regression.
+arXiv preprint arXiv:2510.01450.
+Cited by: §6.
+
+Appendix AReader’s guide to the geometry
+
+This appendix provides a short map from the attention equations to the geometric claims in the main text. We reserve 
+𝑑
+ for the raw query/key dimension, 
+𝑑
+𝑣
+ for the value dimension, and 
+𝑛
+𝜓
+ for a generic feature dimension. For PSD features, 
+𝑝
+ is the matrix side length and 
+𝑛
+≔
+𝑝
+⁡
+(
+𝑝
++
+1
+)
+/
+2
+ is the symmetric ambient dimension, so the full PSD map has 
+𝑛
+𝜓
+=
+𝑛
+. The sequence length is 
+𝑇
+, the chunk size is 
+𝐶
+, and 
+𝑁
+𝐶
+≔
+⌈
+𝑇
+/
+𝐶
+⌉
+ is the number of chunks. Packing statements define their dictionary size locally.
+
+Why recall becomes a packing problem.
+
+Suppose a query 
+𝒒
+ is meant to retrieve the binding at key 
+𝒌
+𝑗
+ from the additive state 
+𝑺
+=
+∑
+𝑖
+𝜓
+⁡
+(
+𝒌
+𝑖
+)
+​
+𝒗
+𝑖
+⊤
+. The numerator of the readout is:
+
+After normalizing features so the matched coefficient is one, every wrong value is weighted by a feature inner product. A fixed recurrent state therefore stores many bindings well only when the stored feature vectors are nearly orthogonal. This is the interference 
+𝜇
+⁡
+(
+𝒦
+,
+𝑇
+)
+ in Equation 5: it asks how many unit feature vectors fit in the allowed cone with all pairwise interference below a target tolerance.
+
+Why cones enter.
+
+Normalized linear attention needs nonnegative weights in the denominator and numerator. A self-dual cone 
+𝒦
+=
+𝒦
+∗
+ gives a coordinate-free certificate: if 
+𝜓
+⁡
+(
+𝒙
+)
+,
+𝜓
+⁡
+(
+𝒚
+)
+∈
+𝒦
+, then 
+⟨
+𝜓
+⁡
+(
+𝒙
+)
+,
+𝜓
+⁡
+(
+𝒚
+)
+⟩
+≥
+0
+. This is weaker than strict coordinatewise positivity. Boundary points are allowed; small 
+𝜖
+ terms are numerical safeguards against a zero denominator, not part of the capacity theorem.
+
+Where the denominator gate appears.
+
+For a fixed query, write 
+𝐷
+𝑡
+=
+𝜓
+​
+(
+𝒒
+𝑡
+)
+⊤
+​
+𝒁
+𝑡
+=
+𝐷
+𝑡
+−
+1
++
+⟨
+𝜓
+⁡
+(
+𝒒
+𝑡
+)
+,
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+⟩
+. If 
+𝐷
+𝑡
+>
+0
+, the normalized readout is a convex interpolation between the previous normalized readout and the new value, with weights 
+𝐷
+𝑡
+−
+1
+/
+𝐷
+𝑡
+ and 
+⟨
+𝜓
+⁡
+(
+𝒒
+𝑡
+)
+,
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+⟩
+/
+𝐷
+𝑡
+. This is the parameter-free gate proved formally in Proposition 1; it comes from normalization, not from an additional state transition.
+
+What the three cone factors do.
+
+The orthant has 
+𝑑
+ coordinate rays that are exactly orthogonal, but beyond those rays it inherits the ordinary Welch interference floor. The positive orthant has small solid angle, but a worst-case packing can live on sparse boundary faces, so volume alone is not a universal capacity obstruction. The Lorentz lift of a linear key uses 
+𝜓
+Lor
+(
+𝒌
+)
+=
+2
+−
+1
+/
+2
+(
+𝒌
+,
+1
+)
+ and turns 
+𝑧
+=
+⟨
+𝒒
+,
+𝒌
+⟩
+ into 
+(
+1
++
+𝑧
+)
+/
+2
+; this adds the 
+1
+/
+2
+ offset, so pushing below that offset forces the raw keys to be mutually obtuse and invokes Rankin. The PSD rank-one map 
+𝜓
+PSD
+​
+(
+𝒖
+)
+=
+𝒖
+​
+𝒖
+⊤
+ turns 
+𝑧
+ into 
+𝑧
+2
+, so antipodal and orthogonal-ish raw keys identifies antipodal raw vectors as the same line, while near-orthogonal raw lines become useful packing directions.
+
+How softmax fits.
+
+The exponential kernel is an infinite direct sum of tensor degrees. Theorem 12 shows the cone interpretation of those degrees: even monomials are rank-one PSD rays on tensorized features, while signed odd monomials become nonnegative only when paired with enough even mass into Lorentz-gated PSD atoms. KATA keeps the first capacity-changing PSD degree and implements it with a fixed recurrent state.
+
+A.1Kernel methods
+
+The exponential dot-product kernel admits the tensor expansion:
+
+Thus the canonical RKHS feature map is the infinite direct sum 
+𝜙
+⁡
+(
+𝒙
+)
+=
+⨁
+𝑟
+≥
+0
+𝒙
+⊗
+𝑟
+/
+𝑟
+!
+. Linear attention replaces this infinite feature map by a finite 
+𝜓
+:
+ℝ
+𝑑
+→
+ℝ
+𝑛
+𝜓
+.
+
+Lemma 9 (Norm of the exponential feature map on the sphere).
+
+For 
+𝜏
+>
+0
+, let 
+𝐾
+𝜏
+​
+(
+𝐪
+,
+𝐤
+)
+=
+exp
+⁡
+(
+⟨
+𝐪
+,
+𝐤
+⟩
+/
+𝜏
+)
+ have canonical feature map:
+
+Then:
+
+In particular, on 
+𝒮
+𝑑
+−
+1
+ the squared feature norm is the constant 
+𝑒
+1
+/
+𝜏
+ and the feature norm is 
+𝑒
+1
+/
+(
+2
+​
+𝜏
+)
+.
+
+Proof.
+
+The claim follows by evaluating the reproducing kernel on the diagonal: 
+∥
+𝜙
+𝜏
+​
+(
+𝒙
+)
+∥
+ℋ
+2
+=
+⟨
+𝜙
+𝜏
+​
+(
+𝒙
+)
+,
+𝜙
+𝜏
+​
+(
+𝒙
+)
+⟩
+ℋ
+=
+𝐾
+𝜏
+​
+(
+𝒙
+,
+𝒙
+)
+. ∎
+
+Hence unit-normalizing 
+𝒒
+,
+𝒌
+ in input space maps the sphere into a sphere of radius 
+𝑒
+1
+/
+(
+2
+​
+𝜏
+)
+ in the exact RKHS, matching the cone-restricted fixed-norm setting used throughout the main text up to a positive scalar.
+
+RMSNorm effect
+
+RMSNorm normalizes the input direction and then applies a learned per-channel scale. Its output is therefore not unit norm; nevertheless, its query–key inner product can be represented as a scalar multiple of an inner product between unit vectors in one higher dimension. Ignoring the stabilizing 
+𝜖
+, let 
+𝑐
+𝑑
+>
+0
+ absorb the fixed conversion from RMS normalization to 
+ℓ
+2
+ normalization, together with any fixed attention-logit scaling, and define:
+
+Define the diagonal gain matrix:
+
+Then:
+
+Choose any 
+𝑀
+>
+0
+ satisfying 
+𝑀
+≥
+∥
+𝒌
+¯
+∥
+2
+ for every key under consideration. For a finite dictionary one may take 
+𝑀
+=
+max
+𝑗
+⁡
+∥
+𝒌
+¯
+𝑗
+∥
+2
+; a context-independent choice for 
+𝑫
+𝛾
+≠
+0
+ is:
+
+Define:
+
+Both 
+𝒒
+~
+ and 
+𝒌
+~
+ are unit vectors in 
+ℝ
+𝑑
++
+1
+, and:
+
+Thus the RMSNorm-scaled logit is exactly a scalar inverse-temperature factor 
+𝑀
+ multiplying a cosine similarity in the lifted space. The diagonal gain matrix is absorbed into the lifted key geometry.
+
+A.2Symmetric cones and Jordan algebras
+
+A subset 
+𝒦
+⊂
+ℝ
+𝑛
+ is a cone if 
+𝑠
+​
+𝒗
+∈
+𝒦
+ for all 
+𝑠
+>
+0
+, 
+𝒗
+∈
+𝒦
+. It is convex if 
+𝒖
++
+𝒗
+∈
+𝒦
+ whenever 
+𝒖
+,
+𝒗
+∈
+𝒦
+. A closed convex cone is pointed if 
+𝒦
+∩
+(
+−
+𝒦
+)
+=
+{
+0
+}
+ and full-dimensional if its interior is non-empty.
+
+The dual cone of 
+𝒦
+⊂
+ℝ
+𝑛
+ under the Euclidean inner product is 
+𝒦
+∗
+=
+{
+𝒚
+∈
+ℝ
+𝑛
+:
+⟨
+𝒙
+,
+𝒚
+⟩
+≥
+0
+​
+∀
+𝒙
+∈
+𝒦
+}
+. The cone is self-dual if 
+𝒦
+=
+𝒦
+∗
+. Its automorphism group is 
+Aut
+⁡
+(
+𝒦
+)
+=
+{
+𝑨
+∈
+GL
+⁡
+(
+𝑛
+,
+ℝ
+)
+:
+𝑨
+⁡
+(
+𝒦
+)
+=
+𝒦
+}
+, and 
+𝒦
+ is homogeneous if 
+Aut
+⁡
+(
+𝒦
+)
+ acts transitively on the interior 
+int
+⁡
+(
+𝒦
+)
+.
+
+The Koecher–Vinberg theorem [Koecher, 1957, Vinberg, 1963, Faraut and Korányi, 1994] identifies real symmetric cones with cones of squares in formally real (Euclidean) Jordan algebras, and classifies the irreducible cases as: 
+ℝ
++
+ (one-dimensional Jordan algebra), 
+ℒ
++
+𝑚
+ for 
+𝑚
+≥
+3
+ (spin factor), 
+𝕊
++
+𝑛
+ for 
+𝑛
+≥
+2
+ (real symmetric matrices), 
+ℋ
++
+𝑛
+​
+(
+ℂ
+)
+ (complex Hermitian, 
+𝑛
+≥
+2
+), 
+ℋ
++
+𝑛
+​
+(
+ℍ
+)
+ (quaternionic Hermitian, 
+𝑛
+≥
+2
+), and 
+ℋ
++
+3
+​
+(
+𝕆
+)
+ (Albert algebra, exceptional). Our analysis restricts to the first three (real-coordinate Jordan algebras); the others remain valid symmetric cones but require complex-, quaternionic-, or octonionic-valued feature maps.
+
+A.3Fundamental geometric bounds
+
+We collect the four bounds that govern packing on the cone-restricted sphere. Throughout, 
+𝑇
+ is the number of unit vectors and 
+𝐷
+ is the ambient dimension.
+
+Welch bound.
+
+For any 
+𝑇
+ unit vectors 
+𝒖
+1
+,
+…
+,
+𝒖
+𝑇
+∈
+𝕊
+𝐷
+−
+1
+⊂
+ℝ
+𝐷
+:
+
+Inverting for 
+𝑇
+ at squared interference 
+𝜖
+ gives 
+𝑇
+≤
+𝐷
+⁡
+(
+1
+−
+𝜖
+)
+/
+(
+1
+−
+𝐷
+​
+𝜖
+)
+ for 
+𝜖
+<
+1
+/
+𝐷
+. As 
+𝑇
+→
+∞
+, the floor approaches 
+1
+/
+𝐷
+. The Welch bound is achieved with equality by Equiangular Tight Frames (ETFs).
+
+Gerzon bound.
+
+An ETF on 
+𝑇
+ vectors in 
+ℝ
+𝐷
+ requires 
+𝑇
+≤
+𝐷
+⁡
+(
+𝐷
++
+1
+)
+/
+2
+; above this ceiling, equality in the Welch bound is impossible. Below the ceiling, existence remains parameter-dependent, and real ETFs occur only for special pairs 
+(
+𝐷
+,
+𝑇
+)
+. Over 
+ℂ
+𝐷
+, the corresponding ceiling is 
+𝐷
+2
+, although complex ETF existence is also incomplete [Fickus and Mixon, 2016].
+
+Rankin bound.
+
+If 
+𝑇
+ unit vectors in 
+ℝ
+𝐷
+ have strictly negative pairwise inner products, then 
+𝑇
+≤
+𝐷
++
+1
+. At the boundary where the inner products are merely nonpositive, the cross-polytope gives the sharp bound 
+𝑇
+≤
+2
+​
+𝐷
+. The Lorentz condition in Theorem 13 is strict: for interference below 
+1
+/
+2
+, its spatial components lie in 
+ℝ
+𝑑
+−
+1
+ and are mutually obtuse, so 
+𝑇
+≤
+𝑑
+.
+
+Alon’s combinatorial bound.
+
+Alon’s rank bound [Alon, 2009] states that for any 
+𝑇
+ unit vectors with 
+max
+𝑖
+≠
+𝑗
+⁡
+|
+⟨
+𝒖
+𝑖
+,
+𝒖
+𝑗
+⟩
+|
+≤
+𝜇
+:
+
+This universal lower bound leaves only a 
+log
+⁡
+(
+1
+/
+𝜇
+)
+ factor between the best known necessary dimension and the sufficient 
+𝐷
+=
+𝒪
+⁡
+(
+𝜇
+−
+2
+​
+log
+⁡
+𝑇
+)
+ scaling of random spherical codes.
+
+Finite-size comparison.
+
+Alon’s bound hides an unspecified universal constant, so we do not assign it a numerical value. For 
+𝑇
+=
+10
+5
+ and 
+𝜇
+=
+0.05
+, the Welch bound requires 
+𝐷
+≥
+399
+, while the simple all-pairs random-code estimate 
+𝐷
+≈
+4
+​
+log
+⁡
+𝑇
+/
+𝜇
+2
+ gives 
+𝐷
+≈
+18,421
+. The deterministic MUB-derived and DeVore dictionaries below require 
+𝐷
+=
+802
+ and 
+𝐷
+=
+2,209
+, respectively.
+
+A.4Dense associative memory hierarchy
+
+The cone feature degrees parallel the Krotov–Hopfield Dense Associative Memory (DAM) hierarchy. DAM capacity is defined through an energy, update rule, and stability criterion, whereas our 
+𝜖
+-capacity counts address directions at fixed interference. The comparison below concerns the tensor-power degree of 
+𝐹
+⁡
+(
+𝑧
+)
+=
+⟨
+𝜓
+⁡
+(
+𝒒
+)
+,
+𝜓
+⁡
+(
+𝒌
+)
+⟩
+ for 
+𝑧
+=
+⟨
+𝒒
+,
+𝒌
+⟩
+ and does not identify the two capacity notions.
+
+• 
+
+Unnormalized linear attention: 
+𝐹
+Lin
+​
+(
+𝑧
+)
+=
+𝑧
+, degree-1 (classical Hopfield), using the raw signed key kernel. Cone nonnegativity is absent.
+
+Unnormalized linear attention: 
+𝐹
+Lin
+​
+(
+𝑧
+)
+=
+𝑧
+, degree-1 (classical Hopfield), using the raw signed key kernel. Cone nonnegativity is absent.
+
+• 
+
+Lorentz lift of the linear kernel: 
+𝐹
+Lor
+​
+(
+𝑧
+)
+=
+1
+2
++
+1
+2
+​
+𝑧
+. This is the smallest nonnegative cone lift of the degree-1 substrate. Below interference 
+1
+/
+2
+, its geometric address capacity is 
+𝒪
+⁡
+(
+𝑝
+)
+ by the Rankin wall of Theorem 13.
+
+Lorentz lift of the linear kernel: 
+𝐹
+Lor
+​
+(
+𝑧
+)
+=
+1
+2
++
+1
+2
+​
+𝑧
+. This is the smallest nonnegative cone lift of the degree-1 substrate. Below interference 
+1
+/
+2
+, its geometric address capacity is 
+𝒪
+⁡
+(
+𝑝
+)
+ by the Rankin wall of Theorem 13.
+
+• 
+
+Square-diagonal PSD with rank-one rays: 
+𝐹
+PSD
+​
+(
+𝑧
+)
+∝
+𝑧
+2
+, degree-2 (Krotov–Hopfield dense memory). For fixed interference and 
+𝑝
+>
+1
+/
+𝜖
+, the spherical-cap construction of Theorem 4 gives exponentially many address directions. Under the isotropic-value pSNR criterion, aggregate retrieval instead has the 
+Θ
+⁡
+(
+𝑝
+2
+)
+ threshold of Theorem 7.
+
+Square-diagonal PSD with rank-one rays: 
+𝐹
+PSD
+​
+(
+𝑧
+)
+∝
+𝑧
+2
+, degree-2 (Krotov–Hopfield dense memory). For fixed interference and 
+𝑝
+>
+1
+/
+𝜖
+, the spherical-cap construction of Theorem 4 gives exponentially many address directions. Under the isotropic-value pSNR criterion, aggregate retrieval instead has the 
+Θ
+⁡
+(
+𝑝
+2
+)
+ threshold of Theorem 7.
+
+• 
+
+Softmax: 
+𝐹
+soft
+​
+(
+𝑧
+)
+=
+𝑒
+𝑧
+=
+∑
+𝑟
+≥
+0
+𝑧
+𝑟
+/
+𝑟
+!
+, infinite degree. Theorem 12 shows that its even Taylor degrees are rank-one PSD rays on tensor powers, while its signed odd degrees become positive only after pairing with even mass into Lorentz-gated PSD atoms. The kernel requires the infinite RKHS feature 
+𝜙
+⁡
+(
+𝒙
+)
+=
+⨁
+𝑟
+𝒙
+⊗
+𝑟
+/
+𝑟
+!
+.
+
+Softmax: 
+𝐹
+soft
+​
+(
+𝑧
+)
+=
+𝑒
+𝑧
+=
+∑
+𝑟
+≥
+0
+𝑧
+𝑟
+/
+𝑟
+!
+, infinite degree. Theorem 12 shows that its even Taylor degrees are rank-one PSD rays on tensor powers, while its signed odd degrees become positive only after pairing with even mass into Lorentz-gated PSD atoms. The kernel requires the infinite RKHS feature 
+𝜙
+⁡
+(
+𝒙
+)
+=
+⨁
+𝑟
+𝒙
+⊗
+𝑟
+/
+𝑟
+!
+.
+
+KATA’s degree-2 map uses 
+𝒪
+⁡
+(
+𝑝
+2
+)
+ feature coordinates without adding 
+𝒪
+⁡
+(
+𝑝
+2
+​
+𝑑
+𝑣
+)
+ model parameters. The quadratic kernel rematerializes the 
+𝑝
+→
+𝑝
+2
+ feature expansion on chip, while the linear-state kernel stores the expanded recurrent state in HBM. Tensor-train factorizations [Oseledets, 2011] are a possible route to higher feature orders without materializing the full tensor; enforcing nonnegativity under such truncations remains open.
+
+Appendix BCone classification and normalization proofs
+
+B.1Proof of Proposition 1 (output-level gating)
+
+Let 
+𝐷
+𝑡
+−
+1
+=
+𝜓
+​
+(
+𝒒
+𝑡
+)
+⊤
+​
+𝒁
+𝑡
+−
+1
+ and 
+𝑐
+𝑡
+=
+𝜓
+​
+(
+𝒒
+𝑡
+)
+⊤
+​
+𝜓
+​
+(
+𝒌
+𝑡
+)
+. If 
+𝐷
+𝑡
+−
+1
+=
+0
+, then the nonnegative summands in 
+𝐷
+𝑡
+−
+1
+ are all zero, so 
+𝜓
+​
+(
+𝒒
+𝑡
+)
+⊤
+​
+𝑺
+𝑡
+−
+1
+=
+0
+ as well. Since 
+𝐷
+𝑡
+=
+𝐷
+𝑡
+−
+1
++
+𝑐
+𝑡
+>
+0
+, we have 
+𝑐
+𝑡
+>
+0
+ and the normalized readout is exactly 
+𝒗
+𝑡
+⊤
+.
+
+Now suppose 
+𝐷
+𝑡
+−
+1
+>
+0
+. Splitting numerator and denominator of 
+𝒛
+𝑡
+:
+
+Multiplying and dividing the first numerator term by 
+𝜓
+​
+(
+𝒒
+𝑡
+)
+⊤
+​
+𝒁
+𝑡
+−
+1
+ yields:
+
+The two numerators sum to 
+𝜓
+​
+(
+𝒒
+𝑡
+)
+⊤
+​
+𝒁
+𝑡
+, so 
+𝛼
+𝑡
+​
+(
+𝒒
+𝑡
+)
++
+𝛽
+𝑡
+​
+(
+𝒒
+𝑡
+)
+=
+1
+. Nonnegativity follows from Assumption 1, because 
+𝐷
+𝑡
+−
+1
+ and 
+𝑐
+𝑡
+ are sums of nonnegative feature inner products.
+
+B.2Canonical-cone classification
+
+Let 
+𝒦
+ be the closed, pointed, full-dimensional self-dual homogeneous cone that contains 
+im
+⁡
+𝜓
+. Self-duality gives 
+𝒦
+=
+𝒦
+∗
+, so for any two features 
+𝜓
+⁡
+(
+𝒙
+)
+,
+𝜓
+⁡
+(
+𝒚
+)
+∈
+𝒦
+:
+
+which certifies Assumption 1. By the Koecher–Vinberg theorem, 
+𝒦
+ is the cone of squares of a Euclidean Jordan algebra and decomposes uniquely as a Cartesian product of irreducible symmetric cones. Restricting to the ordinary real families considered here leaves 
+ℝ
++
+, Lorentz cones, and real PSD cones. Products of one-dimensional 
+ℝ
++
+ factors are orthants. Thus every cone in our scope is represented as a product of orthant, Lorentz, and PSD components. Assumption 2 constrains how rotations of the input act within this product, but does not introduce additional real irreducible cone factors.
+
+Appendix CPacking and SNR proofs
+
+C.1Proof of Theorem 3 (orthant Welch limit)
+
+The 
+𝑑
+ standard basis vectors lie in 
+ℝ
++
+𝑑
+ and are pairwise orthogonal, so zero interference is possible for 
+𝑁
+=
+𝑑
+. For 
+𝑁
+>
+𝑑
+, apply the Welch bound to any 
+𝑁
+ unit vectors 
+𝝍
+1
+,
+…
+,
+𝝍
+𝑁
+∈
+ℝ
++
+𝑑
+:
+
+Because orthant inner products are nonnegative, this is also a lower bound on the squared interference 
+𝜇
+2
+. If 
+𝜇
+≤
+𝜖
+ and 
+𝜖
+<
+1
+/
+𝑑
+, rearranging 
+𝜖
+2
+≥
+(
+𝑁
+−
+𝑑
+)
+/
+(
+𝑑
+⁡
+(
+𝑁
+−
+1
+)
+)
+ gives 
+𝑁
+≤
+𝑑
+⁡
+(
+1
+−
+𝜖
+2
+)
+/
+(
+1
+−
+𝑑
+​
+𝜖
+2
+)
+.
+
+C.2Proof of Theorem 13 (Lorentz interference wall)
+
+Proof.
+
+A unit extreme ray of the closure of 
+ℒ
++
+𝑑
+ has the form 
+𝜓
+=
+2
+−
+1
+/
+2
+(
+𝒚
+,
+1
+)
+ with 
+𝒚
+∈
+𝕊
+𝑑
+−
+2
+. Hence:
+
+If 
+⟨
+𝜓
+𝑖
+,
+𝜓
+𝑗
+⟩
+≤
+𝜖
+<
+1
+/
+2
+, then 
+⟨
+𝒚
+𝑖
+,
+𝒚
+𝑗
+⟩
+≤
+−
+𝛼
+ with 
+𝛼
+=
+1
+−
+2
+​
+𝜖
+>
+0
+. Therefore:
+
+which gives 
+𝑁
+≤
+1
++
+1
+/
+𝛼
+. Since the pairwise inner products are strictly negative, Rankin’s strict spherical-code bound also gives 
+𝑁
+≤
+𝑑
+ for vectors in 
+ℝ
+𝑑
+−
+1
+ [Rankin, 1955]. Combining the two bounds proves the claim. ∎
+
+Lemma 10 (One-sided spherical-cap bound).
+
+Let 
+𝑝
+≥
+2
+, let 
+𝐮
+∼
+Unif
+⁡
+(
+𝕊
+𝑝
+−
+1
+)
+, and fix 
+𝐞
+∈
+𝕊
+𝑝
+−
+1
+. For every 
+𝑎
+∈
+[
+0
+,
+1
+]
+:
+
+Proof.
+
+By rotation invariance, take 
+𝒆
+ to be the north pole and write 
+𝜃
+=
+arccos
+⁡
+(
+𝑎
+)
+∈
+[
+0
+,
+𝜋
+/
+2
+]
+. With 
+𝜎
+ denoting normalized surface measure, the cap 
+𝐶
+𝑎
+​
+(
+𝒆
+)
+=
+{
+𝒖
+:
+⟨
+𝒖
+,
+𝒆
+⟩
+≥
+𝑎
+}
+ has measure:
+
+where 
+𝐼
+𝑥
+​
+(
+𝛼
+,
+𝛽
+)
+ is the regularized incomplete beta function.
+
+It remains to upper-bound the first ratio. Set 
+𝑛
+=
+𝑝
+−
+2
+ and 
+𝑠
+=
+sin
+⁡
+𝜃
+=
+1
+−
+𝑎
+2
+. If 
+𝑠
+=
+0
+, the claim is trivial. Otherwise substitute 
+sin
+⁡
+𝜙
+=
+𝑠
+​
+sin
+⁡
+𝜓
+ in the numerator. Then:
+
+Since 
+0
+≤
+𝑠
+≤
+1
+, we have 
+1
+−
+𝑠
+2
+​
+sin
+2
+⁡
+𝜓
+≥
+1
+−
+sin
+2
+⁡
+𝜓
+=
+cos
+⁡
+𝜓
+ for 
+𝜓
+∈
+[
+0
+,
+𝜋
+/
+2
+]
+. Hence:
+
+Dividing by the denominator gives 
+𝜎
+⁡
+(
+𝐶
+𝑎
+​
+(
+𝒆
+)
+)
+≤
+𝑠
+𝑛
++
+1
+=
+(
+1
+−
+𝑎
+2
+)
+(
+𝑝
+−
+1
+)
+/
+2
+. ∎
+
+C.3Proof of Theorem 4 (PSD exponential packing)
+
+For 
+𝑝
+≥
+2
+, the extreme rays of the PSD cone 
+𝕊
++
+𝑝
+ are rank-one matrices 
+𝒖
+​
+𝒖
+⊤
+ with 
+𝒖
+∈
+𝕊
+𝑝
+−
+1
+. Their Frobenius inner product is:
+
+Thus PSD interference at most 
+𝜖
+ is equivalent to 
+|
+⟨
+𝒖
+𝑖
+,
+𝒖
+𝑗
+⟩
+|
+≤
+𝜖
+. Let 
+𝑎
+=
+𝜖
+ and let 
+𝜎
+ denote normalized surface measure on 
+𝕊
+𝑝
+−
+1
+.
+
+Now choose lines greedily on 
+𝕊
+𝑝
+−
+1
+: after selecting 
+𝒖
+1
+,
+…
+,
+𝒖
+𝑚
+, add any 
+𝒖
+ outside the antipodal caps 
+𝐶
+𝑎
+​
+(
+𝒖
+𝑖
+)
+∪
+𝐶
+𝑎
+​
+(
+−
+𝒖
+𝑖
+)
+. When the process is maximal, these antipodal caps cover the sphere; otherwise an uncovered point could be added. By Lemma 10, each selected line covers at most 
+2
+​
+(
+1
+−
+𝜖
+)
+(
+𝑝
+−
+1
+)
+/
+2
+ surface measure, so maximality implies:
+
+Because each new line is chosen outside all previous antipodal caps, the selected lines satisfy 
+|
+⟨
+𝒖
+𝑖
+,
+𝒖
+𝑗
+⟩
+|
+<
+𝑎
+, hence they meet the stated 
+𝜖
+ interference bound after the rank-one PSD map. Adding 
+𝜂
+​
+𝑰
+ to each rank-one matrix and renormalizing moves the construction into the cone interior if a numerical margin is desired, and the pairwise Frobenius inner products converge to the rank-one values as 
+𝜂
+↓
+0
+.
+
+C.4Rank-one PSD atoms minimize Haar-average interference
+
+The ray through 
+𝒖
+​
+𝒖
+⊤
+ is extreme. Indeed, if 
+𝒖
+​
+𝒖
+⊤
+=
+𝑨
++
+𝑩
+ with 
+𝑨
+,
+𝑩
+⪰
+0
+, then for every 
+𝒘
+⟂
+𝒖
+, 
+0
+=
+𝒘
+⊤
+​
+𝑨
+​
+𝒘
++
+𝒘
+⊤
+​
+𝑩
+​
+𝒘
+. Positive semidefiniteness gives 
+𝑨
+​
+𝒘
+=
+𝑩
+​
+𝒘
+=
+0
+, so the ranges of 
+𝑨
+ and 
+𝑩
+ are contained in 
+span
+​
+{
+𝒖
+}
+. Hence 
+𝑨
+ and 
+𝑩
+ are nonnegative multiples of 
+𝒖
+​
+𝒖
+⊤
+.
+
+Proposition 11 (Rank-one PSD atoms minimize Haar-average interference).
+
+Let 
+𝐀
+,
+𝐁
+⪰
+0
+ have 
+∥
+𝐀
+∥
+𝐹
+=
+∥
+𝐁
+∥
+𝐹
+=
+1
+ with eigendecompositions 
+𝐀
+=
+∑
+𝑟
+𝑎
+𝑟
+​
+𝐮
+𝑟
+​
+𝐮
+𝑟
+⊤
+ and 
+𝐁
+=
+∑
+𝑠
+𝑏
+𝑠
+​
+𝐯
+𝑠
+​
+𝐯
+𝑠
+⊤
+, 
+𝑎
+𝑟
+,
+𝑏
+𝑠
+≥
+0
+. Then 
+⟨
+𝐀
+,
+𝐁
+⟩
+𝐹
+=
+∑
+𝑟
+,
+𝑠
+𝑎
+𝑟
+​
+𝑏
+𝑠
+​
+⟨
+𝐮
+𝑟
+,
+𝐯
+𝑠
+⟩
+2
+≥
+0
+, and under a Haar-random relative eigenbasis 
+𝔼
+​
+⟨
+𝐀
+,
+𝐁
+⟩
+𝐹
+=
+Tr
+⁡
+(
+𝐀
+)
+​
+Tr
+⁡
+(
+𝐁
+)
+/
+𝑝
+≥
+1
+/
+𝑝
+, with equality only for rank-one matrices.
+
+Let 
+𝑨
+=
+∑
+𝑟
+𝑎
+𝑟
+​
+𝒖
+𝑟
+​
+𝒖
+𝑟
+⊤
+ and 
+𝑩
+=
+∑
+𝑠
+𝑏
+𝑠
+​
+𝒗
+𝑠
+​
+𝒗
+𝑠
+⊤
+ be spectral decompositions with 
+𝑎
+𝑟
+,
+𝑏
+𝑠
+≥
+0
+. Then:
+
+All coefficients are nonnegative, so high-rank PSD features average many rank-one interactions without cancellation. If the relative eigenbasis is Haar-random, then 
+𝔼
+​
+⟨
+𝒖
+𝑟
+,
+𝒗
+𝑠
+⟩
+2
+=
+1
+/
+𝑝
+ for every pair 
+(
+𝑟
+,
+𝑠
+)
+, hence:
+
+Since 
+∥
+𝑨
+∥
+𝐹
+2
+=
+∑
+𝑟
+𝑎
+𝑟
+2
+=
+1
+, Cauchy–Schwarz gives 
+Tr
+⁡
+(
+𝑨
+)
+=
+∑
+𝑟
+𝑎
+𝑟
+≥
+1
+, with equality iff exactly one eigenvalue is nonzero. The same holds for 
+𝑩
+, so the expected interference is at least 
+1
+/
+𝑝
+, with equality only when both matrices are rank one.
+
+The Cholesky identity used in the main text follows from cyclicity of trace: if 
+𝑨
+=
+𝑳
+​
+𝑳
+⊤
+ and 
+𝑩
+=
+𝑴
+​
+𝑴
+⊤
+, then:
+
+Thus dense factors introduce all cross-column products. A single flat-vector inner product omits these interactions.
+
+C.5MUB-derived real dictionary
+
+See 5
+
+Proof.
+
+We first write the construction explicitly when 
+𝑠
+=
+𝑝
+ is an odd prime. Let 
+𝜔
+=
+exp
+⁡
+(
+2
+​
+𝜋
+​
+𝑖
+/
+𝑝
+)
+ and let 
+𝒆
+0
+,
+…
+,
+𝒆
+𝑝
+−
+1
+ be the standard basis of 
+ℂ
+𝑝
+. The first basis is 
+{
+𝒆
+0
+,
+…
+,
+𝒆
+𝑝
+−
+1
+}
+. For each 
+𝑘
+∈
+𝔽
+𝑝
+ and 
+𝑚
+∈
+𝔽
+𝑝
+, define:
+
+with all exponents evaluated modulo 
+𝑝
+. This gives 
+𝑝
+ additional bases, one for each 
+𝑘
+∈
+𝔽
+𝑝
+.
+
+Within a fixed 
+𝑘
+, the inner product of two vectors is:
+
+which is 
+1
+ if 
+𝑚
+=
+𝑚
+′
+ and 
+0
+ otherwise. Thus each fixed-
+𝑘
+ collection is an orthonormal basis. A standard basis vector has inner-product modulus 
+1
+/
+𝑝
+ with every 
+𝒖
+𝑘
+,
+𝑚
+, since every coordinate of 
+𝒖
+𝑘
+,
+𝑚
+ has modulus 
+1
+/
+𝑝
+. Finally, for 
+𝑘
+≠
+𝑘
+′
+:
+
+The quadratic coefficient is nonzero, so the Gauss-sum identity gives this sum modulus 
+𝑝
+; hence the inner-product modulus is 
+1
+/
+𝑝
+.
+
+The same finite-field construction, with the appropriate trace character, gives complete sets of 
+𝑠
++
+1
+ mutually unbiased bases in 
+ℂ
+𝑠
+ for every prime power 
+𝑠
+=
+ℓ
+𝑘
+ [Wootters and Fields, 1989, Bandyopadhyay et al., 2002]. Write these bases as 
+ℬ
+𝑎
+=
+{
+𝒖
+𝑎
+,
+1
+,
+…
+,
+𝒖
+𝑎
+,
+𝑠
+}
+ for 
+𝑎
+=
+1
+,
+…
+,
+𝑠
++
+1
+. They satisfy:
+
+with all vectors unit norm. Thus the complex construction already contains 
+𝑚
+=
+𝑠
+⁡
+(
+𝑠
++
+1
+)
+ unit vectors with maximum complex interference 
+1
+/
+𝑠
+.
+
+To obtain real vectors, apply the realification map 
+𝑅
+:
+ℂ
+𝑠
+→
+ℝ
+2
+​
+𝑠
+, 
+𝑅
+⁡
+(
+𝒂
++
+𝑖
+​
+𝒃
+)
+=
+(
+𝒂
+,
+𝒃
+)
+. This map preserves norms: 
+∥
+𝑅
+⁡
+(
+𝒖
+)
+∥
+2
+2
+=
+∥
+ℜ
+⁡
+𝒖
+∥
+2
+2
++
+∥
+ℑ
+⁡
+𝒖
+∥
+2
+2
+=
+∥
+𝒖
+∥
+2
+2
+. Moreover, for any 
+𝒖
+,
+𝒗
+∈
+ℂ
+𝑠
+:
+
+Hence 
+|
+⟨
+𝑅
+⁡
+(
+𝒖
+)
+,
+𝑅
+⁡
+(
+𝒗
+)
+⟩
+ℝ
+|
+≤
+|
+⟨
+𝒖
+,
+𝒗
+⟩
+ℂ
+|
+. Realifying the 
+𝑠
+⁡
+(
+𝑠
++
+1
+)
+ MUB vectors therefore gives 
+𝑚
+=
+𝑠
+⁡
+(
+𝑠
++
+1
+)
+ unit vectors in 
+ℝ
+2
+​
+𝑠
+ with maximum absolute interference at most 
+1
+/
+𝑠
+. Since 
+𝑑
+=
+2
+​
+𝑠
+, this is 
+1
+/
+𝑠
+=
+2
+/
+𝑑
+. ∎
+
+C.6DeVore construction
+
+See 6
+
+Proof.
+
+For a prime 
+𝑝
+, take 
+𝔽
+𝑝
+=
+ℤ
+/
+𝑝
+​
+ℤ
+ and index the rows by pairs 
+(
+𝑥
+,
+𝑦
+)
+∈
+𝔽
+𝑝
+2
+. The same construction works over the finite field 
+𝔽
+𝑠
+ for any prime power 
+𝑠
+, so we write it in that notation. Following DeVore’s finite-field construction [DeVore, 2007], index the coordinates of 
+ℝ
+𝑠
+2
+ by 
+(
+𝑥
+,
+𝑦
+)
+∈
+𝔽
+𝑠
+2
+ and choose one polynomial for every coefficient vector 
+𝒂
+=
+(
+𝑎
+0
+,
+…
+,
+𝑎
+𝑟
+)
+∈
+𝔽
+𝑠
+𝑟
++
+1
+:
+
+There are 
+𝑠
+𝑟
++
+1
+ such coefficient vectors. The condition 
+𝑟
+<
+𝑠
+ ensures that distinct coefficient vectors define distinct functions on 
+𝔽
+𝑠
+: if 
+𝑃
+𝒂
+=
+𝑃
+𝒃
+ at all 
+𝑠
+ field elements, then 
+𝑃
+𝒂
+−
+𝑃
+𝒃
+ is a nonzero polynomial of degree at most 
+𝑟
+ with more than 
+𝑟
+ roots, impossible over a field.
+
+For each polynomial 
+𝑃
+, define 
+𝒗
+𝑃
+∈
+ℝ
+𝑠
+2
+ by:
+
+The graph 
+{
+(
+𝑥
+,
+𝑃
+⁡
+(
+𝑥
+)
+)
+:
+𝑥
+∈
+𝔽
+𝑠
+}
+ has exactly 
+𝑠
+ coordinates, so 
+∥
+𝒗
+𝑃
+∥
+2
+2
+=
+𝑠
+⋅
+(
+1
+/
+𝑠
+)
+=
+1
+.
+
+For two distinct polynomials 
+𝑃
+,
+𝑄
+, the supports of 
+𝒗
+𝑃
+ and 
+𝒗
+𝑄
+ overlap exactly at the field elements where 
+𝑃
+⁡
+(
+𝑥
+)
+=
+𝑄
+⁡
+(
+𝑥
+)
+. Therefore:
+
+The polynomial 
+𝑃
+−
+𝑄
+ is nonzero and has degree at most 
+𝑟
+. By the standard root bound for univariate polynomials over a field, it has at most 
+𝑟
+ roots in 
+𝔽
+𝑠
+. Hence 
+⟨
+𝒗
+𝑃
+,
+𝒗
+𝑄
+⟩
+≤
+𝑟
+/
+𝑠
+. This gives 
+𝑚
+=
+𝑠
+𝑟
++
+1
+ unit vectors in 
+ℝ
+𝑠
+2
+ with maximum interference at most 
+𝑟
+/
+𝑠
+. ∎
+
+C.7Proof of Theorem 7 (idealized Welch-scale retrieval)
+
+Proof.
+
+Normalize the matched score to one. For linear features, each distractor has score magnitude 
+𝜖
+⋆
+ and therefore contributes power 
+𝜖
+⋆
+. For rank-one PSD features, the score is the squared raw correlation, so each distractor contributes power 
+(
+𝜖
+⋆
+)
+2
+. Summing over 
+𝑇
+−
+1
+ distractors gives:
+
+Substituting 
+𝜖
+⋆
+=
+(
+𝑇
+−
+𝑝
+)
+/
+(
+𝑝
+⁡
+(
+𝑇
+−
+1
+)
+)
+ yields the two exact expressions in the theorem.
+
+Finally, 
+pSNR
+Lin
+>
+1
+ is equivalent to 
+𝑇
+<
+2
+​
+𝑝
+. For PSD features, setting 
+pSNR
+PSD
+=
+1
+ gives:
+
+whose larger root is 
+𝑝
+2
++
+2
+​
+𝑝
+−
+2
++
+𝒪
+⁡
+(
+𝑝
+−
+1
+)
+, giving the stated 
+Θ
+⁡
+(
+𝑝
+2
+)
+ threshold. ∎
+
+C.8Proof of Proposition 8 (softmax sharpening)
+
+Proof.
+
+Write 
+𝑧
+𝑗
+=
+⟨
+𝒒
+,
+𝒌
+𝑗
+⟩
+. Because 
+𝒒
+ and 
+𝒌
+𝑗
+ have unit norm:
+
+Adding a common bias does not change softmax:
+
+At the matched key 
+𝑧
+⋆
+=
+1
+, while the harmful Welch-scale distractors have 
+𝑧
+𝑗
+=
+𝜇
+⋆
+=
+𝜖
+⋆
+. After canceling the common bias factor, their unnormalized scores are:
+
+The partition is common to every coefficient and cancels from pSNR. Under the independent isotropic-value model of Equation 10:
+
+Therefore 
+pSNR
+Soft
+>
+1
+ is exactly
+
+When 
+𝑇
+≫
+𝑝
+, 
+𝜇
+⋆
+=
+(
+𝑇
+−
+𝑝
+)
+/
+(
+𝑝
+⁡
+(
+𝑇
+−
+1
+)
+)
+→
+1
+/
+𝑝
+, which gives Equation 15. Solving the same inequality for 
+1
+/
+𝜏
+ gives Equation 16. ∎
+
+C.9Softmax Taylor cone decomposition
+
+Theorem 12 (Softmax Taylor components factor through cone atoms).
+
+Let 
+𝑧
+=
+⟨
+𝐪
+,
+𝐤
+⟩
+ for unit vectors 
+𝐪
+,
+𝐤
+∈
+𝕊
+𝑑
+−
+1
+, and define 
+𝐭
+𝑟
+​
+(
+𝐱
+)
+=
+vec
+⁡
+(
+𝐱
+⊗
+𝑟
+)
+. Every even Taylor monomial factors through rank-one PSD atoms:
+
+The odd-degree terms become nonnegative after Lorentz gating, and the exponential kernel admits the decomposition:
+
+Proof.
+
+For unit 
+𝒒
+,
+𝒌
+ and 
+𝒕
+𝑟
+​
+(
+𝒙
+)
+=
+vec
+⁡
+(
+𝒙
+⊗
+𝑟
+)
+:
+
+Thus:
+
+which is the inner product of two rank-one rays in the PSD cone over the 
+𝑟
+-fold tensor feature space. An odd monomial satisfies 
+𝑧
+2
+​
+𝑟
++
+1
+<
+0
+ at 
+𝒌
+=
+−
+𝒒
+ and therefore violates nonnegativity on the full sphere.
+
+Let 
+ℓ
+⁡
+(
+𝒙
+)
+=
+(
+𝒙
+,
+1
+)
+. For 
+𝒙
+∈
+𝕊
+𝑑
+−
+1
+, 
+ℓ
+⁡
+(
+𝒙
+)
+∈
+∂
+ℒ
++
+𝑑
++
+1
+ and:
+
+Consequently:
+
+the product of a rank-one PSD-ray kernel and a Lorentz-ray kernel. Equivalently, define:
+
+Then 
+⟨
+Φ
+𝑟
+​
+(
+𝒒
+)
+,
+Φ
+𝑟
+​
+(
+𝒌
+)
+⟩
+=
+𝑧
+2
+​
+𝑟
+​
+(
+1
++
+𝑧
+)
+ under the tensor-product inner product, making the “multiplication” a standard feature-map tensoring operation.
+
+It remains to check that the Taylor coefficients can be regrouped this way. Absolute convergence on 
+[
+−
+1
+,
+1
+]
+ permits rearrangement, and:
+
+has odd coefficient 
+1
+/
+(
+2
+​
+𝑟
++
+1
+)
+!
+ on 
+𝑧
+2
+​
+𝑟
++
+1
+ and even coefficient:
+
+on 
+𝑧
+2
+​
+𝑟
+ for 
+𝑟
+≥
+1
+, while the constant term is 
+1
+. This is exactly the Taylor series of 
+𝑒
+𝑧
+.
+
+∎
+
+Theorem 13 (Lorentz Rankin wall).
+
+Let 
+0
+≤
+𝜖
+<
+1
+/
+2
+. Any configuration of 
+𝑁
+ unit vectors on the extreme rays of 
+ℒ
++
+𝑑
+ with pairwise interference at most 
+𝜖
+ satisfies:
+
+Appendix DKATA variants and recurrences
+
+D.1Variant taxonomy
+
+We use three explicit KATA variants:
+
+Plain KATA (additive recurrence, no gate).
+
+𝑺
+𝑡
+=
+𝑺
+𝑡
+−
+1
++
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+​
+𝒗
+𝑡
+⊤
+,  
+𝒁
+𝑡
+=
+𝒁
+𝑡
+−
+1
++
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+, with the convex output gate of Proposition 1 applied at readout. Best on MQAR (the state is purely accumulative); fails on overwrite (no mechanism to discard a stale binding).
+
+GatedKATA (multiplicative scalar state gate).
+
+𝑺
+𝑡
+=
+𝛾
+𝑡
+​
+𝑺
+𝑡
+−
+1
++
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+​
+𝒗
+𝑡
+⊤
+ with a learned scalar 
+𝛾
+𝑡
+∈
+[
+0
+,
+1
+]
+. The parameter-free convex output gate of Proposition 1 acts at readout and leaves 
+𝑺
+𝑡
+ unchanged. The learned 
+𝛾
+𝑡
+ enters the recurrence and changes the relative weights stored in the state. Unrolling assigns write 
+𝑠
+ the multiplicative weight 
+∏
+𝑟
+=
+𝑠
++
+1
+𝑡
+𝛾
+𝑟
+, producing token-dependent positional weighting that generally favors recent writes. The overwrite gains identify this positional weighting as the gate’s leading role, with state-norm control as a secondary effect; see Section 5.2.
+
+GatedDeltaKATA (PSD inside the GDN raw-key recurrence).
+
+The recurrence is:
+
+This is Gated DeltaNet’s recurrence with the rank-one erase term applied to 
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+; GDN applies the same term to the raw 
+𝒌
+𝑡
+. The construction inherits GDN’s overwrite semantics and uses a Welch-cone PSD feature as its key substrate.
+
+Comparison with GDN’s raw-key geometry.
+
+Gated DeltaNet’s recurrence treats the unit-normalized key 
+𝒌
+𝑡
+∈
+𝕊
+𝑑
+−
+1
+ as the feature itself. Under the nonnegative Lorentz lift, any strict interference tolerance 
+𝜖
+<
+1
+/
+2
+ forces negative raw-key inner products and hence permits at most 
+min
+⁡
+{
+𝑑
++
+1
+,
+1
++
+1
+/
+(
+1
+−
+2
+​
+𝜖
+)
+}
+ keys by Theorem 13. At the boundary 
+𝜖
+=
+1
+/
+2
+, nonpositive inner products permit up to 
+2
+​
+𝑑
+ keys; for 
+𝑑
+head
+=
+128
+, this boundary is 
+256
+ tokens, consistent with the empirical degradation between 
+𝐾
+=
+256
+ and 
+𝐾
+=
+512
+. The rank-one factors used by KATA-M
+𝑔
+ live in 
+𝕊
++
+𝑝
+ with 
+𝑝
+=
+𝑑
+head
+/
+𝑔
+; KATA-
+Σ
+​
+𝑔
+ sums the corresponding block outer products within the same cone. Their packing is governed by Theorem 3: above the 
+1
+/
+𝑝
+ Welch scale, the spherical-cap construction gives exponential address capacity in 
+𝑝
+ at any fixed interference tolerance. This larger geometric packing budget is consistent with the MQAR trend at comparable fixed-state budgets.
+
+D.2Chunkwise forward pass
+
+D.3Delta-rule chunked forward and backward
+
+Recurrence.
+
+The delta variant replaces the additive write with a content-based erase applied in feature space. With per-token strength 
+𝛽
+𝑡
+∈
+(
+0
+,
+1
+)
+, the pseudo-values 
+𝒖
+𝑡
+∈
+ℝ
+𝑑
+𝑣
+ are defined by forward substitution on a lower-triangular system, and the readout reads them out through the PSD kernel:
+
+The erase kernel is the PSD Gram 
+⟨
+𝜓
+⁡
+(
+𝒌
+𝑠
+)
+,
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+⟩
+=
+∑
+𝑖
+​
+𝑗
+(
+𝒌
+𝑠
+,
+𝑖
+⋅
+𝒌
+𝑡
+,
+𝑗
+)
+2
+ (KATA-
+Σ
+​
+𝑔
+, with 
+𝑖
+,
+𝑗
+ over the 
+𝑔
+ groups). GDN uses the raw 
+𝒌
+𝑠
+⋅
+𝒌
+𝑡
+ kernel. The readout is unnormalized (no denominator), and the online Widrow–Hoff erase keeps 
+𝑺
+=
+∑
+𝑠
+𝜓
+⁡
+(
+𝒌
+𝑠
+)
+​
+𝒖
+𝑠
+⊤
+∈
+ℝ
+𝑛
+𝜓
+×
+𝑑
+𝑣
+ bounded.
+
+Chunked forward (WY-free).
+
+Let 
+𝑺
+ be the state entering chunk 
+[
+𝑐
+]
+. Form the two 
+𝐶
+×
+𝐶
+ Gram blocks 
+𝐴
+𝑡
+​
+𝑠
+𝑘
+​
+𝑘
+=
+∑
+𝑖
+​
+𝑗
+(
+𝒌
+𝑡
+,
+𝑖
+⋅
+𝒌
+𝑠
+,
+𝑗
+)
+2
+ and 
+𝐴
+𝑡
+​
+𝑠
+𝑞
+​
+𝑘
+=
+∑
+𝑖
+​
+𝑗
+(
+𝒒
+𝑡
+,
+𝑖
+⋅
+𝒌
+𝑠
+,
+𝑗
+)
+2
+ directly from the raw projections; no 
+𝑛
+𝜓
+×
+𝑛
+𝜓
+ erase matrix is formed. With 
+𝑵
+=
+diag
+(
+𝜷
+)
+​
+tril
+​
+(
+𝐴
+𝑘
+​
+𝑘
+,
+−
+1
+)
+:
+
+Since 
+𝑵
+ is strictly lower-triangular (nilpotent, 
+𝑵
+𝐶
+=
+0
+), the inverse 
+𝑻
+ is exact after 
+⌈
+log
+2
+⁡
+𝐶
+⌉
+ Neumann doublings; only 
+𝐶
+×
+𝐶
+, 
+𝐶
+×
+𝑑
+𝑣
+, and the 
+𝑛
+𝜓
+×
+𝑑
+𝑣
+ state ever reside in SRAM.
+
+Chunked backward.
+
+The backward is a reverse scan over chunks carrying the state cotangent 
+𝑑
+​
+𝑺
++
+ (from later chunks); the forward quantities 
+𝑺
+,
+𝑻
+,
+𝑼
+,
+𝑽
+′
+ are recomputed from the checkpointed 
+𝑺
+. Per chunk (all 
++
+⁣
+=
+ accumulate into 
+𝑑
+​
+𝑺
+, returned to chunk 
+[
+𝑐
+−
+1
+]
+):
+
+The only non-matmul VJP is the matrix-inverse term 
+𝑑
+​
+𝑵
+=
+−
+𝑻
+⊤
+​
+𝑑
+​
+𝑻
+​
+𝑻
+⊤
+; the feature-map VJP closes the chain, 
+𝑑
+​
+𝒌
+𝑔
+=
+(
+𝑑
+​
+Ψ
+​
+(
+𝑲
+)
+𝑔
++
+𝑑
+​
+Ψ
+​
+(
+𝑲
+)
+𝑔
+⊤
+)
+​
+𝒌
+𝑔
+ per group (and likewise for 
+𝒒
+). The backward therefore has the same 
+𝒪
+⁡
+(
+𝑇
+​
+𝐶
++
+𝑇
+​
+𝑛
+𝜓
+​
+𝑑
+𝑣
+/
+𝐶
+)
+ cost profile as the forward, with a single 
+𝑛
+𝜓
+×
+𝑑
+𝑣
+ state cotangent streamed across chunks.
+
+Appendix EHardware implementation and benchmarks
+
+E.1Associative-scan kernel
+
+The chunked attention forward decomposes into three stages, each launched as a separate Triton kernel that communicates with the next through small HBM buffers at chunk boundaries. Let 
+𝐶
+ denote the chunk size and define the number of chunks as:
+
+The final chunk is padded when 
+𝐶
+ does not divide 
+𝑇
+. The analysis assumes already-feature-mapped inputs 
+𝒒
+=
+𝜓
+⁡
+(
+𝒒
+^
+)
+ and 
+𝒌
+=
+𝜓
+⁡
+(
+𝒌
+^
+)
+ in 
+ℝ
+𝑛
+𝜓
+, where 
+𝑛
+𝜓
+ denotes the active post-feature dimension.
+
+Three-kernel pipeline.
+
+(i) Chunk-state computes, for every chunk 
+𝑐
+:
+
+All 
+(
+𝑏
+,
+ℎ
+,
+𝑐
+)
+ triples are independent, exposing 
+𝐵
+⋅
+𝐻
+⋅
+𝑁
+𝐶
+ programs. (ii) Inter-chunk reduction computes the exclusive prefix:
+
+along the chunk axis. This is the only stage with a cross-chunk dependency. (iii) Chunk-output combines the inter-chunk prefix with the local 
+𝐶
+×
+𝐶
+ causal pattern to produce 
+𝑶
+[
+𝑐
+]
+.
+
+Associative scan versus sequential scan.
+
+The standard chunk-parallel implementation (FLA’s linear-attention kernel [Yang and Zhang, 2024]) evaluates the prefix sequentially over 
+𝑁
+𝐶
+ chunks, giving depth 
+Θ
+⁡
+(
+𝑁
+𝐶
+)
+. Our associative scan uses 
+⌈
+log
+2
+⁡
+𝑁
+𝐶
+⌉
+ rounds, each parallel across the 
+𝑁
+𝐶
+ chunk slots. Its total work is 
+𝒪
+⁡
+(
+𝑁
+𝐶
+​
+log
+⁡
+𝑁
+𝐶
+⋅
+𝑛
+𝜓
+​
+𝑑
+𝑣
+)
+, compared with 
+𝒪
+⁡
+(
+𝑁
+𝐶
+​
+𝑛
+𝜓
+​
+𝑑
+𝑣
+)
+ for the linear scan, while its parallel depth is 
+𝒪
+⁡
+(
+log
+⁡
+𝑁
+𝐶
+⋅
+𝑑
+𝑣
+)
+. With one program per batch index 
+𝑏
+, head index 
+ℎ
+, and feature index 
+𝑖
+∈
+{
+1
+,
+…
+,
+𝑛
+𝜓
+}
+, all 
+𝐵
+⋅
+𝐻
+⋅
+𝑛
+𝜓
+ feature slices scan independently.
+
+Wall-clock model.
+
+The three stages have wall-clock cost:
+
+The middle term replaces the linear-scan baseline’s 
+𝒪
+⁡
+(
+𝑁
+𝐶
+​
+𝑑
+𝑣
+)
+. At 
+𝑇
+=
+2048
+ and 
+𝐶
+=
+32
+, the scan depth decreases from 
+𝑁
+𝐶
+=
+64
+ to 
+log
+2
+⁡
+𝑁
+𝐶
+=
+6
+. In practice, the scan stage is a small fraction of the wall-clock time. The dominant cost is the HBM write of 
+𝑺
+loc
+ and the subsequent prefix read. Reducing the per-chunk state through a smaller 
+𝑛
+𝜓
+, as in orthant, Lorentz, or grouped PSD features, therefore translates directly into higher throughput.
+
+Measured throughput (H100 SXM, bf16, 
+𝐵
+=
+4
+, 
+𝐻
+=
+12
+, 
+𝑑
+𝑣
+=
+64
+).
+
+Throughput in million tokens/s, 
+𝐶
+=
+32
+, against FLA’s linear-attention kernel on the same materialized inputs:
+
+At 
+𝑇
+≤
+2048
+, the tree-scan kernel delivers 
+2.1
+–
+2.4
+×
+ the throughput of FLA at 
+𝑇
+=
+1024
+ and 
+1.3
+×
+ at 
+𝑇
+=
+2048
+; tree versus linear within the same dispatch is a consistent 
+1.06
+–
+1.12
+×
+ throughput gain that grows with 
+𝑁
+𝐶
+. At 
+𝑇
+=
+4096
+, chunk-state becomes HBM-bound, and FLA’s internal 
+𝑛
+𝜓
+-axis tiling overtakes our single-tile output kernel. The asymptotic 
+log
+⁡
+𝑁
+𝐶
+ advantage is then hidden by the bandwidth ceiling on writes of 
+𝑺
+loc
+. For PSD-packed 
+𝑛
+𝜓
+≥
+1024
+, FLA’s pre-materialize path with internal feature-axis tiling currently wins. Adding the same tiling to the tree-scan output kernel is the natural follow-on.
+
+E.2Induction-head benchmark
+
+The two model families are aligned on the Zoology [Arora et al., 2023] backbone: two-layer pre-norm transformer, 
+𝑑
+model
+=
+128
+, four heads, 
+4
+×
+ GELU state mixer, LM head weight-tied to the token embedding, Zoology-style Linear/Embedding init with std
+=
+0.02
+ and GPT-2 residual scaling. Softmax uses F.scaled_dot_product_attention; KATA-
+Σ
+​
+2
+ uses the fused rank-2 Triton forward with a matched PyTorch backward. The phase-transition budget scales comparably to softmax at all scales tested, but without softmax’s 
+𝒪
+⁡
+(
+𝑇
+2
+)
+ memory and compute.
+
+E.3KATA kernel microbenchmark
+
+Forward and forward+backward wall-clock time on an NVIDIA H100 for the rank-two KATA-
+Σ
+​
+2
+ kernel, using a fused Triton forward and a PyTorch backward over saved chunk-boundary states in fp32:
+
+The fused kernel scales linearly with 
+𝑇
+ and stays near peak bandwidth; no per-token 
+𝜓
+ tensor is written to HBM. The PyTorch backward rematerializes 
+𝜓
+ once per chunk, avoiding an 
+𝒪
+⁡
+(
+𝑇
+​
+𝑛
+𝜓
+)
+ footprint. A fused backward kernel is left for future work.
+
+E.4Detailed benchmark numbers
+
+The tables below give the exact benchmark values. Tables 8 and 9 tabulate the forward and training-step curves in Figure 4; Table 10 reports the 
+𝐵
+×
+𝑇
+ forward-throughput grid; and Table 11 isolates the associative-scan and sequential-scan comparison at 
+𝐵
+=
+1
+.
+
+Appendix FExperimental protocols and architectures
+
+F.1MQAR worked example and protocol
+
+Each MQAR example packs 
+𝐾
+ distinct key–value pairs and 
+𝐾
+ queries into a single sequence of length 
+𝑇
+=
+4
+​
+𝐾
+: the first 
+2
+​
+𝐾
+ tokens interleave the 
+𝐾
+ bindings 
+(
+𝑘
+1
+,
+𝑣
+1
+,
+…
+,
+𝑘
+𝐾
+,
+𝑣
+𝐾
+)
+, then the remaining 
+2
+​
+𝐾
+ positions reissue the 
+𝐾
+ keys in random order, each followed by an answer slot the model must fill. Loss is computed only at answer positions, so the model must (i) store all 
+𝐾
+ bindings presented in the first half and (ii) retrieve the correct value an arbitrary number of steps later. Keys and values are drawn from 
+𝑉
+=
+8192
+, so random guessing floors at 
+1
+/
+8192
+≈
+×
+10
+−
+4
+. A worked 
+𝐾
+=
+4
+, 
+𝑇
+=
+16
+ example:
+
+At 
+𝐾
+=
+1024
+, 
+𝑇
+=
+4096
+: 
+1024
+ disjoint bindings must survive through up to 
+4096
+ intervening tokens before the recurrent state is queried, with the state discriminating among 
+1024
+ possibilities at each answer slot.
+
+F.2Additive and convex output-gate ablation
+
+At 
+𝑑
+model
+=
+128
+ with one head and KATA-
+Σ
+​
+2
+ features:
+
+F.3MQAR architecture and training
+
+Every model uses the canonical Zoology TransformerBlock. Its state mixer is Identity, and its sequence mixer is Hybrid(BaseConv, mixer), so one short depthwise convolution precedes every sequence operator. We use one head, following Zoology’s convention 
+𝑑
+head
+=
+𝑑
+model
+, no positional embeddings, a tied LM head, and vocabulary size 
+𝑉
+=
+8192
+. Training uses batch size 
+256
+, AdamW with 
+wd
+=
+0.1
+, cosine annealing over 
+32
+ epochs, and a three-point learning-rate sweep 
+{
+10
+−
+3
+,
+×
+10
+−
+3
+,
+10
+−
+2
+}
+ with the best run selected per row. Training mixes streams up to 
+𝐾
+train
+=
+64
+ at 
+𝑇
+=
+256
+; evaluation uses 
+𝐾
+∈
+{
+128,256,512,768
+,
+1024
+}
+ and 
+𝑇
+∈
+{
+512
+,
+1024
+,
+2048
+,
+3072
+,
+4096
+}
+.
+
+GatedDeltaKATA in the overwrite table uses the full GDN-style configuration: ShortConv
+(
+𝑘
+=
+4
+)
+ on 
+𝒒
+/
+𝒌
+/
+𝒗
+, GDN-style decay parameterization 
+(
+𝐴
+log
+,
+𝑑
+𝑡
+​
+bias
+,
+𝑎
+proj
+)
+, 
+RMSNorm
+ on the output, and 
+𝑣
+-expansion 
+2
+×
+. GatedDeltaKATA applies the rank-
+1
+ erase to 
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+, while GDN applies it to the raw 
+𝒌
+𝑡
+; this is the single functional difference. Total state 
+141
+ KB matches GDN’s 
+133
+ KB; parameter counts match within 
+1
+%
+.
+
+F.4Per-method architectures and reproducibility
+
+We list, for each row in Sections 5.1 and 5.2, the precise projections, gates, normalizations, and feature maps so that each architecture can be reproduced from a fresh TransformerBlock skeleton. All variants share the canonical Zoology outer loop described above (two-layer hybrid block, BaseConv
+(
+𝑘
+=
+3
+)
+, no positional embeddings unless explicitly stated, tied LM head, vocab 
+𝑉
+=
+8192
+). Differences below concern only the sequence-mixer module. Throughout, 
+𝑑
+≡
+𝑑
+model
+; with 
+𝐻
+=
+1
+, we have 
+𝑑
+head
+=
+𝑑
+.
+
+Plain KATA (additive recurrence with denominator).
+
+Three projections 
+𝑊
+𝑞
+,
+𝑊
+𝑘
+,
+𝑊
+𝑣
+∈
+ℝ
+𝑑
+×
+𝑑
+ are followed by a reduced PSD feature map. KATA-
+Σ
+​
+2
+ splits 
+𝒌
+ into 
+𝒂
+,
+𝒃
+∈
+ℝ
+𝑑
+/
+2
+ and uses 
+𝜓
+⁡
+(
+𝒌
+)
+=
+𝜖
+​
+𝑰
++
+𝒂
+​
+𝒂
+⊤
++
+𝒃
+​
+𝒃
+⊤
+. KATA-
+Σ
+​
+4
+ splits it into 
+𝒂
+1
+,
+…
+,
+𝒂
+4
+∈
+ℝ
+𝑑
+/
+4
+ and uses 
+𝜓
+⁡
+(
+𝒌
+)
+=
+𝜖
+​
+𝑰
++
+1
+4
+​
+∑
+𝑖
+=
+1
+4
+𝒂
+𝑖
+​
+𝒂
+𝑖
+⊤
+. The factor 
+1
+/
+4
+ is the numerical scale used in the reported 
+Σ
+​
+4
+ configuration. It cancels from normalized plain-KATA weights as 
+𝜖
+→
+0
+ and is retained as part of the unnormalized gated configuration. In either case, 
+𝑛
+𝜓
+=
+𝑚
+⁡
+(
+𝑚
++
+1
+)
+/
+2
+ for block width 
+𝑚
+=
+𝑑
+/
+𝑔
+. The chunkwise recurrence computes the numerator and denominator with the packed feature map, and returns 
+𝒐
+𝑡
+=
+𝜓
+​
+(
+𝒒
+𝑡
+)
+⊤
+​
+𝑺
+𝑡
+/
+𝜓
+​
+(
+𝒒
+𝑡
+)
+⊤
+​
+𝒁
+𝑡
+ followed by 
+𝑊
+𝑜
+∈
+ℝ
+𝑑
+×
+𝑑
+. The extras configuration adds depthwise ShortConv
+(
+𝑘
+=
+4
+)
+, per-head RMSNorm, and value expansion 
+2
+×
+; 
+𝜖
+=
+10
+−
+4
+.
+
+KATA-Orthant.
+
+Same 
+𝑊
+𝑞
+,
+𝑊
+𝑘
+,
+𝑊
+𝑣
+ projections; feature map 
+𝜓
+⁡
+(
+𝒙
+)
+=
+ReLU
+⁡
+(
+𝒙
+)
++
+𝜖
+​
+𝟏
+, post-feature dimension 
+𝑛
+𝜓
+=
+𝑑
+. The recurrence is normalized linear attention, 
+𝑺
+𝑡
+=
+𝑺
+𝑡
+−
+1
++
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+​
+𝒗
+𝑡
+⊤
+, 
+𝒁
+𝑡
+=
+𝒁
+𝑡
+−
+1
++
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+, 
+𝒐
+𝑡
+=
+(
+𝜓
+​
+(
+𝒒
+𝑡
+)
+⊤
+​
+𝑺
+𝑡
+)
+/
+(
+𝜓
+​
+(
+𝒒
+𝑡
+)
+⊤
+​
+𝒁
+𝑡
+)
+, implemented via FLA’s normalized linear-attention kernel. ShortConv
+(
+𝑘
+=
+4
+)
+ and output 
+RMSNorm
+ are enabled; 
+𝜖
+=
+10
+−
+6
+.
+
+KATA-Lorentz.
+
+Identical to KATA-Orthant except for the feature map: with 
+𝒙
+∈
+ℝ
+𝑑
+, write 
+𝒚
+=
+𝒙
+1
+:
+𝑑
+−
+1
+ and 
+𝑠
+=
+𝑥
+𝑑
+, then 
+𝜓
+⁡
+(
+𝒙
+)
+=
+(
+𝒚
+,
+∥
+𝒚
+∥
+2
+​
+(
+1
++
+𝑠
+2
+)
+)
+∈
+ℝ
+𝑑
+. The image lies in the closed Lorentz cone 
+{
+(
+𝒚
+,
+𝑡
+)
+:
+𝑡
+≥
+∥
+𝒚
+∥
+2
+}
+ so 
+⟨
+𝜓
+⁡
+(
+𝒙
+)
+,
+𝜓
+⁡
+(
+𝒚
+)
+⟩
+≥
+0
+. State and dispatch are identical to the orthant case.
+
+GatedKATA (additive scalar decay, no denominator).
+
+Adds a single per-head per-token log-decay projection 
+𝑊
+𝛼
+∈
+ℝ
+𝑑
+×
+𝐻
+ (with bias) producing 
+log
+⁡
+𝛾
+𝑡
+=
+log
+⁡
+𝜎
+⁡
+(
+𝑊
+𝛼
+​
+𝒙
+𝑡
+)
+∈
+ℝ
+𝐻
+. The recurrence is 
+𝑺
+𝑡
+=
+𝛾
+𝑡
+​
+𝑺
+𝑡
+−
+1
++
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+​
+𝒗
+𝑡
+⊤
+, 
+𝒐
+𝑡
+=
+𝜓
+​
+(
+𝒒
+𝑡
+)
+⊤
+​
+𝑺
+𝑡
+ (no denominator), implemented via FLA’s simple gated-linear-attention kernel on the packed 
+𝜓
+ with the per-token gate. The convex-gate ablation pre-scales 
+𝒗
+𝑡
+ by 
+1
+−
+𝛾
+𝑡
+ before the same kernel, yielding 
+𝑺
+𝑡
+=
+𝛾
+𝑡
+​
+𝑺
+𝑡
+−
+1
++
+(
+1
+−
+𝛾
+𝑡
+)
+​
+𝜓
+​
+(
+𝒌
+𝑡
+)
+​
+𝒗
+𝑡
+⊤
+. The KATA-
+Σ
+​
+2
+ and KATA-
+Σ
+​
+4
+ feature variants are as above; 
+𝜖
+=
+10
+−
+4
+.
+
+GatedDeltaKATA (PSD inside the GDN raw-key recurrence).
+
+Component-for-component match to Gated DeltaNet except for the substitution of 
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+ for 
+𝒌
+𝑡
+ in the recurrence. Projections: 
+𝑊
+𝑞
+,
+𝑊
+𝑘
+∈
+ℝ
+𝑑
+×
+𝑑
+, 
+𝑊
+𝑣
+∈
+ℝ
+𝑑
+×
+2
+​
+𝑑
+ (default 
+𝑣
+-expansion 
+2
+×
+). Depthwise ShortConv
+(
+𝑘
+=
+4
+)
+ on 
+𝒒
+,
+𝒌
+,
+𝒗
+, no SiLU. Beta projection 
+𝑊
+𝛽
+∈
+ℝ
+𝑑
+×
+𝐻
+ producing 
+𝛽
+𝑡
+=
+𝜎
+⁡
+(
+𝑊
+𝛽
+​
+𝒙
+𝑡
+)
+. Decay parameterization, matching FLA’s gated-delta-rule kernel, 
+𝑔
+𝑡
+=
+−
+exp
+(
+𝐴
+log
+)
+⊙
+softplus
+(
+𝑊
+𝛼
+𝒙
+𝑡
++
+dt
+_
+bias
+)
+ with 
+𝐴
+log
+∈
+ℝ
+𝐻
+ initialized by 
+log
+⁡
+𝑈
+⁡
+(
+0
+,
+16
+)
+ and 
+dt
+​
+_
+​
+bias
+∈
+ℝ
+𝐻
+ calibrated so that 
+softplus
+⁡
+(
+dt
+​
+_
+​
+bias
+)
+∼
+𝑈
+⁡
+(
+10
+−
+3
+,
+10
+−
+1
+)
+; 
+𝐴
+log
+ and 
+dt
+​
+_
+​
+bias
+ are excluded from weight decay. The recurrence is:
+
+This recurrence is delegated to FLA’s gated-delta-rule kernel on packed 
+𝜓
+; the rank-
+1
+ erase 
+𝜓
+​
+(
+𝒌
+𝑡
+)
+⊤
+​
+𝑺
+𝑡
+−
+1
+ is contracted directly, so the 
+𝑛
+𝜓
+×
+𝑛
+𝜓
+ matrix 
+𝜓
+⁡
+(
+𝒌
+𝑡
+)
+​
+𝜓
+​
+(
+𝒌
+𝑡
+)
+⊤
+ is never materialized. Output passes through per-head 
+RMSNorm
+ (
+𝜖
+norm
+=
+10
+−
+5
+) and 
+𝑊
+𝑜
+∈
+ℝ
+2
+​
+𝑑
+×
+𝑑
+. KATA-
+Σ
+​
+4
+ uses 
+𝐻
+=
+2
+ because the kernel requires packed feature dimension at most 
+256
+; the packed dimension is 
+528
+ at 
+𝐻
+=
+1
+,
+𝑑
+=
+128
+ and 
+136
+ at 
+𝐻
+=
+2
+. Optional knobs (disabled in the reported runs unless noted): per-head 
+ℓ
+2
+ normalization of 
+𝒒
+,
+𝒌
+ before 
+𝜓
+ with 
+𝜖
+=
+10
+−
+6
+; RoPE on 
+𝒒
+,
+𝒌
+ with base 
+10
+4
+.
+
+Gated DeltaNet (baseline).
+
+FLA’s GatedDeltaNet mixer used out-of-the-box, configured to match the surrounding skeleton: l_max set to the longest evaluation sequence, NH
+=
+1
+, 
+use_short_conv
+=
+True (
+𝑘
+=
+4
+), 
+use_gate
+=
+False. Feature substrate: raw 
+𝒌
+𝑡
+∈
+𝕊
+𝑑
+−
+1
+ (FLA’s use_qk_l2norm_in_kernel). Recurrence is identical in form to GatedDeltaKATA above with 
+𝜓
+⁡
+(
+𝒌
+)
+=
+𝒌
+. State per head is 
+𝑑
+×
+2
+​
+𝑑
+ (for 
+𝑣
+-expansion 
+2
+); at 
+𝑑
+=
+128
+,
+ NH
+=
+1
+, total 
+∼
+133
+ KB.
+
+Softmax attention (full / sliding window).
+
+A standard MHA block uses PyTorch scaled dot-product attention (SDPA) with a causal mask. Three projections 
+𝑊
+𝑞
+,
+𝑊
+𝑘
+,
+𝑊
+𝑣
+∈
+ℝ
+𝑑
+×
+𝑑
+ and an output 
+𝑊
+𝑜
+∈
+ℝ
+𝑑
+×
+𝑑
+ surround the attention operator. The 
++
+RoPE variant rotates 
+𝒒
+,
+𝒌
+ before SDPA with base 
+𝜃
+∈
+{
+10
+4
+,
+×
+10
+4
+}
+; reported runs use 
+𝜃
+=
+×
+10
+4
+. The sliding-window variant restricts the mask to the 
+𝑊
+=
+256
+ tokens preceding the query and caches the boolean mask. We use PyTorch’s memory-efficient SDPA backend for this configuration. At sequence length 
+𝑇
+, the KV cache contains 
+2
+​
+𝑑
+​
+𝑇
+ floats for full softmax and 
+2
+​
+𝑑
+​
+𝑊
+ for sliding-window attention.
+
+Initialization and optimization.
+
+Linear layers use Zoology’s 
+𝒩
+⁡
+(
+0
+,
+0.02
+2
+)
+ initialization, with GPT-2 residual scaling 
+1
+/
+2
+​
+𝑁
+layers
+ on 
+𝑊
+𝑜
+, and the LM head is tied to the embeddings. We use AdamW 
+(
+𝛽
+1
+=
+0.9
+,
+𝛽
+2
+=
+0.95
+)
+, weight decay 
+0.1
+ except on 
+𝐴
+log
+ and 
+dt
+​
+_
+​
+bias
+, gradient clipping at 
+1.0
+, and a 
+32
+-epoch cosine schedule without warmup. For each row, we select the best learning rate in 
+{
+10
+−
+3
+,
+×
+10
+−
+3
+,
+10
+−
+2
+}
+ and stop when the hardest extrapolation slice reaches 
+0.999
+ accuracy.
