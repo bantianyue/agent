@@ -1,0 +1,205 @@
+Introducing CUDA Rust: Two Tracks for Writing GPU Kernels
+
+L
+
+T
+
+F
+
+R
+
+E
+
+AI-Generated Summary
+
+In September 2026, NVIDIA announced it is leaning into native GPU programming in Rust. CUDA C++ and CUDA Python are mature, enterprise-grade toolchains, and NVIDIA will be growing and maturing CUDA Rust into 2027 and beyond
+
+The systems layer of AI spans inference engines, serving infrastructure, drivers, and agent runtimes, and it churns constantly as models and techniques change. More and more of it is written in Rust, which catches whole classes of bugs at compile time without giving up performance.
+
+NVIDIA is part of that shift for the same reason. The Nova Linux driver is written in Rust. NVIDIA Dynamo is built on a Rust core. NVTX has Rust bindings.
+
+The GPU kernel is the exception. You can launch kernels from Rust, but the kernel itself often has to be written in another language.
+
+NVIDIA CUDA Rust closes that gap. GPU kernels can be written in Rust, compiled natively to PTX, rather than a wrapper around code from somewhere else.
+
+There are two tracks to use Rust, matching the two tracks CUDA itself has. SIMT is the model you already write in CUDA C++ or numba-cuda. You indicate what one thread does, and launch thousands of them. Tile is a newer programming model, which is also available in C++ and Python. All of these frontends let you say what one tile of data does, and the Tile IR compiler does the rest.
+
+When you are picking one to build on, reach for Tile first. The compiler decides how tiles map onto each architecture, so your source doesn’t encode architecture-specific choices, and you drop to SIMT when you need that control or want to manage memory and threads yourself.
+
+Which language you reach for is a separate question from which model. Use the CUDA exposure that best fits the stack you already have. The two projects below are for when that stack is Rust. We plan to support inter-language interop, so the choice does not lock you out of the others.
+
+Below is the same kernel on each track, which performs elementwise addition over 1,024 floats. Both are complete programs, both run, and both print the same line, so you can read them side by side and see what changes.
+
+The SIMT track: cuda-oxide
+
+cuda-oxide is a custom rustc codegen backend. It intercepts compilation, routes #[kernel] functions through Rust MIR, the community Pliron IR framework, and LLVM IR down to PTX, and hands everything else to the standard backend. The GPU dialects on top of Pliron are ours. The dialects and every transform stay in Rust until the standard LLVM backend takes over.
+
+You will need Linux, a GPU with compute capability 8.0 or later, a CUDA toolkit (12.x or newer), clang with its libclang headers, and the pinned nightly toolchain. cargo oxide doctor checks all of it, including the optional system LLVM. Install cargo-oxide, the Cargo subcommand that drives the build:
+
+Then scaffold a project and run it. The template is a complete vector addition program:
+
+The first cargo oxide run builds the codegen backend, so expect it to take a while. Later runs reuse the cache.
+
+It prints PASSED: all 1024 elements correct. This is the whole program that did it, exactly what cargo oxide new wrote, with comments added here:
+
+Host and device code live in one file, build with one command, and need no separate kernel crate.
+
+Read the kernel signature first, because it carries the whole safety argument. a and b are ordinary shared slices, readable by every thread. c is a DisjointSlice<f32>, a type that hands each thread exclusive access to its own element and nothing else. It exists because &mut [f32] is the wrong shape for the job. Every thread would need the same &mut, which Rust correctly refuses. DisjointSlice splits that one mutable borrow into per-thread pieces.
+
+thread::index_1d() returns an index type, not a bare integer, and c.get_mut(idx) only accepts that type. You get back an Option, so the out-of-bounds case is a branch you handle rather than a memory error you find later.
+
+The launch is checked rather than trusted. #[launch_contract] declares that this kernel indexes in one dimension with 256-thread blocks. prepare_vecadd validates your LaunchConfig1D against that declaration and the live device limits, and hands back a proof that the safe vecadd method requires. Kernels without a contract expose only raw unsafe launch methods, because a bare LaunchConfig says nothing about the kernel it is launching.
+
+The Tile track: cutile-rs
+
+cutile-rs works one level higher. You perform computations on tiles rather than scalars. Each tile block runs the kernel body once as a single logical thread over one sub-tensor of data, and the compiler decides how many real GPU threads back it. The #[cutile::module] macro embeds the kernel’s AST in the host binary and JIT-compiles it through CUDA Tile IR (the NVIDIA tile-level compiler IR) when the kernel is first needed.
+
+Requirements are lighter than the SIMT track. You need a GPU with compute capability 8.0 or later, CUDA 13.3, stable Rust 1.89 or newer, and Linux, but no nightly toolchain and no LLVM of your own.
+
+cutile is published, so there is nothing to clone:
+
+Here is the same elementwise addition, written for tiles. Paste it into src/main.rs and cargo run:
+
+PASSED: all 1024 elements correct
+
+The Tile track reaches the same answer on stable Rust, and its signature makes the same safety argument. There is no DisjointSlice this time. Partitioning on the host is only needed for mutable tensors, and it hands each tile block one writable sub-tensor that no other tile block can overlap. That exclusivity is what &mut already guarantees.
+
+The -1 in the input shapes is a sentinel rather than a size. That dimension is read off the tensor at launch, so the shape can vary without recompiling.
+
+The interesting line on the host is .partition([128]), and it is doing three jobs at once. It makes the exclusivity real. Each tile owns its 128-element chunk and no other tile can touch it. It fixes the launch geometry, since 1,024 divided by 128 is a grid of 8 tiles.
+
+The grid follows from the partition instead of being computed separately and checked against the kernel’s indexing. It also supplies B, which is never written at the call site because the launcher reads the tile width off the partition. That is why a &mut output has to be partitioned before it can be passed at all.
+
+Then look at what the launch returns. The add you call on the host is a macro-generated launcher, not the device function above. It takes ownership of all three tensors and hands them back as a tuple when the GPU is done. That is what .first() is for, picking the output back out of it.
+
+Nothing runs until .sync_on(&stream). Everything before it is a lazy description, recorded rather than submitted. That includes the ones, the zeros, the kernel call, and even the copy back to the host. The whole program is one chain with a single synchronization point.
+
+What the compiler catches
+
+Both kernels make the same claim about memory. Their inputs are shared, and their output belongs to one writer alone. They differ only in the level at which they make it, and in whether a purpose-built type is needed to make it at all.
+
+That matters because thousands of threads reach the same buffers in no guaranteed order. When two of them hit the same address and one is writing, the ordering decides the result. Those bugs rarely reproduce on demand, and they pass tests before failing in production.
+
+Passing the SIMT kernel’s output buffer as one of its own inputs does not compile, whether or not that kernel would actually race:
+
+error[E0502]: cannot borrow `c_dev` as mutable because it is also borrowed as immutable
+
+The same aliasing on the Tile side does not compile either:
+
+error[E0382]: use of moved value: `z`
+
+Both examples catch the classic aliasing mistake at compile time, and they draw the line in different places. cuda-oxide checks each launch call. cutile-rs’s ownership follows the tensors across the launch boundary, which is the stronger of the two claims.
+
+Tile gives you no shared memory or thread indexing to get wrong, because the compiler owns both. A tile block is a single logical thread, so there are no threads for you to race. That is what makes it safe by construction, and it is also what you trade away. SIMT keeps that control, and today shared memory there requires unsafe. Shared memory is the bedrock of fast SIMT kernels, so making that path safe is active work.
+
+Where the projects stand
+
+Both projects are early-stage and neither is production-ready. cuda-oxide is early alpha. cutile-rs is further along, published on crates.io and already used outside NVIDIA in HuggingFace’s Grout inference engine and in mistral.rs. Coverage is incomplete and APIs will move. Where you find rough edges, we want to hear about them.
+
+Cargo and crates set an expectation that getting started is easy. GPU programming has historically been the opposite, and closing that distance is part of the work. The SIMT track still needs a pinned nightly toolchain, which is exactly the kind of thing we would like to stop asking you for.
+
+Rust on GPUs is not new. There is good work in this space that predates ours and continues alongside it. The ecosystem appendix in the cuda-oxide book maps where we sit relative to Rust-GPU, rust-cuda, CubeCL, and the rest, and we have been working with the rust-cuda maintainers as both projects mature.
+
+What is new is the engineering we are putting behind it, and a clear sense of where it is going.
+
+What you can do today
+
+Run the SIMT example. cargo oxide new, then cargo oxide run, in cuda-oxide.
+
+Run the Tile example. Clone cutile-rs, then cargo run -p cutile-examples --example hello_world.
+
+Read the docs. The cuda-oxide book and the cuTile Rust documentation.
+
+Read the paper. Fearless Concurrency on the GPU.
+
+File issues. Tell us what broke and what was missing, on cuda-oxide or cutile-rs.
+
+Join the conversation. GitHub Discussions on both repos, or the cuda-oxide Discord.
+
+Come to the talk. Melih Elibol is presenting “Fearless Concurrency on the GPU” at RustConf 2026, Sept. 8 to 11 in Montréal. NVIDIA will have other staff attending too, so come find us if you’re there!
+
+Tinker with what is here and come work on it with us. It is early, it is open, and what you build now will shape what comes next.
+
+The Rust community
+
+NVIDIA is excited to be leaning in with the Rust community as we elevate native Rust GPU programming. Projects like rust-cuda, rust-gpu, and cudarc pioneered the marriage of GPUs and Rust, and the people behind them, including the team at VectorWare, continue to shape how we think about our own work as we build with the Rust community.
+
+Tags
+
+About the Authors
+
+Comments
+
+Related posts
+
+Develop High-Performance GPU Kernels in C++ with NVIDIA CUDA Tile
+
+NVIDIA CUDA 13.3 Enhances GPU Development with Tile Programming in C++, Compiler Autotuning, and Python Updates
+
+Advancing GPU Programming with the CUDA Tile IR Backend for OpenAI Triton
+
+Focus on Your Algorithm—NVIDIA CUDA Tile Handles the Hardware
+
+CUDA Refresher: The GPU Computing Ecosystem
+
+Related posts
+
+Extract More Kernel Performance with NVIDIA CompileIQ Auto-Tuning
+
+Advanced Strategies for High-Performance GPU Programming with NVIDIA CUDA
+
+Improving GPU Performance by Reducing Instruction Cache Misses
+
+Differentiable Slang: Example Applications
+
+Differentiable Slang: A Shading Language for Renderers That Learn
+
+L
+
+T
+
+F
+
+R
+
+E
+
+Join
+
+Home
+
+Blog
+
+Forums
+
+Docs
+
+Downloads
+
+Training
+
+NVIDIA and our third-party partners use cookies and other tools to collect and record information you provide as well as information about your interactions with our websites for performance improvement, analytics, and to assist in our marketing efforts. By clicking "Accept All", you consent to our use of cookies and other tools as described in our Cookie Policy. You can manage your cookie settings by clicking on "Manage Settings". Please see our Privacy Policy for more information on our privacy practices.
+
+We have detected the Global Privacy Control (GPC) signal and recorded your rejection of all optional cookies on this site for this browser. You can manage your cookie settings by clicking on "Manage Settings". Please see our Cookie Policy for more information and visit our Privacy Policy for details on our privacy practices.
+
+Cookie Settings
+
+Required Cookies
+
+These cookies enable core functionality such as security, network management, and accessibility. These cookies are required for the site to function and cannot be turned off.
+
+Performance Cookies
+
+These cookies are used to provide quantitative measures of our website visitors, such as the number of times you visit, time on page, your mouse movements, scrolling, clicks and keystroke activity on the websites; other browsing, search, or product research behavior; and what brought you to our site. These cookies may store a unique ID so that our system will remember you when you return. Information collected with these cookies is used to measure and find ways to improve website performance.
+
+Personalization Cookies
+
+These cookies collect data about how you have interacted with our website to help us improve your web experience, such as which pages you have visited. These cookies   may store a unique ID so that our system will remember you when you return. They may be set by us or by third party providers whose services we have added to our pages. These cookies enable us to provide enhanced website functionality and personalization as well as make the marketing messages we send to you more relevant to your interests. If you do not allow these cookies, then some or all of these services may not function properly.
+
+Advertising Cookies
+
+These cookies record your visit to our websites, the pages you have visited and the links you have followed to influence the advertisements that you see on other websites. These cookies and the information they collect may be managed by other companies, including our advertising partners, and may be used to build a profile of your interests and show you relevant advertising on other sites. We and our advertising partners will use this information to make our websites and the advertising displayed on it,  more relevant to your interests.
+
+Cookie List
+
+checkbox label label
