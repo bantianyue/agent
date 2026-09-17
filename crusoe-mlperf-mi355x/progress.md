@@ -22,3 +22,4 @@
 
 创建时间: 2026-09-17
 来源: https://www.crusoe.ai/resources/blog/serving-5-75-million-tokens-per-second-crusoes-mlperf-inference-v6-1-results-on-amd-mi355x
+| Step 4d-i: 传送门 | completed |
