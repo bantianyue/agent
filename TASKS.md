@@ -1584,3 +1584,4 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-09-17 12:25 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-17 12:29 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0VNDJEDpCoCeEcu7soCTWqBYcQAR4DcvGPcc47f_hXK0，draft 回读正文 4 图验证齐全（忽略 4 Implementation / 5 Evaluation） |
