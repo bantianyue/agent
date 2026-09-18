@@ -72,7 +72,7 @@ DATA = {
     "正是在这次 kernel 验证过程中，我们发现了 KDA kernel 在上下文并行（CP）路径上的数值精度问题。CP 与非 CP 结果的差异，把调查方向指向了并行执行引入的状态传播与合并计算。",
     "CP 切分需要合并来自不同上下文分片的状态，其核心计算可以简化如下：",
     "__CODE__python::M = tl.dot(M_chunk, M)     # Merge state transformations across shards\nS_next = tl.dot(M, S) + H  # Update the initial state for the next shard",
-    "在原始实现中，即使输入是 FP32，<code style="background:#f5f5f5;padding:1px 5px;border-radius:3px;font-family:Consolas,Monaco,monospace;font-size:13px;color:#c7254e;">tl.dot</code> 出于性能考虑也默认使用 TF32 计算。这种更低的计算精度会让误差在变换合并与状态更新过程中累积，并随上下文变长而更加明显。",
+    "在原始实现中，即使输入是 FP32，<code style=\"background:#f5f5f5;padding:1px 5px;border-radius:3px;font-family:Consolas,Monaco,monospace;font-size:13px;color:#c7254e;\">tl.dot</code> 出于性能考虑也默认使用 TF32 计算。这种更低的计算精度会让误差在变换合并与状态更新过程中累积，并随上下文变长而更加明显。",
     "修复方式是给这两处运算显式设置 input_precision=\"tf32x3\"。它把三次 TF32 Tensor Core 运算组合成一个更高精度的结果，在尽量保留 Tensor Core 性能优势的同时降低累积误差。",
     "在这个案例里，反馈环境在问题暴露之前就已经开始起作用。从并行策略到 kernel 的映射定义了该测什么；切分与未切分路径的对比暴露出数值差异；对计算精度的分析解释了差异来源；回归测试则为验证改动提供了持续依据。对 Agent 而言，这套流程把系统级的并行设计变成了可执行、可追溯的正确性任务。局部验证之后，候选实现仍需回到目标部署，做模型级精度与服务性能的最终验收测试。",
     "这些数值精度修复已经合并进 Flash Linear Attention 上游，详见 PR #1180。"
@@ -85,10 +85,11 @@ DATA = {
     "对系统级性能问题来说，清晰的测试场景和性能约束，能给 Agent 一个发现异常、选择分析方向的起点。",
     "我们的推理优化工程师为 Agent 定义了测试场景，包括仅 Prefill、Prefill + KV Transfer、仅 Decode，用来隔离不同执行阶段及其组合的性能影响。他们还为每个场景设定了验收标准，例如在相同负载下，Prefill + KV Transfer 与仅 Prefill 基线的性能差距不应超过 5%。",
     "然而 Agent 发现，在某些场景中性能差距超过了 20%。这条反馈把调查范围收窄到 KV Transfer 引入的额外开销与并发交互。Agent 随后详细检查了 KV Transfer 的时间线，并发现一个异常：在这些场景中，Python 侧的 KV Transfer 执行从未与 DeepEP 的 dispatch/combine 调用区间重叠。",
-    "这一现象促使 Agent 去调查 DeepEP 与 Mooncake Transfer 之间的并发，沿着调用链一路追到 Python/C++ 边界。在我们使用的 DeepEP v1.2.1 中，<code style="background:#f5f5f5;padding:1px 5px;border-radius:3px;font-family:Consolas,Monaco,monospace;font-size:13px;color:#c7254e;">intranode_dispatch</code> 与 <code style="background:#f5f5f5;padding:1px 5px;border-radius:3px;font-family:Consolas,Monaco,monospace;font-size:13px;color:#c7254e;">intranode_combine</code> 都没有显式释放 Python GIL。此外，当 dispatch 需要已接收 token 的数量时，它会在 CPU 上等待 GPU 返回该信息。",
+    "这一现象促使 Agent 去调查 DeepEP 与 Mooncake Transfer 之间的并发，沿着调用链一路追到 Python/C++ 边界。在我们使用的 DeepEP v1.2.1 中，<code style=\"background:#f5f5f5;padding:1px 5px;border-radius:3px;font-family:Consolas,Monaco,monospace;font-size:13px;color:#c7254e;\">intranode_dispatch</code> 与 <code style=\"background:#f5f5f5;padding:1px 5px;border-radius:3px;font-family:Consolas,Monaco,monospace;font-size:13px;color:#c7254e;\">intranode_combine</code> 都没有显式释放 Python GIL。此外，当 dispatch 需要已接收 token 的数量时，它会在 CPU 上等待 GPU 返回该信息。",
     "关键在于，进入 C++ 并不会自动释放 GIL。这些调用持有锁期间，同一进程里负责 Mooncake Transfer 的 Python 线程无法及时拿到 GIL，传输任务的调度与提交因此被延迟，KV Transfer 与后续计算重叠的机会随之减少。即便底层传输机制支持异步执行，上层提交被阻塞，也会让预期的并行无法充分体现。",
-    "源码本身还提供了一个直接对照：同一版本里的 <code style="background:#f5f5f5;padding:1px 5px;border-radius:3px;font-family:Consolas,Monaco,monospace;font-size:13px;color:#c7254e;">internode_dispatch</code> 已经显式释放了 GIL，并附有注释说明这样做是为了避免 CPU 等待期间阻塞其他线程中的 KV Transfer。这进一步支持了 Agent 对节点内路径的判断。",
+    "源码本身还提供了一个直接对照：同一版本里的 <code style=\"background:#f5f5f5;padding:1px 5px;border-radius:3px;font-family:Consolas,Monaco,monospace;font-size:13px;color:#c7254e;\">internode_dispatch</code> 已经显式释放了 GIL，并附有注释说明这样做是为了避免 CPU 等待期间阻塞其他线程中的 KV Transfer。这进一步支持了 Agent 对节点内路径的判断。",
     "关键修复是在相关 C++ 执行区间释放 GIL，让 Mooncake Transfer 的 Python 线程能及时推进任务。修复必须同时用时间线和最初的性能约束来验证：前者检查调度与传输是否获得了与计算重叠的机会，后者判断这项改动是否真的提升了服务性能。在相同测试条件下，修复后 Prefill + KV Transfer 与仅 Prefill 的性能差距降到了 1% 以下。"
+    "??????????????????????????????????????????????????????????????? GIL ???????????????????????????????????????? Agent ?????????????",
    ],
    "fig_after": {"7": [{"src": "fig03.png", "caption": "图 3：发现并修复 KV Transfer 的并发瓶颈"}]}
   },
