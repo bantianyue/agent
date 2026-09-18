@@ -81,11 +81,15 @@ def parse_element(p):
                     end += 1
                 val = t[p:end]; p = end
             props[key] = val
+            if t[p] == ",":
+                p += 1
             continue
         break
     if t[p] == ",":
         p += 1
     if t[p] == "}":
+        p += 1
+    if t[p] == ")":
         p += 1
     return (tag, props, children), p
 
@@ -108,6 +112,7 @@ while True:
     while p < len(t) and t[p] in "\n\r \t":
         p += 1
     if not CALL.match(t, p):
+        print("BREAK at",p,repr(t[p-60:p+60]),file=sys.stderr)
         break
 
 print("nodes:", len(nodes), file=sys.stderr)
