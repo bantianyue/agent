@@ -22,3 +22,4 @@
 
 创建时间: 2026-09-18
 来源: https://vllm.ai/blog/2026-09-13-kimi-k3-performance-optimization
+| Step 4d-i: 传送门 | completed |
