@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import json, os, sys
 
@@ -61,6 +61,74 @@ DATA = {
     "基于这些原则，GLM-5.3-Flash 的上线过程建立了一个由工程师、Infra Agent 和实验环境共同参与的优化闭环。工程师定义目标与系统边界；Agent 负责分析、提出假设、修改代码；实验环境提供分层、及时、可验证的反馈。三者一起，把过去依赖工程师经验串联的诊断过程，变成了 Agent 可以持续执行的工程流程。"
    ],
    "fig_after": {"12": [{"src": "fig02.png", "caption": "图 2：围绕稠密反馈构建的 Infra Agent 优化闭环"}]}
+  },
+  {
+   "type": "h2",
+   "title": "正确性反馈：让 Agent 判断模型算得对不对",
+   "paras": [
+    "推理性能优化必须以数值正确性为前提。对 Agent 来说，验证的起点是弄清推理引擎究竟做了哪些计算。高层的并行策略会改变 kernel 输入的切分方式、走哪条执行路径以及结果如何合并。只在未切分条件下测试 kernel 输出，不足以覆盖它在真实部署中的行为。",
+    "为此，我们建立了从推理引擎并行策略到 kernel 实现的映射，把系统级的部署配置转换成 Agent 可以逐个验证的 kernel 级任务。这个映射帮助 Agent 弄清：某种并行配置涉及哪些 kernel、输入如何切分、哪些计算路径需要与未切分实现做对比。",
+    "在此基础上，我们让 Agent 对比不同切分与未切分执行路径的数值精度。对相同输入，在统一计算语义和输出位置之后，检查不同执行方式的结果是否满足数值误差容限。这样就把并行配置、kernel 路径和观测到的误差串在一起。一旦测试暴露出差异，Agent 就可以顺着对应的切分方案和计算路径继续排查，而不必从整个模型层面重新开始诊断。",
+    "正是在这次 kernel 验证过程中，我们发现了 KDA kernel 在上下文并行（CP）路径上的数值精度问题。CP 与非 CP 结果的差异，把调查方向指向了并行执行引入的状态传播与合并计算。",
+    "CP 切分需要合并来自不同上下文分片的状态，其核心计算可以简化如下：",
+    "__CODE__python::M = tl.dot(M_chunk, M)     # Merge state transformations across shards\nS_next = tl.dot(M, S) + H  # Update the initial state for the next shard",
+    "在原始实现中，即使输入是 FP32，<code style="background:#f5f5f5;padding:1px 5px;border-radius:3px;font-family:Consolas,Monaco,monospace;font-size:13px;color:#c7254e;">tl.dot</code> 出于性能考虑也默认使用 TF32 计算。这种更低的计算精度会让误差在变换合并与状态更新过程中累积，并随上下文变长而更加明显。",
+    "修复方式是给这两处运算显式设置 input_precision=\"tf32x3\"。它把三次 TF32 Tensor Core 运算组合成一个更高精度的结果，在尽量保留 Tensor Core 性能优势的同时降低累积误差。",
+    "在这个案例里，反馈环境在问题暴露之前就已经开始起作用。从并行策略到 kernel 的映射定义了该测什么；切分与未切分路径的对比暴露出数值差异；对计算精度的分析解释了差异来源；回归测试则为验证改动提供了持续依据。对 Agent 而言，这套流程把系统级的并行设计变成了可执行、可追溯的正确性任务。局部验证之后，候选实现仍需回到目标部署，做模型级精度与服务性能的最终验收测试。",
+    "这些数值精度修复已经合并进 Flash Linear Attention 上游，详见 PR #1180。"
+   ]
+  },
+  {
+   "type": "h2",
+   "title": "系统行为反馈：定位 KV Transfer 的并发瓶颈",
+   "paras": [
+    "对系统级性能问题来说，清晰的测试场景和性能约束，能给 Agent 一个发现异常、选择分析方向的起点。",
+    "我们的推理优化工程师为 Agent 定义了测试场景，包括仅 Prefill、Prefill + KV Transfer、仅 Decode，用来隔离不同执行阶段及其组合的性能影响。他们还为每个场景设定了验收标准，例如在相同负载下，Prefill + KV Transfer 与仅 Prefill 基线的性能差距不应超过 5%。",
+    "然而 Agent 发现，在某些场景中性能差距超过了 20%。这条反馈把调查范围收窄到 KV Transfer 引入的额外开销与并发交互。Agent 随后详细检查了 KV Transfer 的时间线，并发现一个异常：在这些场景中，Python 侧的 KV Transfer 执行从未与 DeepEP 的 dispatch/combine 调用区间重叠。",
+    "这一现象促使 Agent 去调查 DeepEP 与 Mooncake Transfer 之间的并发，沿着调用链一路追到 Python/C++ 边界。在我们使用的 DeepEP v1.2.1 中，<code style="background:#f5f5f5;padding:1px 5px;border-radius:3px;font-family:Consolas,Monaco,monospace;font-size:13px;color:#c7254e;">intranode_dispatch</code> 与 <code style="background:#f5f5f5;padding:1px 5px;border-radius:3px;font-family:Consolas,Monaco,monospace;font-size:13px;color:#c7254e;">intranode_combine</code> 都没有显式释放 Python GIL。此外，当 dispatch 需要已接收 token 的数量时，它会在 CPU 上等待 GPU 返回该信息。",
+    "关键在于，进入 C++ 并不会自动释放 GIL。这些调用持有锁期间，同一进程里负责 Mooncake Transfer 的 Python 线程无法及时拿到 GIL，传输任务的调度与提交因此被延迟，KV Transfer 与后续计算重叠的机会随之减少。即便底层传输机制支持异步执行，上层提交被阻塞，也会让预期的并行无法充分体现。",
+    "源码本身还提供了一个直接对照：同一版本里的 <code style="background:#f5f5f5;padding:1px 5px;border-radius:3px;font-family:Consolas,Monaco,monospace;font-size:13px;color:#c7254e;">internode_dispatch</code> 已经显式释放了 GIL，并附有注释说明这样做是为了避免 CPU 等待期间阻塞其他线程中的 KV Transfer。这进一步支持了 Agent 对节点内路径的判断。",
+    "关键修复是在相关 C++ 执行区间释放 GIL，让 Mooncake Transfer 的 Python 线程能及时推进任务。修复必须同时用时间线和最初的性能约束来验证：前者检查调度与传输是否获得了与计算重叠的机会，后者判断这项改动是否真的提升了服务性能。在相同测试条件下，修复后 Prefill + KV Transfer 与仅 Prefill 的性能差距降到了 1% 以下。"
+   ],
+   "fig_after": {"7": [{"src": "fig03.png", "caption": "图 3：发现并修复 KV Transfer 的并发瓶颈"}]}
+  },
+  {
+   "type": "h2",
+   "title": "性能反馈：把已有的 kernel 优化经验变成系统级收益",
+   "paras": [
+    "kernel 优化要回答两个问题：如何判断一项优化是否有效，以及去哪里找有希望的优化方向。",
+    "首先，kernel 性能必须在推理引擎的真实执行环境中评估。比如，给某个计算 kernel 更多资源，可能缩短它自身的执行时间，却让 KV Transfer kernel 可用资源变少，最终拖慢整条流水线。因此 Agent 必须跳出单个 kernel 的延时，结合目标负载、资源约束、任务重叠和端到端收益来确定正确的优化目标。",
+    "其次，大量优化经验就嵌在 SGLang、Flash Linear Attention、DeepGEMM 等项目的手写 kernel 里。Agent 需要从这些代码中提炼优化手法及其适用条件，为当前 kernel 和目标硬件提出候选方案，再用实验验证实际效果。现有代码提供优化方向，系统反馈决定这些优化在实践中是否站得住。",
+    "我们让基于 GLM-5.3 的 Infra Agent 从不同代码库、编程语言和硬件平台的既有 kernel 中学习优化手法，并通过增量实验与消融实验，把这些手法提炼成包含适用条件、变换方法、资源约束和验证证据的“优化骨架”。面对新 kernel 时，Agent 从这些骨架出发，再用 profiling 和分层测试重新评估分块、访存和资源分配策略。经过验证的改动及其适用条件会回流到骨架库。工程师主要负责定义目标与约束，并审核涉及数值语义、并发行为和生产风险的关键改动。",
+    "图 4 展示了一个代表性 KDA Decode kernel 的性能演进。引入 ReplaySSM 用计算换内存，带来了第一次 kernel 执行时间的上升（v0 到 v1）。随后 Agent 的分割优化把 v1 的执行时间降低了 9.6%。接着，在收到计算是主要瓶颈的反馈后，Infra Agent 发现原始实现沿 V 维度切块，导致同一份 FP32 归一化与门控计算被重复执行了四次。它把这些块合并进同一个线程块，让共享的中间结果常驻寄存器，并用一次 warp 级归约替代了重复的分块计算。通过牺牲一部分并行度，它从源头上消除了冗余计算，相比 v2 实现了 1.71 倍加速。",
+    "在这个案例里，基于 GLM-5.3 的 Infra Agent 从既有实现中提炼优化经验，并把它用到了支撑自己推理的 kernel 上。从骨架出发，它逐个调优组件，用分层验证决定保留哪些改动，再用端到端性能确认它们的实际价值。经过验证的洞见又回流到骨架库。模型由此参与优化了自己的推理系统，而每一次部署积累的经验，又减少了下一轮优化所需的工程投入。"
+   ],
+   "fig_after": {"3": [{"src": "fig04.png", "caption": "图 4：代表性 KDA Decode kernel 从基线实现到生产版本的性能演进"}]}
+  },
+  {
+   "type": "h2",
+   "title": "让反馈驱动行动，用实验检验假设",
+   "paras": [
+    "这三个案例共同说明，反馈的价值不在于数量，而在于它能否帮助 Agent 回答眼前的问题。大量非结构化日志会淹没关键信号；覆盖不完整的 profiling 会导致错误归因；在微基准里有效的优化，未必能转化为端到端收益。因此构建反馈环境不只是提供测试、日志和性能数据，还要明确每类观察能支撑什么判断、它的边界在哪、哪些结论必须靠进一步实验来确认。",
+    "在这个过程中，工程师有三项关键职责：定义优化目标与系统约束，构建 Agent 能直接使用的反馈环境，审核涉及系统架构、异步并发和生产风险的关键改动。在这个框架内，Agent 提出假设、实施改动、运行实验，再用反馈决定保留、修正还是放弃当前做法。正确性、稳定性和端到端性能共同构成最终验收标准。",
+    "回看 GLM-5.3-Flash 的上线过程，kernel 里的数值精度问题、跨 Python/C++ 边界的并发问题、关键 kernel 的性能优化，分别代表了不同层面的工程挑战。通过局部测试、跨层观察和分层基准，最初模糊的异常被逐步转化为可检验的工程假设，复杂的系统问题被拆解成一系列可观察、可用实验检验、结果可归因的迭代。正是在这个反馈闭环里，Agent 的编程与推理能力转化成了可验证的工程进展。",
+    "基于 GLM-5.3 的 Infra Agent 帮助建起了推理基础设施，而由工程师与 Agent 共同优化的系统，又反过来支撑 GLM-5.3-Flash 稳定地服务用户。原文写道：“The model optimizes the system; the system runs the model.”（模型优化系统，系统跑起模型。）这项工作说明，要缩短系统工程周期，光有更强的模型能力还不够，还需要一套 Agent 工程闭环，让模型能持续收到反馈、检验判断、修正行动。",
+    "当然，我们还没有走到递归自我改进这一步。选择目标、划定边界、评估风险，仍然是人的责任。我们相信在很长一段时间里，这条线都应该由人守住。但那些数字（两周、3 倍吞吐、10 万张加速器）告诉我们：在这个边界上的进展，不会因为我们希望它慢下来就慢下来。"
+   ]
   }
+
  ],
+ "conclusion": [
+  "**????????????????????????????????????????????????** ???????????????????????????????????????????????????????????????????????????????? kernel????????????????",
+  "??????????????????????????????????????????????????? Agent ???????????????????????????????????? 3 ?????????????????????????????????????????"
+ ],
+ "reference_url": "https://z.ai/blog/glm-built-its-inference-infrastructure"
 }
+
+if __name__ == "__main__":
+    out = os.path.join(_article_dir, "article_data.json")
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(DATA, f, ensure_ascii=False, indent=2)
+    n_para = sum(len(s.get("paras", [])) for s in DATA["sections"])
+    n_fig = sum(len(v) for s in DATA["sections"] for v in (s.get("fig_after") or {}).values())
+    print("OK wrote", out, len(DATA["sections"]), "sections", n_para, "paras", n_fig, "figs")
