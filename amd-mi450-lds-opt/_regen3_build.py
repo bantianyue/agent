@@ -132,6 +132,21 @@ for tb in art.find_all("table"):
     for th in tb.find_all("th"):
         th["style"] += "background:#f3f4f5;font-weight:bold;"
 
+# 6b) 结果表表头中文化（与正文术语一致）
+TH_FIX = {
+    "layout": "布局",
+    "Measured cycles": "实测 cycles",
+    "raw B/cycle": "原始 B/cycle",
+    "steady B/cycle": "稳态 B/cycle",
+    "peak B/cycle": "峰值 B/cycle",
+}
+for tb in art.find_all("table"):
+    for th in tb.find_all("th"):
+        t = th.get_text(strip=True)
+        if t in TH_FIX:
+            th.clear()
+            th.append(TH_FIX[t])
+
 # 7) 段落 / 标题 / 列表
 for p in art.find_all("p"):
     if not p.get("style"):
@@ -163,9 +178,16 @@ for h2 in art.find_all("h2"):
         h2.append(H2_FIX[t])
 
 # 8) 清理 & 破折号
-for sel in ["script", "style", "input", "a.headerlink", ".headerlink", ".onlyprint", "nav", "aside"]:
+for sel in ["script", "style", "input", "a.headerlink", ".headerlink", ".onlyprint", "nav", "aside",
+            "div.author_string", ".author_string", "div.author_row", ".author_row",
+            "section.ablog__blog_comments", ".ablog__blog_comments"]:
     for el in art.select(sel):
         el.decompose()
+
+# 去掉 HTML 注释（页面 chrome）
+from bs4 import Comment as _Comment
+for c in art.find_all(string=lambda s: isinstance(s, _Comment)):
+    c.extract()
 
 for txt in art.find_all(string=True):
     s = str(txt)
