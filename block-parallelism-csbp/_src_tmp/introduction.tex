@@ -1,0 +1,102 @@
+\section{Introduction}
+\label{sec:introduction}
+
+\ifdefined\preprintfrontierfigure
+\preprintfrontierfigure
+\fi
+
+Block diffusion language models, or BDLMs, offer a promising approach to
+combining strong language-model quality with efficient inference. They retain
+autoregressive dependencies across consecutive token blocks while generating
+the tokens within each block through parallel denoising. This combines the
+causal structure of autoregressive models with the parallelism of
+diffusion-based generation
+\citep{arriola2025blockdiffusion,odonoghue2026diffusiongemma,fu2026nemotronlabsdiffusion}.
+
+Coding agents and other long-running assistants accumulate interaction
+histories~\citep{yang2024sweagent,yao2023react}, motivating long-context BDLM
+training.
+For these workloads, activation memory and long-context attention are major
+bottlenecks. Existing long-context training systems commonly use context
+parallelism, which partitions sequence activations across devices so that each
+device stores and processes only part of the context. During attention, devices
+exchange information across these partitions, allowing local queries to
+incorporate relevant information from the full
+sequence~\citep{liu2023ringattention,jacobs2023ulysses}.
+
+Conventional context parallelism (CP) is poorly matched to BDLM training
+because it partitions the combined clean-plus-corrupted representation by
+token position and performs distributed attention across those position
+shards. Clean K/V from earlier blocks can condition multiple later blocks,
+whereas corrupted K/V for block $b$ are used only by queries from that block.
+At every layer, CP therefore exchanges both clean and corrupted K/V during
+forward and their corresponding gradients during backward. The corrupted K/V
+consume cross-rank bandwidth despite having no reuse across blocks
+(Figure~\ref{fig:block-parallel-overview}(a)).
+
+\begin{figure}[t]
+    \centering
+    \resizebox{\linewidth}{!}{\input{figure_block_parallel.tex}}
+    \caption{(a) Conventional CP shards by token position and exchanges both clean and corrupted K/V across ranks,
+    despite corrupted K/V having no reuse across blocks. (b) BP keeps
+    corrupted K/V local to each block's owner, but replicates overlapping
+    clean prefixes. (c) CSBP also shards the shared clean context, so only
+    clean K/V and their gradients cross ranks during attention.
+    Figure~\ref{fig:csbp} details the resulting tensor communication.}
+    \label{fig:block-parallel-overview}
+\end{figure}
+
+Our first insight is that we can eliminate this block-specific communication by
+exploiting the BDLM objective's separability across corrupted blocks. We
+introduce block parallelism (BP), which makes target-block computation a new
+distributed parallelism dimension. BP assigns each complete corrupted-block
+computation to one rank. Different ranks execute different block computations
+concurrently while each block's corrupted Q/K/V, activations, and gradients
+remain local (Figure~\ref{fig:block-parallel-overview}(b)).
+
+BP alone replicates increasingly long and overlapping clean prefixes across
+ranks. To scale BP to long contexts, we introduce context-sharded
+block parallelism (CSBP): CP shards the shared clean sequence across the same
+ranks that own complete corrupted-block computations. Each clean K/V shard
+serves all local blocks whose prefixes include it, and its gradients accumulate
+on its owner. CSBP thus distributes clean computation and storage while keeping
+corrupted K/V and their gradients local
+(Figure~\ref{fig:block-parallel-overview}(c)).
+
+We make four contributions.
+
+\begin{itemize}
+    \item \textbf{Block parallelism.} We introduce target-block computation as
+    a new distributed parallelism dimension for BDLM training. BP uses
+    per-block loss separability to assign each complete corrupted-block
+    computation, including its forward pass, loss, and backward pass, to one
+    rank. Different blocks execute concurrently while their corrupted K/V and
+    gradients remain local, eliminating block-specific cross-rank communication.
+
+    \item \textbf{Context-sharded block parallelism.} We introduce CSBP to
+    scale block parallelism to long contexts without replicating the clean
+    sequence. Over the same ranks, BP assigns complete corrupted-block
+    computations while CP shards the shared clean-sequence computation. Each
+    clean K/V shard serves every block whose prefix contains it, and its owner
+    accumulates the backward contributions from all such blocks. CSBP removes
+    corrupted K/V from cross-rank attention communication and avoids
+    replicating overlapping clean prefixes.
+
+    \item \textbf{Efficient long-context training.} Across six models,
+    CSBP delivers $256$K-context speedups of
+    \textbf{1.18--1.45$\boldsymbol{\times}$} for SFT and
+    \textbf{1.27--1.33$\boldsymbol{\times}$} for AR-to-BDLM conversion over the best baselines,
+    while matching or reducing peak HBM (Table~\ref{tab:main-256k-results}).
+    The advantage grows with CP/BP degree and context length
+    (Figures~\ref{fig:parallel-degree-scaling}--\ref{fig:sequence-length-scaling}):
+    at 512K, it reaches \textbf{1.19$\boldsymbol{\times}$} on
+    NemotronDiffusion 14B and \textbf{1.61$\boldsymbol{\times}$} on
+    DiffusionGemma 26B-A4B.
+
+    \item \textbf{Faster speculative decoding training and stronger agent performance.}
+    CSBP accelerates DFlash2 drafter training by
+    \textbf{2.48$\boldsymbol{\times}$} at 512K and
+    \textbf{7.59$\boldsymbol{\times}$} at 1M. Under matched 12-hour
+    DiffusionGemma SFT budgets, CSBP achieves higher pass rates at every trained
+    checkpoint on SWE-bench Verified and Terminal-Bench Lite.
+\end{itemize}

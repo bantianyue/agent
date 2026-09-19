@@ -1,0 +1,770 @@
+\section{Correctness of Context-Sharded Block Parallelism}
+\label{app:correctness}
+
+\begin{proposition}[Exactness of CSBP]
+\label{prop:csbp-exactness}
+Let $\{\mathcal{B}_r\}_{r=1}^{P}$ partition the $B$ target blocks, and let the
+clean token rows be partitioned arbitrarily across the same $P$ ranks. Given
+any fixed input sequence, sampled diffusion times and corruptions, per-token
+model randomness, and loss normalization, CSBP computes, for every
+parameter value $\theta$, the same global sampled loss and parameter gradient
+as the reference length-$2L$ BDLM computation, up to floating-point reduction
+order.
+\end{proposition}
+
+\begin{proof}
+Fix the input sequence, sampled diffusion times and corruptions, model
+randomness, and loss normalization. Let
+$\mathcal L_b^{\mathrm{ref}}(\theta)$ and
+$\mathcal L_b^{\mathrm{CSBP}}(\theta)$ be the resulting sampled losses for
+block $b$.
+For rank $r$, define
+\begin{equation}
+    \mathcal L_r^{\mathrm{CSBP}}
+    =\sum_{b\in\mathcal B_r}\mathcal L_b^{\mathrm{CSBP}},
+    \qquad
+    \mathcal L^{\mathrm{CSBP}}
+    =\sum_{r=1}^{P}\mathcal L_r^{\mathrm{CSBP}},
+    \qquad
+    \mathcal L^{\mathrm{ref}}
+    =\sum_{b=1}^{B}\mathcal L_b^{\mathrm{ref}}.
+    \label{eq:correctness-loss-definitions}
+\end{equation}
+
+Let $H_d^{\mathrm{clean}}$ and $H_{b,d}^{\mathrm{corr}}$ denote the clean
+representations and the corrupted representations of block $b$ after $d$ of
+the model's $D$ transformer layers. Thus $H_0$ is the embedding output and
+$H_D$ enters the output projection. We use $H_d$ to denote all clean and
+corrupted representations at depth $d$, and $\theta_d$ to denote the
+parameters of layer $d$ for $1\leq d\leq D$.
+
+\begin{enumerate}
+\item
+\textbf{Reference dependencies.}
+The length-$2L$ construction and block-causal mask described in
+Section~\ref{sec:background} determine the visible K/V rows. At layer $d$, a
+clean query at position $q$ attends to clean positions $1,\ldots,q$. The
+corrupted queries in block $b$ attend to their own corrupted block and the
+clean positions in preceding blocks. We write $K_{\leq q,d}^{\mathrm{clean}}$
+and $V_{\leq q,d}^{\mathrm{clean}}$ for the clean K/V rows at positions
+$1,\ldots,q$. The reference attention is
+\begin{align}
+    O_{q,d}^{\mathrm{clean,ref}}
+    &= \operatorname{Attn}\!\left(
+        Q_{q,d}^{\mathrm{clean}},
+        K_{\leq q,d}^{\mathrm{clean}},
+        V_{\leq q,d}^{\mathrm{clean}}
+      \right),
+    \label{eq:correctness-clean-attention}
+    \\
+    O_{b,d}^{\mathrm{corr,ref}}
+    &= \operatorname{Attn}\!\left(
+        Q_{b,d}^{\mathrm{corr}},
+        [K_{b,d}^{\mathrm{corr}};K_{<b,d}^{\mathrm{clean}}],
+        [V_{b,d}^{\mathrm{corr}};V_{<b,d}^{\mathrm{clean}}]
+      \right).
+    \label{eq:correctness-corrupted-attention}
+\end{align}
+Equation~\ref{eq:correctness-corrupted-attention} implies, for every
+$Z\in\{Q,K,V\}$,
+\begin{equation}
+    \frac{\partial O_{b,d}^{\mathrm{corr,ref}}}
+         {\partial Z_{b',d}^{\mathrm{corr}}}
+    =0
+    \qquad (b'\neq b).
+    \label{eq:correctness-block-dependency}
+\end{equation}
+
+\item
+\textbf{Exact sharded attention.}
+Let $C_r$ be the set of clean token positions stored on rank $r$. The clean
+shards satisfy
+\begin{equation}
+    \bigcup_{r=1}^{P} C_r=\{1,\ldots,L\},
+    \qquad
+    C_r\cap C_{r'}=\varnothing \quad (r\neq r').
+    \label{eq:correctness-clean-partition}
+\end{equation}
+Consider one query vector $\mathbf q$. Let $S$ be its visible key positions,
+partitioned into disjoint nonempty sets $S_1,\ldots,S_J$. For the key and value
+rows $\mathbf k_i$ and $\mathbf v_i$, let
+$a_i=\mathbf q\mathbf k_i^\top/\sqrt{d_h}$ and
+$a_{\max}=\max_{i\in S}a_i$. Since the sets $S_j$ partition $S$,
+\begin{equation}
+    \operatorname{Attn}(\mathbf q,K_S,V_S)
+    =
+    \frac{\displaystyle\sum_{j=1}^{J}\sum_{i\in S_j}
+          e^{a_i-a_{\max}}\mathbf v_i}
+         {\displaystyle\sum_{j=1}^{J}\sum_{i\in S_j}e^{a_i-a_{\max}}}.
+    \label{eq:correctness-online-softmax-merge}
+\end{equation}
+Online softmax evaluates these partitioned sums exactly
+\citep{milakov2018online,dao2022flashattention}. For a clean query at position
+$q$, the nonempty sets $C_r\cap\{1,\ldots,q\}$ partition its visible K/V rows.
+For a corrupted query in block $b$, its local corrupted block together with
+the nonempty clean sets $C_r\cap\{1,\ldots,(b-1)M\}$ partition its visible
+K/V rows. These clean sets are empty for $b=1$.
+CSBP therefore supplies exactly the rows in
+Equations~\ref{eq:correctness-clean-attention} and
+\ref{eq:correctness-corrupted-attention}.
+
+\item
+\textbf{Forward induction.}
+The common inputs and embedding computation give
+$H_0^{\mathrm{CSBP}}=H_0^{\mathrm{ref}}$. Assume
+$H_{d-1}^{\mathrm{CSBP}}=H_{d-1}^{\mathrm{ref}}$ for some
+$1\leq d\leq D$. Their Q/K/V projections agree, and
+Equation~\ref{eq:correctness-online-softmax-merge} gives
+\begin{equation}
+    \begin{aligned}
+      O_{q,d}^{\mathrm{clean,CSBP}}&=O_{q,d}^{\mathrm{clean,ref}}
+      && \forall q,\\
+      O_{b,d}^{\mathrm{corr,CSBP}}=O_{b,d}^{\mathrm{corr,ref}}
+      && \forall b.
+    \end{aligned}
+    \label{eq:correctness-forward-step}
+\end{equation}
+The remaining operations in layer $d$ are unchanged, so
+$H_d^{\mathrm{CSBP}}=H_d^{\mathrm{ref}}$. Induction over
+$d=1,\ldots,D$ gives $H_D^{\mathrm{CSBP}}=H_D^{\mathrm{ref}}$.
+
+\item
+\textbf{Loss.}
+The output projection and block losses are unchanged. The forward induction
+therefore gives
+$\mathcal L_b^{\mathrm{CSBP}}=\mathcal L_b^{\mathrm{ref}}$ for every block.
+Since $\{\mathcal B_r\}_{r=1}^{P}$ partitions the target blocks,
+\begin{equation}
+    \mathcal L^{\mathrm{CSBP}}
+    =\sum_{r=1}^{P}\sum_{b\in\mathcal B_r}\mathcal L_b^{\mathrm{CSBP}}
+    =\sum_{b=1}^{B}\mathcal L_b^{\mathrm{ref}}
+    =\mathcal L^{\mathrm{ref}}.
+    \label{eq:correctness-sampled-loss}
+\end{equation}
+
+\item
+\textbf{Backward pass.}
+The equal final representations and common loss functions give the same
+derivatives at the output of the model. Let $\mathcal L$ denote the global
+sampled loss of either execution. For
+$Z\in\{Q,K,V\}$,
+Equation~\ref{eq:correctness-block-dependency} and the chain rule give
+\begin{equation}
+    \frac{\partial \mathcal L}{\partial Z_{b,d}^{\mathrm{corr}}}
+    = \sum_{b'=1}^{B}
+      \left(
+      \frac{\partial O_{b',d}^{\mathrm{corr}}}
+           {\partial Z_{b,d}^{\mathrm{corr}}}
+      \right)^{\!\top}
+      \frac{\partial \mathcal L}{\partial O_{b',d}^{\mathrm{corr}}}
+    = \left(
+      \frac{\partial O_{b,d}^{\mathrm{corr}}}
+           {\partial Z_{b,d}^{\mathrm{corr}}}
+      \right)^{\!\top}
+      \frac{\partial \mathcal L}{\partial O_{b,d}^{\mathrm{corr}}}.
+    \label{eq:correctness-corrupted-gradient}
+\end{equation}
+Thus corrupted Q/K/V derivatives depend only on the queries from the same
+block and are computed on its owner. Let $Z_{r,d}^{\mathrm{clean}}$ denote the
+clean K/V rows at positions $C_r$, and let $O_{q,d}$ denote the attention
+output for query row $q$. The chain rule gives
+\begin{equation}
+    \frac{\partial \mathcal L}{\partial Z_{r,d}^{\mathrm{clean}}}
+    = \sum_q
+      \left(
+        \frac{\partial O_{q,d}}{\partial Z_{r,d}^{\mathrm{clean}}}
+      \right)^{\!\top}
+      \frac{\partial \mathcal L}{\partial O_{q,d}},
+    \qquad Z\in\{K,V\},
+    \label{eq:correctness-clean-gradient}
+\end{equation}
+where the sum is over all clean and corrupted query rows. A term is zero when
+the query cannot attend to a position in $C_r$. Exact CP backward accumulates
+this sum on rank $r$. For every clean query row $q$,
+\begin{equation}
+    \frac{\partial \mathcal L}{\partial Q_{q,d}^{\mathrm{clean}}}
+    = \left(
+        \frac{\partial O_{q,d}^{\mathrm{clean}}}
+             {\partial Q_{q,d}^{\mathrm{clean}}}
+      \right)^{\!\top}
+      \frac{\partial \mathcal L}{\partial O_{q,d}^{\mathrm{clean}}},
+    \label{eq:correctness-query-gradient}
+\end{equation}
+which is computed on the query owner. Because the two executions have the same
+forward values and output derivatives, Equations~\ref{eq:correctness-corrupted-gradient}--\ref{eq:correctness-query-gradient}
+give the same Q/K/V derivatives. Backpropagation through the unchanged
+remainder of layer $d$ therefore satisfies
+\begin{equation}
+    \begin{aligned}
+      \frac{\partial \mathcal L^{\mathrm{CSBP}}}
+           {\partial H_{d-1}^{\mathrm{CSBP}}}
+      &=
+      \left(
+        \frac{\partial H_d^{\mathrm{CSBP}}}
+             {\partial H_{d-1}^{\mathrm{CSBP}}}
+      \right)^{\!\top}
+      \frac{\partial \mathcal L^{\mathrm{CSBP}}}
+           {\partial H_d^{\mathrm{CSBP}}} \\
+      &=
+      \left(
+        \frac{\partial H_d^{\mathrm{ref}}}
+             {\partial H_{d-1}^{\mathrm{ref}}}
+      \right)^{\!\top}
+      \frac{\partial \mathcal L^{\mathrm{ref}}}
+           {\partial H_d^{\mathrm{ref}}}
+      =
+      \frac{\partial \mathcal L^{\mathrm{ref}}}
+           {\partial H_{d-1}^{\mathrm{ref}}}, \\[4pt]
+      \nabla_{\theta_d}\mathcal L^{\mathrm{CSBP}}
+      &=
+      \left(
+        \frac{\partial H_d^{\mathrm{CSBP}}}{\partial \theta_d}
+      \right)^{\!\top}
+      \frac{\partial \mathcal L^{\mathrm{CSBP}}}
+           {\partial H_d^{\mathrm{CSBP}}} \\
+      &=
+      \left(
+        \frac{\partial H_d^{\mathrm{ref}}}{\partial \theta_d}
+      \right)^{\!\top}
+      \frac{\partial \mathcal L^{\mathrm{ref}}}
+           {\partial H_d^{\mathrm{ref}}}
+      =\nabla_{\theta_d}\mathcal L^{\mathrm{ref}}.
+    \end{aligned}
+    \label{eq:correctness-backward-step}
+\end{equation}
+Because the output projection is identical, its parameter gradient and
+derivative with respect to $H_D$ agree, providing the base case. Reverse
+induction through $d=D,\ldots,1$ gives equal transformer-layer gradients and
+equal derivatives with respect to $H_0$. The common embedding computation then
+gives equal embedding gradients. Finally, linearity of differentiation and
+Equation~\ref{eq:correctness-loss-definitions} give
+\begin{equation}
+    \sum_{r=1}^{P}
+    \nabla_\theta \mathcal L_r^{\mathrm{CSBP}}
+    =\nabla_\theta \mathcal L^{\mathrm{CSBP}}
+    =\nabla_\theta \mathcal L^{\mathrm{ref}}.
+    \label{eq:correctness-sampled-gradient}
+\end{equation}
+\end{enumerate}
+Equations~\ref{eq:correctness-sampled-loss} and
+\ref{eq:correctness-sampled-gradient} hold for every sampled realization.
+Taking expectations also gives the same BDLM objective and objective gradient.
+\end{proof}
+
+\paragraph{Communication consequence.}
+Under CSBP, only clean K/V and their gradients cross ranks during attention,
+while corrupted Q/K/V and their gradients remain on the rank assigned their
+block.
+
+\section{Load Balancing}
+\label{app:load-balancing}
+
+Both attention workloads in CSBP increase with block position. Later
+target blocks attend to longer clean prefixes, and later clean query blocks
+attend to longer causal prefixes. Because both costs grow with the same block
+index, the same early--late pairing balances them simultaneously.
+
+Assume $B$ equal-sized blocks of $M=L/B$ tokens. Let
+$W_b^{\mathrm{target}}$ and $W_b^{\mathrm{clean}}$ denote the valid query--key
+pairs for target-block and clean causal attention at block $b$. The $M$ target
+queries in block $b$ attend to $(b-1)M$ clean-prefix keys and $M$ keys from
+their own corrupted block, for $bM$ visible keys. The $M$ clean queries attend
+to the $b-1$ preceding clean blocks and causally within their own block. Their
+work is therefore
+\begin{align}
+    W_b^{\mathrm{target}}
+    &= bM^2,
+    &
+    W_b^{\mathrm{clean}}
+    &= (b-1)M^2+\frac{M(M+1)}{2}.
+    \label{eq:block-work-by-position}
+\end{align}
+
+Dual-end BP pairs target block $b$ with block $B+1-b$. Clean-sequence zigzag
+sharding uses the same early--late pairing~\citep{dubey2024llama3}. The work of
+each pair is
+\begin{align}
+    W_b^{\mathrm{target}}+W_{B+1-b}^{\mathrm{target}}
+    &= (B+1)M^2,
+    &
+    W_b^{\mathrm{clean}}+W_{B+1-b}^{\mathrm{clean}}
+    &= BM^2+M.
+    \label{eq:aligned-pair-work}
+\end{align}
+Both sums are independent of $b$, so every early--late pair carries the same
+amount of target-block work and the same amount of clean causal work. When $B$
+is divisible by $2P$, assigning $B/(2P)$ pairs to each rank gives
+\begin{align}
+    W_r^{\mathrm{target}}
+    &= \frac{B(B+1)M^2}{2P},
+    &
+    W_r^{\mathrm{clean}}
+    &= \frac{L(L+1)}{2P},
+    \qquad 1\leq r\leq P.
+    \label{eq:aligned-rank-work}
+\end{align}
+Using the same pairs for target-block placement and clean zigzag sharding gives
+every rank equal target-block and clean causal attention work. Attention
+backward uses the same valid query--key pairs, so these pair counts remain
+balanced. When exact divisibility does not hold, we distribute the complete
+pairs as evenly as possible and assign any unpaired middle block to the
+currently least-loaded rank.
+
+\clearpage
+\section{CSBP Algorithm and Execution Schedule}
+\label{app:execution-schedule}
+
+Algorithm~\ref{alg:csbp-attention} summarizes one CSBP layer. Each rank stores
+one clean-sequence shard and the complete corrupted blocks in $\mathcal B_r$.
+All ranks execute concurrently: CP supplies clean K/V, while each block's
+corrupted Q/K/V remain local.
+
+\begin{algorithm}[H]
+\small
+\caption{CSBP forward pass on rank $r$}
+\label{alg:csbp-attention}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Clean shard $(Q_r,K_r,V_r)$ and
+  $\{(Q_b,K_b,V_b):b\in\mathcal B_r\}$
+\State \textbf{Output:} $O_r$ and $\{O_b:b\in\mathcal B_r\}$
+\State All-gather the clean K/V shards to form
+  $(K^{\mathrm{clean}},V^{\mathrm{clean}})$ on each rank
+\Statex
+\State \textbf{Clean-sequence attention (CP)}
+\State Compute clean-query attention under the block-causal mask
+\State $O_r\gets\operatorname{softmax}\!\left(
+  Q_r(K^{\mathrm{clean}})^\top/\sqrt{d_h}+\mathcal M_r\right)
+  V^{\mathrm{clean}}$
+\Statex
+\State \textbf{Assigned corrupted blocks (BP)}
+\ForAll{$b\in\mathcal B_r$}
+  \State Compute within-block attention from the local $Q_b,K_b,V_b$
+  \State Compute clean-prefix attention from the gathered
+    $K_{<b}^{\mathrm{clean}},V_{<b}^{\mathrm{clean}}$
+  \State Merge the two outputs and LSEs by online softmax to obtain
+  \State $O_b\gets\operatorname{Attn}\!\left(
+    Q_b,[K_b;K_{<b}^{\mathrm{clean}}],
+    [V_b;V_{<b}^{\mathrm{clean}}]\right)$
+    \Comment{Equation~\ref{eq:csbp-block-attention}}
+\EndFor
+\State \Return $O_r$ and $\{O_b:b\in\mathcal B_r\}$
+\end{algorithmic}
+\end{algorithm}
+
+Algorithm~\ref{alg:csbp-backward} gives the exact backward pass. Rank $r$
+keeps the corrupted Q/K/V gradients for its assigned blocks, while CP sums the
+clean K/V gradients contributed by all clean and corrupted queries.
+
+\begin{algorithm}[H]
+\small
+\caption{CSBP attention backward on rank $r$}
+\label{alg:csbp-backward}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Saved forward tensors and
+  $\{\mathcal L_b:b\in\mathcal B_r\}$
+\State \textbf{Output:} $(dQ_r,dK_r,dV_r)$ and
+  $\{(dQ_b,dK_b,dV_b):b\in\mathcal B_r\}$
+\Statex
+\State \textbf{Clean-query backward (CP)}
+\State Backpropagate $O_r$; retain $dQ_r$ and the clean K/V contributions
+\Statex
+\State \textbf{Assigned corrupted blocks (local backward)}
+\ForAll{$b\in\mathcal B_r$}
+  \State Backpropagate $\mathcal L_b$ through $O_b$
+  \State $(dQ_b,dK_b,dV_b)
+    \gets\nabla_{(Q_b,K_b,V_b)}\mathcal L_b$
+    \Comment{kept on rank $r$}
+  \State Add this block's clean-prefix K/V gradients to the CP reduction
+\EndFor
+\Statex
+\State \textbf{Clean-gradient reduction (CP backward)}
+\State Reduce-scatter the clean K/V contributions across ranks
+\For{$Z\in\{K,V\}$}
+  \State $\displaystyle dZ_r\gets
+    \sum_q\left(\frac{\partial O_q}{\partial Z_r}\right)^{\!\top}
+    \frac{\partial\mathcal L}{\partial O_q}$
+    \Comment{Equation~\ref{eq:correctness-clean-gradient}}
+\EndFor
+\State \Return $(dQ_r,dK_r,dV_r)$ and
+  $\{(dQ_b,dK_b,dV_b):b\in\mathcal B_r\}$
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+\paragraph{Efficient fused operator.}
+Implementation~\ref{impl:csbp-forward} shows the production forward path. It
+starts an asynchronous all-gather of clean K/V, then computes all local
+corrupted blocks with one block-diagonal attention launch while communication
+runs. After the all-gather, one masked fused-attention launch computes the
+clean-K/V contribution for every query. The mask uses each gathered key's
+original clean token position, so the kernel consumes the gathered K/V directly
+without a reordering copy.
+
+Each attention launch returns a normalized output $O_j$ and row-wise
+log-sum-exp (LSE) $z_j$.  For two disjoint key sets, the CUDA kernel sets
+$m=\max(z_1,z_2)$, $w_j=e^{z_j-m}$, and computes
+\begin{equation}
+  O=\frac{w_1O_1+w_2O_2}{w_1+w_2},\qquad
+  z=m+\log(w_1+w_2).
+  \label{eq:csbp-lse-merge}
+\end{equation}
+This is Equation~\ref{eq:correctness-online-softmax-merge} applied to the two
+attention launches.  The implementation stores the numerator, $m$, and the
+normalizer $w_1+w_2$ in FP32 until the final division.
+
+\begin{lstlisting}[
+  style=implementation,
+  language=Python,
+  caption={CSBP forward schedule and CUDA LSE merge.},
+  label={impl:csbp-forward}
+]
+@cuda_kernel
+def merge_lse_kernel(numerator, m, normalizer,
+                     O_block, z_block):
+    # One thread handles one (corrupted-query row, head-dimension) element.
+    q, d = cuda_grid_2d()
+    if q >= len(z_block):
+        return
+    m_new = max(m[q], z_block[q])
+    w_acc = exp(m[q] - m_new) if isfinite(m[q]) else 0.0
+    w_block = exp(z_block[q] - m_new) if isfinite(z_block[q]) else 0.0
+    numerator[q, d] = (w_acc * numerator[q, d]
+                       + w_block * O_block[q, d])
+    if d == 0:
+        normalizer[q] = w_acc * normalizer[q] + w_block
+        m[q] = m_new
+
+
+def csbp_collective_forward(Q, K_block, V_block,
+                            K_clean_r, V_clean_r, masks, scale):
+    # 1. Start the clean K/V all-gather.
+    work, gathered = async_all_gather(K_clean_r, V_clean_r)
+
+    # 2. One block-diagonal launch covers every block owned by this rank.
+    O_block, LSE_block = block_diagonal_attention(
+        Q[:masks.corrupted_rows], K_block, V_block, scale)
+
+    # 3. Use the gathered clean K/V directly in one masked launch.
+    work.wait()
+    K_clean, V_clean = view_all_gathered_clean_kv(gathered)
+    clean_mask = block_causal_mask(masks)
+    O_clean, LSE_clean = masked_clean_attention(
+        Q, K_clean, V_clean, clean_mask, scale)
+
+    # 4. Custom CUDA kernels apply the LSE rule above in FP32.
+    numerator = O_clean.float()
+    m = LSE_clean.float()
+    normalizer = isfinite(m).float()
+    launch(merge_lse_kernel, numerator, m, normalizer,
+           O_block, LSE_block)
+    O, LSE = empty_outputs(Q)
+    launch(normalize_output_kernel,
+           numerator, m, normalizer, O, LSE)
+    save_for_backward(Q, K_block, V_block, K_clean, V_clean, O, LSE)
+    return O
+\end{lstlisting}
+
+\clearpage
+Implementation~\ref{impl:csbp-backward} shows the fused packed backward. One
+masked kernel reuses the saved output and LSE to compute gradients for the local
+corrupted K/V and gathered clean K/V together. The corrupted gradients remain
+local, while only the clean K/V gradients are reduce-scattered to their CP
+ranks.
+
+\begin{lstlisting}[
+  style=implementation,
+  language=Python,
+  caption={Fused CSBP backward. One masked kernel computes the local corrupted-block and clean-context gradients.},
+  label={impl:csbp-backward}
+]
+def csbp_fused_backward(dO, saved, masks, scale):
+    Q, K_block, V_block, K_clean, V_clean, O, LSE = saved
+
+    # 1. Pack local corrupted K/V before the gathered clean K/V.
+    K_packed, V_packed = pack_local_clean_kv(
+        K_block, V_block, K_clean, V_clean)
+
+    # 2. One masked backward reuses the exact forward output and LSE.
+    dQ, dK_packed, dV_packed = masked_attention_backward(
+        Q, K_packed, V_packed, O, LSE, dO,
+        masks.packed, scale)
+
+    # 3. Split local gradients from the clean gradients that communicate.
+    dK_block, dK_clean = split_local_clean_gradients(
+        dK_packed, masks.corrupted_rows)
+    dV_block, dV_clean = split_local_clean_gradients(
+        dV_packed, masks.corrupted_rows)
+
+    # 4. Return each rank's clean K/V-gradient shard.
+    dK_clean_r, dV_clean_r = reduce_scatter_clean_gradients(
+        dK_clean, dV_clean)
+    return dQ, dK_block, dV_block, dK_clean_r, dV_clean_r
+\end{lstlisting}
+
+\section{AR-to-BDLM Conversion Methodology}
+\label{app:fast-dllm-v2-objective}
+
+Fast-dLLM v2 adapts a pretrained causal LM to block diffusion while retaining
+next-token prediction~\citep{wu2025fastdllmv2}. It samples a blockwise binary
+mask $m^{(0)}$ and constructs a second noisy view with the complementary mask
+$m^{(1)}=1-m^{(0)}$ on every supervised token. If $h_i^{(v)}$ is the hidden
+representation at position $i$ in view $v\in\{0,1\}$, let $m_i^{(v)}=1$ when
+$x_i$ is masked and let $\mathcal{S}$ contain the supervised positions other
+than the first token. The sampled objective is
+\begin{equation}
+    \widehat{\mathcal{L}}_{\mathrm{AR\mbox{-}to\mbox{-}BDLM}}
+    =
+    -\sum_{v=0}^{1}\sum_{i\in\mathcal{S}}
+    m_i^{(v)}\log p_\theta\!\left(x_i\mid h_{i-1}^{(v)}\right),
+    \qquad
+    m_i^{(0)}+m_i^{(1)}=1.
+    \label{eq:fast-dllm-v2-objective}
+\end{equation}
+The complementary views supervise every eligible next token exactly once.
+The one-token shift uses the preceding query row to predict $x_i$, matching a
+causal LM head.
+
+The objective preserves the two properties used by block parallelism. Each
+view uses the length-$2L$ clean-plus-corrupted computation, and queries in
+block $b$ use corrupted K/V only from block $b$ of that view and clean K/V
+from preceding clean blocks,
+\begin{equation}
+    O_{b,v}
+    =\operatorname{Attn}\!\left(
+      Q_{b,v},
+      [K_{b,v};K_{<b,v}^{\mathrm{clean}}],
+      [V_{b,v};V_{<b,v}^{\mathrm{clean}}]
+    \right).
+    \label{eq:fast-dllm-v2-attention}
+\end{equation}
+The two views are separate batch elements and introduce no cross-view
+attention. The label shift also leaves these attention dependencies unchanged.
+We assign each shifted loss term to the block containing its prediction row,
+and group the terms from both views into the corresponding block loss. The
+objective therefore retains the decomposition
+$\widehat{\mathcal{L}}_{\mathrm{AR\mbox{-}to\mbox{-}BDLM}}
+=\sum_{b=1}^{B}\mathcal{L}_b$.
+
+CSBP therefore applies directly. BP assigns each complete corrupted
+computation and loss for block $b$ in both views to one rank, while CP shards
+the clean sequence of both views across the same ranks.
+Corrupted Q/K/V and their gradients remain on the block owner, while clean K/V
+gradients are accumulated on their CP shard owners.
+Proposition~\ref{prop:csbp-exactness}
+applies to each view, and summing the complementary-view losses preserves its
+loss and gradient equalities.
+
+\clearpage
+\section{DFlash2 Drafter Training Methodology}
+\label{app:dflash2-objective}
+
+DFlash trains a lightweight block-diffusion drafter for speculative
+decoding~\citep{chen2026dflash}. Given a clean sequence $x$, hidden features
+$H^{\mathrm{tar}}$ are extracted from a frozen autoregressive target model.
+For each sampled block $b$, the token at position $a_b$ is visible and the next
+$M-1$ tokens are masked and predicted in one pass. Queries attend
+bidirectionally within the block and to target-feature K/V preceding $a_b$;
+different draft blocks do not attend to one another.
+
+Let
+$\widetilde{x}^{(b)}=(x_{a_b},\mathtt{[MASK]},\ldots,\mathtt{[MASK]})$
+denote the input for block $b$. One draft-attention layer computes
+\begin{equation}
+    O_b
+    =
+    \operatorname{Attn}\!\left(
+      Q_b,
+      [K_b;K_{<a_b}^{\mathrm{tar}}],
+      [V_b;V_{<a_b}^{\mathrm{tar}}]
+    \right).
+    \label{eq:dflash2-block-attention}
+\end{equation}
+Following DFlash2~\citep{inco2026dflash2}, our drafter uses the architecture in
+the open-source SpecForge implementation~\citep{specforge2025}. It retains this
+one-pass backbone and uses block-local two-tap dynamic convolutions and a
+candidate-path selector. Its sampled objective is the sum of a draft-token loss
+and a selector loss for each block:
+\begin{equation}
+    \widehat{\mathcal{L}}_{\mathrm{DFlash2}}
+    = \frac{1}{Z}\sum_b \mathcal{L}_b,
+    \qquad
+    \mathcal{L}_b
+    = \mathcal{L}^{\mathrm{draft}}_b
+      + \alpha_{\mathrm{sel}}\mathcal{L}^{\mathrm{sel}}_b,
+    \label{eq:dflash2-training-objective}
+\end{equation}
+where $Z$ is the sum of valid token weights and $\alpha_{\mathrm{sel}}$ weights
+the selector term.
+
+This blockwise objective makes CSBP directly applicable. Let
+$\mathcal B_r$ be the blocks assigned to rank $r$; these sets are disjoint and
+together contain every sampled block. Since $\mathcal L_b$ depends only on block
+$b$ and its target-feature prefix, each rank evaluates its assigned terms, and
+\begin{equation}
+    \sum_{r=1}^{P}
+    \nabla_\theta\!\left(
+      \frac{1}{Z}\sum_{b\in\mathcal B_r}\mathcal L_b
+    \right)
+    = \nabla_\theta\widehat{\mathcal L}_{\mathrm{DFlash2}}.
+    \label{eq:dflash2-gradient-decomposition}
+\end{equation}
+Thus, assigning complete blocks to ranks preserves the loss and gradient up to
+floating-point reduction order. It also gives DFlash2 an additional source of
+savings beyond full-model SFT and AR-to-BDLM conversion. With $P$ context
+ranks, conventional CP repeats each block-local drafter path $P$ times, while
+CSBP evaluates it once. Full-model training has no separate drafter path and
+therefore no corresponding $P$-to-one reduction. The repeated DFlash2 work
+includes the decoder, vocabulary objective, output-head recomputation, and
+selector; target-feature processing remains context sharded. At 512K, removing
+two-way replication reduces measured GEMM work by $1.92\times$, and higher
+execution efficiency raises the throughput gain to $2.48\times$. At 1M,
+removing eight-way replication permits four data-parallel replicas, producing
+the $7.59\times$ aggregate throughput gain.
+
+\section{DiffusionGemma SFT Training Data and Evaluation Details}
+\label{app:training-evaluation-details}
+
+\paragraph{SWE-bench Verified.}
+For the software-engineering comparison in
+Figure~\ref{fig:equal-wall-clock-downstream}, the best baseline and CSBP
+train on identical
+ordered streams of successful CoderForge-Preview trajectories
+\citep{CoderForge2026}, formatted for the OpenHands agent
+interface~\citep{wang2025openhands}. Trajectories in the training stream have
+a mean sequence length of 65{,}536.5 tokens and a maximum length of
+131{,}072 tokens.
+We evaluate the base model at 0 hours and
+checkpoints at 3, 6, 9, and 12 hours, with one attempt on each of the 500
+SWE-bench Verified tasks~\citep{jimenez2024swebench,chowdhury2024swebenchverified}.
+The harness supplies the issue and repository state; success requires both the
+designated \texttt{FAIL\_TO\_PASS} and \texttt{PASS\_TO\_PASS} tests to pass.
+
+\paragraph{Terminal-Bench Lite.}
+The best baseline and CSBP train on identical ordered streams of quality-filtered Terminus-2
+trajectories from
+LiteCoder-Terminal-SFT~\citep{peng2026litecoderterminal}. Trajectories in the
+training stream have a mean sequence length of 65{,}551 tokens and a maximum
+length of 131{,}072 tokens. We evaluate the same
+checkpoint schedule with Harbor's Terminus-2 agent~\citep{Harbor_Framework}
+on all 100 OpenThoughts-TBLite tasks~\citep{OpenThoughts-TBLite}, with one
+attempt per task. A task passes only when its benchmark verifier returns success.
+
+\paragraph{Matched wall-clock protocol.}
+Within each workload, the best baseline and CSBP use the same model, training corpus,
+optimizer settings, checkpoint schedule, and evaluation configuration; only
+the distributed training method changes. We report pass rate as the percentage
+of tasks solved by the single attempt. Evaluation tasks and verifier outputs do
+not contribute training gradients. Both sources apply benchmark decontamination:
+CoderForge excludes matching SWE-bench Verified repository/commit pairs and
+problem statements, while LiteCoder-Terminal-SFT filters 13-gram overlaps with
+Terminal-Bench queries~\citep{CoderForge2026,peng2026litecoderterminal}.
+
+\paragraph{SFT optimization.}
+The CoderForge-Preview and LiteCoder-Terminal-SFT runs use a global batch size
+of one example and one gradient-accumulation step per update.
+We train rank-16 LoRA adapters with $\alpha=32$ on eight H100 GPUs. The
+baseline uses CP8, while CSBP uses CP8/BP8.
+We optimize with DeepSpeed ZeRO-2 and FusedAdam using a peak learning rate of
+$10^{-5}$, Adam coefficients $(\beta_1,\beta_2)=(0.95,0.99)$,
+$\epsilon=10^{-8}$, weight decay $10^{-4}$, gradient clipping at $1.0$, and a
+cosine schedule that decays the learning rate to $10^{-6}$.
+
+\section{End-to-End Numerical Agreement}
+\label{app:numerical-agreement}
+
+Table~\ref{tab:objective-equivalence-256k} compares the strongest non-BP
+baseline with CSBP using full-depth BF16 runs at 256K context on sixteen H200
+GPUs.  The
+NemotronDiffusion and DiffusionGemma rows evaluate BDLM fine-tuning, while the
+Qwen rows evaluate Fast-dLLM v2 AR-to-BDLM conversion.  Each pair uses the same
+model, random seed, generated inputs, objective, and optimizer configuration.
+The resulting loss differences are small and consistent with floating-point
+reduction order.
+
+\input{tables/appendix_objective_equivalence_256k}
+
+\section{Pure Block Parallelism Ablation}
+\label{app:pure-bp-ablation}
+
+Sharding the clean context makes BP practical at long sequence lengths
+(Table~\ref{tab:pure-bp-ablation}). For NemotronDiffusion 14B at 64K, CSBP is
+$1.46\times$ faster than pure BP and uses 89.8 rather than 110.7\,GiB of HBM.
+At 128K, CSBP still fits while pure BP runs out of memory. DiffusionGemma 26B-A4B
+shows the same need for context sharding even earlier: pure BP runs out of
+memory at both 64K and 128K, where CSBP fits and outperforms pure CP. Block ownership removes corrupted
+K/V communication; context sharding prevents replicated clean prefixes from
+erasing that benefit.
+
+\input{tables/appendix_pure_bp_ablation}
+
+\section{Load Balancing Analysis}
+\label{app:dual-end-scheduling-ablation}
+
+Load balancing delivers substantial gains without increasing memory use
+(Table~\ref{tab:dual-end-scheduling-ablation}). Replacing contiguous block
+assignment with early--late pairing improves throughput by $1.34\times$ for
+NemotronDiffusion 3B and $1.28\times$ for DiffusionGemma 26B-A4B at 256K. Peak
+HBM is unchanged for NemotronDiffusion and falls by 6.5\,GiB for DiffusionGemma.
+Only the block assignment changes; the objective and
+remaining training settings are fixed. These gains show that equal block
+counts are not enough: balancing attention work across ranks is important
+to realizing CSBP's throughput benefit.
+
+\input{tables/appendix_dual_end_scheduling_ablation}
+
+\section{AR-to-BDLM Conversion Results}
+\label{app:fast-dllm-v2-results}
+
+CSBP's benefits extend to converting autoregressive models into BDLMs
+(Table~\ref{tab:fast-dllm-v2-context-scaling}). Under the Fast-dLLM v2
+objective, both Qwen backbones train faster and use less peak HBM at every
+evaluated context length. Speedup grows from $1.26$--$1.27\times$ at 64K to
+$1.27$--$1.33\times$ at 256K, where CSBP also saves 9.6\,GiB of HBM.
+
+\input{tables/appendix_fast_dllm_v2_scaling}
+
+\section{Effectiveness Across Different Block Sizes}
+\label{app:block-size-sensitivity}
+
+CSBP maintains its advantage across an eightfold range of block sizes
+(Table~\ref{tab:block-size-sensitivity}). From 128 to 1,024 tokens per block,
+speedup stays within $1.14$--$1.15\times$ for NemotronDiffusion 14B and
+$1.33$--$1.44\times$ for DiffusionGemma 26B-A4B.
+
+\input{tables/appendix_block_size_sensitivity}
+
+\section{Savings Breakdowns}
+\label{app:sources-of-speedup}
+
+Table~\ref{tab:operator-profile-256k} separates attention communication from
+end-to-end step time. NemotronDiffusion 14B uses full attention, so keeping
+corrupted K/V local halves its logical attention traffic; overlap limits the
+reduction in exposed attention communication to 20.4\%. DiffusionGemma 26B-A4B
+has a second, architecture-specific source of savings: 25 of its 30 attention
+layers use a 1,024-token sliding window. The tested CP8 baseline uses full-shard
+K/V exchange in all 30 layers. CSBP keeps corrupted K/V local and, in the 25
+sliding-window layers, its window-aware exchange sends only the clean rows
+needed by local queries; only the five global-attention layers exchange
+complete clean K/V shards. This reduces logical attention traffic by 93.5\%
+and exposed attention communication by 93.4\%.
+
+\input{tables/operator_profile_256k}
+
+The 93\% reductions apply to attention communication, not the complete
+training step. DiffusionGemma's step time falls by 31.3\%, while dense and
+expert GEMM durations remain nearly unchanged. Both forward and backward
+become faster, yielding $1.18\times$ and $1.45\times$ end-to-end speedup for
+NemotronDiffusion 14B and DiffusionGemma 26B-A4B, respectively.
+
+\section{Complete H200 Profiles}
+\label{app:h200-profiles}
+
+CSBP improves the throughput--memory trade-off across the tested models and
+context lengths (Table~\ref{tab:h200-two-node-1p2}). The independently selected
+configurations deliver speedups up to $1.61\times$. Even when throughput is
+nearly tied, context sharding can substantially reduce memory: for NemotronDiffusion
+3B at 128K, CSBP stays within 1\% of the DP16 baseline's throughput while
+saving 41\,GiB of peak HBM. This case highlights another practical benefit
+of CSBP: retaining throughput while freeing memory.
+
+\input{tables/two_node_h200_1p2_results}

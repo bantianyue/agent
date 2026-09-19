@@ -1,0 +1,101 @@
+\section{Background}
+\label{sec:background}
+
+\subsection{Notation}
+Let a sequence $x=(x_1,\ldots,x_L)$ be divided into $B$ contiguous blocks of
+$M=L/B$ tokens.
+\begin{equation}
+    x=\left(x^{(1)},\ldots,x^{(B)}\right),
+    \qquad
+    x^{(<b)}=\left(x^{(1)},\ldots,x^{(b-1)}\right).
+\end{equation}
+We use $b$ to index blocks and $r$ to index the $P$ ranks in a parallel group.
+At each transformer layer~\citep{vaswani2017attention}, $Q$, $K$, and $V$ denote the query, key, and value
+projections; semicolons inside brackets denote sequence concatenation.
+
+\subsection{Block diffusion language models}
+
+A block diffusion language model (BDLM) generates blocks from left to right
+while denoising the tokens within each block in parallel
+\citep{arriola2025blockdiffusion}.
+\begin{equation}
+    p_\theta(x)
+    =
+    \prod_{b=1}^{B}
+    p_\theta\!\left(x^{(b)}\mid x^{(<b)}\right),
+    \label{eq:bdlm-factorization}
+\end{equation}
+where each conditional distribution is modeled by a diffusion process.
+
+% Verified against bdlm_parallel commit 4b60e48: core/objectives/runtime.py
+% (stratified times), core/objectives/fast_dllm_v2.py (uniform times), and
+% training/run_spec.py (default sampling bounds).
+Training samples continuous times $t_b$, not discrete timestep indices:
+standard BDLM uses uniform stratification over $[10^{-3},1)$ across batch/block
+pairs; Fast-dLLM~v2 uses unstratified $\mathcal{U}[0,1)$ draws.
+Each target block forms a corrupted copy $x_{t_b}^{(b)}$ conditioned on its
+clean prefix $x^{(<b)}$. The training objective is
+\begin{equation}
+    \mathcal{L}_{\mathrm{BDLM}}
+    =
+    \sum_{b=1}^{B}
+        \mathbb{E}_{t_b,\,x_{t_b}^{(b)}}\!\left[
+            -w(t_b)\log p_\theta\!\left(
+                x^{(b)} \mid x_{t_b}^{(b)},x^{(<b)}
+            \right)
+        \right].
+    \label{eq:bdlm-training-objective}
+\end{equation}
+The expectation is over $t_b$ and
+$x_{t_b}^{(b)}\sim q_{t_b}(\cdot\mid x^{(b)})$, where $q_{t_b}$ is the
+corruption process and $w(t_b)$ is a noise-dependent loss weight. We denote
+the $b$th summand, including token normalization, by $\mathcal{L}_b$. Training
+observes the complete sequence and uses the clean ground-truth prefix for every
+target block.
+
+The standard BDLM training computation evaluates all $B$ block losses together
+by placing a length-$L$ corrupted copy alongside a length-$L$ clean copy,
+forming a length-$2L$ representation. It contains a block-specific corrupted
+copy and a reusable clean copy of every token. A block-causal attention mask
+gives the clean tokens in block $b$ access to the preceding clean blocks and
+causal access within block $b$. The corrupted tokens in target block $b$
+attend bidirectionally within their own corrupted block and attend to the clean
+prefix $x^{(<b)}$, but do not use corrupted K/V from other blocks. Their
+visible keys and values are therefore
+$[K_b;K_{<b}^{\mathrm{clean}}]$ and
+$[V_b;V_{<b}^{\mathrm{clean}}]$.
+
+The corrupted activations of block $b$ affect only $\mathcal{L}_b$, while its
+clean representation can be reused by multiple later block losses. Corrupted
+computation is therefore block-specific, while clean computation is shared
+across block losses. All block losses share the model parameters.
+
+
+\subsection{Context parallelism}
+\label{sec:background-cp}
+Context parallelism (CP) uses token position as its ownership dimension,
+partitioning the attention input across $P$ ranks so each rank stores
+approximately a $1/P$ fraction of its token activations while the group jointly
+evaluates attention~\citep{liu2023ringattention,jacobs2023ulysses}. BDLM
+training supplies the length-$2L$ clean-plus-corrupted representation as this
+attention input, so conventional CP partitions both copies by token position.
+
+Let $Q_r$, $K_r$, and $V_r$ denote the query, key, and value projections
+initially owned by rank $r$, and let $d_h$ be the attention-head dimension.
+Writing $K=[K_1;\ldots;K_P]$ and $V=[V_1;\ldots;V_P]$, the attention output
+for the queries on rank $r$ is
+\begin{equation}
+O_r
+=
+\operatorname{softmax}\!\left(
+    \frac{Q_rK^\top}{\sqrt{d_h}} + \mathcal{M}_r
+\right)V,
+\label{eq:context-parallel-attention}
+\end{equation}
+where $\mathcal{M}_r$ contains the attention-mask rows for the queries on rank
+$r$.
+
+Causal attention produces uneven work across sequence shards because later
+queries see longer prefixes. Zigzag partitioning pairs early and late chunks
+on each rank to balance their attention work~\citep{dubey2024llama3}, while
+retaining the sequence shard as the unit of CP ownership.

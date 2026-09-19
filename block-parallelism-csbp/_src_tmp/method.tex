@@ -1,0 +1,172 @@
+\section{Block Parallelism}
+\label{sec:method}
+
+\subsection{Limitations of conventional context parallelism}
+\label{sec:cp-limitations}
+
+Conventional CP is poorly matched to BDLM training because it partitions the
+entire length-$2L$ clean-plus-corrupted representation by token position and
+performs distributed attention across those position shards. Both clean and
+corrupted K/V therefore participate in cross-rank attention communication.
+The corrupted K/V for block $b$ are used only by queries from that block. CP
+exchanges these block-specific K/V during forward and returns their gradients
+to the position-shard owners during backward, adding communication at every
+layer for data used by only one block.
+
+Clean K/V are shared across later block losses. When
+$\mathcal{L}_b$ uses a clean K/V shard, attention backward produces a gradient
+contribution for that shard. This contribution is accumulated on the owning
+rank, where backward continues through the clean projections and earlier
+layers. Conventional CP therefore combines the required clean-prefix
+communication with block-specific corrupted K/V and gradient communication at
+every layer.
+
+\subsection{Block-parallel execution}
+\label{sec:block-parallel-training}
+
+Our first insight is that we can eliminate this block-specific communication by
+exploiting the BDLM objective's per-block loss separability to expose
+target-block computation as a new distributed parallelism dimension. The
+corrupted activations of block $b$ contribute only to $\mathcal{L}_b$, while
+the clean representations of its observed prefix can contribute to multiple
+block losses. BP assigns each complete corrupted-block computation to one rank.
+The assigned rank executes the corrupted forward pass, loss, and backward pass
+for block $b$ while keeping the block's corrupted Q/K/V, activations, and
+gradients local. Different ranks execute different block computations
+concurrently (Figure~\ref{fig:block-parallel-overview}(b)).
+
+Let $\mathcal{B}_r$ denote the blocks assigned to rank $r$. Rank $r$ computes
+\begin{equation}
+    \mathcal{L}_r
+    =
+    \sum_{b\in\mathcal{B}_r}
+    \mathcal{L}_b.
+    \label{eq:local-block-loss}
+\end{equation}
+Linearity of differentiation gives the global gradient identity
+\begin{equation}
+    \sum_{r=1}^{P}\nabla_\theta\mathcal{L}_r
+    =
+    \sum_{b=1}^{B}\nabla_\theta\mathcal{L}_b
+    =
+    \nabla_\theta\mathcal{L}_{\mathrm{BDLM}}.
+    \label{eq:block-gradient-sum}
+\end{equation}
+
+\subsection{Context-sharded block parallelism}
+\label{sec:context-sharded-block-parallelism}
+
+BP keeps corrupted-block computations local, but BP alone replicates clean
+prefixes across ranks. A rank can reuse the longest prefix required by its
+assigned blocks, but these prefixes overlap across ranks, and ranks assigned
+later blocks may compute and store nearly the full clean sequence. Clean
+computation and activations can therefore be replicated across up to
+$\min(B,P)$ active ranks.
+
+Our second insight is that we can scale BP without this replication because BP
+and CP operate on complementary parts of the computation over the same $P$
+ranks. BP assigns complete corrupted-block computations while CP shards the
+clean-sequence computation shared by those blocks. We call this
+context-sharded block parallelism (CSBP). Each rank executes a subset of
+complete corrupted-block computations and stores one clean-sequence shard
+(Figure~\ref{fig:csbp}). Context parallelism supplies the distributed clean
+K/V and accumulates their backward contributions, while BP keeps each
+corrupted-block computation on its owner.
+
+\begin{figure}[t]
+    \centering
+    \resizebox{\linewidth}{!}{\input{figure_fused_bp_cp.tex}}
+    \caption{Conventional CP shards the combined clean-plus-corrupted sequence
+    by token position. Clean and corrupted $K/V$ cross ranks during forward,
+    and clean and corrupted $dK/dV$ cross ranks during backward; $Q$, $dQ$, and
+    attention outputs remain with their query owners. CSBP shards only the
+    shared clean sequence, so only clean $K/V$ and $dK/dV$ cross ranks. Each
+    block owner retains its corrupted $Q/K/V$ and $dQ/dK/dV$ locally.}
+    \label{fig:csbp}
+\end{figure}
+
+\paragraph{Forward pass.}
+The rank assigned target block $b$ computes
+\begin{equation}
+    O_b
+    =
+    \operatorname{Attn}\!\left(
+        Q_b,
+        [K_b;K_{<b}^{\mathrm{clean}}],
+        [V_b;V_{<b}^{\mathrm{clean}}]
+    \right),
+    \label{eq:csbp-block-attention}
+\end{equation}
+where $\operatorname{Attn}$ denotes scaled dot-product attention. The rank
+holds $Q_b$, $K_b$, and $V_b$ locally, while CP supplies the sharded
+clean-prefix K/V. Online softmax combines the local within-block contribution
+with the distributed clean-prefix
+contributions~\citep{milakov2018online,dao2022flashattention}.
+
+The target-block computations reuse overlapping prefixes of the clean
+sequence. During one context-parallel attention pass, rank $r$ applies each
+clean K/V shard supplied by CP to its clean queries and to every
+$b\in\mathcal{B}_r$ whose prefix contains tokens from that shard. The
+length-$L$ distributed clean K/V stream therefore serves every local block
+whose clean prefix includes that shard. Algorithm~\ref{alg:csbp-attention}
+gives the complete per-layer computation in the same notation.
+
+\paragraph{Backward pass.}
+The rank assigned block $b$ backpropagates $\mathcal{L}_b$, computing the
+gradients of $Q_b$, $K_b$, and $V_b$ locally together with contributions to
+the clean-prefix K/V gradients. Exact CP backward accumulates the clean K/V
+gradient contributions from all clean and assigned corrupted-block queries on
+each clean-shard owner, which continues backward through the clean projections
+and earlier layers. Corrupted Q/K/V gradients therefore remain on block owners,
+while gradients through clean activations are accumulated on clean-shard
+owners. Together, these contributions give the global parameter gradient in
+Equation~\ref{eq:block-gradient-sum}. Algorithm~\ref{alg:csbp-backward}
+gives the corresponding backward pass. Implementations~\ref{impl:csbp-forward}
+and~\ref{impl:csbp-backward} give the production forward and backward fast
+paths.
+
+Later target blocks and clean-sequence chunks have longer prefixes and require
+more attention work. We devise a dual-end strategy that assigns target blocks
+$b$ and $B+1-b$ to the same rank. We use the same early--late pairing for
+target blocks and zigzag clean-sequence sharding over the same
+ranks~\citep{dubey2024llama3}. Appendix~\ref{app:load-balancing} shows that this
+common pairing exactly balances target-block and clean causal attention for
+equal partitions and handles non-divisible block counts.
+
+\subsection{Complexity and sources of improvement}
+\label{sec:complexity-analysis}
+
+CSBP preserves the exact BDLM computation and gradients
+(Proposition~\ref{prop:csbp-exactness}) while eliminating cross-rank
+communication for corrupted K/V and avoiding replicated clean prefixes.
+
+\paragraph{Computation.}
+Conventional CP and CSBP evaluate the same valid attention pairs, so
+both require $\Theta(L^2)$ total attention work and $\Theta(L^2/P)$ work per
+rank under balanced assignment. CSBP changes where this work is
+executed. Each corrupted block is evaluated on one rank, while CP supplies the
+shared clean K/V. The gain comes from keeping block-specific computation local
+and eliminating its cross-rank communication while preserving the same
+asymptotic attention work.
+
+\paragraph{Communication.}
+Conventional CP applies distributed attention to the combined length-$2L$
+clean-plus-corrupted representation. CSBP distributes only the
+length-$L$ clean K/V, while corrupted K/V remain on their block owners. Each
+communicated clean K/V shard serves every local block query whose prefix
+includes that shard. In backward, corrupted K/V gradients remain on block
+owners and clean K/V gradients return to their shard owners. Cross-rank
+attention communication therefore contains only shared clean K/V and their
+gradients. CSBP removes the length-$L$ corrupted component from this
+communication in both forward and backward.
+
+\paragraph{Memory.}
+Each CSBP rank stores one length-$L/P$ clean shard and the activations for its
+assigned corrupted blocks. With balanced block assignments, each rank stores
+approximately $L/P$ clean tokens and $L/P$ corrupted tokens, giving
+approximately $2L/P$ token activations and matching conventional CP to first
+order. Pure BP can store a clean prefix approaching length $L$ on ranks
+assigned later blocks. CSBP reduces this clean-prefix component to
+$L/P$, providing up to a $P\times$ reduction for a rank whose longest required
+prefix approaches $L$. CSBP therefore retains CP's activation scaling
+without pure BP's overlapping-prefix replication.
