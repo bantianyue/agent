@@ -1,0 +1,1032 @@
+[
+ {
+  "kind": "text",
+  "block": 0,
+  "en": "Everything you need to understand how MoE serving engines route tokens, batch expert computation, distribute weights across GPUs, and manage communication and load imbalance. It covers expert parallelism, grouped GEMM, topology-aware placement, memory requirements, inference optimizations, and the trade-offs that determine latency and throughput."
+ },
+ {
+  "kind": "text",
+  "block": 2,
+  "en": "A dense transformer applies the same feed-forward network to every token. Batching changes the input matrix dimensions, but it does not change which weights execute."
+ },
+ {
+  "kind": "text",
+  "block": 3,
+  "en": "An MoE layer replaces that feed-forward network with multiple experts. A router scores those experts for each token. Only the selected experts execute for that token."
+ },
+ {
+  "kind": "fig",
+  "block": 4,
+  "en_url": "https://pbs.twimg.com/tweet_video_thumb/HSfCovMaEAAgD8M?format=jpg&name=900x900",
+  "n": 1
+ },
+ {
+  "kind": "text",
+  "block": 5,
+  "en": "This reduces executed expert computation per token. Although it does not determine which weights the next token will need, so the serving system must account for every selectable expert."
+ },
+ {
+  "kind": "text",
+  "block": 6,
+  "en": "The Qwen3-30B-A3B model card reports 30.5 billion total parameters and 3.3 billion activated parameters. Each token selects eight of 128 routed experts."
+ },
+ {
+  "kind": "text",
+  "block": 7,
+  "en": "The server must still make the full model available. It needs attention weights, embeddings, expert weights, temporary buffers, and a growing key-value cache. The 3.3 billion figure roughly describes active computation. It does not describe the deployment's memory footprint or expert weights alone."
+ },
+ {
+  "kind": "fig",
+  "block": 8,
+  "en_url": "https://pbs.twimg.com/media/HSfAZGRa8AEmSP8?format=png&name=900x900",
+  "n": 2
+ },
+ {
+  "kind": "text",
+  "block": 9,
+  "en": "Activated parameters estimate the executed path for one token. Resident parameters determine the weight memory required by the deployment"
+ },
+ {
+  "kind": "text",
+  "block": 10,
+  "en": "In this article, we will follow a token through the MoE serving path. We will examine how the router selects experts, how the runtime groups tokens into expert batches, how local kernels execute them, and how activations move between GPUs."
+ },
+ {
+  "kind": "text",
+  "block": 11,
+  "en": "We will then cover expert placement, load imbalance, capacity limits, quantization, and the measurements that reveal whether computation, memory bandwidth, or interconnect traffic is limiting performance."
+ },
+ {
+  "kind": "h2",
+  "block": 13,
+  "en": "MoE layer structure and token routing"
+ },
+ {
+  "kind": "text",
+  "block": 14,
+  "en": "A transformer layer applies attention before feed-forward computation. Attention mixes information across token positions. The feed-forward network then transforms each token position independently."
+ },
+ {
+  "kind": "text",
+  "block": 15,
+  "en": "An MoE layer replaces one dense feed-forward network with multiple experts. Each expert is a separate feed-forward network."
+ },
+ {
+  "kind": "text",
+  "block": 16,
+  "en": "Attention still processes every token. The router controls only the expert branch. Sparse expert activation therefore does not make the attention path sparse."
+ },
+ {
+  "kind": "fig",
+  "block": 17,
+  "en_url": "https://pbs.twimg.com/media/HSe_vw7aUAAeiIZ?format=jpg&name=900x900",
+  "n": 3
+ },
+ {
+  "kind": "text",
+  "block": 18,
+  "en": "Consider a toy layer with four experts. Its router scores every expert for one token vector. The layer selects the two highest-scoring experts."
+ },
+ {
+  "kind": "text",
+  "block": 19,
+  "en": "Those two experts process the same token vector independently. The layer then combines their outputs. Model-specific routing weights determine each contribution."
+ },
+ {
+  "kind": "text",
+  "block": 20,
+  "en": "The weighted expert output can be written as follows."
+ },
+ {
+  "kind": "fig",
+  "block": 21,
+  "en_url": "https://pbs.twimg.com/media/HSe_1gdbUAATVdp?format=png&name=900x900",
+  "n": 4
+ },
+ {
+  "kind": "text",
+  "block": 22,
+  "en": "Here:"
+ },
+ {
+  "kind": "text",
+  "block": 23,
+  "en": "x is the token's input vector."
+ },
+ {
+  "kind": "text",
+  "block": 24,
+  "en": "S(x) is its selected expert set."
+ },
+ {
+  "kind": "text",
+  "block": 25,
+  "en": "E_e is expert e, while w_e(x) is its routing weight."
+ },
+ {
+  "kind": "text",
+  "block": 26,
+  "en": "The output vector is y."
+ },
+ {
+  "kind": "text",
+  "block": 27,
+  "en": "The sum covers only selected experts. Each expert transforms the same input vector. Its routing weight scales that expert's contribution before addition."
+ },
+ {
+  "kind": "text",
+  "block": 28,
+  "en": "The router selects several expert functions. The layer weights and sums their outputs. Architectures use different normalization rules for those weights."
+ },
+ {
+  "kind": "fig",
+  "block": 29,
+  "en_url": "https://pbs.twimg.com/media/HSfADSpaYAABXND?format=jpg&name=900x900",
+  "n": 5
+ },
+ {
+  "kind": "text",
+  "block": 30,
+  "en": "Token-to-expert routing occurs inside each MoE layer. This is different from application-level model routing which chooses an LLM for an entire request."
+ },
+ {
+  "kind": "text",
+  "block": 31,
+  "en": "The toy layer uses top-two routing for readability. Qwen3-30B-A3B selects eight of 128 experts per token. Its model card also reports 48 layers."
+ },
+ {
+  "kind": "text",
+  "block": 32,
+  "en": "Some architectures include shared experts. These experts process every token regardless of router scores. DeepSeekMoE uses shared expert isolation alongside routed experts."
+ },
+ {
+  "kind": "text",
+  "block": 33,
+  "en": "Shared experts execute for every token. Routed experts execute conditionally. Only models designed with shared experts use this split."
+ },
+ {
+  "kind": "text",
+  "block": 34,
+  "en": "Do not assume every model has shared experts. Check its architecture and serving implementation first."
+ },
+ {
+  "kind": "text",
+  "block": 35,
+  "en": "The router changes the feed-forward computation inside each MoE layer. Batched inference must then schedule token-expert assignments with different destination experts and matrix sizes."
+ },
+ {
+  "kind": "h2",
+  "block": 37,
+  "en": "How a batch becomes expert-specific matrices"
+ },
+ {
+  "kind": "text",
+  "block": 38,
+  "en": "The router makes a decision for each token. The GPU cannot efficiently run one tiny expert operation at a time. The serving engine therefore converts routing decisions into larger expert-specific matrices."
+ },
+ {
+  "kind": "text",
+  "block": 39,
+  "en": "Consider four tokens entering a four-expert layer with top-two routing. The router makes these choices:"
+ },
+ {
+  "kind": "text",
+  "block": 40,
+  "en": "T1 selects E1 with weight 0.7 and E3 with weight 0.3."
+ },
+ {
+  "kind": "text",
+  "block": 41,
+  "en": "T2 selects E1 with weight 0.4 and E3 with weight 0.6."
+ },
+ {
+  "kind": "text",
+  "block": 42,
+  "en": "T3 selects E1 with weight 0.7 and E2 with weight 0.3."
+ },
+ {
+  "kind": "text",
+  "block": 43,
+  "en": "T4 selects E2 with weight 0.8 and E4 with weight 0.2."
+ },
+ {
+  "kind": "text",
+  "block": 44,
+  "en": "The runtime now has eight assignments, not four. Each assignment contains three things. It carries the token vector, the selected expert, and the routing weight."
+ },
+ {
+  "kind": "fig",
+  "block": 45,
+  "en_url": "https://pbs.twimg.com/media/HSfJgL0aQAAWW0C?format=jpg&name=900x900",
+  "n": 6
+ },
+ {
+  "kind": "text",
+  "block": 46,
+  "en": "The runtime groups these assignments by expert. E1 receives T1, T2, and T3. E2 receives T3 and T4. E3 receives T1 and T2. E4 receives T4. Those groups become matrices with three, two, two, and one rows."
+ },
+ {
+  "kind": "text",
+  "block": 47,
+  "en": "Each expert processes its own matrix. The runtime keeps the original token ID beside every row. That ID tells it where each result must return."
+ },
+ {
+  "kind": "text",
+  "block": 48,
+  "en": "T1 receives one result from E1 and another from E3."
+ },
+ {
+  "kind": "text",
+  "block": 49,
+  "en": "The runtime multiplies them by 0.7 and 0.3."
+ },
+ {
+  "kind": "text",
+  "block": 50,
+  "en": "It then adds both contributions to produce T1's final expert output."
+ },
+ {
+  "kind": "text",
+  "block": 51,
+  "en": "The same combine step applies to every token."
+ },
+ {
+  "kind": "text",
+  "block": 52,
+  "en": "This grouping step is called dispatch. The return step is called combine. Both occur on one GPU. Multiple GPUs add network transfers between them."
+ },
+ {
+  "kind": "text",
+  "block": 53,
+  "en": "An expert batch counts assignments, not unique source tokens. With top-two routing, every token contributes two rows across the expert matrices."
+ },
+ {
+  "kind": "text",
+  "block": 54,
+  "en": "Prefill processes many prompt tokens in one pass. Experts can therefore receive matrices with many rows. Larger matrices usually use the GPU more efficiently."
+ },
+ {
+  "kind": "text",
+  "block": 55,
+  "en": "Decode adds one new token for each active request. Low concurrency can leave an expert with one or two rows. Launching a matrix kernel for so little work wastes GPU capacity."
+ },
+ {
+  "kind": "text",
+  "block": 56,
+  "en": "Higher concurrency creates more assignments in each step. Grouped general matrix multiplication, or grouped GEMM, runs several expert matrices in one launch. It reduces launch overhead, even when row counts differ."
+ },
+ {
+  "kind": "text",
+  "block": 57,
+  "en": "Some engines pad expert matrices to fixed sizes. Fixed shapes make kernels easier to schedule. The trade-off is computation on padded rows that contain no token."
+ },
+ {
+  "kind": "fig",
+  "block": 58,
+  "en_url": "https://pbs.twimg.com/media/HSfFiPzbIAAMiZb?format=png&name=900x900",
+  "n": 7
+ },
+ {
+  "kind": "text",
+  "block": 59,
+  "en": "Prefill and decode do not have fixed performance profiles. Prompt length and request count change their expert matrix sizes. Hidden width and hardware determine how efficiently those matrices run."
+ },
+ {
+  "kind": "fig",
+  "block": 60,
+  "en_url": "https://pbs.twimg.com/media/HSfAOqabIAAhfrw?format=jpg&name=900x900",
+  "n": 8
+ },
+ {
+  "kind": "text",
+  "block": 61,
+  "en": "Grouped GEMM packs existing expert work into fewer launches. It cannot create work for an expert that received no token."
+ },
+ {
+  "kind": "text",
+  "block": 62,
+  "en": "In summary, routing creates assignments. Dispatch groups them into expert matrices. Combine returns the results to their original tokens. The next section follows those matrices through one GPU."
+ },
+ {
+  "kind": "h2",
+  "block": 64,
+  "en": "Local MoE execution pipeline"
+ },
+ {
+  "kind": "text",
+  "block": 65,
+  "en": "An MoE layer performs more than expert matrix multiplication. In fact, it must select experts, rearrange token rows, execute the experts, and restore token order. Each stage can consume meaningful time."
+ },
+ {
+  "kind": "text",
+  "block": 66,
+  "en": "The router first produces one score for every eligible expert. A top-k operation keeps the selected expert indices and their weights. The runtime then rearranges token rows so each expert receives a contiguous matrix."
+ },
+ {
+  "kind": "text",
+  "block": 67,
+  "en": "This rearrangement is called permutation. It reads token vectors and writes them in expert order. It also records an inverse mapping for the combine step. Small decode batches can spend as much time moving rows as multiplying them."
+ },
+ {
+  "kind": "text",
+  "block": 68,
+  "en": "Grouped GEMM executes several expert matrices in one kernel launch. The matrices may have different row counts. Grouping reduces launches without changing their contents."
+ },
+ {
+  "kind": "text",
+  "block": 69,
+  "en": "The expert then applies its activation and output projection. The runtime uses the inverse mapping to restore token order. It applies routing weights and adds contributions from matching token IDs."
+ },
+ {
+  "kind": "fig",
+  "block": 70,
+  "en_url": "https://pbs.twimg.com/media/HSfAirbbIAAUBNS?format=png&name=900x900",
+  "n": 9
+ },
+ {
+  "kind": "text",
+  "block": 71,
+  "en": "Grouped GEMM does not change assignment counts. It executes the existing expert batches with fewer launches."
+ },
+ {
+  "kind": "text",
+  "block": 72,
+  "en": "Kernel fusion joins operations that would otherwise launch separately. A fused path may avoid writing intermediate activations to GPU memory. It can therefore reduce launch cost and memory traffic."
+ },
+ {
+  "kind": "text",
+  "block": 73,
+  "en": "Fusion support is conditional. A kernel may support only certain data types, batch shapes, or quantization formats. Unsupported combinations must use a more modular path."
+ },
+ {
+  "kind": "text",
+  "block": 74,
+  "en": "Activation quantization creates another choice. The runtime can quantize before dispatch and send fewer bytes. It can also dispatch at higher precision and quantize before expert computation. The first option saves bandwidth but adds conversion work earlier."
+ },
+ {
+  "kind": "fig",
+  "block": 75,
+  "en_url": "https://pbs.twimg.com/media/HSfLzZWaMAAbXze?format=jpg&name=900x900",
+  "n": 10
+ },
+ {
+  "kind": "text",
+  "block": 76,
+  "en": "Decode often gives each expert a small matrix. Weight reads, row movement, and kernel startup may then dominate. Prefill usually supplies more rows, which makes matrix efficiency more important."
+ },
+ {
+  "kind": "text",
+  "block": 77,
+  "en": "A fused path removes supported boundaries between operations. It does not increase expert batch size. It also does not change router choices or assignment counts."
+ },
+ {
+  "kind": "text",
+  "block": 78,
+  "en": "Measure routing, permutation, expert GEMM, and combination separately. One combined MoE timer cannot identify the slow stage."
+ },
+ {
+  "kind": "text",
+  "block": 79,
+  "en": "In summary, expert GEMM is only one part of local execution. Small batches often expose the cost of movement and launches."
+ },
+ {
+  "kind": "h2",
+  "block": 81,
+  "en": "Model weight residency and runtime memory"
+ },
+ {
+  "kind": "text",
+  "block": 82,
+  "en": "MoE deployment uses three different parameter counts. Total parameters describe the checkpoint. Activated parameters describe one token's executed path. Resident parameters describe the weights currently available to the serving system."
+ },
+ {
+  "kind": "text",
+  "block": 83,
+  "en": "These counts need not match. One token touches a small expert subset. The next token can choose another subset."
+ },
+ {
+  "kind": "text",
+  "block": 84,
+  "en": "A fully resident deployment keeps every selectable expert on its GPUs. It also stores attention, embeddings, normalization, and output weights. Sparse routing does not remove any of these weights."
+ },
+ {
+  "kind": "text",
+  "block": 85,
+  "en": "Storing Qwen3-30B-A3B’s 30.5 billion parameters at two bytes each requires about 61 GB, or 56.8 GB, for the weights alone."
+ },
+ {
+  "kind": "text",
+  "block": 86,
+  "en": "The following expression gives the weight-storage lower bound."
+ },
+ {
+  "kind": "fig",
+  "block": 87,
+  "en_url": "https://pbs.twimg.com/media/HSfAoQHa0AEyxHf?format=png&name=900x900",
+  "n": 11
+ },
+ {
+  "kind": "text",
+  "block": 88,
+  "en": "B(weights) is the stored weight bytes."
+ },
+ {
+  "kind": "text",
+  "block": 89,
+  "en": "P is the total parameter count."
+ },
+ {
+  "kind": "text",
+  "block": 90,
+  "en": "B(stored) is the number of bytes used for each stored parameter."
+ },
+ {
+  "kind": "text",
+  "block": 91,
+  "en": "The expression multiplies parameter count by bytes per parameter. For Qwen's figures, that gives 61 billion bytes. Decimal gigabytes divide this number by one billion. The result covers weights only."
+ },
+ {
+  "kind": "text",
+  "block": 92,
+  "en": "The deployment also needs temporary activations and communication buffers. Memory allocators reserve additional space. The key-value cache stores attention state for active sequences. None of that appears in the 61 gigabyte estimate."
+ },
+ {
+  "kind": "fig",
+  "block": 93,
+  "en_url": "https://pbs.twimg.com/media/HSfAvmxa0AAZD63?format=jpg&name=900x900",
+  "n": 12
+ },
+ {
+  "kind": "text",
+  "block": 94,
+  "en": "Never replace 30.5 billion with 3.3 billion in this estimate. Activated parameters do not determine the checkpoint's stored weight bytes."
+ },
+ {
+  "kind": "text",
+  "block": 95,
+  "en": "Weight quantization stores each parameter with fewer bytes. Sharding divides the weights across GPUs. Neither changes how many parameters the checkpoint contains."
+ },
+ {
+  "kind": "text",
+  "block": 96,
+  "en": "Sparse activation reduces expert computation without reducing total weight storage. The model may still require weight sharding despite modest active FLOPs."
+ },
+ {
+  "kind": "text",
+  "block": 97,
+  "en": "Expert offloading keeps some experts in CPU memory. The runtime transfers one to a GPU when routing selects it. This saves GPU memory while adding a slower transfer path."
+ },
+ {
+  "kind": "text",
+  "block": 98,
+  "en": "An absent expert can stall decoding while its weights move. Caching helps when the same experts are reused. Prefetching helps only when future selections are predictable."
+ },
+ {
+  "kind": "fig",
+  "block": 99,
+  "en_url": "https://pbs.twimg.com/media/HSfAzhkb0AAz9ns?format=jpg&name=900x900",
+  "n": 13
+ },
+ {
+  "kind": "text",
+  "block": 100,
+  "en": "There is no fixed GPU count implied by these figures. Precision, sharding, reserved memory, and KV capacity change the answer."
+ },
+ {
+  "kind": "text",
+  "block": 101,
+  "en": "In summary, activated parameters estimate computation. Resident parameters determine weight memory. Sharding solves capacity by spreading weights, but routed activations may then cross GPUs."
+ },
+ {
+  "kind": "h2",
+  "block": 103,
+  "en": "Expert-parallel dispatch and combine"
+ },
+ {
+  "kind": "text",
+  "block": 104,
+  "en": "Expert parallelism assigns different experts to different GPUs. Consider four experts across two GPUs. GPU A owns E1 and E2. GPU B owns E3 and E4."
+ },
+ {
+  "kind": "text",
+  "block": 105,
+  "en": "A token begins on GPU A and selects E1 and E3. Its E1 assignment stays on GPU A. Its E3 assignment must travel to GPU B."
+ },
+ {
+  "kind": "text",
+  "block": 106,
+  "en": "The network record contains the token vector and routing metadata. The metadata identifies the token, destination expert, source GPU, and routing weight. The destination needs these fields to return the result correctly."
+ },
+ {
+  "kind": "text",
+  "block": 107,
+  "en": "Each GPU groups local and received assignments by expert. It executes one matrix for each active local expert. Remote results then travel back to their source GPUs."
+ },
+ {
+  "kind": "text",
+  "block": 108,
+  "en": "The source GPU restores token order using saved identifiers. It applies each routing weight and sums matching contributions. This completes the combine step."
+ },
+ {
+  "kind": "fig",
+  "block": 109,
+  "en_url": "https://pbs.twimg.com/media/HSfA3z5bIAAnjn_?format=jpg&name=900x900",
+  "n": 14
+ },
+ {
+  "kind": "text",
+  "block": 110,
+  "en": "With many GPUs, each GPU may send assignments to several peers. This produces an all-to-all communication pattern. Combine sends the expert results back after computation."
+ },
+ {
+  "kind": "text",
+  "block": 111,
+  "en": "Expert weights normally remain on their assigned GPUs. The network moves token activations and metadata, not expert weights. Padding and temporary buffers can increase the transferred bytes."
+ },
+ {
+  "kind": "text",
+  "block": 112,
+  "en": "The following upper bound estimates the dispatch activation payload."
+ },
+ {
+  "kind": "fig",
+  "block": 113,
+  "en_url": "https://pbs.twimg.com/media/HSfA8ezaQAAe6he?format=png&name=900x900",
+  "n": 15
+ },
+ {
+  "kind": "text",
+  "block": 114,
+  "en": "B(dispatch) is the dispatched activation payload."
+ },
+ {
+  "kind": "text",
+  "block": 115,
+  "en": "T is the token count entering the MoE layer."
+ },
+ {
+  "kind": "text",
+  "block": 116,
+  "en": "K is the selected experts per token."
+ },
+ {
+  "kind": "text",
+  "block": 117,
+  "en": "H is the hidden width."
+ },
+ {
+  "kind": "text",
+  "block": 118,
+  "en": "Finally, b is bytes per activation value."
+ },
+ {
+  "kind": "text",
+  "block": 119,
+  "en": "The product counts one full hidden vector per assignment. It is an upper bound before considering locality. Assignments that stay on one GPU consume no network bandwidth."
+ },
+ {
+  "kind": "text",
+  "block": 120,
+  "en": "Real traffic depends on how many assignments are remote. Metadata and padding add bytes. Expert replication can keep some assignments local. Combine adds traffic in the return direction."
+ },
+ {
+  "kind": "text",
+  "block": 121,
+  "en": "The estimate covers activation payload only. It excludes protocol overhead and cannot predict latency without topology and message-size measurements."
+ },
+ {
+  "kind": "text",
+  "block": 122,
+  "en": "Every MoE layer repeats this exchange. A small dispatch delay can accumulate across the model. Overlap hides some delay when independent computation is available."
+ },
+ {
+  "kind": "text",
+  "block": 123,
+  "en": "DeepEP provides separate communication paths for large and small batches. Its throughput path targets larger transfers. Its low-latency path targets decode steps where startup time matters more."
+ },
+ {
+  "kind": "text",
+  "block": 124,
+  "en": "Kernel bandwidth is not end-to-end serving speed. A full request also includes attention, scheduling, sampling, cache work, and every model layer."
+ },
+ {
+  "kind": "text",
+  "block": 125,
+  "en": "In summary, expert parallelism keeps weights in place and moves assignments. It increases distributed weight capacity but adds repeated activation traffic."
+ },
+ {
+  "kind": "h2",
+  "block": 127,
+  "en": "Network topology and expert placement"
+ },
+ {
+  "kind": "text",
+  "block": 128,
+  "en": "Not every GPU link has the same cost. GPUs inside one server may use NVLink or NVSwitch. GPUs in different servers may use InfiniBand or Ethernet."
+ },
+ {
+  "kind": "text",
+  "block": 129,
+  "en": "A cross-server transfer usually costs more than an in-server transfer. Expert placement decides which GPU stores each expert. That choice determines how often routing crosses slower links."
+ },
+ {
+  "kind": "text",
+  "block": 130,
+  "en": "One common layout keeps frequent expert traffic inside an NVLink domain. Another parallel layout distributes layers across servers. The best boundary depends on the model and cluster."
+ },
+ {
+  "kind": "fig",
+  "block": 131,
+  "en_url": "https://pbs.twimg.com/media/HSfBpGja8AAIKwD?format=png&name=900x900",
+  "n": 16
+ },
+ {
+  "kind": "text",
+  "block": 132,
+  "en": "Placement changes physical destinations without changing router outputs. A frequently selected expert can move closer to its token sources. The runtime can also create physical replicas of one logical expert."
+ },
+ {
+  "kind": "text",
+  "block": 133,
+  "en": "Routing constraints are different because they limit the model's choices. DeepSeek-V3 uses node-limited routing. Each token can reach experts on only a limited number of nodes. That rule belongs to the trained architecture."
+ },
+ {
+  "kind": "text",
+  "block": 134,
+  "en": "Node-limited routing is part of that model's trained architecture. Adding a similar restriction after training can change selected experts and model quality."
+ },
+ {
+  "kind": "text",
+  "block": 135,
+  "en": "Placement needs routing traces and topology measurements. Routing traces show which experts receive work. Topology measurements show the cost of each destination. Expert popularity alone cannot capture link cost."
+ },
+ {
+  "kind": "text",
+  "block": 136,
+  "en": "Placing popular experts together may reduce network traffic. It can also overload one server. Spreading them balances computation but may increase cross-server traffic. Replication helps only when spare GPU memory exists."
+ },
+ {
+  "kind": "text",
+  "block": 137,
+  "en": "Measure bytes and time by communication domain. A single cluster-wide traffic counter cannot distinguish cheap intra-node movement from expensive cross-node movement. Also record which expert pairs produce that traffic, since placement needs a stable pattern to exploit."
+ },
+ {
+  "kind": "text",
+  "block": 138,
+  "en": "In summary, placement tries to keep frequent traffic on fast links. It must also distribute work across GPUs. Routing traces reveal whether one layout can satisfy both goals."
+ },
+ {
+  "kind": "h2",
+  "block": 140,
+  "en": "Tensor, expert, and data-parallel execution layouts"
+ },
+ {
+  "kind": "text",
+  "block": 141,
+  "en": "Three parallel layouts divide different kinds of work. Tensor parallelism splits one matrix operation across GPUs. Expert parallelism assigns different experts to GPUs. Data parallelism gives different requests to replicas."
+ },
+ {
+  "kind": "text",
+  "block": 142,
+  "en": "Tensor parallelism divides a weight matrix into shards. Each GPU computes a partial result. The GPUs exchange partial results to finish the layer."
+ },
+ {
+  "kind": "fig",
+  "block": 143,
+  "en_url": "https://pbs.twimg.com/media/HSfBv9da4AA6gGx?format=jpg&name=900x900",
+  "n": 17
+ },
+ {
+  "kind": "text",
+  "block": 144,
+  "en": "Expert parallelism distributes whole experts or expert shards. Token assignments move toward their selected experts. Its traffic therefore depends on routing and placement."
+ },
+ {
+  "kind": "text",
+  "block": 145,
+  "en": "Data parallelism sends different requests to separate replicas. Some engines replicate attention components inside data-parallel groups. They distribute experts across a larger group."
+ },
+ {
+  "kind": "text",
+  "block": 146,
+  "en": "Real deployments combine these layouts. Attention layers and expert layers can use different GPU groups. One parallelism label cannot describe the whole deployment."
+ },
+ {
+  "kind": "text",
+  "block": 147,
+  "en": "Consider tensor parallel size two and data parallel size four. Attention runs in four groups with two GPUs each. Expert layers can use all eight GPUs as one expert-parallel group."
+ },
+ {
+  "kind": "fig",
+  "block": 148,
+  "en_url": "https://pbs.twimg.com/media/HSfBs6iboAAbZUC?format=png&name=900x900",
+  "n": 18
+ },
+ {
+  "kind": "text",
+  "block": 149,
+  "en": "Real deployments combine these layouts. Attention and expert layers can use different rank groups. One label rarely describes the entire model."
+ },
+ {
+  "kind": "text",
+  "block": 150,
+  "en": "The vLLM expert parallel deployment guide documents this mixed approach. With expert parallelism enabled, its EP group size is the tensor-parallel size multiplied by the data-parallel size. Attention uses tensor parallelism within each data-parallel group when TP exceeds one."
+ },
+ {
+  "kind": "text",
+  "block": 151,
+  "en": "For example, TP equal to two and DP equal to four create four attention groups. Each attention group spans two ranks. Expert layers can use an eight-rank EP group."
+ },
+ {
+  "kind": "fig",
+  "block": 152,
+  "en_url": "https://pbs.twimg.com/media/HSfBz-3aQAAb_yi?format=jpg&name=900x900",
+  "n": 19
+ },
+ {
+  "kind": "text",
+  "block": 153,
+  "en": "The TP2 and DP4 arrangement is a vLLM configuration example. Other engines may define different communication groups."
+ },
+ {
+  "kind": "text",
+  "block": 154,
+  "en": "Tensor parallelism communicates inside each matrix operation. Expert parallelism moves routed activations. Data parallelism consumes memory for replicated components. Each layout pays a different cost."
+ },
+ {
+  "kind": "text",
+  "block": 155,
+  "en": "Low concurrency can make expert-parallel transfers inefficient. Weak interconnects can produce the same result. Tensor parallelism can also struggle when collective communication dominates."
+ },
+ {
+  "kind": "text",
+  "block": 156,
+  "en": "In summary, tensor parallelism divides operations. Expert parallelism divides expert ownership. Data parallelism divides requests. The useful combination depends on memory, traffic, and interconnect speed."
+ },
+ {
+  "kind": "h2",
+  "block": 158,
+  "en": "Expert load imbalance and rank-level tail latency"
+ },
+ {
+  "kind": "text",
+  "block": 159,
+  "en": "Routing rarely divides work perfectly. Suppose one expert receives half the assignments. Its GPU must process a larger matrix than the others."
+ },
+ {
+  "kind": "text",
+  "block": 160,
+  "en": "Other GPUs may finish early and wait. The layer cannot finish until every required contribution returns. The slowest participating GPU therefore determines step latency."
+ },
+ {
+  "kind": "fig",
+  "block": 161,
+  "en_url": "https://pbs.twimg.com/media/HSfB26LbYAA1PBG?format=jpg&name=900x900",
+  "n": 20
+ },
+ {
+  "kind": "text",
+  "block": 164,
+  "en": "Training can encourage balanced routing across a large dataset. One production batch can still be skewed. Language and request mix can change which experts are selected."
+ },
+ {
+  "kind": "text",
+  "block": 165,
+  "en": "Expert imbalance occurs inside one model replica. Request imbalance occurs between replicas that receive different workloads. These problems need different measurements and fixes."
+ },
+ {
+  "kind": "text",
+  "block": 166,
+  "en": "A balanced daily histogram can hide slow individual steps. Measure assignment counts and time at the serving-step level."
+ },
+ {
+  "kind": "text",
+  "block": 167,
+  "en": "Record assignment counts for every serving step. Also record dispatch time, expert execution time, combine time, and GPU idle time. These measurements show whether one expert or link sets the tail."
+ },
+ {
+  "kind": "text",
+  "block": 168,
+  "en": "Placement can separate experts that are frequently selected together. A hot expert can move to a less busy GPU. These changes keep router decisions intact."
+ },
+ {
+  "kind": "text",
+  "block": 169,
+  "en": "Replication creates several physical copies of one logical expert. The router still selects the same logical expert. The runtime sends its assignments to an available copy."
+ },
+ {
+  "kind": "fig",
+  "block": 170,
+  "en_url": "https://pbs.twimg.com/media/HSfB8XIawAAsjIe?format=jpg&name=900x900",
+  "n": 21
+ },
+ {
+  "kind": "text",
+  "block": 171,
+  "en": "Replication consumes GPU memory and leaves less space for the KV cache. Moving an expert also consumes bandwidth. A short traffic spike may end before rebalancing completes."
+ },
+ {
+  "kind": "text",
+  "block": 172,
+  "en": "Some runtimes rebalance experts using recent load measurements. They may also support redundant expert copies. Both mechanisms need enough memory and a workload stable enough to learn from recent history."
+ },
+ {
+  "kind": "text",
+  "block": 173,
+  "en": "Rebalancing changes physical destinations. It does not change which logical experts the model selected or their intended outputs."
+ },
+ {
+  "kind": "text",
+  "block": 174,
+  "en": "Average utilization cannot explain MoE tail latency. Measure each step and each GPU. Placement and replication can reduce the tail, but they consume memory and control bandwidth."
+ },
+ {
+  "kind": "h2",
+  "block": 176,
+  "en": "Inference optimizations and model-correctness boundaries"
+ },
+ {
+  "kind": "text",
+  "block": 177,
+  "en": "MoE optimizations fall into two groups. Some change only execution. Others change numerical values or the selected computation."
+ },
+ {
+  "kind": "text",
+  "block": 178,
+  "en": "Fusion, grouped GEMM, placement, and communication overlap preserve logical expert selection. They change how the runtime performs the work. Small floating-point differences may still occur."
+ },
+ {
+  "kind": "text",
+  "block": 179,
+  "en": "Quantization changes stored weights or transmitted activations. It can reduce memory and network traffic. It also introduces numerical error. Quality must therefore be tested on the target workload."
+ },
+ {
+  "kind": "text",
+  "block": 180,
+  "en": "Reducing top-k changes the executed expert set. It removes expert contributions from the weighted sum. Renormalizing the remaining weights changes the result again."
+ },
+ {
+  "kind": "fig",
+  "block": 181,
+  "en_url": "https://pbs.twimg.com/media/HSfB_X4aMAA6qqZ?format=jpg&name=900x900",
+  "n": 22
+ },
+ {
+  "kind": "text",
+  "block": 182,
+  "en": "Suppose the model normally selects eight experts. A runtime executes only four. The output now contains fewer expert functions. Renormalization also changes their combined scale."
+ },
+ {
+  "kind": "text",
+  "block": 183,
+  "en": "The paper Training-Free Halving of Activated Experts studies this distinction. It executes fewer experts while using a larger reference set for normalization mass."
+ },
+ {
+  "kind": "text",
+  "block": 184,
+  "en": "On Qwen3.6-35B-A3B, standard reduction from eight experts to four lost 4.65 MMLU points. Its adjusted reference mass reduced the measured loss to 0.35 points. The paper reports halved routed-expert compute for that setting."
+ },
+ {
+  "kind": "text",
+  "block": 185,
+  "en": "The same method lost 0.55 MMLU points on Qwen3.5-397B-A17B when reducing ten experts to five. The authors also found that perplexity and task accuracy preferred different settings."
+ },
+ {
+  "kind": "text",
+  "block": 186,
+  "en": "These are research results for specific checkpoints and evaluations. They do not establish a general rule for halving top-k."
+ },
+ {
+  "kind": "text",
+  "block": 187,
+  "en": "Expert parallelism changes where selected computation runs. Lower top-k changes which computation runs. They are not equivalent optimizations."
+ },
+ {
+  "kind": "text",
+  "block": 188,
+  "en": "Capacity limits require similar care. Some training systems cap tokens assigned to an expert. Particular runtimes may implement inference limits too."
+ },
+ {
+  "kind": "text",
+  "block": 189,
+  "en": "MoE inference does not automatically drop tokens when an expert is busy. A capacity or dropping rule belongs to a specific model or runtime. Check the implementation before assuming one exists."
+ },
+ {
+  "kind": "text",
+  "block": 190,
+  "en": "Optimize unchanged computation first. Treat quantization and top-k changes as model changes requiring quality tests."
+ },
+ {
+  "kind": "text",
+  "block": 191,
+  "en": "Execution changes need performance tests. Quantization needs performance and quality tests. Top-k changes need the same tests plus careful output comparison."
+ },
+ {
+  "kind": "h2",
+  "block": 193,
+  "en": "Benchmark design and bottleneck diagnosis"
+ },
+ {
+  "kind": "text",
+  "block": 194,
+  "en": "A useful benchmark changes one serving decision at a time. Keep the checkpoint, precision, prompts, output limits, and request arrivals constant. Then change the parallel layout or kernel path."
+ },
+ {
+  "kind": "text",
+  "block": 195,
+  "en": "Start with the smallest supported layout that fits the model. Add a same-server layout next. Test cross-server expert parallelism only after measuring those baselines."
+ },
+ {
+  "kind": "text",
+  "block": 196,
+  "en": "Memory capacity may prevent one or more configurations from loading the model. Backend support may also exclude a kernel or communication layout."
+ },
+ {
+  "kind": "text",
+  "block": 197,
+  "en": "Test low and high concurrency. Use short and long prompts. This separates small decode matrices from prompt-heavy prefill work."
+ },
+ {
+  "kind": "text",
+  "block": 198,
+  "en": "Record prefill and output throughput. Measure time to first token and time per output token. Also record inter-token latency and p95 request latency. Tail measurements reveal delays caused by one hot GPU."
+ },
+ {
+  "kind": "text",
+  "block": 199,
+  "en": "GPU-level measurements explain those request metrics. Record bytes by network domain, assignment counts, expert time, and idle time. Split routing, permutation, dispatch, GEMM, combine, and unpermutation. Also record resident weights and remaining KV capacity."
+ },
+ {
+  "kind": "fig",
+  "block": 200,
+  "en_url": "https://pbs.twimg.com/media/HSfCEoPaMAAKekp?format=jpg&name=900x900",
+  "n": 23
+ },
+ {
+  "kind": "text",
+  "block": 201,
+  "en": "Interpret each stage separately. High dispatch time points to topology, locality, or message size. One persistently slow GPU points to routing skew or poor placement."
+ },
+ {
+  "kind": "fig",
+  "block": 202,
+  "en_url": "https://pbs.twimg.com/media/HSfCGzobcAAM_Yg?format=png&name=900x900",
+  "n": 24
+ },
+ {
+  "kind": "text",
+  "block": 203,
+  "en": "The diagnostic table maps common symptoms to initial measurements. Hardware topology and backend behavior can produce other causes."
+ },
+ {
+  "kind": "text",
+  "block": 204,
+  "en": "High memory use with low expert compute indicates a weight-capacity problem. Little memory remaining for KV cache confirms the same constraint. More concurrency may improve matrix sizes while worsening cache pressure."
+ },
+ {
+  "kind": "text",
+  "block": 205,
+  "en": "In summary, compare identical request traces and change one variable. Measure memory, computation, and communication separately. The largest measured cost determines the next experiment."
+ },
+ {
+  "kind": "fig",
+  "block": 206,
+  "en_url": "https://pbs.twimg.com/media/HSfCKk7a4AAu7HK?format=jpg&name=900x900",
+  "n": 25
+ },
+ {
+  "kind": "h2",
+  "block": 208,
+  "en": "Engineering checklist"
+ },
+ {
+  "kind": "text",
+  "block": 209,
+  "en": "Qwen3-30B-A3B has 30.5 billion total parameters and 3.3 billion activated parameters. The total count drives weight storage. The activated count estimates the executed path for each token."
+ },
+ {
+  "kind": "text",
+  "block": 210,
+  "en": "An MoE serving step includes routing, token permutation, dispatch, grouped expert computation, combine, and unpermutation. Multi-GPU deployments add communication domains, expert placement, and rank-level load imbalance."
+ },
+ {
+  "kind": "text",
+  "block": 211,
+  "en": "Validate a deployment in this order. First, confirm weight and KV-cache capacity. Next, profile every stage of the MoE path. Then measure assignment skew and bytes by communication domain. Finally, compare placement, kernels, quantization, or top-k changes against the same request trace."
+ },
+ {
+  "kind": "text",
+  "block": 212,
+  "en": "Placement and kernel changes target runtime overhead. Quantization changes numerical values. Top-k changes the executed expert set. Keep those experiments separate so performance gains and model-quality changes remain attributable."
+ },
+ {
+  "kind": "text",
+  "block": 213,
+  "en": "MoE inference becomes easier to diagnose once three quantities remain separate. The deployment must store model weights, execute selected experts, and move routed activations. Measure each one independently before changing the serving layout."
+ },
+ {
+  "kind": "text",
+  "block": 214,
+  "en": "Over to you: Would you investigate memory, expert computation, or communication first in your deployment?"
+ }
+]

@@ -1,14 +1,8 @@
-MoE inference engineering, clearly explained
-
 Everything you need to understand how MoE serving engines route tokens, batch expert computation, distribute weights across GPUs, and manage communication and load imbalance. It covers expert parallelism, grouped GEMM, topology-aware placement, memory requirements, inference optimizations, and the trade-offs that determine latency and throughput.
-
- 
 
 A dense transformer applies the same feed-forward network to every token. Batching changes the input matrix dimensions, but it does not change which weights execute.
 
 An MoE layer replaces that feed-forward network with multiple experts. A router scores those experts for each token. Only the selected experts execute for that token.
-
- 
 
 This reduces executed expert computation per token. Although it does not determine which weights the next token will need, so the serving system must account for every selectable expert.
 
@@ -16,15 +10,11 @@ The Qwen3-30B-A3B model card reports 30.5 billion total parameters and 3.3 billi
 
 The server must still make the full model available. It needs attention weights, embeddings, expert weights, temporary buffers, and a growing key-value cache. The 3.3 billion figure roughly describes active computation. It does not describe the deployment's memory footprint or expert weights alone.
 
- 
-
 Activated parameters estimate the executed path for one token. Resident parameters determine the weight memory required by the deployment
 
 In this article, we will follow a token through the MoE serving path. We will examine how the router selects experts, how the runtime groups tokens into expert batches, how local kernels execute them, and how activations move between GPUs.
 
 We will then cover expert placement, load imbalance, capacity limits, quantization, and the measurements that reveal whether computation, memory bandwidth, or interconnect traffic is limiting performance.
-
- 
 
 MoE layer structure and token routing
 
@@ -34,15 +24,11 @@ An MoE layer replaces one dense feed-forward network with multiple experts. Each
 
 Attention still processes every token. The router controls only the expert branch. Sparse expert activation therefore does not make the attention path sparse.
 
- 
-
 Consider a toy layer with four experts. Its router scores every expert for one token vector. The layer selects the two highest-scoring experts.
 
 Those two experts process the same token vector independently. The layer then combines their outputs. Model-specific routing weights determine each contribution.
 
 The weighted expert output can be written as follows.
-
- 
 
 Here:
 
@@ -58,8 +44,6 @@ The sum covers only selected experts. Each expert transforms the same input vect
 
 The router selects several expert functions. The layer weights and sums their outputs. Architectures use different normalization rules for those weights.
 
- 
-
 Token-to-expert routing occurs inside each MoE layer. This is different from application-level model routing which chooses an LLM for an entire request.
 
 The toy layer uses top-two routing for readability. Qwen3-30B-A3B selects eight of 128 experts per token. Its model card also reports 48 layers.
@@ -71,8 +55,6 @@ Shared experts execute for every token. Routed experts execute conditionally. On
 Do not assume every model has shared experts. Check its architecture and serving implementation first.
 
 The router changes the feed-forward computation inside each MoE layer. Batched inference must then schedule token-expert assignments with different destination experts and matrix sizes.
-
- 
 
 How a batch becomes expert-specific matrices
 
@@ -89,8 +71,6 @@ T3 selects E1 with weight 0.7 and E2 with weight 0.3.
 T4 selects E2 with weight 0.8 and E4 with weight 0.2.
 
 The runtime now has eight assignments, not four. Each assignment contains three things. It carries the token vector, the selected expert, and the routing weight.
-
- 
 
 The runtime groups these assignments by expert. E1 receives T1, T2, and T3. E2 receives T3 and T4. E3 receives T1 and T2. E4 receives T4. Those groups become matrices with three, two, two, and one rows.
 
@@ -116,17 +96,11 @@ Higher concurrency creates more assignments in each step. Grouped general matrix
 
 Some engines pad expert matrices to fixed sizes. Fixed shapes make kernels easier to schedule. The trade-off is computation on padded rows that contain no token.
 
- 
-
 Prefill and decode do not have fixed performance profiles. Prompt length and request count change their expert matrix sizes. Hidden width and hardware determine how efficiently those matrices run.
-
- 
 
 Grouped GEMM packs existing expert work into fewer launches. It cannot create work for an expert that received no token.
 
 In summary, routing creates assignments. Dispatch groups them into expert matrices. Combine returns the results to their original tokens. The next section follows those matrices through one GPU.
-
- 
 
 Local MoE execution pipeline
 
@@ -140,8 +114,6 @@ Grouped GEMM executes several expert matrices in one kernel launch. The matrices
 
 The expert then applies its activation and output projection. The runtime uses the inverse mapping to restore token order. It applies routing weights and adds contributions from matching token IDs.
 
- 
-
 Grouped GEMM does not change assignment counts. It executes the existing expert batches with fewer launches.
 
 Kernel fusion joins operations that would otherwise launch separately. A fused path may avoid writing intermediate activations to GPU memory. It can therefore reduce launch cost and memory traffic.
@@ -150,8 +122,6 @@ Fusion support is conditional. A kernel may support only certain data types, bat
 
 Activation quantization creates another choice. The runtime can quantize before dispatch and send fewer bytes. It can also dispatch at higher precision and quantize before expert computation. The first option saves bandwidth but adds conversion work earlier.
 
- 
-
 Decode often gives each expert a small matrix. Weight reads, row movement, and kernel startup may then dominate. Prefill usually supplies more rows, which makes matrix efficiency more important.
 
 A fused path removes supported boundaries between operations. It does not increase expert batch size. It also does not change router choices or assignment counts.
@@ -159,8 +129,6 @@ A fused path removes supported boundaries between operations. It does not increa
 Measure routing, permutation, expert GEMM, and combination separately. One combined MoE timer cannot identify the slow stage.
 
 In summary, expert GEMM is only one part of local execution. Small batches often expose the cost of movement and launches.
-
- 
 
 Model weight residency and runtime memory
 
@@ -174,8 +142,6 @@ Storing Qwen3-30B-A3B’s 30.5 billion parameters at two bytes each requires abo
 
 The following expression gives the weight-storage lower bound.
 
- 
-
 B(weights) is the stored weight bytes.
 
 P is the total parameter count.
@@ -185,8 +151,6 @@ B(stored) is the number of bytes used for each stored parameter.
 The expression multiplies parameter count by bytes per parameter. For Qwen's figures, that gives 61 billion bytes. Decimal gigabytes divide this number by one billion. The result covers weights only.
 
 The deployment also needs temporary activations and communication buffers. Memory allocators reserve additional space. The key-value cache stores attention state for active sequences. None of that appears in the 61 gigabyte estimate.
-
- 
 
 Never replace 30.5 billion with 3.3 billion in this estimate. Activated parameters do not determine the checkpoint's stored weight bytes.
 
@@ -198,13 +162,9 @@ Expert offloading keeps some experts in CPU memory. The runtime transfers one to
 
 An absent expert can stall decoding while its weights move. Caching helps when the same experts are reused. Prefetching helps only when future selections are predictable.
 
- 
-
 There is no fixed GPU count implied by these figures. Precision, sharding, reserved memory, and KV capacity change the answer.
 
 In summary, activated parameters estimate computation. Resident parameters determine weight memory. Sharding solves capacity by spreading weights, but routed activations may then cross GPUs.
-
- 
 
 Expert-parallel dispatch and combine
 
@@ -218,21 +178,17 @@ Each GPU groups local and received assignments by expert. It executes one matrix
 
 The source GPU restores token order using saved identifiers. It applies each routing weight and sums matching contributions. This completes the combine step.
 
- 
-
 With many GPUs, each GPU may send assignments to several peers. This produces an all-to-all communication pattern. Combine sends the expert results back after computation.
 
 Expert weights normally remain on their assigned GPUs. The network moves token activations and metadata, not expert weights. Padding and temporary buffers can increase the transferred bytes.
 
 The following upper bound estimates the dispatch activation payload.
 
- 
+B(dispatch) is the dispatched activation payload.
 
-B(dispatch) is the dispatched activation payload. 
+T is the token count entering the MoE layer.
 
-T is the token count entering the MoE layer. 
-
-K is the selected experts per token. 
+K is the selected experts per token.
 
 H is the hidden width.
 
@@ -252,8 +208,6 @@ Kernel bandwidth is not end-to-end serving speed. A full request also includes a
 
 In summary, expert parallelism keeps weights in place and moves assignments. It increases distributed weight capacity but adds repeated activation traffic.
 
- 
-
 Network topology and expert placement
 
 Not every GPU link has the same cost. GPUs inside one server may use NVLink or NVSwitch. GPUs in different servers may use InfiniBand or Ethernet.
@@ -261,8 +215,6 @@ Not every GPU link has the same cost. GPUs inside one server may use NVLink or N
 A cross-server transfer usually costs more than an in-server transfer. Expert placement decides which GPU stores each expert. That choice determines how often routing crosses slower links.
 
 One common layout keeps frequent expert traffic inside an NVLink domain. Another parallel layout distributes layers across servers. The best boundary depends on the model and cluster.
-
- 
 
 Placement changes physical destinations without changing router outputs. A frequently selected expert can move closer to its token sources. The runtime can also create physical replicas of one logical expert.
 
@@ -278,15 +230,11 @@ Measure bytes and time by communication domain. A single cluster-wide traffic co
 
 In summary, placement tries to keep frequent traffic on fast links. It must also distribute work across GPUs. Routing traces reveal whether one layout can satisfy both goals.
 
- 
-
 Tensor, expert, and data-parallel execution layouts
 
 Three parallel layouts divide different kinds of work. Tensor parallelism splits one matrix operation across GPUs. Expert parallelism assigns different experts to GPUs. Data parallelism gives different requests to replicas.
 
 Tensor parallelism divides a weight matrix into shards. Each GPU computes a partial result. The GPUs exchange partial results to finish the layer.
-
- 
 
 Expert parallelism distributes whole experts or expert shards. Token assignments move toward their selected experts. Its traffic therefore depends on routing and placement.
 
@@ -296,15 +244,11 @@ Real deployments combine these layouts. Attention layers and expert layers can u
 
 Consider tensor parallel size two and data parallel size four. Attention runs in four groups with two GPUs each. Expert layers can use all eight GPUs as one expert-parallel group.
 
- 
-
 Real deployments combine these layouts. Attention and expert layers can use different rank groups. One label rarely describes the entire model.
 
 The vLLM expert parallel deployment guide documents this mixed approach. With expert parallelism enabled, its EP group size is the tensor-parallel size multiplied by the data-parallel size. Attention uses tensor parallelism within each data-parallel group when TP exceeds one.
 
 For example, TP equal to two and DP equal to four create four attention groups. Each attention group spans two ranks. Expert layers can use an eight-rank EP group.
-
- 
 
 The TP2 and DP4 arrangement is a vLLM configuration example. Other engines may define different communication groups.
 
@@ -314,15 +258,11 @@ Low concurrency can make expert-parallel transfers inefficient. Weak interconnec
 
 In summary, tensor parallelism divides operations. Expert parallelism divides expert ownership. Data parallelism divides requests. The useful combination depends on memory, traffic, and interconnect speed.
 
- 
-
 Expert load imbalance and rank-level tail latency
 
 Routing rarely divides work perfectly. Suppose one expert receives half the assignments. Its GPU must process a larger matrix than the others.
 
 Other GPUs may finish early and wait. The layer cannot finish until every required contribution returns. The slowest participating GPU therefore determines step latency.
-
- 
 
 Training can encourage balanced routing across a large dataset. One production batch can still be skewed. Language and request mix can change which experts are selected.
 
@@ -336,17 +276,13 @@ Placement can separate experts that are frequently selected together. A hot expe
 
 Replication creates several physical copies of one logical expert. The router still selects the same logical expert. The runtime sends its assignments to an available copy.
 
- 
-
 Replication consumes GPU memory and leaves less space for the KV cache. Moving an expert also consumes bandwidth. A short traffic spike may end before rebalancing completes.
 
 Some runtimes rebalance experts using recent load measurements. They may also support redundant expert copies. Both mechanisms need enough memory and a workload stable enough to learn from recent history.
 
-👉 Rebalancing changes physical destinations. It does not change which logical experts the model selected or their intended outputs.
+Rebalancing changes physical destinations. It does not change which logical experts the model selected or their intended outputs.
 
 Average utilization cannot explain MoE tail latency. Measure each step and each GPU. Placement and replication can reduce the tail, but they consume memory and control bandwidth.
-
- 
 
 Inference optimizations and model-correctness boundaries
 
@@ -357,8 +293,6 @@ Fusion, grouped GEMM, placement, and communication overlap preserve logical expe
 Quantization changes stored weights or transmitted activations. It can reduce memory and network traffic. It also introduces numerical error. Quality must therefore be tested on the target workload.
 
 Reducing top-k changes the executed expert set. It removes expert contributions from the weighted sum. Renormalizing the remaining weights changes the result again.
-
- 
 
 Suppose the model normally selects eight experts. A runtime executes only four. The output now contains fewer expert functions. Renormalization also changes their combined scale.
 
@@ -380,8 +314,6 @@ Optimize unchanged computation first. Treat quantization and top-k changes as mo
 
 Execution changes need performance tests. Quantization needs performance and quality tests. Top-k changes need the same tests plus careful output comparison.
 
- 
-
 Benchmark design and bottleneck diagnosis
 
 A useful benchmark changes one serving decision at a time. Keep the checkpoint, precision, prompts, output limits, and request arrivals constant. Then change the parallel layout or kernel path.
@@ -396,21 +328,13 @@ Record prefill and output throughput. Measure time to first token and time per o
 
 GPU-level measurements explain those request metrics. Record bytes by network domain, assignment counts, expert time, and idle time. Split routing, permutation, dispatch, GEMM, combine, and unpermutation. Also record resident weights and remaining KV capacity.
 
- 
-
 Interpret each stage separately. High dispatch time points to topology, locality, or message size. One persistently slow GPU points to routing skew or poor placement.
-
- 
 
 The diagnostic table maps common symptoms to initial measurements. Hardware topology and backend behavior can produce other causes.
 
 High memory use with low expert compute indicates a weight-capacity problem. Little memory remaining for KV cache confirms the same constraint. More concurrency may improve matrix sizes while worsening cache pressure.
 
 In summary, compare identical request traces and change one variable. Measure memory, computation, and communication separately. The largest measured cost determines the next experiment.
-
- 
-
- 
 
 Engineering checklist
 
@@ -424,14 +348,4 @@ Placement and kernel changes target runtime overhead. Quantization changes numer
 
 MoE inference becomes easier to diagnose once three quantities remain separate. The deployment must store model weights, execute selected experts, and move routed activations. Measure each one independently before changing the serving layout.
 
-👉 Over to you: Would you investigate memory, expert computation, or communication first in your deployment?
-
- 
-
-That's a wrap!
-
-If you enjoyed this tutorial:
-
-Find me →  @_avichawla
-
-Every day, I share tutorials and insights on DS, ML, LLMs, and RAGs.
+Over to you: Would you investigate memory, expert computation, or communication first in your deployment?
