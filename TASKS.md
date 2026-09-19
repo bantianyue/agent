@@ -1002,6 +1002,7 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-09-02 13:11 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-19 17:17 | ♻️ 重新生成 | 按今日标准重推：4 张原 GIF 恢复动画、8 图按源 DOM 归位并配源文图注、标题去 emoji、封面用原文 hero；覆盖草稿 TIqnnVEu6Oy3-wtKttGa0aTpd0vczANsp13PNfP74Isiqs5dsWYOuZ9Bi5tHQDEf，body 图 8 张核验通过 |
 
 ### #1 - serve-5-models-one-gpu
 
