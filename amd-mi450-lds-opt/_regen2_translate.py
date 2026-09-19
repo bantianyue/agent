@@ -16,7 +16,8 @@ EXTRA = """
 4. 图注以「图N：」开头（中文冒号），N 与原文 Figure 编号一致；图注里的变量高亮占位符照旧保留。
 5. 术语首次出现时给中文并括注英文，例如：分区冲突（partition conflict）、转置加载（transposed load）。
 6. 纯数字/符号块不需要翻译。
-7. 只输出 JSON 数组，元素为 {"id": 数字, "type": "text", "content": "中文译文"}，不要任何解释。
+7. «B» 与 «/B» 是加粗标记，«I» 与 «/I» 是斜体标记，必须成对原样保留，并用它们包住对应的中文译文；标记本身不要翻译、不要增删、顺序不变。
+8. 只输出 JSON 数组，元素为 {"id": 数字, "type": "text", "content": "中文译文"}，不要任何解释。
 """
 
 SYS = TRANSLATE_PROMPT + "\n---\n" + EXTRA
@@ -55,7 +56,7 @@ def parse_json_array(text):
 
 
 def ph_seq(s):
-    return re.findall(r"？\d+？", s)
+    return re.findall(r"？\d+？|«/?[BI]»", s)
 
 
 def save():
@@ -112,9 +113,12 @@ for b in need:
         if ph_seq(zh) == ph_seq(b["txt"]):
             out[b["i"]] = zh
         else:
-            fixed = re.sub(r"？\d+？", lambda m, it=iter(ph_seq(b["txt"])): next(it, m.group(0)), zh)
+            fixed = re.sub(r"？\d+？|«/?[BI]»", lambda m, it=iter(ph_seq(b["txt"])): next(it, m.group(0)), zh)
             if ph_seq(fixed) == ph_seq(b["txt"]):
                 out[b["i"]] = fixed
+            elif re.findall(r"？\d+？", zh) == re.findall(r"？\d+？", b["txt"]):
+                out[b["i"]] = re.sub(r"«/?[BI]»", "", zh)
+                print("  丢弃强调标记 idx=", b["i"], flush=True)
             else:
                 print("  兜底失败 idx=", b["i"], repr(zh[:60]), flush=True)
     except Exception as e:

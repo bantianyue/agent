@@ -51,6 +51,10 @@ for i, el in enumerate(els):
     restored = zh[i]
     for ph, orig in b["ph"].items():
         restored = restored.replace(ph, orig)
+    restored = (
+        restored.replace("\u00abB\u00bb", "<strong>").replace("\u00ab/B\u00bb", "</strong>")
+        .replace("\u00abI\u00bb", "<em>").replace("\u00ab/I\u00bb", "</em>")
+    )
     repl = BeautifulSoup(f"<{el.name}>" + restored + f"</{el.name}>", "html.parser").find()
     if repl is None:
         print("  !! 重建失败 idx=", i, el.name)
@@ -143,6 +147,21 @@ for li in art.find_all("li"):
 for sd in art.find_all(["strong", "b"]):
     sd["style"] = "font-weight:bold;color:#111;"
 
+# 7b) 标题归一（与公众号标题一致、Part II 中文化）
+h1 = art.find("h1")
+if h1 is not None:
+    h1.clear()
+    h1.append("AMD Instinct MI450 GPU 上的 LDS 优化深度解析")
+H2_FIX = {
+    "第一部分：转置 LDS Load": "第一部分：转置 LDS 加载",
+    "Part II：Partition Conflicts": "第二部分：分区冲突",
+}
+for h2 in art.find_all("h2"):
+    t = h2.get_text(strip=True)
+    if t in H2_FIX:
+        h2.clear()
+        h2.append(H2_FIX[t])
+
 # 8) 清理 & 破折号
 for sel in ["script", "style", "input", "a.headerlink", ".headerlink", ".onlyprint", "nav", "aside"]:
     for el in art.select(sel):
@@ -167,7 +186,7 @@ WRAP_OPEN = (
     "<section style=\"font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue','PingFang SC',"
     "'Microsoft YaHei',sans-serif;max-width:100%;box-sizing:border-box;\">"
 )
-out = WRAP_OPEN + body + ref + "</section>"
+out = (WRAP_OPEN + body + ref + "</section>").replace("\u00a0", "&nbsp;")
 open(f"{BASE}/article.html", "w", encoding="utf-8").write(out)
 open(f"{BASE}/article_zh.html", "w", encoding="utf-8").write(out)
 
