@@ -1,0 +1,129 @@
+===== block 86 =====
+expert_offset = data_start
+              + (layer * num_experts + expert) * expert_stride
+
+===== block 106 =====
+page cache -> pinned memory
+
+===== block 108 =====
+Traditional path:
+T = T(SSD -> page cache)
+  + T(page cache -> pinned)
+  + T(pinned -> GPU)
+  + T(sync)
+
+Expert Pack direct I/O:
+T = T(SSD -> pinned)
+  + T(pinned -> GPU)
+
+===== block 119 =====
+usable_vram = min(requested_cache, free_vram - reserve)
+slot_count  = floor(usable_vram / expert_payload_bytes)
+
+===== block 133 =====
+T_step ~= T(miss delivery) + T(GPU compute)
+
+===== block 182 =====
+OLLAMA_HOST=127.0.0.1:11435 ollama serve >/tmp/deepseek-ollama.log 2>&1 &
+
+===== block 186 =====
+ollama pull frob/deepseek-v4-flash-0731
+ollama show --modelfile frob/deepseek-v4-flash-0731
+
+===== block 190 =====
+cd /path/to/sglang-latest-deepseek-v4-kimi-k3-ssd
+python3 -m pip install -e 'python'
+python3 tools/expert_pack/prepare_deepseek_pack.py \
+  --gguf /path/to/deepseek-v4-flash-0731.gguf \
+  --model-config /path/to/deepseek-v4-flash-config.json \
+  --safety-margin-gib 16
+
+===== block 194 =====
+python3 examples/runtime/deepseek_v4/benchmark_deepseek_5090.py \
+  --gguf /path/to/deepseek-v4-flash-0731.gguf \
+  --validate-only
+
+===== block 199 =====
+GGUF=/path/to/deepseek-v4-flash-0731.gguf
+ARTIFACT_DIR=${XDG_CACHE_HOME:-$HOME/.cache}/sglang-expert-pack/deepseek-v4-flash/<fingerprint>
+MODEL_META="$ARTIFACT_DIR/model-meta"
+PACK_PATH="$(dirname "$GGUF")/DeepSeek-V4-Flash.expert-pack"
+MANIFEST_PATH="$(dirname "$GGUF")/DeepSeek-V4-Flash.expert-pack.manifest.json"
+STATS_PATH="$ARTIFACT_DIR/deepseek-v4-expert-pack.stats.json"
+SOURCE_SHA256="$(jq -r '.source.sha256' "$MANIFEST_PATH")"
+OLLAMA_MANIFEST_SHA256="$(jq -r '.model.model_identity_sha256 // .model.ollama_manifest_sha256' "$MANIFEST_PATH")"
+CONFIG_SHA256="$(jq -r '.model.config_sha256' "$MANIFEST_PATH")"
+
+python3 -m sglang.launch_server \
+  --model-path "$MODEL_META" \
+  --tokenizer-path "$MODEL_META" \
+  --trust-remote-code \
+  --load-format expert_pack \
+  --model-loader-extra-config "{\"pack_path\":\"$PACK_PATH\",\"manifest_path\":\"$MANIFEST_PATH\",\"source_path\":\"$GGUF\",\"source_sha256\":\"$SOURCE_SHA256\",\"ollama_manifest_sha256\":\"$OLLAMA_MANIFEST_SHA256\",\"config_sha256\":\"$CONFIG_SHA256\",\"cache_vram_mib\":21504,\"cache_vram_reserve_mib\":2048,\"stage_slots\":12,\"read_splits\":4,\"direct_io\":true,\"stats_flush_interval\":43,\"stats_path\":\"$STATS_PATH\"}" \
+  --attention-backend dsv4 \
+  --tp-size 1 --ep-size 1 \
+  --disable-cuda-graph --disable-flashinfer-autotune \
+  --disable-shared-experts-fusion --skip-server-warmup \
+  --max-running-requests 1 --mem-fraction-static 0.96 \
+  --watchdog-timeout 1800 --host 127.0.0.1 --port 30001
+
+===== block 207 =====
+hf download Blackfrost-AI/KIMI-K3-Q2_K-GGUF-ABLITERATED \
+  --include "KIMI-K3-MXP4-DERISKED-Q2_K-*.gguf" \
+  --local-dir /path/to/kimi-k3
+
+===== block 210 =====
+hf download moonshotai/Kimi-K3 \
+  config.json tokenizer_config.json generation_config.json \
+  tokenization_kimi.py encoding_k3.py tiktoken.model \
+  --revision 9f62e4e9fffbd0a83ddd60e1c209d828994b3569 \
+  --local-dir /path/to/kimi-k3-tokenizer
+
+===== block 213 =====
+cd /path/to/sglang-latest-deepseek-v4-kimi-k3-ssd
+python3 tools/expert_pack/prepare_kimi_pack.py \
+  --gguf /path/to/kimi-k3/KIMI-K3-MXP4-DERISKED-Q2_K-00001-of-00038.gguf \
+  --model-config /path/to/kimi-k3-tokenizer/config.json \
+  --safety-margin-gib 2
+
+===== block 217 =====
+python3 examples/runtime/kimi_k3/benchmark_kimi_k3_5090.py \
+  --gguf /path/to/kimi-k3/KIMI-K3-MXP4-DERISKED-Q2_K-00001-of-00038.gguf \
+  --max-new-tokens 200 --direct-io --read-splits 1 --prepare-only
+
+===== block 220 =====
+GGUF_DIR=/path/to/kimi-k3
+PACK_PATH="$GGUF_DIR/KIMI-K3-MXP4-DERISKED-Q2_K.expert-major.pack"
+ARTIFACT_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/sglang-expert-pack/kimi-k3/<fingerprint>"
+MODEL_META="$ARTIFACT_DIR/model-meta"
+MANIFEST_PATH="$ARTIFACT_DIR/kimi-k3-expert-pack.manifest.json"
+STATS_PATH="$ARTIFACT_DIR/kimi-k3-expert-pack.stats.json"
+
+python3 -m sglang.launch_server \
+  --model-path "$MODEL_META" \
+  --tokenizer-path "$MODEL_META" \
+  --trust-remote-code \
+  --load-format expert_pack \
+  --model-loader-extra-config "{\"pack_path\":\"$PACK_PATH\",\"manifest_path\":\"$MANIFEST_PATH\",\"cache_vram_mib\":5120,\"cache_vram_reserve_mib\":1536,\"stage_slots\":16,\"read_splits\":1,\"direct_io\":true,\"stats_flush_interval\":92,\"stats_path\":\"$STATS_PATH\",\"verify_pack_sha256\":false}" \
+  --tp-size 1 --ep-size 1 \
+  --disable-cuda-graph --disable-shared-experts-fusion \
+  --disable-radix-cache --mamba-radix-cache-strategy no_buffer \
+  --disable-overlap-schedule --skip-server-warmup \
+  --chunked-prefill-size 64 --watchdog-timeout 1800 \
+  --max-running-requests 1 --mem-fraction-static 0.98 \
+  --host 127.0.0.1 --port 30001
+
+===== block 223 =====
+/path/to/llama.cpp/build/bin/llama-server \
+  -m /path/to/kimi-k3/KIMI-K3-MXP4-DERISKED-Q2_K-00001-of-00038.gguf \
+  -ngl -1 --cpu-moe --host 127.0.0.1 --port 8081 \
+  -t 16 -tb 16 --threads-http 16 -np 1 -c 4096 \
+  --no-warmup --metrics \
+  --log-file /path/to/kimi-k3-llama-cpp/server.log
+
+===== block 240 =====
+router selects a small set of experts
+  -> Expert Pack resolves their offsets
+  -> O_DIRECT reads into aligned pinned buffers
+  -> expert-level asynchronous H2D fills the GPU cache
+  -> the complete expert becomes available for computation
