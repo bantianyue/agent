@@ -143,12 +143,14 @@ H3TITLES = {25:"LLM 后训练", 42:"后训练与现有方案分析", 78:"高效�
             139:"实验设置", 164:"端到端后训练性能", 171:"大型 MoE 模型上的表现",
             175:"不同训练步骤上的表现", 178:"消融实验", 184:"深入观察 SpecActor 的实际运行"}
 eq_i, alg_i = 0, 0
+carry_figs = []
 
 def new_sec(t, title):
     global cur, pending_figs
     cur = {"type": t, "title": title, "paras": [], "fig_after": {}}
     sections.append(cur)
-    pending_figs = []
+    pending_figs = list(carry_figs)
+    carry_figs.clear()
 
 def attach_fig(cap_idx, sec):
     key = str(len(sec["paras"]) - 1) if sec["paras"] else "0"
@@ -197,11 +199,31 @@ while i < len(items):
         cur["paras"].append("__CODE__text::" + ALG[alg_i])
         alg_i += 1
     elif k == "fig":
-        if cur is None or not cur["paras"]:
-            pending_figs.append(i)
+        nxt = items[i+1] if i+1 < len(items) else None
+        if (nxt is not None and nxt["kind"] in ("h2", "h3")) or cur is None or not cur["paras"]:
+            if nxt is not None and nxt["kind"] in ("h2", "h3"):
+                carry_figs.append(i)
+            else:
+                pending_figs.append(i)
         else:
             attach_fig(i, cur)
     i += 1
+
+# 多图同 key 拆分：避免两图连排（后面还有段落时逐张后移）
+for _s in sections:
+    _fa = _s.get("fig_after", {})
+    if not _fa:
+        continue
+    _used, _new = set(), {}
+    for _k in sorted(_fa, key=int):
+        _p = int(_k)
+        for _f in _fa[_k]:
+            _key = _p
+            while _key in _used and _key < len(_s["paras"]) - 1:
+                _key += 1
+            _used.add(_key)
+            _new.setdefault(str(_key), []).append(_f)
+    _s["fig_after"] = _new
 
 data = {
  "title": "SpecActor：用解耦与 Fastest-of-N 推测，把后训练 rollout 提速 2.4 倍",
