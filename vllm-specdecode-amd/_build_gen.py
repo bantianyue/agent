@@ -15,6 +15,9 @@ TAB = json.load(open(os.path.join(d, "_tables_zh.json"), encoding="utf-8"))
 def T(i):
     """取第 i 块译文并做统一术语清洗"""
     s = TR[str(i)]
+    # 首个注释已在 lead 给出，正文不再重复（否则会被下面替换成「投机解码（投机解码）」）
+    s = s.replace("（speculative decoding）", "")
+    s = s.replace("（Speculative decoding）", "")
     s = s.replace("speculative decoding（投机解码）", "投机解码")
     s = s.replace("Speculative decoding（投机解码）", "投机解码")
     s = s.replace("speculative decoding", "投机解码")
@@ -26,6 +29,9 @@ def T(i):
     s = s.replace("图 2 给出了", "下图给出了")
     s = s.replace("图 2 给出", "下图给出")
     s = s.replace("图 3 以并排视图", "下图以并排视图")
+    # 中→中之间不留空格（英文短语替换后残留的空格）
+    s = re.sub(r"(?<=[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef])\s+(?=[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef])", "", s)
+    s = re.sub(r"(×|\d)\s+(?=[\u4e00-\u9fff])", r"\1", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -159,7 +165,7 @@ DATA = {
     "conclusion": [
         "**① 加速来自一次 target 前向提交多个 token，而不是放宽判定标准。** 原模型始终是 target，draft 只提候选，验证从左到右进行，遇到第一个被拒 token 就停止并丢弃后续候选，输出行为与不投机时一致。",
         "**② 五种方法的分野在两点：draft 拿到哪些 target 信息，以及候选是串行还是并行起草。** native MTP 内建在模型里、Gemma 4 MTP 独立打包但共享 target 的 KV cache、EAGLE-3 融合三层 hidden states 自回归起草，DFlash 用 anchor 加 mask 一次并行预测整块，DSpark 再补一个轻量 Markov 头补回位置间的依赖。",
-        "**③ 部署上没有万能配置，调参要看接受行为。** 实测吞吐比从低于基线到 2.87× 都有，同一系列的不同模型（Qwen3.6-27B 与 35B-A3B）最优 N 都不一样；先跑通 checkpoint 支持的配置，再用逐位置接受率把 N 收到峰值，通常落在 4 到 7。",
+        "**③ 部署上没有万能配置，调参要看接受行为。** 实测吞吐比从低于基线到 2.87×都有，同一系列的不同模型（Qwen3.6-27B 与 35B-A3B）最优 N 都不一样；先跑通 checkpoint 支持的配置，再用位置级接受率把 N 收到峰值，通常落在 4 到 7。",
         "投机解码本质是用额外显存和 draft 计算，换每次 target 前向的产出 token 数。在 AMD Instinct + ROCm 上它已经跑通，真正决定收益的是把 N 和 draft checkpoint 压到目标工作负载的接受模式上，而不是照抄一个推荐值。",
     ],
     "reference_url": "https://vllm.ai/blog/2026-08-23-speculative-decoding-amd-gpus",

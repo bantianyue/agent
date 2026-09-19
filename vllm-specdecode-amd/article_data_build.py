@@ -30,7 +30,7 @@ DATA = {
       "title": "引言",
       "paras": [
         "LLM（大语言模型）支持广泛的应用，但大规模服务需要精细优化。标准自回归解码是多数 LLM 服务系统采用的基线：模型生成一个 token，将其追加到序列，再用更新后的序列生成下一个 token。该过程简单可靠，但由于输出 token 必须严格按从左到右的顺序产生，服务循环每次仍只推进一个已提交 token。",
-        "投机解码（投机解码）[1] 在此基线上引入 draft-and-verify 机制。轻量级 draft 组件提出候选未来 token，target model 在候选被提交前对其验证。当多个 draft token 被接受时，系统可在单次 target-model 验证步骤中提交多个输出 token，同时保持 target model 的输出行为不变。",
+        "投机解码[1] 在此基线上引入 draft-and-verify 机制。轻量级 draft 组件提出候选未来 token，target model 在候选被提交前对其验证。当多个 draft token 被接受时，系统可在单次 target-model 验证步骤中提交多个输出 token，同时保持 target model 的输出行为不变。",
         "以下说明投机解码在 vLLM 中的工作方式，并给出测试环境中的测量结果。先回顾自回归解码基线与 draft-and-verify 流程，再考察五种投机 drafting 方法：native MTP、Gemma 4 MTP、EAGLE-3、DFlash 和 DSpark。这些方法的差异在于 draft 组件如何从 target model 获取信息，以及候选 token 是串行、自回归、并行还是混合方式生成。最后给出在本环境中启用所测方法的方式、基于 ROCm™ 开放软件平台在 AMD Instinct™ MI300X 和 MI355X GPU 上的实验测量结果，并讨论实际调优与可观测性方面的注意事项。"
       ]
     },
@@ -61,7 +61,7 @@ DATA = {
         "该过程包含两部分：",
         "Draft：提出若干个候选的未来 token。",
         "Verify：使用 target model 校验这些候选。",
-        "在每轮 投机解码 中（见下图），一个轻量的 draft 组件提出一个或多个未来 token。这些 token 仅为候选，不会被立即提交。随后 target model 在一次验证 pass 中评估候选 token 序列。",
+        "在每轮投机解码中（见下图），一个轻量的 draft 组件提出一个或多个未来 token。这些 token 仅为候选，不会被立即提交。随后 target model 在一次验证 pass 中评估候选 token 序列。",
         "验证从左到右进行。每个 draft token 使用 target model 在对应位置的结果进行校验。被接受的 token 提交到输出序列。当某个 draft token 被拒绝时，同一提案中后续的候选不再被接受。",
         "如果某个 draft token 被拒绝，则由 target model 给出下一个 token。其余 draft token 被丢弃，生成从更新后的序列继续。",
         "从概念上讲，标准自回归解码的推进方式如下：",
@@ -137,7 +137,7 @@ DATA = {
       "type": "h2",
       "title": "五种起草方法如何工作",
       "paras": [
-        "所有 投机解码方法遵循相同的整体 draft-and-verify 流程，但在 draft 组件的设计方式及其与 target model 的协作方式上存在差异。",
+        "所有投机解码方法遵循相同的整体 draft-and-verify 流程，但在 draft 组件的设计方式及其与 target model 的协作方式上存在差异。",
         "主要差异在于：",
         "从 target model 获取的信息类型。",
         "这些信息如何融入 drafting 过程。",
@@ -145,7 +145,7 @@ DATA = {
         "基于这些差异，可将 drafting 方法归为三大类：native MTP 模块、独立 MTP drafter、专用的 target-conditioned draft 网络。",
         "Native MTP 模块：直接内建于 target 模型架构中；使用模型原生的辅助预测路径；按顺序生成候选 token。",
         "独立 MTP drafter：使用与特定 target 模型配对的独立 checkpoint；推理时使用 target 模型的激活值和共享的 KV cache 信息；按顺序生成候选 token。",
-        "专用的 target-conditioned draft 网络：使用针对特定 target 模型训练的独立 speculator 模型，包括 EAGLE-3、DFlash 和 DSpark。EAGLE-3 基于 target 模型的 hidden states 自回归地 draft，DFlash 基于 target 模型的 hidden states 并行 draft 块，DSpark 则增加轻量的因果校正和基于置信度的前缀选择。",
+        "专用的 target-conditioned draft 网络：使用针对特定 target 模型训练的独立 speculator 模型，包括 EAGLE-3、DFlash 和 DSpark。EAGLE-3基于 target 模型的 hidden states 自回归地 draft，DFlash 基于 target 模型的 hidden states 并行 draft 块，DSpark 则增加轻量的因果校正和基于置信度的前缀选择。",
         "这些分类描述的是 draft 组件的架构，而非 target 模型系列。一个 target 模型可以支持 native MTP，同时也可拥有单独训练的 EAGLE-3、DFlash 或 DSpark draft 模型。",
         "draft 组件并非完全独立运行。根据方法不同，draft 组件可能接收：",
         "来自 target 模型的 hidden representation。",
@@ -191,7 +191,7 @@ DATA = {
       "type": "h3",
       "title": "Gemma 4 MTP",
       "paras": [
-        "Gemma 4 使用单独打包的 MTP draft 组件，与特定 target model 配对 [3]。该 draft 组件虽有独立 checkpoint，但在推理过程中仍与 target model 紧密连接。",
+        "Gemma 4使用单独打包的 MTP draft 组件，与特定 target model 配对 [3]。该 draft 组件虽有独立 checkpoint，但在推理过程中仍与 target model 紧密连接。",
         "draft 组件使用 target model 产生的 activation，并共享 target model 的 KV cache。由此可复用 target 已计算好的上下文信息，无需独立处理已接受的 prefix。",
         "与 native MTP 相同，draft 组件的层数与配置的 speculative length 相互独立。当请求多个候选 token 时，draft 组件按顺序依次生成："
       ],
@@ -214,14 +214,14 @@ DATA = {
       "type": "h3",
       "title": "EAGLE-3",
       "paras": [
-        "EAGLE-3 使用针对特定 target model 训练的专用 draft 网络。draft 组件拥有自身的执行路径，但仍紧密依赖于 target model 产生的信息作为条件 [4]。",
-        "在 target model 前向传播过程中，EAGLE-3 记录 target Transformer 三个阶段的 hidden states：接近开头、中间附近和接近结尾。它们是同一 accepted sequence 在 target model 不同处理阶段上的上下文表示。",
+        "EAGLE-3使用针对特定 target model 训练的专用 draft 网络。draft 组件拥有自身的执行路径，但仍紧密依赖于 target model 产生的信息作为条件 [4]。",
+        "在 target model 前向传播过程中，EAGLE-3记录 target Transformer 三个阶段的 hidden states：接近开头、中间附近和接近结尾。它们是同一 accepted sequence 在 target model 不同处理阶段上的上下文表示。",
         "三个 hidden states 被拼接并投影为单一的 fused target feature。该融合表示随后与采样所得 token 的 embedding 结合，再进入 EAGLE-3 draft decoder。",
         "这两类输入承担不同的作用：",
         "融合后的 target 特征利用 target model 前向传播中多个阶段的信息，对已接受的序列进行汇总。",
         "采样得到的 token embedding 标识出 drafting 继续的起始 token。",
-        "EAGLE-3 以自回归方式生成 draft token。对于第一个 draft token，它使用由已接受序列计算得到的融合 target 特征，并结合采样 token 的 embedding。生成一个 draft token 后，其 embedding 被送入下一个 drafting 阶段。",
-        "由于 target model 尚未处理后续的投机位置，这些位置上的 target model 隐状态不可用。因此 EAGLE-3 在延续 draft 序列时使用前一个 draft 组件的输出。",
+        "EAGLE-3以自回归方式生成 draft token。对于第一个 draft token，它使用由已接受序列计算得到的融合 target 特征，并结合采样 token 的 embedding。生成一个 draft token 后，其 embedding 被送入下一个 drafting 阶段。",
+        "由于 target model 尚未处理后续的投机位置，这些位置上的 target model 隐状态不可用。因此 EAGLE-3在延续 draft 序列时使用前一个 draft 组件的输出。",
         "这种顺序反馈使后续 draft token 直接依赖于所提议序列中更早的 drafted token。然而，生成更多投机 token 也意味着在验证之前需要更多顺序 drafting 工作。"
       ],
       "fig_after": {
@@ -249,14 +249,14 @@ DATA = {
       "type": "h3",
       "title": "DFlash",
       "paras": [
-        "DFlash 使用为特定 target 模型训练的专用 draft 网络。与顺序生成候选 token 的 MTP 和 EAGLE-3 不同，DFlash 并行预测整个未来位置块 [5]。",
+        "DFlash 使用为特定 target 模型训练的专用 draft 网络。与顺序生成候选 token 的 MTP 和 EAGLE-3不同，DFlash 并行预测整个未来位置块 [5]。",
         "DFlash 以 anchor token 开始每个 draft block。anchor 是由 target 模型生成或确认的已知 token，因此 DFlash 无需预测它。它只是为后续被掩码的位置提供一个已知的起始点。在后续解码轮次中，这通常是上一轮验证过程返回的额外 target token。",
         "anchor 占据 block 的第一个位置，其余位置被掩码并并行预测：",
         "draft block 以已确认的 anchor token 开始，后跟被掩码的位置：",
         "其中，anchor 是已知的 target-model token，而被 mask 的位置由 DFlash 预测。",
         "单次 DFlash 前向传播即可同时预测所有被 mask 的位置：",
-        "与 EAGLE-3 相同，DFlash 首先将 target model 多个层的 hidden states 融合为一个表示。",
-        "主要区别在于该融合表示的使用方式。EAGLE-3 在自回归 draft network 的输入端将其与采样 token 的 embedding 拼接。DFlash 则把融合后的 target 上下文转换为额外的 Key 和 Value 表示，供 draft network 的每一层使用。",
+        "与 EAGLE-3相同，DFlash 首先将 target model 多个层的 hidden states 融合为一个表示。",
+        "主要区别在于该融合表示的使用方式。EAGLE-3在自回归 draft network 的输入端将其与采样 token 的 embedding 拼接。DFlash 则把融合后的 target 上下文转换为额外的 Key 和 Value 表示，供 draft network 的每一层使用。",
         "因此，来自被 mask 的 draft 位置的 Query 可以同时关注：",
         "由 target model 导出的 Key 和 Value 表示。",
         "Key 和 Value 表示由 draft block 自身产生。",
@@ -408,7 +408,7 @@ DATA = {
       "type": "h2",
       "title": "在 vLLM 中启用投机解码",
       "paras": [
-        "在 vLLM 中，投机解码（投机解码）通过 --speculative-config 配置。主要差异在于 method 名称、是否需要单独的 draft checkpoint，以及请求的候选 token 数量。当前 vLLM 支持 mtp、eagle3、dflash 和 dspark 作为 method 取值。",
+        "在 vLLM 中，投机解码通过 --speculative-config 配置。主要差异在于 method 名称、是否需要单独的 draft checkpoint，以及请求的候选 token 数量。当前 vLLM 支持 mtp、eagle3、dflash 和 dspark 作为 method 取值。",
         "对于原生 MTP，draft 组件随 target 模型一同提供，因此省略 model 字段：",
         "__CODE__bash::vllm serve <target-model> \\\n  --speculative-config '{\n    \"method\": \"mtp\",\n    \"num_speculative_tokens\": <N>\n  }'",
         "对于 Gemma 4 MTP、EAGLE-3、DFlash 和 DSpark，model 字段通常指向针对 target 模型训练的 checkpoint：",
@@ -466,7 +466,7 @@ DATA = {
       "type": "h2",
       "title": "预训练 draft 模型去哪找",
       "paras": [
-        "目前已有多个组织在 Hugging Face 上发布预训练 draft 模型。Google 为 Gemma 4 提供 MTP assistant，Z-Lab 维护了一系列 DFlash checkpoint。Red Hat AI 提供覆盖 EAGLE-3、DFlash 和 DSpark 的 draft 模型，DeepSeek 的 DeepSpec 集合为这三种方法提供匹配的 checkpoint。LightSeek 专注于面向 Kimi 的基于 EAGLE 的 draft 模型，Inferact 则发布面向 MiniMax 和 Kimi 的 draft 模型。"
+        "目前已有多个组织在 Hugging Face 上发布预训练 draft 模型。Google 为 Gemma 4提供 MTP assistant，Z-Lab 维护了一系列 DFlash checkpoint。Red Hat AI 提供覆盖 EAGLE-3、DFlash 和 DSpark 的 draft 模型，DeepSeek 的 DeepSpec 集合为这三种方法提供匹配的 checkpoint。LightSeek 专注于面向 Kimi 的基于 EAGLE 的 draft 模型，Inferact 则发布面向 MiniMax 和 Kimi 的 draft 模型。"
       ],
       "table": {
         "head": [
@@ -512,7 +512,7 @@ DATA = {
       "type": "h2",
       "title": "实验设置与主要观测",
       "paras": [
-        "启用 投机解码 后，实际问题是额外的 drafting 工作能否提升端到端服务性能。候选 token 不必在每个位置都正确，因为 target model 会在提交前对其评估。因此性能取决于有多少候选 token 被接受，以及节省的 target-model 解码工作是否超过 drafting 与验证的成本。",
+        "启用投机解码后，实际问题是额外的 drafting 工作能否提升端到端服务性能。候选 token 不必在每个位置都正确，因为 target model 会在提交前对其评估。因此性能取决于有多少候选 token 被接受，以及节省的 target-model 解码工作是否超过 drafting 与验证的成本。",
         "我们使用基于任务的基准测试而非随机 token 序列来评估模型质量与服务性能。接受行为取决于实际模型输出的结构和可预测性，因此基于任务的 prompt 能更真实地反映实际性能。",
         "主要性能指标如下：",
         "输出 token 吞吐，以及相对非投机基线的加速比。",
@@ -525,7 +525,7 @@ DATA = {
       "title": "模型与实验覆盖",
       "paras": [
         "实验覆盖五个投机起草（speculative drafting）方法，涉及多个 target 模型系列。对勾表示该 target-方法组合已有基准测试结果；短横线表示该组合未纳入当前实验。",
-        "该表汇总了实验中包含的 target-method 组合，并展示了 投机解码在不同模型、负载和 proposal 长度下的表现。由于模型架构、激活参数量、draft 组件规模、负载以及服务条件都会影响性能，每项结果应结合其测试配置来解读。"
+        "该表汇总了实验中包含的 target-method 组合，并展示了投机解码在不同模型、负载和 proposal 长度下的表现。由于模型架构、激活参数量、draft 组件规模、负载以及服务条件都会影响性能，每项结果应结合其测试配置来解读。"
       ],
       "table": {
         "head": [
@@ -624,13 +624,13 @@ DATA = {
       "title": "主要观测",
       "paras": [
         "测量结果随 target 模型、draft 方法、负载和 proposal 长度而变化。",
-        "对于 gemma-4-26B-A4B-it，在测试扫描范围内测得的最高吞吐比分别为：Gemma 4 MTP 在 GSM8K 和 MBPP 上达到 2.74× 和 2.62×，DFlash 在 MATH500 和 HumanEval 上达到 2.87× 和 2.79×。EAGLE-3 在四个数据集上的测量结果为 2.11× 至 2.27×。",
-        "对于 gemma-4-31B-it，Gemma 4 MTP 在 GSM8K 上达到 2.00×，在 MBPP 上达到 1.99×；DFlash 在 MATH500 上达到 2.34×，在 HumanEval 上达到 2.05×。EAGLE-3 与 DSpark 在四个评测数据集上也均高于基线。与最大实测吞吐对应的 proposal length 随 workload 而变化。",
-        "对于 Qwen3-8B，DSpark 的结果从 MATH500 上的 1.15× 到 GSM8K 上的 1.63×。DFlash 的结果范围为 1.08× 至 1.27×。EAGLE-3 在 GSM8K、HumanEval 和 MBPP 上高于基线，而在 MATH500 上的最大实测值仍低于基线。",
-        "对于 Qwen3.5-27B、Qwen3.5-122B-A10B 和 Qwen3.6-27B，在测试范围内测得的最大 native-MTP 值均高于对应的最大 DFlash 值。该组中最高倍率为 Qwen3.5-122B-A10B 在 MATH500 上的 2.20×。与最大实测吞吐对应的 native-MTP proposal length 为 N=4 至 N=7，取决于模型与数据集。",
-        "对于 Qwen3.6-35B-A3B，DFlash 的结果范围为 1.77× 至 2.06×，最大值在四个数据集上均出现在 N=7。Native-MTP 的结果范围为 1.28× 至 1.49×，最大值出现在 N=6。与 Qwen3.6-27B 的结果差异表明，同一系列内不同模型的表现可能不同。",
-        "对于 MiniMax-M3-MXFP8，EAGLE-3 在 N=4 时于 HumanEval 上达到 2.09×。对于 Kimi-K2.5，EAGLE-3 最高达到 2.33×，DFlash 最高达到 2.68×。在测试范围内，EAGLE-3 的最大值通常出现在 N=4，而 DFlash 的最大值出现在 N=7。",
-        "在各项实验中，与最大实测吞吐对应的 proposal length 并非常量。对于串行方法，吞吐通常随 N 的前几个取值上升后进入平台期。对于 DFlash 与 DSpark，N=7 常位于较高吞吐的设置之列，而更大的取值并未持续提升吞吐。",
+        "对于 gemma-4-26B-A4B-it，在测试扫描范围内测得的最高吞吐比分别为：Gemma 4 MTP 在 GSM8K 和 MBPP 上达到 2.74×和 2.62×，DFlash 在 MATH500和 HumanEval 上达到 2.87×和 2.79×。EAGLE-3在四个数据集上的测量结果为 2.11×至 2.27×。",
+        "对于 gemma-4-31B-it，Gemma 4 MTP 在 GSM8K 上达到 2.00×，在 MBPP 上达到 1.99×；DFlash 在 MATH500上达到 2.34×，在 HumanEval 上达到 2.05×。EAGLE-3与 DSpark 在四个评测数据集上也均高于基线。与最大实测吞吐对应的 proposal length 随 workload 而变化。",
+        "对于 Qwen3-8B，DSpark 的结果从 MATH500上的 1.15×到 GSM8K 上的 1.63×。DFlash 的结果范围为 1.08×至 1.27×。EAGLE-3在 GSM8K、HumanEval 和 MBPP 上高于基线，而在 MATH500上的最大实测值仍低于基线。",
+        "对于 Qwen3.5-27B、Qwen3.5-122B-A10B 和 Qwen3.6-27B，在测试范围内测得的最大 native-MTP 值均高于对应的最大 DFlash 值。该组中最高倍率为 Qwen3.5-122B-A10B 在 MATH500上的 2.20×。与最大实测吞吐对应的 native-MTP proposal length 为 N=4至 N=7，取决于模型与数据集。",
+        "对于 Qwen3.6-35B-A3B，DFlash 的结果范围为 1.77×至 2.06×，最大值在四个数据集上均出现在 N=7。Native-MTP 的结果范围为 1.28×至 1.49×，最大值出现在 N=6。与 Qwen3.6-27B 的结果差异表明，同一系列内不同模型的表现可能不同。",
+        "对于 MiniMax-M3-MXFP8，EAGLE-3在 N=4时于 HumanEval 上达到 2.09×。对于 Kimi-K2.5，EAGLE-3最高达到 2.33×，DFlash 最高达到 2.68×。在测试范围内，EAGLE-3的最大值通常出现在 N=4，而 DFlash 的最大值出现在 N=7。",
+        "在各项实验中，与最大实测吞吐对应的 proposal length 并非常量。对于串行方法，吞吐通常随 N 的前几个取值上升后进入平台期。对于 DFlash 与 DSpark，N=7常位于较高吞吐的设置之列，而更大的取值并未持续提升吞吐。",
         "这些观察结果反映了本研究所使用的硬件、软件、target model、draft checkpoint、workload 以及 sweep 设置。"
       ]
     },
@@ -638,7 +638,7 @@ DATA = {
       "type": "h2",
       "title": "调参考虑",
       "paras": [
-        "投机解码 应被视为一种运行时优化，而非对所有 workload 都同样有效的固定设置。与最高吞吐对应的 num_speculative_tokens 取值取决于有多少 proposed token 被接受，以及所避免的 target-model decode 工作量是否超过 drafting 与 verification 的开销。",
+        "投机解码应被视为一种运行时优化，而非对所有 workload 都同样有效的固定设置。与最高吞吐对应的 num_speculative_tokens 取值取决于有多少 proposed token 被接受，以及所避免的 target-model decode 工作量是否超过 drafting 与 verification 的开销。",
         "因此可观测性很重要。model-card 推荐配置或示例配置可作为起点，但最终设置应基于代表性 workload 和端到端测量来确定。有用的信号包括吞吐、平均接受长度、整体接受率以及逐位置接受率。",
         "更大的 proposal window 为系统提供了在一次 verification pass 中提交多个 token 的更多机会。然而，在较靠后的 draft 位置上接受率可能下降。此时，额外的候选贡献甚微，却仍增加 drafting 与 verification 的工作量，导致吞吐趋于平缓甚至回退。"
       ]
@@ -647,21 +647,21 @@ DATA = {
       "type": "h3",
       "title": "从受支持的配置入手",
       "paras": [
-        "对于原生 MTP，N=1 是保守的起点，因为它引入的额外串行 draft 工作量最少：",
+        "对于原生 MTP，N=1是保守的起点，因为它引入的额外串行 draft 工作量最少：",
         "__CODE__json::{\"method\": \"mtp\", \"num_speculative_tokens\": 1}",
         "在确认正确性与稳定性后，再扫描更大的取值，如 2、3、4、5、6、7。",
-        "在测量中，最大实测吞吐对应的原生 MTP 设置随 target model 与 workload 而变化。对于 Qwen3.5-27B，最大实测吞吐在 GSM8K 和 MATH500 上出现在 N=5，在 HumanEval 和 MBPP 上出现在 N=4，在 MT-Bench 上出现在 N=3。对于 Qwen3.5-122B-A10B，在所列举的四个推理与代码数据集上，最大实测吞吐出现在 N=7。",
-        "Qwen3.6 的测量结果同样表明，同一系列内的不同模型，该设置也会发生变化。对于 Qwen3.6-27B，最大实测值出现在 N=4 或 N=5，而所测试的 Qwen3.6-35B-A3B 配置的吞吐随 N 持续提升，直至 N=6。",
-        "对于 Gemma 4 MTP 和 EAGLE-3，增大 N 同样会增加串行 draft 工作量。因此，即使 checkpoint 提供了推荐配置，做一次短扫描仍有必要。在 Gemma 4 和 EAGLE-3 实验中，实测吞吐通常在 N 的前几个取值上持续上升，随后趋于平台。",
+        "在测量中，最大实测吞吐对应的原生 MTP 设置随 target model 与 workload 而变化。对于 Qwen3.5-27B，最大实测吞吐在 GSM8K 和 MATH500上出现在 N=5，在 HumanEval 和 MBPP 上出现在 N=4，在 MT-Bench 上出现在 N=3。对于 Qwen3.5-122B-A10B，在所列举的四个推理与代码数据集上，最大实测吞吐出现在 N=7。",
+        "Qwen3.6的测量结果同样表明，同一系列内的不同模型，该设置也会发生变化。对于 Qwen3.6-27B，最大实测值出现在 N=4或 N=5，而所测试的 Qwen3.6-35B-A3B 配置的吞吐随 N 持续提升，直至 N=6。",
+        "对于 Gemma 4 MTP 和 EAGLE-3，增大 N 同样会增加串行 draft 工作量。因此，即使 checkpoint 提供了推荐配置，做一次短扫描仍有必要。在 Gemma 4和 EAGLE-3实验中，实测吞吐通常在 N 的前几个取值上持续上升，随后趋于平台。",
         "对于 DFlash，先从 draft checkpoint 推荐或支持的 proposal length 入手。许多 DFlash checkpoint 都采用固定 block size 训练。例如，当：",
         "__CODE__python::block_size = 16",
         "最大 proposal length 通常为：",
         "__CODE__python::num_speculative_tokens = 15",
-        "因为第一个位置是已确认的 anchor token，其余 15 个位置为 draft 候选。",
+        "因为第一个位置是已确认的 anchor token，其余 15个位置为 draft 候选。",
         "这是支持的最大 proposal length，不一定是吞吐最高的设置。实践中，测试较小的值很有用，例如：",
         "__CODE__text::N = 3, 7, 11, 15",
-        "在 DFlash 实验中，N=7 经常处于吞吐较高的设置之列。对某些工作负载，实测吞吐最大值出现在 N=11。",
-        "对 DSpark，num_speculative_tokens 设定每一轮投机所生成的候选 token 数量。在 vLLM 实验中，配置的完整 proposal 会全部提交给 target model 验证，因此 N=3 与 N=7 之类的取值应通过端到端吞吐进行对比。"
+        "在 DFlash 实验中，N=7经常处于吞吐较高的设置之列。对某些工作负载，实测吞吐最大值出现在 N=11。",
+        "对 DSpark，num_speculative_tokens 设定每一轮投机所生成的候选 token 数量。在 vLLM 实验中，配置的完整 proposal 会全部提交给 target model 验证，因此 N=3与 N=7之类的取值应通过端到端吞吐进行对比。"
       ]
     },
     {
@@ -702,7 +702,7 @@ DATA = {
       "title": "让扫描匹配工作负载",
       "paras": [
         "不同工作负载会产生不同的接受模式。",
-        "在 GSM8K 与 MATH500 的测量中，在测试的 sweep 范围内，中等或更长的 proposal 长度往往对应更高的实测吞吐。对于 Qwen3.5-122B-A10B 上的原生 MTP，实测吞吐随 N 增长至 N=7。对于 DFlash，较高的实测值常出现在 N=7 或 N=11。",
+        "在 GSM8K 与 MATH500的测量中，在测试的 sweep 范围内，中等或更长的 proposal 长度往往对应更高的实测吞吐。对于 Qwen3.5-122B-A10B 上的原生 MTP，实测吞吐随 N 增长至 N=7。对于 DFlash，较高的实测值常出现在 N=7或 N=11。",
         "对于 HumanEval 与 MBPP，中等 proposal 长度往往属于吞吐较高的配置。代码包含可预测的局部结构，但格式、标识符与实现选择可能导致原本合理的续写发生偏离。"
       ]
     },
@@ -778,7 +778,7 @@ DATA = {
       "paras": [
         "vLLM server 可运行 target model，并暴露所选 drafting 方法所需层的 hidden states。选择自定义 target layers 时，speculator 训练配置中也必须使用相同的层选择。",
         "采集的信息取决于方法：",
-        "EAGLE-3 使用所选 target model 层的 hidden states 进行自回归 drafting。[4]",
+        "EAGLE-3使用所选 target model 层的 hidden states 进行自回归 drafting。[4]",
         "DFlash 使用 target 模型的特征训练一个网络，并行预测未来多个位置的 token。[16]",
         "DSpark 在 DFlash 风格的 draft 网络上增加了轻量的顺序头和置信度头。[6]",
         "MTP 训练微调的是 target 模型自身的 MTP 组件，因此要求 target 模型本身已包含兼容的 MTP 层。[13]"
@@ -800,7 +800,7 @@ DATA = {
         "投机解码在 vLLM 中作为 draft-and-verify 方案用于 LLM（大语言模型）服务。draft 组件提出候选的未来 token，target 模型在提交任何 token 之前对该提案进行评估。",
         "共考察五种 draft 方法：native MTP、Gemma 4 MTP、EAGLE-3、DFlash 和 DSpark。它们的主要差异在于如何使用 target 模型的信息，以及候选 token 是串行生成、并行生成，还是通过并行预测与轻量级串行校正相结合的方式生成。",
         "实验覆盖选定的 Gemma、Qwen、MiniMax 和 Kimi 模型，运行于 AMD Instinct™ MI300X 和 MI355X GPU，使用 ROCm™ 软件平台。实测吞吐随 target 模型、draft checkpoint、工作负载、proposal 长度和服务配置的不同而变化。",
-        "在所测试的配置中，部分设置带来较小变化，或吞吐低于非投机解码基线，而若干模型-工作负载组合的吞吐比超过 2×。观测范围高端示例包括 gemma-4-26B-A4B-it 上 DFlash 的 2.87×、同一 target 上 Gemma 4 MTP 的 2.83×，以及 Kimi-K2.5 上 DFlash 的 2.68×。",
+        "在所测试的配置中，部分设置带来较小变化，或吞吐低于非投机解码基线，而若干模型-工作负载组合的吞吐比超过 2×。观测范围高端示例包括 gemma-4-26B-A4B-it 上 DFlash 的 2.87×、同一 target 上 Gemma 4 MTP 的 2.83×，以及 Kimi-K2.5上 DFlash 的 2.68×。",
         "Proposal 长度也是重要的实验变量。增加 num_speculative_tokens 在前几个设置下有时能提升吞吐，而更大的取值可能导致吞吐持平或下降。checkpoint 推荐值可作为起点，但在选择部署配置时，仍需针对代表性负载进行测量并参考 acceptance 指标。"
       ]
     },
@@ -809,7 +809,7 @@ DATA = {
       "title": "未来工作",
       "paras": [
         "后续基准测试可纳入非学习类方法，例如 n-gram speculation 与 suffix decoding，尤其适用于代码编辑、Agentic（智能体原生）循环等存在重复 token 模式的负载。",
-        "在并发度、prompt 与输出长度、batch size 以及采样设置上进行更广泛的评测，也有助于揭示 投机解码在不同服务条件下的表现。",
+        "在并发度、prompt 与输出长度、batch size 以及采样设置上进行更广泛的评测，也有助于揭示投机解码在不同服务条件下的表现。",
         "另一个有价值的方向是研究 speculator 训练数据如何影响代码、数学、对话、多语言 prompt、工具调用和结构化输出等场景下的 acceptance。这可为针对特定负载选择或训练 draft checkpoint 提供更明确的指导。",
         "最后，对 draft 生成、target 验证、KV cache 行为、graph 执行和调度进行更深入的 profiling（性能分析），有助于解释不同 target 模型与负载之间观察到的性能差异。"
       ]
@@ -820,7 +820,7 @@ DATA = {
       "paras": [
         "测量在 AMD Instinct™ MI300X 和 MI355X 平台上使用以下配置运行。",
         "Hardware 1：8× AMD Instinct™ MI300X GPU（gfx942），搭配 2× AMD EPYC™ 9654 96-Core Processor。",
-        "Hardware 2：8× AMD Instinct™ MI355X GPU（gfx950），搭配 2× AMD EPYC™ 9575F 64-Core processor。MiniMax-M3-MXFP8 实验使用该平台。",
+        "Hardware 2：8× AMD Instinct™ MI355X GPU（gfx950），搭配 2× AMD EPYC™ 9575F 64-Core processor。MiniMax-M3-MXFP8实验使用该平台。",
         "Ubuntu 22.04.5 LTS、ROCm/HIP runtime 7.2.53211、vLLM 0.23.1rc1.dev1120+g0f0f28b53、PyTorch 2.11.0+gitd0c8b1f、Transformers 5.13.1、Python 3.12.13。",
         "服务器制造商可能会采用不同的配置，从而产生不同的结果。性能可能因配置、软件、vLLM 版本以及是否使用最新驱动程序和优化而有所不同。"
       ]
@@ -829,7 +829,7 @@ DATA = {
   "conclusion": [
     "**① 加速来自一次 target 前向提交多个 token，而不是放宽判定标准。** 原模型始终是 target，draft 只提候选，验证从左到右进行，遇到第一个被拒 token 就停止并丢弃后续候选，输出行为与不投机时一致。",
     "**② 五种方法的分野在两点：draft 拿到哪些 target 信息，以及候选是串行还是并行起草。** native MTP 内建在模型里、Gemma 4 MTP 独立打包但共享 target 的 KV cache、EAGLE-3 融合三层 hidden states 自回归起草，DFlash 用 anchor 加 mask 一次并行预测整块，DSpark 再补一个轻量 Markov 头补回位置间的依赖。",
-    "**③ 部署上没有万能配置，调参要看接受行为。** 实测吞吐比从低于基线到 2.87× 都有，同一系列的不同模型（Qwen3.6-27B 与 35B-A3B）最优 N 都不一样；先跑通 checkpoint 支持的配置，再用逐位置接受率把 N 收到峰值，通常落在 4 到 7。",
+    "**③ 部署上没有万能配置，调参要看接受行为。** 实测吞吐比从低于基线到 2.87×都有，同一系列的不同模型（Qwen3.6-27B 与 35B-A3B）最优 N 都不一样；先跑通 checkpoint 支持的配置，再用位置级接受率把 N 收到峰值，通常落在 4 到 7。",
     "投机解码本质是用额外显存和 draft 计算，换每次 target 前向的产出 token 数。在 AMD Instinct + ROCm 上它已经跑通，真正决定收益的是把 N 和 draft checkpoint 压到目标工作负载的接受模式上，而不是照抄一个推荐值。"
   ],
   "reference_url": "https://vllm.ai/blog/2026-08-23-speculative-decoding-amd-gpus"

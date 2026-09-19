@@ -22,3 +22,4 @@
 
 创建时间: 2026-08-28（2026-09-19 按当前标准重新生成）
 来源: https://vllm.ai/blog/2026-08-23-speculative-decoding-amd-gpus
+| Step 4d-i: 传送门 | completed |

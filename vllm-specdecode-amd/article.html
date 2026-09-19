@@ -19,7 +19,7 @@
 
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">引言</h2>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">LLM（大语言模型）支持广泛的应用，但大规模服务需要精细优化。标准自回归解码是多数LLM服务系统采用的基线：模型生成一个token，将其追加到序列，再用更新后的序列生成下一个token。该过程简单可靠，但由于输出token必须严格按从左到右的顺序产生，服务循环每次仍只推进一个已提交token。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">投机解码（投机解码）[1] 在此基线上引入draft-and-verify机制。轻量级draft组件提出候选未来token，target model在候选被提交前对其验证。当多个draft token被接受时，系统可在单次target-model验证步骤中提交多个输出token，同时保持target model的输出行为不变。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">投机解码[1] 在此基线上引入draft-and-verify机制。轻量级draft组件提出候选未来token，target model在候选被提交前对其验证。当多个draft token被接受时，系统可在单次target-model验证步骤中提交多个输出token，同时保持target model的输出行为不变。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">以下说明投机解码在vLLM中的工作方式，并给出测试环境中的测量结果。先回顾自回归解码基线与draft-and-verify流程，再考察五种投机drafting方法：native MTP、Gemma 4 MTP、EAGLE-3、DFlash和DSpark。这些方法的差异在于draft组件如何从target model获取信息，以及候选token是串行、自回归、并行还是混合方式生成。最后给出在本环境中启用所测方法的方式、基于ROCm™ 开放软件平台在AMD Instinct™ MI300X和MI355X GPU上的实验测量结果，并讨论实际调优与可观测性方面的注意事项。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">自回归解码基线</h2>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在标准的自回归解码中，每个decode step产生并提交一个新token。例如，生成四个输出token需要四个顺序执行的decode step：</p>
@@ -34,7 +34,7 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">该过程包含两部分：</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Draft：提出若干个候选的未来token。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Verify：使用target model校验这些候选。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在每轮 投机解码 中（见下图），一个轻量的draft组件提出一个或多个未来token。这些token仅为候选，不会被立即提交。随后target model在一次验证pass中评估候选token序列。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在每轮投机解码中（见下图），一个轻量的draft组件提出一个或多个未来token。这些token仅为候选，不会被立即提交。随后target model在一次验证pass中评估候选token序列。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">验证从左到右进行。每个draft token使用target model在对应位置的结果进行校验。被接受的token提交到输出序列。当某个draft token被拒绝时，同一提案中后续的候选不再被接受。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">如果某个draft token被拒绝，则由target model给出下一个token。其余draft token被丢弃，生成从更新后的序列继续。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">从概念上讲，标准自回归解码的推进方式如下：</p>
@@ -64,7 +64,7 @@
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig09.png"></figure>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">五种起草方法如何工作</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">所有 投机解码方法遵循相同的整体draft-and-verify流程，但在draft组件的设计方式及其与target model的协作方式上存在差异。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">所有投机解码方法遵循相同的整体draft-and-verify流程，但在draft组件的设计方式及其与target model的协作方式上存在差异。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">主要差异在于：</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">从target model获取的信息类型。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这些信息如何融入drafting过程。</p>
@@ -184,7 +184,7 @@
 </tbody>
 </table>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">在vLLM中启用投机解码</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在vLLM中，投机解码（投机解码）通过 --speculative-config配置。主要差异在于method名称、是否需要单独的draft checkpoint，以及请求的候选token数量。当前vLLM支持mtp、eagle3、dflash和dspark作为method取值。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在vLLM中，投机解码通过 --speculative-config配置。主要差异在于method名称、是否需要单独的draft checkpoint，以及请求的候选token数量。当前vLLM支持mtp、eagle3、dflash和dspark作为method取值。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于原生MTP，draft组件随target模型一同提供，因此省略model字段：</p>
 <pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code>vllm<span style="color: #F8F8F2">&nbsp;</span>serve<span style="color: #F8F8F2">&nbsp;</span>&lt;target-model&gt;<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>--speculative-config<span style="color: #F8F8F2">&nbsp;</span><span style="color: #E6DB74">&#39;{</span><br/><span style="color: #E6DB74">&nbsp;&nbsp;&nbsp;&nbsp;&quot;method&quot;:&nbsp;&quot;mtp&quot;,</span><br/><span style="color: #E6DB74">&nbsp;&nbsp;&nbsp;&nbsp;&quot;num_speculative_tokens&quot;:&nbsp;&lt;N&gt;</span><br/><span style="color: #E6DB74">&nbsp;&nbsp;}&#39;</span></code></pre>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于Gemma 4 MTP、EAGLE-3、DFlash和DSpark，model字段通常指向针对target模型训练的checkpoint：</p>
@@ -225,7 +225,7 @@
 </tbody>
 </table>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">实验设置与主要观测</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">启用 投机解码 后，实际问题是额外的drafting工作能否提升端到端服务性能。候选token不必在每个位置都正确，因为target model会在提交前对其评估。因此性能取决于有多少候选token被接受，以及节省的target-model解码工作是否超过drafting与验证的成本。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">启用投机解码后，实际问题是额外的drafting工作能否提升端到端服务性能。候选token不必在每个位置都正确，因为target model会在提交前对其评估。因此性能取决于有多少候选token被接受，以及节省的target-model解码工作是否超过drafting与验证的成本。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们使用基于任务的基准测试而非随机token序列来评估模型质量与服务性能。接受行为取决于实际模型输出的结构和可预测性，因此基于任务的prompt能更真实地反映实际性能。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">主要性能指标如下：</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">输出token吞吐，以及相对非投机基线的加速比。</p>
@@ -233,7 +233,7 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">相对非投机基线的模型质量。</p>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">模型与实验覆盖</h3>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">实验覆盖五个投机起草（speculative drafting）方法，涉及多个target模型系列。对勾表示该target-方法组合已有基准测试结果；短横线表示该组合未纳入当前实验。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">该表汇总了实验中包含的target-method组合，并展示了 投机解码在不同模型、负载和proposal长度下的表现。由于模型架构、激活参数量、draft组件规模、负载以及服务条件都会影响性能，每项结果应结合其测试配置来解读。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">该表汇总了实验中包含的target-method组合，并展示了投机解码在不同模型、负载和proposal长度下的表现。由于模型架构、激活参数量、draft组件规模、负载以及服务条件都会影响性能，每项结果应结合其测试配置来解读。</p>
 <table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
 <thead style="font-weight: bold;color: #3f3f3f;">
 <tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">目标模型</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">Native MTP</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">Gemma 4 MTP</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">EAGLE-3</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">DFlash</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">DSpark</th></tr>
@@ -254,16 +254,16 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">吞吐方面，我们以标准自回归基线为参照测量每秒生成的token数，并扫描speculative token数量，以研究投机深度对端到端服务吞吐的影响。</p>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">主要观测</h3>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">测量结果随target模型、draft方法、负载和proposal长度而变化。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于gemma-4-26B-A4B-it，在测试扫描范围内测得的最高吞吐比分别为：Gemma 4 MTP在GSM8K和MBPP上达到2.74× 和2.62×，DFlash在MATH500和HumanEval上达到2.87× 和2.79×。EAGLE-3在四个数据集上的测量结果为2.11× 至2.27×。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于gemma-4-26B-A4B-it，在测试扫描范围内测得的最高吞吐比分别为：Gemma 4 MTP在GSM8K和MBPP上达到2.74×和2.62×，DFlash在MATH500和HumanEval上达到2.87×和2.79×。EAGLE-3在四个数据集上的测量结果为2.11×至2.27×。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于gemma-4-31B-it，Gemma 4 MTP在GSM8K上达到2.00×，在MBPP上达到1.99×；DFlash在MATH500上达到2.34×，在HumanEval上达到2.05×。EAGLE-3与DSpark在四个评测数据集上也均高于基线。与最大实测吞吐对应的proposal length随workload而变化。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于Qwen3-8B，DSpark的结果从MATH500上的1.15× 到GSM8K上的1.63×。DFlash的结果范围为1.08× 至1.27×。EAGLE-3在GSM8K、HumanEval和MBPP上高于基线，而在MATH500上的最大实测值仍低于基线。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于Qwen3-8B，DSpark的结果从MATH500上的1.15×到GSM8K上的1.63×。DFlash的结果范围为1.08×至1.27×。EAGLE-3在GSM8K、HumanEval和MBPP上高于基线，而在MATH500上的最大实测值仍低于基线。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于Qwen3.5-27B、Qwen3.5-122B-A10B和Qwen3.6-27B，在测试范围内测得的最大native-MTP值均高于对应的最大DFlash值。该组中最高倍率为Qwen3.5-122B-A10B在MATH500上的2.20×。与最大实测吞吐对应的native-MTP proposal length为N=4至N=7，取决于模型与数据集。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于Qwen3.6-35B-A3B，DFlash的结果范围为1.77× 至2.06×，最大值在四个数据集上均出现在N=7。Native-MTP的结果范围为1.28× 至1.49×，最大值出现在N=6。与Qwen3.6-27B的结果差异表明，同一系列内不同模型的表现可能不同。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于Qwen3.6-35B-A3B，DFlash的结果范围为1.77×至2.06×，最大值在四个数据集上均出现在N=7。Native-MTP的结果范围为1.28×至1.49×，最大值出现在N=6。与Qwen3.6-27B的结果差异表明，同一系列内不同模型的表现可能不同。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对于MiniMax-M3-MXFP8，EAGLE-3在N=4时于HumanEval上达到2.09×。对于Kimi-K2.5，EAGLE-3最高达到2.33×，DFlash最高达到2.68×。在测试范围内，EAGLE-3的最大值通常出现在N=4，而DFlash的最大值出现在N=7。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在各项实验中，与最大实测吞吐对应的proposal length并非常量。对于串行方法，吞吐通常随N的前几个取值上升后进入平台期。对于DFlash与DSpark，N=7常位于较高吞吐的设置之列，而更大的取值并未持续提升吞吐。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这些观察结果反映了本研究所使用的硬件、软件、target model、draft checkpoint、workload以及sweep设置。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">调参考虑</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">投机解码 应被视为一种运行时优化，而非对所有workload都同样有效的固定设置。与最高吞吐对应的num_speculative_tokens取值取决于有多少proposed token被接受，以及所避免的target-model decode工作量是否超过drafting与verification的开销。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">投机解码应被视为一种运行时优化，而非对所有workload都同样有效的固定设置。与最高吞吐对应的num_speculative_tokens取值取决于有多少proposed token被接受，以及所避免的target-model decode工作量是否超过drafting与verification的开销。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">因此可观测性很重要。model-card推荐配置或示例配置可作为起点，但最终设置应基于代表性workload和端到端测量来确定。有用的信号包括吞吐、平均接受长度、整体接受率以及逐位置接受率。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">更大的proposal window为系统提供了在一次verification pass中提交多个token的更多机会。然而，在较靠后的draft位置上接受率可能下降。此时，额外的候选贡献甚微，却仍增加drafting与verification的工作量，导致吞吐趋于平缓甚至回退。</p>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">从受支持的配置入手</h3>
@@ -352,7 +352,7 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Proposal长度也是重要的实验变量。增加num_speculative_tokens在前几个设置下有时能提升吞吐，而更大的取值可能导致吞吐持平或下降。checkpoint推荐值可作为起点，但在选择部署配置时，仍需针对代表性负载进行测量并参考acceptance指标。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">未来工作</h2>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">后续基准测试可纳入非学习类方法，例如n-gram speculation与suffix decoding，尤其适用于代码编辑、Agentic（智能体原生）循环等存在重复token模式的负载。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在并发度、prompt与输出长度、batch size以及采样设置上进行更广泛的评测，也有助于揭示 投机解码在不同服务条件下的表现。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在并发度、prompt与输出长度、batch size以及采样设置上进行更广泛的评测，也有助于揭示投机解码在不同服务条件下的表现。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">另一个有价值的方向是研究speculator训练数据如何影响代码、数学、对话、多语言prompt、工具调用和结构化输出等场景下的acceptance。这可为针对特定负载选择或训练draft checkpoint提供更明确的指导。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最后，对draft生成、target验证、KV cache行为、graph执行和调度进行更深入的profiling（性能分析），有助于解释不同target模型与负载之间观察到的性能差异。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">实验环境与配置</h2>
@@ -369,7 +369,7 @@
 <strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
 </div>
 <div style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-<strong>① 加速来自一次target前向提交多个token，而不是放宽判定标准。</strong> 原模型始终是target，draft只提候选，验证从左到右进行，遇到第一个被拒token就停止并丢弃后续候选，输出行为与不投机时一致。<br  /><br  /><strong>② 五种方法的分野在两点：draft拿到哪些target信息，以及候选是串行还是并行起草。</strong> native MTP内建在模型里、Gemma 4 MTP独立打包但共享target的KV cache、EAGLE-3融合三层hidden states自回归起草，DFlash用anchor加mask一次并行预测整块，DSpark再补一个轻量Markov头补回位置间的依赖。<br  /><br  /><strong>③ 部署上没有万能配置，调参要看接受行为。</strong> 实测吞吐比从低于基线到2.87× 都有，同一系列的不同模型（Qwen3.6-27B与35B-A3B）最优N都不一样；先跑通checkpoint支持的配置，再用逐位置接受率把N收到峰值，通常落在4到7。<br  /><br  />投机解码本质是用额外显存和draft计算，换每次target前向的产出token数。在AMD Instinct + ROCm上它已经跑通，真正决定收益的是把N和draft checkpoint压到目标工作负载的接受模式上，而不是照抄一个推荐值。</div>
+<strong>① 加速来自一次target前向提交多个token，而不是放宽判定标准。</strong> 原模型始终是target，draft只提候选，验证从左到右进行，遇到第一个被拒token就停止并丢弃后续候选，输出行为与不投机时一致。<br  /><br  /><strong>② 五种方法的分野在两点：draft拿到哪些target信息，以及候选是串行还是并行起草。</strong> native MTP内建在模型里、Gemma 4 MTP独立打包但共享target的KV cache、EAGLE-3融合三层hidden states自回归起草，DFlash用anchor加mask一次并行预测整块，DSpark再补一个轻量Markov头补回位置间的依赖。<br  /><br  /><strong>③ 部署上没有万能配置，调参要看接受行为。</strong> 实测吞吐比从低于基线到2.87×都有，同一系列的不同模型（Qwen3.6-27B与35B-A3B）最优N都不一样；先跑通checkpoint支持的配置，再用位置级接受率把N收到峰值，通常落在4到7。<br  /><br  />投机解码本质是用额外显存和draft计算，换每次target前向的产出token数。在AMD Instinct + ROCm上它已经跑通，真正决定收益的是把N和draft checkpoint压到目标工作负载的接受模式上，而不是照抄一个推荐值。</div>
 </div>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
@@ -377,14 +377,14 @@
 <div style="text-align:center;">
 <span class="portal-title">【传送门】</span>
 <div style="text-align:left;display:inline-block;" class="portal-links">
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HPaDwcT_4Rw5ty7LwDG4Ng" target="_blank" data-linktype="2">Torch Profiler在Trace里分析性能瓶颈: 剖析SGLang LLM推理</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/YHmkt8EHFGm-HeflWCsB2w" target="_blank" data-linktype="2">英伟达Kernel Agent: 编译器与算子调优Agent的协同设计</a><br>
-<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/4aEYa-5J2Ir82V_1_9anDA" target="_blank" data-linktype="2">AI芯片架构全景: 从NVIDIA到Groq的六条设计路线</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
 <a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/YHmkt8EHFGm-HeflWCsB2w" target="_blank" data-linktype="2">英伟达Kernel Agent: 编译器与算子调优Agent的协同设计</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
 </div>
 </div>
 
