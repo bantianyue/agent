@@ -1,34 +1,11 @@
-﻿import re, os, json
-
-BASE = "_src_tmp/"
-FILES = ["abs.tex","body/intro.tex","body/bg.tex","body/overview-v3.tex","body/design-v2.tex","body/eval.tex","body/related.tex","body/concl.tex"]
-
-raw = {}
-for f in FILES:
-    raw[f] = open(BASE+f, encoding="utf-8", errors="ignore").read()
-
-# ---- 1. label -> number maps (document order) ----
-sec_map, fig_map, alg_map = {}, {}, {}
-sec_n, sub_n, fig_n, alg_n = 0, 0, 0, 0
-for f in FILES:
-    for m in re.finditer(r"\\(section|subsection|begin\{figure|begin\{algorithm)(\*)?\}", raw[f]):
-        pass
-for f in FILES:
-    t = re.sub(r"(?m)^\s*%.*$", "", raw[f])
-    for m in re.finditer(r"\\section\*?\{[^}]*\}((?:\s*\\label\{[^}]*\})?)", t):
-        sec_n += 1; sub_n = 0
-        lab = re.search(r"\\label\{([^}]*)\}", m.group(1) or "")
-        if lab: sec_map[lab.group(1)] = str(sec_n)
-    for m in re.finditer(r"\\subsection\*?\{[^}]*\}((?:\s*\\label\{[^}]*\})?)", t):
-        sub_n += 1
-        lab = re.search(r"\\label\{([^}]*)\}", m.group(1) or "")
-        if lab: sec_map[lab.group(1)] = "%d.%d" % (sec_n, sub_n)
-    for m in re.finditer(r"\\begin\{figure\}(.*?)\\end\{figure\}", t, re.S):
-        fig_n += 1
-        lab = re.search(r"\\label\{([^}]*)\}", m.group(1))
-        if lab: fig_map[lab.group(1)] = str(fig_n)
-    for m in re.finditer(r"\\label\{(alg:[^}]*)\}", t):
-        alg_n += 1; alg_map[m.group(1)] = str(alg_n)
-json.dump({"sec":sec_map,"fig":fig_map,"alg":alg_map}, open("_labels.json","w",encoding="utf-8"), ensure_ascii=False, indent=1)
-print("figs:",fig_n,"secs:",sec_n,"algs:",alg_n)
-print(json.dumps(fig_map, ensure_ascii=False))
+﻿import sys, importlib.util, json
+spec = importlib.util.spec_from_file_location("llm_utils", r"C:\Users\twfehh7\.codex\skills\wechat-article-sop\scripts\llm_utils.py")
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+try:
+    cfg = m.load_llm_config()
+    print("cfg keys:", list(cfg.keys()))
+    print("base_url:", cfg.get("base_url"), "model:", cfg.get("model"))
+except Exception as e:
+    print("cfg err", e)
+r = m.translate_batch([{"id":1,"type":"text","content":"Rollout dominates the training time in LLM post-training."}], batch_size=1)
+print(r)
