@@ -72,14 +72,17 @@ def main():
             continue
         ordered.append(el)
 
-    lead_pool, sections = [], []
+    lead_pool, sections, summary_paras = [], [], []
     cur = None
     pre_idx = 0
     drop_roadmap_list = False
     seen_first_h2 = False
+    in_summary = False
 
     def add_para(html):
-        if cur is not None:
+        if in_summary:
+            summary_paras.append(html)
+        elif cur is not None:
             cur["paras"].append(html)
         else:
             lead_pool.append(html)
@@ -97,6 +100,11 @@ def main():
             # 「其他资源」起（含）之后是源站附录/免责声明，整块丢弃
             if text.startswith("其他资源") or text.startswith("免责声明"):
                 break
+            # 原文自带的「总结」＝源文结论：按 SOP 去掉原标题，内容进结语暖灰卡
+            if text.startswith("总结") or text.startswith("小结"):
+                cur = None
+                in_summary = True
+                continue
             if text.startswith("分区冲突"):
                 text = "第二部分：分区冲突"
             cur = {"type": "h2", "title": text, "paras": [], "fig_after": {}}
@@ -183,6 +191,11 @@ def main():
     if pre_idx != len(CODE_LANGS):
         print("⚠️ 代码块数 %d != 语言表 %d" % (pre_idx, len(CODE_LANGS)))
 
+    # fig01.webp 是原文标题下方的整篇题图（1012x675 横幅）。标准模板的 lead 段不支持配图，
+    # 最近的位置 = 首个 h2 章节第一段之后（正文最靠前），保证「17 图一张不少」。
+    hero = {"src": "fig01.webp", "caption": ""}
+    sections[0]["fig_after"].setdefault("0", []).insert(0, hero)
+
     lead = lead_pool
     data = {
         "title": TITLE,
@@ -194,9 +207,10 @@ def main():
         "lead": lead,
         "sections": sections,
         "conclusion": [
-            "在 AMD Instinct™ MI450 GPU 上，有两个 LDS 效应会悄然限制 kernel 吞吐。transposed LDS load：ds_load_tr 的 cooperative-transpose 指令让每个 lane 发出一次宽读，由硬件把数据重分布成 matrix core 期望的 layout；编译器不模式匹配转置，而是把两侧表示为 linear layout 并通过 left division 判定可用性。",
-            "partition conflict：为什么到达同一物理 LDS partition 的 cross-pair warp 会串行化，对 WMMA ctaLayout 做 swizzle 并用 PartitionedSharedLayout 固定 piece 归属，再加上 partition 感知分配器与循环不变的 base-pointer 求解，以几乎零运行时代价让这种分离落到物理层面。一个只读 LDS 的微基准测试给出收益：冲突解决后 LDS 带宽提升 1.65 倍。",
-            "**这是可以直接套用的判断顺序**：先看 layout 是否匹配指令（能否用 ds_load_tr），再看物理分区有没有被拆开（ctaLayout、PartitionedSharedLayout、分配器），最后才轮到调参。LDS 只是 global memory 到 matrix core 之间的一站，但这一站决定了 kernel 能不能摸到理论带宽。",
+            p for p in summary_paras
+            if not re.search(r"我们计划后续|我们计划|后续带来更多", p)
+        ] + [
+            "**这是可以直接套用的判断顺序**：先看 layout 是否匹配指令（能否用 ds_load_tr），再看物理分区有没有被拆开（ctaLayout、PartitionedSharedLayout、分配器），最后才轮到调参。LDS 只是 global memory 到 matrix core 之间的一站，但这一站决定了 kernel 能不能摸到理论带宽；gfx1250 上的 layout 优化还在快速演进，值得持续跟进编译器侧的 lowering 变化。",
         ],
         "reference_url": URL,
     }
