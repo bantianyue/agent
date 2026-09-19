@@ -1,0 +1,346 @@
+[10pt,sigplan,letterpaper,twocolumn]article [10pt,nocopyright]sigmin
+
+[hyphens]url [breaklinks,colorlinks]hyperref [usenames,dvipsnames]xcolor [toc,page]appendix [normalem]ulem
+
+[T1]fontenc [labelfont=bf,font=normal,skip=1pt]caption [export]adjustbox [linesnumbered,vlined,boxed,commentsnumbered]algorithm2e [1]
+
+[normalem]ulem
+
+[hang,flushmargin]footmisc
+
+[compact]titlesec * * *
+
+[figure]labelfont=bf,name= [table]labelfont=bf,name=
+
+, identifierstyle=, commentstyle=[RGB]0,96,96, stringstyle=[RGB]128,0,0, showstringspaces=false
+
+, citecolor=blue!50!black, urlcolor=blue!80!black
+
+[1]Figure~ [1]Section~ [1]Algorithm~
+
+[1] [1] [1]
+
+[1] [1] [1][rgb]0.7,0,0.8#1 [1][rgb]1,0.3,1#1
+
+[2][: ] [1] [1] [1] [1][rgb]0.1,0.7,0.5YF: #1 [1]
+
+[1] [1] [1] [1]
+
+[1] \[-1.8ex]
+
+*[1] [baseline=(C.base)] [draw,rectangle,fill=blue,inner sep=1.5pt](C) ;
+
+[1,2]Rongxin Cheng [2]Kai Zhou [1]Xingda Wei). [1]Siyuan Liu [1,2]Mingcong Han [3]Mingjing Ai [2]Yeju Zhou [2]Baoquan Zhong [2]Wencong Xiao [1]Rong Chen [1]Haibo Chen
+
+[1]Institute of Parallel and Distributed Systems, Shanghai Jiao Tong University [2]ByteDance Seed [3]Unaffiliated
+
+Rollout dominates the training time in large language model (LLM) post-training, where the trained model is used to generate tokens given a batch of prompts. This work, , achieves fast rollout with speculative decoding that deploys a fast draft path to accelerate the unparallelizable generation, while the correctness is guaranteed by fast parallel verification of the outputs with the original model. addresses two foundational challenges that hinder speculation efficiency: (1) a method that overcomes the computation inefficiency issue when executing speculative decoding with relative large per-worker batch size--- a common configuration in training but unfriendly to speculation, and (2) a method that selects and combines different draft methods according to the rollout progress to approximate the optimal draft method even when the best one is unknown a priori. Extensive evaluations on production traces show that accelerates mean rollout speed by 2.0--2.4,$$, with up to 2.7,$$ speedup, over common post-training baselines. The results are consistent across both dense and MoE models and across different RL algorithms. 	Notably, is 1.1--2.6,$$ faster 	compared to vanilla speculative rollout in different traces. The accelerated rollout achieves 1.4--2.3,$$ faster end-to-end training time.
+
+## Introduction
+
+Large foundational models like LLMs have demonstrated remarkable accuracy across a wide range of tasks including writing~, coding~, and many others~. Post-training these models with reinforcement learning (RL) has become a key pillar in the training pipeline to further enhance model capabilities in challenging reasoning tasks~.
+
+Rollout is a key and performance-dominant phase in post-training (): at each step, the system feeds the model with a batch of prompts representing target problems (e.g., math or coding problems) to be solved. The model then generates tokens for each prompt in an attempt to solve them. When rollout finishes, the generated tokens are evaluated and the model is updated accordingly. Rollout naturally parallelizes the batch across multiple workers.
+
+). , Rollout accounts for 75--80% of the post-training time. This lengthy and inefficient execution is primarily due to long tails in generation and is further exacerbated by idle GPU time, caused by waiting for the slowest worker to finish. The long tail stems from difficulty variation, with some problems requiring more tokens than others to solve. Therefore, one worker may finish its assigned prompts quickly, while another takes much longer to complete. Importantly, waiting for all requests before updating the model is necessary to ensure rapid and stable training convergence ~.
+
+Given this hard constraint, we ask a specific but important question: ?
+
+Existing solutions fall into two categories, neither of which adequately addresses the issue given the recent trend of ever-growing generation length as LLMs are trained to solve more complex problems~. The first category is , which utilizes idle GPUs in the rollout for other phases in the training pipeline~. It has been proven effective in short-context RL training but less effective in long-tailed training because it does not accelerate rollout directly, yielding 1.1,$$ average speedup. The second category leverages , to accelerate post-training~. Unfortunately, the speedup is still limited (e.g., up to 1.2,$$ with doubled GPUs) because LLM generation is memory-bound and thus cannot fully utilize the extra computation power.
+
+We present , a fast rollout system that retrofits speculative decoding~---a common technique for accelerating LLM inference---to LLM post-training. Specifically, speculative decoding employs a fast path for sequential generation (decoding): First, a ``draft'' model much smaller than the trained one generates a sequence of $n$ draft tokens. Then, the trained model verifies these tokens. Once accepted, these tokens are treated as generated by the trained model. The rationale is that verifying $n$ tokens is typically faster than generating them---although using the same model---because verification processes multiple tokens in parallel.
+
+It is important to note that speculative decoding can provide lossless generation as the original decoding via exact token matching~. Moreover, the drafters are available at post-training~: pre-training pipeline generates both small and large models, following established scaling practices~. Besides, n-gram-based drafters are model-free~.
+
+While intuitive and effective in inference, applying vanilla speculative decoding to rollout yields only 10,% speedup at worst on common production configurations () due to the following challenges. We further address them with two contributions.
+
+). , First, the effectiveness of speculative decoding depends mainly on the verification overhead, which is proportional to the per-worker batch size. However, on common training configurations, e.g., per-worker batch size 128, (see (a)), the verification could become slower than generation due to reaching the GPU computation limit, also noticed by recent works~. Although the batch size gradually decreases during rollout as prompts finish, it remains relatively large () for a considerable portion of the rollout time (), so we need efficient execution on batch configurations that are unfriendly to speculation.
+
+Our key observation is that there exist opportunities to accelerate verification because vanilla speculative execution limits the GPU time provisioned to (compute-hungry) verification due to a coupled draft-$n$-then-verify dependency: the verifier must wait for GPU-underutilized drafter jobs. Such a dependency is necessary to ensure high speculation efficiency for (required in inference~) because without it, the drafter could further waste all $[n,...)$ tokens if verification rejects one token in $[1,n]$. However, such a dependency is overly conservative for rollout where only the batch completion time matters, so trading off a few requests to accelerate others is beneficial. Based on this, we propose decoupled speculation to relax the dependency between draft and verification. The drafter can continue drafting without waiting for verification to finish, thereby allowing subsequent verifications to start earlier to maximize GPU time provisioned to verification. The decoupling comes at the cost of decreased acceptance rate due to more in-flight unverified tokens. Fortunately, many requests only have a slightly decreased acceptance rate, so the computation gain offsets the acceptance loss. Moreover, we further propose a feedback-based draft window mechanism to dynamically minimize wasted tokens due to such aggressive drafting via online reconfiguration.
+
+). , Second, speculative decoding has multiple candidate draft methods, and it is a common practice to select a single drafting method for all requests based on profiling or experience~. However, we found in rollout that different requests suit different draft methods, so using one fixed method might lead to inefficient speculation for stragglers. However, it is challenging to select the optimal one for all requests because for each request, the optimal method not only depends on how fast the drafter is, but also on the acceptance rate of verification. The latter is unknown in advance as it depends on the model output. Meanwhile, it is impractical to run multiple draft methods for each request as it requires proportional extra verifiers and thus extra GPUs.
+
+We propose Fastest-of-N speculation that approximates the best draft methods for all requests with the following three techniques. First, we propose a new abstraction called that establishes a mapping from various acceptance rates to speedup given a pool of draft methods, which can be constructed offline. Given the ladder, at the beginning of rollout, we select one estimated fastest draft method using the average acceptance rate of all requests profiled so far. The rationale is that even though each requests' acceptance rate varies significantly, the average acceptance rate over a (large) batch of requests is statistically stable~. Thus, the selected draft method is likely to be close to the optimal for the batch. Finally, when the batch size decreases during rollout and the initial selection becomes suboptimal, we utilize the freed GPUs from finished workers to launch more draft methods in parallel for long-tailed requests, and the request finishes when the fastest draft method generates the end token (EOS) that is accepted by the verifier. Running multiple draft methods in parallel increases the likelihood of selecting the fastest method with unknown acceptance rates, while utilizing the idle GPUs avoids extra GPU usage.
+
+preserves the exact rollout process for any training algorithm, so algorithm designers can seamlessly use it without worrying about potential accuracy loss. We built on veRL~, a state-of-the-art post-training framework. is easy to integrate into other training frameworks, as it serves as a drop-in replacement for the inference component of any post-training pipeline, without requiring changes to the training logic. Extensive evaluations show that on various real-world training traces and common post-training algorithms including GRPO~, DAPO~, and PPO~ , compared to the state-of-the-art solutions like veRL and RLHFuse, accelerates the end-to-end training time by 1.4--2.3,$$. Also, we are up to 2.6,$$ faster than vanilla speculative rollout baselines in different traces.
+
+## Background and Motivation
+
+## LLM post-training
+
+\[0pt] \[-20pt]
+
+Large Language Models (LLMs) generate responses (termed ) through and phases. The prefill phase processes the initial input (termed ) to generate the first token. The decode phase then iteratively generates subsequent tokens in an auto-regressive fashion by combining previous output tokens with the original input as the new input. The decode phase terminates upon generating an end-of-sequence token.
+
+Leading LLMs are post-trained with reinforcement learning (RL) with multiple steps of execution, where each step follows an identical three phases~:
+
+The process treats the trained model as actor and generates tokens from a sampled batch of pre-defined prompts using LLM decoding. The tokens are used to solve specific tasks like math problems. To accelerate rollout, the sampled batch is divided into smaller micro-batches ( to indicate micro-batch without loss of generality. ) and processed concurrently by multiple rollout workers. Each worker deploys the model on one or more GPUs using model parallelism if necessary~.
+
+Two aspects regarding rollout batch need to be noted. First, to improve efficiency, production RL training applies a relatively large rollout batch size per step to find sufficient positive rewards~, e.g., a typical 32B task sets the per-step total batch size to 8,K~. Second, each prompt is typically seen only once or twice (), limiting the effectiveness of n-gram-based methods like experience replay ~.
+
+In the prepare phase, the rollout results are fed into a set of judgers~ (e.g., a separate reward model) to generate rewards~, which are the arithmetic signals that guide the parameter optimization. These judgers are lightweight; for example, the reward models only compute a forward pass, rather than auto-regressive generation, so the time required is negligible in a training step.
+
+Given the signals from the prepare phase, the learning phase calculates the loss and updates the LLM parameters with a backward pass. The updated parameters are then used in the next rollout step.
+
+\[0pt] and (b) the training latency of various steps in DAPO-32B-20K training trace (detailed setups described in ). \[-5pt]
+
+## Analysis of post-training and current solutions
+
+\[0pt] \[-15pt]
+
+(a) analyzes the contribution of total post-training time in typical training tasks: rollout contributes 70--80,% of the total training time. Since post-training could last for days on hundreds of thousands of GPUs, accelerating rollout is critical to reducing the overall training cost.
+
+There exists significant space for improvement for rollout because many GPUs are idle during the rollout phase due to the long-generation tail problem. (a) shows the GPU bubble in long-tailed rollout: on a DAPO-32B-20K trace, we observed averagely 50,% of the total GPU time is wasted on waiting for the slowest worker to finish. Rollout time differs significantly across workers even with the same per-worker batch size, because the number of tokens required to solve different tasks varies significantly, and the exact number is hard to predict in advance as they are determined by the LLM outputs. Moreover, the waste increases as training progresses because as the model becomes "smarter", it tends to generate more tokens to solve particular tasks~.
+
+An intuitive solution to reduce wasted GPU time is to overlap other phases with the current rollout: As shown in (a), representative solutions like RLHFuse~ utilize the idle workers to execute the prepare and learn phases of finished batches (e.g., batch ), overlapping these phases from fast workers with the rollout of slower workers. While such an overlap cannot accelerate the rollout phase, which is bottlenecked by the slowest worker, it reduces the end-to-end training time because once the slowest rollout finishes, more GPUs can participate in accelerating the remaining phases of the slowest batch (e.g., batch ).
+
+However, the speedup from overlapping is limited because the accelerated prepare and learn phases only contribute a small portion of the overall training time ( (a)). As a result, RLHFuse only accelerates post-training by 3,% in traces with long response budget, with GPU time still wasted, as shown in (b).
+
+Another intuitive solution is to dynamically add more computation resources to accelerate the long-tailed workers: as shown in (b), once a rollout worker finishes its assigned batch (e.g., batch ), it can help accelerate the generation of unfinished batches (e.g., batch ) using parallel LLM generation techniques like sequence parallelism~. Moreover, current works~ aggressively add more GPUs (e.g., by allocating spot instances) to accelerate the slow rollout workers without waiting for more GPUs to become idle. In our example, three workers now process the rollout of batch . Unfortunately, as shown in (b), even if we provision 2,$$ GPUs for rollout, the end-to-end training time is only improved by 1.2--1.3,$$. The limited speedup is rooted in the sequential, memory-bound nature of rollout: tokens must be generated one-by-one, leaving little room for tensor or sequence parallelism~ due to the extra communication overhead. Moreover, data and pipeline parallelism can hardly accelerate when memory-bound.
+
+. We seek an algorithm-agnostic system solution for fast rollout.
+
+## Design Rationale and System Overview
+
+\[2pt] \[-15pt]
+
+~. It is a common technique to accelerate sequential LLM generation: As detailed in (a), the original generation iteratively generates tokens for the current batch using the model being trained. With speculative decoding (b), we first generate a sequence of tokens using a fast draft method, e.g., with a smaller model, as detailed in . The drafted tokens are then verified by the trained model before being accepted as the generated tokens.
+
+Since the verification can be performed on multiple tokens in parallel, its time is similar to or less than that of generating a single token if GPU computation is not the bottleneck. Thus, if tokens are accepted, speculative decoding is much faster than the original generation, as shown in the right half of (b). On the other hand, if the verification rejects the drafted tokens, e.g., the 5$^th$ token for request 3 in our example, the rejected token and draft tokens after it, e.g., tokens 5--6, will be discarded, and the drafter starts from token 6---as the verification will provide a correct 5$^th$ token.
+
+While intuitive, we found adopting state-of-the-art speculative decoding techniques in rollout results in limited speedup, because the speculation verification is inefficient on per-worker batch sizes common in training (see (a)). (a) shows the distribution of per-worker batch sizes collected from production post-training jobs, and (b) compares the time of generation at most 4,096 tokens using speculative decoding and the original generation on a Qwen2.5-32B model. We can see that for common per-worker batch sizes (e.g., 128), speculative decoding brings no or negative gain. The reason is that the verification time increases more significantly with the increased request batch size than others, as shown in (d), because verification introduces a larger token batch than original generation.
+
+\[0pt] checkpoint. \[-5pt]
+
+One may notice that the per-worker batch size decreases during rollout as more requests finish. However, in at least 20% of the rollout time, the batch size is relatively large in our DAPO-32B-20K trace (see ), which still calls for efficient speculative decoding acceleration. In training, even a tiny acceleration matters due to the potential of saving many GPU hours.
+
+). , As we have mentioned in the introduction, we decouple the dependency between drafting and verification, which allows us to fully utilize GPUs for speculative decoding. As shown in (c), unlike traditional coupled execution where the drafter must wait for the verifier, we (1) distribute the drafter and verifier to separate GPUs and (2) allow the drafter to aggressively continue without waiting for the verifier. Such an execution scheme provides more GPU time to the verifier because we only need to allocate a few GPUs for the drafter to avoid many GPU executions being GPU-underutilized during drafting. Note that for the same set of GPUs, decoupled execution increases the per-worker batch size for the verifier: in our example, the batch size is doubled. This does not offset the gain brought by decoupling because verification with a 2,$$ batch (from 128 to 256) only incurs a 1.4,$$ higher latency (as shown in (b)). Besides, our placement method further minimizes the cost by configuring an appropriate parallelism that distributes the verification across more GPUs.
+
+Decoupled speculative decoding faces the challenge of wasting more GPU resources upon possible decreased acceptance rates. In the example in (c), if a token in positions 1--3 is mis-speculated, extra drafted tokens (4--6) will be discarded, which could not happen in a coupled speculation. Fortunately, we found it has little impact on many requests since their acceptance rates remain high, so the speedup of decoupled execution offsets the loss due to waste, still enabling a rapid reduction in the per-worker batch size. To further cope with requests that suffer from significantly decreased acceptance rates, we only relax but not fully discard the draft-verify dependency, using a draft window to control the aggressive generation, i.e., the drafter is only allowed to be ahead of the verifier by a certain number of tokens. Our per-request reconfiguration effectively adjusts these windows online as long as we detect a significant decrease in the acceptance rate for a request.
+
+\[-5pt] ) training trace. \[-15pt]
+
+). , Selecting the best draft method is critical to ensuring high speedup yet is quite challenging because the optimal draft method for each prompt varies and is unknown a priori. The diversity stems from the variation in acceptance rates for a given request. illustrates the speedup of different draft methods on different requests from a batch collected from the training trace. We can see that although many requests achieve the highest speedup with 0.5B drafting models, some require 1.5B models and others require statistical methods like n-gram. Directly executing multiple draft methods in parallel is infeasible because it requires significantly more GPUs---not only to host multiple draft models but also to verify their outputs.
+
+), At the start of the rollout, we use the profiled acceptance rate to select the estimated best draft method, based on the observation that although each prompt's acceptance rate varies significantly, for a large batch, the average acceptance rate is statistically stable. Thus, the selection based on the average is likely to be close to the optimal for the batch. The best draft is selected based on a ladder we constructed offline, which holistically considers major methods, including model-based~ and n-gram-based~.
+
+During the rollout, when more GPUs are freed due to finished requests, dynamically utilizes freed GPUs to deploy more draft methods for tailed requests, where parallel drafting naturally approximates the best draft method better, because as long as the fastest draft method generates all the tokens, we can treat the requests as finished. As shown in (d), if worker 3 becomes idle, we add the second-best draft method (1.5B) to accelerate the unfinished requests. Note that in the illustration we only add one more verification instance since the drafter can be piggybacked on other workers as it is relatively lightweight. If the 1.5B drafting model finishes earlier, the request is completed, and the request is also removed from other workers (e.g., worker 0 and 1).
+
+\[2pt] . \[-15pt]
+
+shows the system architecture of : a global scheduler searches an efficient decoupled speculation plan () during the initial rollout phase. Each worker dynamically reconfigures the execution plan for low-acceptance-rate requests at runtime to improve efficiency. The global scheduler monitors the GPU usage across workers to deploy additional draft methods for long-tailed requests (). Our runtime () efficiently supports scaling primitives required for Fastest-of-N speculation.
+
+## Detailed Design and Implementation
+
+## Efficient Decoupled Speculative Rollout
+
+We adopt a two-step scheduling method to realize an efficient decoupled speculation: (1) at the beginning of the rollout step, we determine the optimal placement---how many workers are assigned to drafting and verification, respectively---to minimize batch completion time. During rollout, we (2) dynamically monitor the acceptance rate of running requests to timely adjust their number of aggressively drafted tokens (with a draft window) to minimize the impact of verification failures.
+
+We choose to adjust only the draft window per request but not the entire placement for the running batch during rollout for three reasons. First, the optimal placement relies on the modeling of system execution, but it becomes less accurate due to the continuously reduced batch sizes caused by finished requests. Second, the overhead of reconfiguring placement may outweigh the benefits. Finally, since the batch sizes shrink quickly thanks to our decoupled execution with optimal initial placement, we no longer need to maximize computational efficiency, and the fine-grained adjustment of the tail requests provided by (2) enables sufficient speedups.
+
+Below, we first describe how we control the wasted tokens via , and then proceed to the two policies.
+
+To control the waste due to mis-speculation, we set a window similar to previous works~ such that: once the drafter sends $w$ tokens to the verifier, it is only allowed to aggressively draft another $w$ tokens. If the verifier has not finished verification, the drafter stops waiting for the feedback from the verifier. In this way, the drafter wastes at most $2w - 1$ tokens under speculation failures, as shown in .
+
+\[0pt] \[-15pt]
+
+At the beginning of each rollout step, given a draft method (described in ), the trained model, and the available GPUs, our planner determines an appropriate draft window for the entire batch, and an efficient initial decoupled speculation plan by assigning the drafter and verifier to different GPUs. The plan only needs to be executed once during post-training because for each step, the initial batch size per worker remains the same, and the acceptance length---average output length per verification are stable for mainstream drafters, as shown in . Our reported EAGLE acceptance length is lower than that of TLT~ because our rollout temperature is set to 1.0 and we use a large-batch-tuned configuration---a common production setup in post-training~.
+
+Finding the optimal execution plan requires solving a combination problem of the parallel configurations of different drafters and verifiers, as well as precisely modeling the performance of speculative decoding using the draft window. To ease problem formulation, we follow prior works that assume the developers have provided a set of possible GPU configurations for running a verifier ($$), i.e., how one copy of model parameter is partitioned on a set of GPUs. For drafter, we assume it only uses one GPU as it is lightweight.
+
+Algorithm~ describes our algorithm, which is essentially an enumeration-based search with decoupled-execution-aware pruning to accelerate the process. First, given a batch of requests to generate (), we select a verification configuration (line 2), and estimate its performance under decoupled execution ($_$) for various numbers of draft GPUs (line 3) and various draft window sizes (line 6). We continuously select execution plans and finally choose the one with the minimal estimated generation time (line 8--10).
+
+To improve search time, we prune the enumeration space by (1) using the observation that drafters need fewer GPUs than verifiers (line 3) and (2) pruning arbitrarily large draft windows, because it only increases the computation waste upon mis-speculation (line 5).
+
+\[0pt] EAGLE released by TLT~. \[-10pt]
+
+$. , A key aspect of the planning is to model the performance---oken eneration peed ($$)---for decoupled execution. We use a bottom-up approach that first models the execution time of drafter and verifier, then move on the modeling of the expectation of $$, considering the impact of wasted tokens due to mis-speculation under a selected draft window.
+
+Given a batch of request $b$, the number of drafter workers $g_d$, and a verifier with execution configuration $g_v$, the draft ($D_g_d()$) and verification ($V_g_v,w()$) time can be approximated as an affine function with respective to the batch size ($b$):  \\[-10pt]
+
+\begin{align*}
+    {D_{g_d}(b)} &= b \cdot D_{g_d}' + \alpha_{g_d} \\
+    {V_{g_v,w}(b)} &= b \cdot V_{g_v,w}' + \beta_{g_v,w}
+\end{align*}
+
+where $D_g_d'$, $V_g_v,w'$, $_g$ and $_g_v,w$ are hyperparameters that fitted through offline profiling, similar to prior works~.
+
+Therefore, the total generation time of $w$ tokens in our decoupled execution paradigm can be modeled as: \\[-10pt]
+
+\begin{align*}
+    \mathrm{IL}_{g_d,g_v,w}(b) = \max \{wD_{g_d}(b), V_{g_v,w}(b)\}
+\end{align*}
+
+Besides the execution time, we also need to consider the slowdown due to mis-speculation. Given a draft window $w$ and the probability of accepting one token $p$ for a batch of requests, we follow prior works~ that first model the probability of accepting $$ tokens given $n$ tokens within a draft window, then calculate the expected wasted tokens accordingly. The difference is that we further consider the additional wasted tokens due to aggressive speculation in decoupled execution. Specifically, within a draft window, the probability of accepting $a$ tokens given an estimated accept probability ($p$) is: \\[-10pt]:
+
+\begin{align*}
+    \mathrm{P}(a, w) &=
+\begin{cases}
+% 1-r^2, & a=1,\\[0.5em]
+p^a (1 - p), & 0 \leq a \leq w - 1,\\[0.5em]
+p^a, & a = w,
+\end{cases} \\
+    % \tau_{m,n} &= n r^{n} + \\
+    % &\sum_{a=0}^{d-1} \frac{(a+2) p^a (1 - p) }{2} \\
+    s.t.  &\quad a \in \mathbb{N}, n \in \mathbb{Z^+}
+\end{align*}
+
+$p$ is profiled using the setup from previous steps and we found it is quite stable for a relatively large batch of requests (see ).
+
+The expectation of the total generated tokens for drafting a draft window $w$ is: \[-10pt] _w = ^w-1 p^a(1-p) ^ + ^ which is a summation of the expected generated tokens when the token is accepted at different positions.
+
+Put it all together, the expectation of TGS is: \[-5pt] _g_d,g_v,w(b) = _g_d,g_v,w(b)
+
+[t] _g_d,g_v,w(b)$, $V_g_v,w(b)$ and $D_g_d(b)$ are descried in . $, the number of GPUs in the cluster $G$, a set of execution configurations for verification $$. ^*$, GPUs for verification $g_v^*$ and draft window $w^*$.
+
+$^* 0$, $(g_d^*, g_v^*, w^*) (0, 0, 0)$; $ $; $w_max = D'_g_d , _g_d $; $ $_ _g_d,g_v,w(b)$;
+
+_ > ^*$ update $^*$ and $(g_d^*, g_v^*, w^*)$; ^*, g_v^*, w^*)$
+
+_r $,\ $w_r$ is request draft window, $m_r$ is a flag specifying coupled ($$) or decoupled ($$) speculation.
+
+$ $p (r)$; $w_, _ _w _, w(p, b=1)$; $w_, _ _w _g_d^*, g_v^*, w(p, b=1)$; $w_r, m_r ((w_,_), (w_,_))$
+
+During decoupled execution, we dynamically monitor each request's acceptance rate to adjust its draft window accordingly. Algorithm~ summarizes our reconfiguration algorithm, which is called periodically during the rollout.
+
+Upon invocation, the algorithm first examines the set of requests with lower acceptance rates than the average (line 1), and reuses the performance model described above for decoupled execution and an extended modeling of coupled execution ($_, w()$, omitted due to space limitation, since its modeling logic is similar to decoupled modeling) to enumerate the best configuration.
+
+Three aspects need to be noted regarding online reconfiguration. First, we do not trigger reconfiguration too frequently because (1) the acceptance rate may change sharply over a short period, and (2) overly frequent reconfiguration may introduce performance instability. Currently, we reconfigure the system every 1000 decoding iterations. Second, we execute requests with different window sizes concurrently to maximize GPU utilization. To achieve efficient co-execution, we schedule kernels with different draft windows into a fused CUDA graph~. Finally, switching between coupled and decoupled execution is straightforward, as we only need to pause the aggressive draft of the switched request.
+
+## Effective Fastest-of-N (FoN) Speculative Rollout
+
+This section describes how we select draft methods for the rollout. The goal is to select the method with the highest speedup. The challenge lies in balancing the draft efficiency and the acceptance rate, given that the acceptance rate is unknown prior to execution for a given request.
+
+To tackle this challenge, we leverage the fact that it is possible to estimate the speedup of different draft methods parameterized by the acceptance rate via offline profiling. With this information, selecting draft methods greedily using the average acceptance rate of a batch request is possible at the beginning of the rollout, and we can further improve the selection based on the runtime-collected acceptance rate.
+
+\[10pt] ) and selection () mechanism for choosing a draft method. \[-0pt]
+
+A draft ladder provides information on the speedup of different draft methods given a fixed acceptance rate, as shown in (a). It can be efficiently constructed via offline profiling without using the trained model because (1) the execution of the drafter is irrelevant to the training model and (2) the speedup can be simulated by randomly accepting tokens according to a given acceptance rate. Thus, our offline profiler directly run the draft methods with simulated acceptance rate to build the ladder.
+
+Our current ladder considers popular draft methods, including model-based~ and n-gram-based~. For model-based draft, we use a checkpoint from the same series as the large model, released jointly before the post-training pipeline. The practice is similar to previous inference works~, but we cannot use the thinking version draft models as they are typically distilled after the large thinking model is ready~. We have also considered more draft methods, including training-based drafters such as the EAGLE family~. We do not include MTP~ as it is not integrated by our evaluated models. Nevertheless, we should emphasize that our design is orthogonal to the draft methods, and integrating more draft methods is likely to make faster if they can further improve speculation speedup.
+
+Initially, we select draft method for the entire batch based on the historically profiled acceptance rate. The profiling only needs to be done once, as the profiled results are stable across different steps (see ). We cannot select multiple methods because each drafter requires similar amount of verification, and we have insufficient GPU computational power during the initial phase.
+
+(b) illustrates the selection process: For three exemplified draft methods---n-gram, drafting with a 0.5B and 1.5B model, we first query the profiled acceptance rate of these methods, and use these rates as the estimated acceptance rate of the batch. Based on the rate, we can estimate the speedup of each draft method () and then select the fastest one among them ().
+
+[t] $ is the maximal verification batch size.
+
+$, the candidate draft methods set $$. $_d$ is the set of workers responsible for draft method $d$, and $$ the whole set of free rollout workers.
+
+= (r,d):w_r , d , w $.
+
+$ $ sort $$ by (r) ascending; $ $ sort $$ by (d) ascending; $ $ (r,d)$ is None $w (_d, b_max)$; (r,d) w$; $(w)=1$;
+
+To cope with the sub-optimal initial selection for tailed requests, we greedily deploy more draft methods as soon as GPUs of both drafter and verifier become available upon batch completion. shows our algorithm for assigning more drafters (and their corresponding verifier) when there are available workers. The routine is iteratively called once there are free workers.
+
+The algorithm assigns drafters to requests in an order sorted by the reverse of their acceptance rate (lines 1) as these requests have little speedup with speculative decoding. For each request, we add a drafter with the highest speedup according to the draft ladder described before if it has not been assigned yet (line 2 and 5). We greedily assign as many drafters as possible to the request until there are no available workers or pending requests (lines 3--9). If the assignments for a request are completed, we proceed to the next request.
+
+Here we adopt a draft-first design that assigns as many draft methods to one request as possible before moving on to the next one. The rationale is that the request with the lowest acceptance rate is likely to suffer from suboptimal drafting, so the draft-first strategy can naturally select the optimal draft method for it (given a sufficient number of free workers). In case of an insufficient number of free workers, we prioritize the draft method with a higher rank in our draft ladder.
+
+, Our ladder assumes that the draft models are frozen during the post-training, because we found that the acceptance rate of draft methods remains stable across steps (even with long gap), see . We suspect this is because even as the trained model becomes smarter, many trivial tokens can still be drafted as long as the trained model corrects the incorrect tokens timely. Note that recent draft training optimizations~ is orthogonal to our design as they can also be applied to our small models. Further, integrating such evolving would require intrusive modifications to both the rollout and training engines. Therefore, we don't include them in our implementation.
+
+## Efficient System Runtime for
+
+only optimizes the rollout phase and makes no intrusive modifications to the training engine, in contrast to~. The runtime extension is also lightweight: supporting decoupled execution only requires message passing between the drafter and the verifier, and we further incorporate two primitives to support Fastest-of-N speculation:
+
+The primitive deploys a serving instance—--either a drafter or a verifier—to a specific worker. This is similar to model autoscaling in existing serving engines~ and we adopted all their designs, including pre-pinning serving engines on workers~, pre-materializing CUDA graphs with GPU execution context pools~ and transfer model weights via fast networking between GPUs~. To further eliminate the overhead of loading large trained model weights to GPUs especially in case of deploying a new verifier, we observed that verifiers are deployed only to freed drafters and the drafter GPUs have low GPU memory usage due to the small size of draft models. Thus, we further pin the trained models to drafters to enable a zero-cost verifier deployment.
+
+Besides the model, when scaling a new drafter's corresponding verifier, the new verifier requires a copy of the KVCache---the intermediate results of the LLM computation---to accelerate computation. A challenge is that during the later stage of rollout, the KVCache may become large since its size is proportional to the model size and the number of generated tokens. To this end, we can leverage the classic KVCache recovery method, which transfers the tail KVCache through the network and recomputes it from the beginning~ to accelerate the KVCache scaling.
+
+## Evaluation
+
+## Experimental setup
+
+We implemented on ---the state-of-the-art post-training framework that has integrated known inference optimizations including CUDA graph~, prefix caching~ and FlashAttention kernels~.
+
+We evaluated on a production training cluster with up to 512,GPUs. These GPUs are organized into nodes where each node contains eight Hopper (80,GB) GPUs interconnected with 400,GB/s NVLink, and inter-node GPUs have up to 400,Gbps RDMA connections.
+
+, Similar to prior works~, we evaluated Qwen series models () as they are one of the most popular open-sourced LLMs~ and are commonly used by algorithm designers. We evaluated on 3 representative 200-step training traces based on production setups with different (popular) post-training algorithms: \[-18pt]
+
+[leftmargin=*,leftmargin=10pt,itemindent=0pt] 0.5em This trace trains Qwen2.5-32B~ with the GRPO~ algorithm, a representative value-model-free post-training method that trains high-quality models like DeepSeek series~. The trace samples a total batch of 8,192 prompts at each step, where for each batch, the model generates responses with a budget of 20,K tokens. The trace runs on 256,GPUs with a tensor parallelism (TP) degree of 4 for each rollout worker, so the initial per-worker batch size is 128. \[-18pt]
+
+This trace also trains Qwen2.5-32B using DAPO~---a trending algorithm in AI academy and industry~---with a per-step batch size of 16,384 and a response budget of 20,K tokens. The trace runs on 256 GPUs with a 4-degree TP for each rollout worker, so the per-worker batch size is 256. DAPO requires a larger per-step batch size because its training method filters out low-quality responses generated during the rollout. \[-18pt]
+
+PPO is another widely used RL algorithm~. The trained model is Qwen2.5-32B, and the PPO trace is different in (1) it utilizes another 32B critic model to generate value and trains the critic together with the actor model; (2) meanwhile, it samples only one response per prompt. The per-step batch size is 4,096 and the maximum response length is 20,K tokens. We run the trace on the same cluster setup like the above two traces. \[-14pt]
+
+For all experiments, we set the sampling temperature of LLM generation to 1.0---a common setup in post-training~---which, however, has a negative impact on speculative decoding ~. LLM post-training requires such settings to explore more diverse responses and avoid entropy collapse~; otherwise, the trained model suffers from premature convergence, which limits its potential for further performance gains.
+
+Due to GPU time constraints, our experiments focus on dense 32,B models, but we have also conducted experiments on a large Qwen3-235B MoE model~ in to demonstrate the effectiveness of .
+
+We focus on reporting the end-to-end training time and the rollout time---since training time is the most critical metric for algorithm developers and rollout dominates the time in . To ensure representative evaluation, we uniformly sample at least 10% of all training steps, using the trained checkpoints at the sampled steps for generation, and report their training and rollout time.
+
+We compared with the following baselines and carefully tuned their implementations and performance. All systems rollout with vLLM v0.10.0 engine~. Specifically, the decoding latency of Qwen2.5-32B model is lower to 13,ms when per-worker batch size is 1 on our platform. For all baselines, we report the optimal configuration for training, i.e., an FSDP degree of 32 and 8-way sequence parallelism~. \[-10pt]
+
+[leftmargin=*,leftmargin=10pt,itemindent=0pt] 0.5em is an open-sourced post-training system used by and is based on it. Besides the inference optimizations mentioned in the beginning of the section, it further incorporates techniques like efficient parameter to quickly update parameters for the rollout. \[-10pt]
+
+is the state-of-the-art post-training system that overlaps the prepare and rollout phases to reduce bubbles caused by long-tailed generation. Since it is not open-sourced, we carefully re-implemented its design and achieve a similar speedup on short-context tasks. \[-18pt]
+
+(2,$$) provisions 2,$$ of GPUs used by the original trace for , which serves as the optimal performance of using more GPUs to accelerate RL like RLBoost~. \[-18pt]
+
++ (vanilla) model-spec. To illustrate the effectiveness of our proposed techniques, we also compare by incorporating model-based speculative decoding in inference systems~. We run coupled speculation described in . The draft method is selected based on the first phase of our Fastest-of-N speculation. For 32B training, we found 0.5B is a sweet point to accelerate. \[-18pt]
+
++ (vanilla) n-gram. N-gram is a popular speclative decoding method used by other works~ to accelerate rollout. We have integrated a baseline of it using vLLM's n-gram (v0.10.0), with enhancement of recent techniques like SAM~ to match their implementation as much as possible (since their code is not open-sourced). \[-18pt]
+
+We also enhance with vanilla speculative decoding~. Specifically, we use small-LLM-based speculation to let readers better understand how our design improve existing speculative decoding methods. We carefully port it on vllm to benefit from its v1 codebase.
+
+. , Unless otherwise specified, we select the available drafters for Qwen2.5-32B before the post-training pipeline: Qwen2.5-0.5B~, Qwen2.5-1.5B---as well as an n-gram drafter~. Other drafting methods, such as EAGLE~, require additional training support, which is not supported by all our evaluated models.
+
+## End-to-end post-training performance
+
+\[0pt] running different training traces with different approaches. \[-15pt]
+
+\[1pt] \[-15pt]
+
+presents the end-to-end training step time of different approaches on the traces. We measure all 1/10 of the sampled training steps and report the mean step time of different approaches. Note that each step uses the exact same model checkpoint and prompt batch in the trace to faithfully reproduce the real-world workloads. achieves 1.5--1.7,$$ faster end-to-end training compared to baselines like veRL and RLHFuse. For vanilla speculative decoding baselines, achieves 1.2--1.5,$$ shorter training time in different traces. Even compared with (2,$$) that uses twice the GPUs, still achieves 1.3--1.4,$$ training speedup. The key contributor is the acceleration of rollout via our efficient mechanisms: for the rollout phase, achieves 2.0--2.4,$$ faster mean generation speed than .
+
+Notably, achieves up to 1.4--2.0,$$ shorter average rollout time even compared with methods that also incorporate speculative decoding acceleration, . This is because: First, both of them suffer from inefficiency due to large per-worker batch size in the initial phase. Second, both of them, especially n-gram, have low acceptance rates for the straggler requests, because the n-gram method performs poorly in high temperature sampling with few history prompts commonly found in training traces. Specifically, the skipped iteration of the last finished requests of n-gram is 16.9--43.6,% across the traces, while achieves 40.9--73.5,% thanks to our Fastest-of-N speculation.
+
+\[1pt] \[-15pt]
+
+## Performance on large MoE models
+
+presents the performance of when training a Qwen3-235B MoE model~ on 256,GPUs with GRPO algorithm. Due to limited GPU time and the availability of checkpoints, we only evaluated a few steps: 0--5 at the start of the post-training (using the Qwen3-235B-Instruct-2507) and $n, , n+5$ from the end of the training (using the Qwen3-235B-Thinking-2507). The difference is that the later steps tend to generate longer responses. The per-step batch size is 256---a slightly smaller batch size due to limited GPU memory, and each rollout worker uses expert parallelism (EP) of 8 for high decode efficiency.
+
+We expand the draft ladder with small models produced before post-training pipeline~: Qwen3-4B-2507-Instruct (released together with 235B), Qwen3-0.6B and Qwen3-1.7B.
+
+improves the training time by 1.4--2.3,$$, with 1.5--2.6,$$ rollout acceleration compared to . It also outperforms vanilla mode-spec by 1.1--1.5,$$, thanks to our decoupled and Fastest-of-N speculation. Notice that even with a relatively small per-step batch size, verification overhead is still high in MoE models as it is exacerbated by expert communication~. We also found that Qwen3-4B-2507-Instruct performs significantly better in speculation than the other two, we suspect its training pipeline is closely coupled with 235B and thus has better alignment with it.
+
+## Performance across different steps
+
+As the trained model evolves across different training steps, the effectiveness of speculative decoding varies. Thus, we further present the detailed latency breakdown of different training steps in . For ease of presentation, we selectively present part of the training steps between 100--200 training steps to examine speculative decoding's effect in real-world post-training. The gap is sufficiently large as confirmed by internal accuracy tests, so the "smartness" of the trained models in different sampling steps varies.
+
+First we can see that still achieves the shortest rollout time in all steps. Specifically, at $175^th$ and $200^th$ steps, veRL + model-spec and n-gram fail to provide acceleration because as models becomes smarter, they tend to produce longer responses~ for more prompts, leading to more rollout steps under a relatively large per-worker batch size. In contrast, consistently reduces rollout time by 1.8--2.7,$$, and is faster than vanilla speculative decoding baselines by 1.4--2.6,$$, 1.2--2.2,$$, 1.2--2.6,$$ in different training traces. Thanks to the quick generation, more workers finish at early time, leaving sufficient room for FoN scheduling.
+
+## Ablation study
+
+\[0pt] \[-15pt]
+
+conducts an ablation study to examine the effectiveness of different proposed techniques described in . We reported only one step here due to space limitation, and other steps in different traces show similar results.
+
+First, we can see that vanilla speculative decoding reduces only 2.6,% rollout end-to-end latency, which is small due to the inefficiency of large-batch verification and suboptimal draft method for the tailed requests.
+
+Thanks to our decoupled speculative decoding, we accelerate rollout by 1.3,$$. Based on decoupled speculative decoding, our dynamic reconfiguration further shortens the rollout time by 1.2,$$ thanks to a better initial execution configuration and dynamic reconfiguration of workers with low acceptance rates to reduce wasted tokens. Finally, our Fastest-of-N speculative decoding further accelerates end-to-end rollout by 1.2,$$, thanks to its ability to leverage multiple draft methods to improve acceptance rates for straggler requests.
+
+\[1pt] $ step of DAPO-32B-20K trace. We sample workers that contains the tailed requests for ease of presentation. \[-5pt]
+
+## An in-depth look at
+
+We conclude our evaluation of by presenting an in-depth analysis of the work done by different workers during the rollout with our techniques in . To ease presentation, we only sampled 5 workers, with a deliberate focus on the worker that finish early and the slowest four workers.
+
+First, from the first row of we can see that vanilla speculative decoding still suffers from long-tailed workers because during the initial phase all workers execute slower and at the end the initially selected draft method cannot accelerate the slowest requests. With decoupled speculative decoding (the second row), we improve speculative decoding performance by 1.1--1.5,$$ but still suffer from long-tailed requests due to suboptimal draft method. With Fastest-of-N speculative decoding activated, the freed workers are assigned different draft methods (we use different color blocks to indicate different draft methods) at 151s in . This subsequently accelerates the slowest requests by 1.5,$$.
+
+## Related work
+
+Several works propose algorithmic changes to accelerate rollout, e.g., skipping the tail generations~. Such modifications essentially make the training a variant of off-policy (vs. on-policy of our targeted setup), which has unstable convergence in theory~ and we observe that they are not always adopted in production~.
+
+Recent works like Seer~ and RollPacker~ address long-tail generation in resource-constraint setups, i.e., each worker has limited GPU capacity to hold the assigned batch. As a result, the batch must be further divided into sub-batches where each sub-batch is executed sequentially, and their optimizations lie in reordering or repacking sub-patches to reduce GPU wastes between sub-batch executions. In contrast, accelerates long-tail generations where the batch can fit in the GPU memory of each worker, a common production setup (see (a)). In general, executing one large batch is faster than sequentially executing the divided sub-batch (if with sufficient resources) because the generation time grows sub-linearly with the batch size (see (b)), not to mention the possible switching overhead between sub-batches with packing techniques~.
+
+A few concurrent works share a similar high-level idea of using speculative decoding to accelerate rollout~. further addresses the low efficiency issue in batch configurations that are unfriendly to speculative decoding, and the unknown best drafter selection issue across requests.
+
+The closest work to ours is TLT~, which selects training-based drafter (EAGLE~) for speculative rollout. It does not consider the large batch efficiency issue and its performance can be further improved with our decoupled speculation. Moreover, our draft ladder with Fastest-of-N speculation further provides two advantages over its chosen EAGLE: (1) EAGLE is more challenging to deploy than the model- and n-gram-based methods in our ladder because it requires extra training to match the target model~, which is not always available for the trained model or requires extra tuning; and (2) we found it has a lower acceptance length than the drafters we considered using the models provided by TLT without prompt tuning for EAGLE~ (see ). Finally, TLT adopts approximate sampling to improve the acceptance rate at the cost of training accuracy~. In contrast, uses exact matching to ensure the correctness of the rollout responses.
+
+The optimization goal of using speculative decoding in rollout is fundamentally different from that in inference systems ~. Specifically, rollout prioritizes overall batch execution efficiency, where individual request latencies are less critical, while inference systems must ensure low latencies for all requests. This introduces new challenges, which we address with decoupled and Fastest-of-N speculation.
+
+## Conclusion
+
+This paper shows that RL rollout can be efficient without compromising the algorithmic equivalence of the original training with fast speculative decoding. makes speculative rollout efficient with two novel techniques: (1) a method that improves the speculation efficiency for common training setups, and (2) a method that dynamically adapts the draft method during the rollout process. improves the training efficiency by 1.4--2.3,$$ compared to the state-of-the-art baselines, and is 1.1--2.6,$$ faster than vanilla speculative rollout.
