@@ -92,7 +92,7 @@ DATA = {
                 "这就是 SFT 里全部的学习信号。它没有单独区分「好答案」和「坏答案」，只有示范里写明应该出现的下一个 token。由于信号是逐 token 的，回答里每一个 token 都会贡献一份梯度。",
             ],
             "fig_after": {
-                "0": [{"src": "fig01.png", "caption": "图1: 下一 token 预测。"}],
+                "0": [{"src": "fig00.png", "caption": "图1: 下一 token 预测。"}],
             },
         },
         {
@@ -106,7 +106,7 @@ DATA = {
                 "messages 列表保存整段对话，每一轮一个 dict。apply_chat_template 把它渲染成一条完整的 token 序列，return_assistant_tokens_mask 标出哪些 token 属于 assistant 的输出。其余位置一律置为 -100。",
             ],
             "fig_after": {
-                "1": [{"src": "fig02.png", "caption": "图2: SFT 的标签掩码。提示位置被替换成 -100，损失只落在回答 token 上。"}],
+                "1": [{"src": "fig01.png", "caption": "图2: SFT 的标签掩码。提示位置被替换成 -100，损失只落在回答 token 上。"}],
             },
         },
         {
@@ -119,7 +119,7 @@ DATA = {
                 "这就是一个完整的 SFT 步骤。loss.backward() 为每个权重填上损失的梯度，optimizer.step() 顺着梯度迈一小步把损失压低。这里把交叉熵完整写出来，是为了让错位和掩码不被藏在函数里。",
             ],
             "fig_after": {
-                "0": [{"src": "fig03.png", "caption": "图3: SFT 训练循环。"}],
+                "0": [{"src": "fig02.png", "caption": "图3: SFT 训练循环。"}],
             },
         },
         {
