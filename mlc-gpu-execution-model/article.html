@@ -1,6 +1,6 @@
 <section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
 <style>
-/* 传送门统一样式（add-portal.py 动态注入时引用此 class） */
+/* 传送门统一样式（add-portal.py动态注入时引用此class） */
 .portal-title { font-size:12px; color:#888; }
 .portal-links { font-size:12px; color:#888; }
 .portal-links a { color:#888; text-decoration:none; }
@@ -10,30 +10,75 @@
 <strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
 </section>
 <section style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">要点关键词1</strong>：核心内容。替换本占位。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">要点关键词2</strong>：核心内容。替换本占位。<br  /><br  />- <strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">要点关键词3</strong>：核心内容。替换本占位。</section>
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">线程层级</strong>：thread、warp（32线程）、warpgroup（128线程）、CTA、cluster、grid对应不同协作尺度；TMA拷贝由单线程发起，完整TMEM累加器由4个warp各读32条lane，2-CTA协作MMA则横跨两个CTA<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">内存空间</strong>：GMEM、SMEM、TMEM与寄存器在容量、延迟、可见范围上各有取舍；B200上单个SM的SMEM最多228 KB，TMEM有128行、最多512列、每列32位，逻辑上属于CTA但仍驻留在SM上<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">流水线</strong>：一个GEMM tile依次走Load、Compute、Epilogue三段，靠barrier与phase模型重叠：Tensor Core算第k块时，TMA搬第k+1块，epilogue处理第k-1块</section>
 </section>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">要写高性能GPU kernel，先得回答三个问题：线程怎么组织、数据放在哪里、不同硬件引擎如何协同。这一章按这条线索把Blackwell的基本结构讲清楚，最后用一个GEMM数据流水线把它们串起来。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">核心结论藏在重叠里：Load、Compute、Epilogue三段不必严格串行，barrier与phase模型让Tensor Core、TMA和epilogue同时保持忙碌，这也是后续所有GEMM优化的出发点。</p>
 
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">正文第一章标题</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第一段正文文字。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第二段正文文字。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">读这一章要抓住的三条线索</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">要写高性能GPU kernel，首先要弄清三件事：线程如何组织、数据存在哪里、不同硬件引擎如何协同。本章按这条线索展开，先讲GPU线程层级，再讲用于存放和搬运数据的内存空间，最后介绍负责计算与数据搬运的引擎；结尾的GEMM流水线把这些内容串起来，展示计算如何与数据搬运重叠。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">- 线程层级决定协作尺度：thread、warp、warpgroup、CTA、cluster和grid各对应一种组织粒度。Blackwell上很多操作有自己天然的scope：一次TMA拷贝由单个线程发起，一个完整的TMEM累加器由4个warp在各自的32 lane窗口上读回，而2-CTA协作MMA横跨两个CTA。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">- 数据不只存在一个地方：GMEM、SMEM、TMEM与寄存器在容量、延迟、访问范围上各有取舍，集群还通过DSMEM让一个CTA访问另一个CTA的共享内存。高性能kernel的核心任务之一，就是让数据在这些空间之间高效流动。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">- 计算与数据搬运由不同硬件引擎承担：CUDA core负责地址计算、控制流与标量逻辑，Tensor Core承担主要的矩阵计算，TMA负责异步搬运数据。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们从Blackwell的SM架构看起，下图给出了本章用到的主要硬件单元。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
-<img style="display: block;width: 100%;margin: 0 auto;" src="fig1.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图片说明文字</figcaption></figure>
-<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">子标题示例</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">子标题下的段落。</p>
-<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">含表格的章节</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下面是一张示例表格。</p>
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.gif"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1：Blackwell SM架构，本章用到的主要硬件单元</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">图1覆盖了Blackwell SM内部参与这些工作的单元：warp、warpgroup、共享内存、Tensor Memory、Tensor Core与TMA引擎。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">线程层级：从thread到grid</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GPU不会把成千上万个线程当成一个平面集合来管理，而是把它们组织成若干层级，每一层的协作粒度都不同。下图按thread、warp、warpgroup、CTA、cluster、grid的顺序逐级展示Blackwell上的线程层级。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.gif"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2：Blackwell的线程层级</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">- Thread：标量执行单元。每个线程有自己的程序计数器和寄存器，并由它所在warp内的lane ID标识。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">- Warp：32个线程，以SIMT（单指令多线程）方式执行。同一warp的lane一起发射同一条指令，但每个lane保留自己的寄存器，也可以被单独屏蔽，这正是同一warp内的lane能走不同分支的原因。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">- Warpgroup：连续4个warp，也就是128个线程。Hopper把warpgroup引入为发射warpgroup级MMA（wgmma）的单位；在Blackwell上，这4个warp还可以覆盖Tensor Memory的4个32 lane窗口。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">- CTA（Cooperative Thread Array，CUDA里也称为thread block）：硬件调度的基本单位。一个CTA运行在单个SM上，并拥有该SM内一块私有的共享内存分配。多个CTA可以同时驻留在同一个SM上，此时它们会分摊这个SM的共享内存容量。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">- Cluster：一组可以跨不同SM协作的CTA。cluster内的CTA之间可以互相同步，也可以读写彼此的共享内存，这项能力称为分布式共享内存。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Blackwell的关键操作并不是都由同一组线程发起。一次TMA拷贝由单个线程发起，之后由硬件执行；每个warp为自己那32条lane的窗口发起warp级TMEM加载；一条tcgen05 MMA由某个指定线程提交，而2-CTA协作MMA横跨两个CTA。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们把参与某个操作的线程集合称为它的scope。分析一个kernel时，需要把操作的scope与它的数据布局、分发机制放在一起考虑。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">内存空间：数据住在哪里</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">线程层级回答了计算如何组织，接下来要确定数据存在哪里。GPU提供多种内存空间，它们在容量、延迟与访问范围上各有取舍，kernel必须让数据在这些空间之间高效流动。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Tensor Memory（TMEM）是Blackwell引入的片上存储空间。在更早的架构上，MMA累加器通常放在寄存器里；随着MMA tile变大，这些累加器会占用寄存器文件的很大一部分。Blackwell的tcgen05改为把累加器写入TMEM，从而减轻寄存器压力。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">TMEM可以看成CTA使用的一块二维暂存区：它有128行，对应128条TMEM lane，最多512列，每列32位宽。逻辑上这块空间属于CTA，物理上它仍然位于SM上。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">TMEM由程序显式管理。kernel必须自己分配和释放它，epilogue也必须显式地把MMA累加器从TMEM读回寄存器。要读回一个完整的128 lane累加器，warpgroup里的4个warp各自加载属于自己的那条32 lane TMEM窗口。</p>
 <table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
 <thead style="font-weight: bold;color: #3f3f3f;">
-<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">列1</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">列2</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">列3</th></tr>
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">内存空间</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">归属</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">作用</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">说明</th></tr>
 </thead>
 <tbody>
-<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">A</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">B</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">C</td></tr>
-<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">D</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong style="color:#0F4C81;">E</strong></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">F</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">全局内存（GMEM）</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">整个设备</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">持久化张量存储</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">大容量HBM，所有SM共享</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">共享内存（SMEM）</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">每个CTA（单个SM）</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">tile暂存</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">低延迟暂存区；B200上每个SM最多228 KB</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Tensor Memory（TMEM）</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">每个CTA</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">MMA累加器存储</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Blackwell引入，供tcgen05使用</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">寄存器文件（RF）</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">每个线程</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">标量与每线程tile片段</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">访问速度快，存放epilogue与临时值</td></tr>
 </tbody>
 </table>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">集群内的分布式共享内存</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个cluster里可以包含运行在不同SM上的CTA。每个CTA仍然拥有自己的共享内存，但分布式共享内存（DSMEM）允许同一cluster内的其他CTA访问这些数据。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这项能力省掉了绕道GMEM的往返：一个CTA可以直接访问另一个CTA的SMEM，而不需要数据所有者先写回GMEM、再由对端重新读入。当异步操作搬运这类数据时，它会在传输完成后更新一个完成barrier；使用方需要先等待该barrier，再去消费结果。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下图展示了2-CTA集群里的DSMEM访问路径：每个CTA保留自己的SMEM，同时可以读取另一个CTA的SMEM。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.gif"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：2-CTA集群通过DSMEM互相访问共享内存</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在上面的2-CTA GEMM中，每个CTA存放自己那部分A、B分片，并通过DSMEM读取对端CTA的B分片。这里的共享并不会把两块SMEM合并，它只意味着同一cluster内的CTA可以跨SM访问彼此的数据。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两个CTA可以组成一个CTA pair，以cta_group::2模式执行协作MMA，从而产出更大的输出tile。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">计算单元：CUDA Core与Tensor Core</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">线程层级决定了计算如何组织，内存空间决定了数据存在哪里，而真正的算术由SM内部的计算单元完成。一个SM主要有两类计算单元：CUDA core与Tensor Core。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">- CUDA core是通用的SIMT ALU，执行处理索引运算、逐元素数学、归约和控制流的标量与向量指令。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">- Tensor Core是固定功能单元，以tile为粒度执行稠密矩阵乘加，在一条指令里完成D = AB + C。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Tensor Core的算术吞吐远高于CUDA core，在FLOP/s上常常高出一个数量级以上。GEMM、卷积、注意力这类稠密线性代数负载，只有有效利用Tensor Core才可能接近峰值性能。与此同时，高性能kernel还必须及时把数据准备好，否则Tensor Core会因为等待数据或依赖而空转。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">不同代GPU的变化不只在Tensor Core吞吐上，编程接口与累加器的存放位置也在变。Hopper引入了异步的warpgroup MMA（wgmma.mma_async）；Blackwell的第五代Tensor Core tcgen05把累加器放在Tensor Memory而不是寄存器里。后续章节会详细讨论这些差异。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Cluster还带来两种对GEMM很重要的协作方式。2-CTA协作MMA让两个CTA各提供一部分SMEM操作数，拼成更大的Tensor Core MMA tile；TMA multicast让一次GMEM加载把同一个tile送给多个CTA，避免每个CTA各自重复读取同一份数据。两者都依赖前面介绍的cluster与DSMEM机制。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">GEMM数据流水线：把三者连起来</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">前面几节分别介绍了线程层级、内存空间、数据搬运机制和计算单元。现在我们用一个GEMM流水线把它们连起来，看看这些硬件结构如何协同工作。下图给出了三段式GEMM tile流水线涉及到的主要单元。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.gif"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4：Blackwell上三段式GEMM数据流水线涉及的主要硬件单元</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个GEMM tile通常要走过三个阶段。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">- Load：一次TMA拷贝把A或B的操作数tile从GMEM搬到SMEM。由单个线程发起这次拷贝，并记录预期到达的字节数。数据陆续抵达SMEM的过程中，TMA引擎会更新进度计数；只有当所有预期字节都到达后，完成barrier才会变为complete。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">- Compute：一条tcgen05 MMA从SMEM读取操作数tile，把乘积累加进TMEM tile。由某个指定线程提交这条MMA；计算完成时，硬件会通知对应的barrier。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">- Epilogue：一个warpgroup把TMEM累加器读回寄存器，把结果转换成输出dtype，再写回GMEM。这一步通常经由SMEM中转，最终写回可能使用TMA store。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这三个阶段之间存在数据依赖，但不必严格串行。朴素的kernel会按加载、等待、计算、等待、写回的顺序依次执行，硬件单元轮流空转。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">高性能kernel会把各阶段组织成流水线：Tensor Core计算第k个tile时，TMA引擎可以搬运第k+1个tile，epilogue可以处理第k-1个tile的输出。barrier与phase模型负责协调这些异步阶段之间的安全交接，本书后续的GEMM优化都建立在这套机制之上。</p>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
@@ -42,12 +87,27 @@
 <strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
 </section>
 <section style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-结语分析内容1。<br  /><br  />结语分析内容2。</section>
+<strong>这一章最值得记住的是三层视角必须一起看：线程层级决定谁来协作，内存空间决定数据住在哪，计算引擎决定谁在干活。</strong> 任何一个Blackwell GEMM的优化决策，最后都能归到这三层的取舍上；缺了任何一层，性能问题都很难定位。<br  /><br  />真正拉开差距的是重叠。三段式流水线之所以有效，是因为它让Tensor Core、TMA与epilogue同时有事可做，而barrier与phase模型是让这种重叠安全成立的基础。后面所有的GEMM优化，基本都在这个框架里做文章：先把阶段拆开，再让它们错开运行。</section>
 </section>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
+<section style="text-align:center;">
+<span class="portal-title" style="font-size:12px;color:#888888;">【传送门】</span>
+<section style="text-align:left;display:inline-block;font-size:12px;color:#888888;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#888888;text-decoration:none;" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#888888;text-decoration:none;" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#888888;text-decoration:none;" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#888888;text-decoration:none;" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#888888;text-decoration:none;" href="https://mp.weixin.qq.com/s/YHmkt8EHFGm-HeflWCsB2w" target="_blank" data-linktype="2">英伟达Kernel Agent: 编译器与算子调优Agent的协同设计</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#888888;text-decoration:none;" href="https://mp.weixin.qq.com/s/4aEYa-5J2Ir82V_1_9anDA" target="_blank" data-linktype="2">AI芯片架构全景: 从NVIDIA到Groq的六条设计路线</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#888888;text-decoration:none;" href="https://mp.weixin.qq.com/s/HPaDwcT_4Rw5ty7LwDG4Ng" target="_blank" data-linktype="2">Torch Profiler在Trace里分析性能瓶颈: 剖析SGLang LLM推理</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#888888;text-decoration:none;" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+</section>
+</section>
+
+
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://arxiv.org/html/XXXX.XXXXX</span></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://mlc.ai/modern-gpu-programming-for-mlsys/chapter_background/index.html</span></p>
 </section>
