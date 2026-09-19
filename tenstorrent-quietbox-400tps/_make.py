@@ -50,10 +50,10 @@ DATA = {
     "summary": [
         {"key": "结果", "body": "Marco-Nano-Instruct（8B MoE，每 token 激活约 6 亿参数）在 1.2 万美元的 Tenstorrent QuietBox 上完成全自回归解码，交付路径 397.7 token/s，不含最终 token 日志交付的 trace 重放 402.6 token/s。"},
         {"key": "方法", "body": "绕开外部内存天花板的关键是把循环复用的关键张量驻留（residency）在 720MB 片上 SRAM，只让选定的冷专家权重从 GDDR6 流式加载，而不是每个 token 都往返外部内存。"},
-        {"key": "对比", "body": "项目记录中最强的全 DRAM 端到端约 260 token/s，通道改为 SRAM 驻留后交付路径提升约 53%；同层驻留 A/B 在 2048 上下文实测 1.248 倍，四芯片结果成为 Galaxy 32 芯片扩展的架构证明。"},
+        {"key": "对比", "body": "项目记录中最强的全 DRAM 端到端约 260 token/s，把交付路径改为 SRAM 驻留后提升约 53%；同层驻留 A/B 在 2048 上下文实测 1.248 倍，四芯片结果成为 Galaxy 32 芯片扩展的架构证明。"},
     ],
     "lead": [
-        "我们拿 **Marco-Nano-Instruct**（80 亿参数的混合专家模型，每个 token 激活约 6 亿参数），把完整的自回归解码流水线，在一台放在桌边的 **1.2 万美元 Tenstorrent QuietBox（Blackhole）** 上推到了 **397.7 token/s**。",
+        "我们拿 **Marco-Nano-Instruct**（80 亿参数的混合专家模型，每个 token 激活约 6 亿参数），把完整的自回归解码流水线，在一台放在桌边的 **1.2 万美元 Tenstorrent QuietBox（Blackhole）**上推到了 **397.7 token/s**。",
         "这个数字不是靠投机解码、草稿模型或跳层换来的：token 完整穿过全部 28 层、最终归一化和语言模型头，再通过设备端反馈回到下一步。真正的杠杆是 **SRAM 驻留**，把每个 token 都要用到的关键数据留在芯片上，而不是反复去外部内存取。",
     ],
     "sections": sections,
