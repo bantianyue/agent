@@ -198,11 +198,11 @@ for txt in art.find_all(string=True):
 
 body = str(art)
 ref = (
-    '<section style="margin-top:30px;padding:16px;background:#f5f0eb;border-radius:8px;'
+    '<div style="background:#f5f0eb;padding:16px;border-radius:8px;margin-top:30px;'
     'font-size:13px;color:#555;line-height:1.8;">'
     "<strong>来源</strong><br>"
     "原文：A Deep Dive into LDS Optimizations on AMD Instinct MI450 GPUs（AMD ROCm Blogs）<br>"
-    f"作者：Ognjen Plavsic、Nicola Zaghen、Lixun Zhang<br>链接：{URL}</section>"
+    f"作者：Ognjen Plavsic、Nicola Zaghen、Lixun Zhang<br>链接：{URL}</div>"
 )
 WRAP_OPEN = (
     "<section style=\"font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue','PingFang SC',"
