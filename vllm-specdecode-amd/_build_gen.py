@@ -20,6 +20,12 @@ def T(i):
     s = s.replace("speculative decoding", "投机解码")
     s = s.replace("Speculative decoding", "投机解码")
     s = s.replace("Figure 3", "图 3").replace("Figure 2", "图 2").replace("Figure 1", "图 1")
+    # 原文图无图注，正文里的「图 N」引用改为「下图」，避免与统一编号冲突
+    s = s.replace("（如图 1 所示）", "（见下图）")
+    s = s.replace("图 1 所示", "下图所示")
+    s = s.replace("图 2 给出了", "下图给出了")
+    s = s.replace("图 2 给出", "下图给出")
+    s = s.replace("图 3 以并排视图", "下图以并排视图")
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -62,9 +68,8 @@ def sec(kind, title, blocks, figs=None, table=None):
     return out
 
 
-CAP1 = "图 1：投机解码的 draft-and-verify 流程：draft 组件提出候选 token，target 模型验证后提交被接受的 token。"
-CAP2 = "图 2：一轮投机解码的接受与拒绝：绿框是通过验证的 draft token，红框是第一个被拒 token，灰框是随后被丢弃的 token。"
-CAP3 = "图 3：五种起草方法的并排对比：draft 组件结构、使用的 target 模型信息，以及候选 token 的生成方式。"
+# 原文三张 SVG 图与 25 张 DOM 示意图均无图注 -> 一律保留空槽，不补造
+CAP1 = CAP2 = CAP3 = ""
 
 
 def f(src, cap=""):
@@ -74,38 +79,38 @@ def f(src, cap=""):
 SECTIONS = [
     sec("h2", "引言", [T(3), T(4), T(5)]),
     sec("h2", "自回归解码基线",
-        [(T(7), [f("fig04.png")]), T(8), T(9), T(10), T(11)]),
+        [(T(7), [f("fig01.png")]), T(8), T(9), T(10), T(11)]),
     sec("h2", "投机解码的核心思想",
         [T(13), T(14), T(15), T(16), T(17), T(18), T(19),
-         (T(20), [f("fig05.png")]), (T(21), [f("fig06.png")]),
-         (T(22), [f("fig01.png", CAP1)])]),
+         (T(20), [f("fig02.png")]), (T(21), [f("fig03.png")]),
+         (T(22), [f("fig04.png", CAP1)])]),
     sec("h3", "一个简单的接受/拒绝示例",
-        [(T(25), [f("fig02.png", CAP2)]), (T(27), [f("fig07.png")]),
-         (T(28), [f("fig08.png")]), (T(29), [f("fig09.png")]),
-         T(30), (T(31), [f("fig10.png")])]),
+        [(T(25), [f("fig05.png", CAP2)]), (T(27), [f("fig06.png")]),
+         (T(28), [f("fig07.png")]), (T(29), [f("fig08.png")]),
+         T(30), (T(31), [f("fig09.png")])]),
     sec("h2", "五种起草方法如何工作",
         [T(33), T(34), T(35), T(36), T(37), T(38), T(39), T(40), T(41),
          T(42), T(43), T(44), T(45), T(46), T(47), T(48)]),
     sec("h3", "Native MTP",
-        [(T(50), []), (T(51), [f("fig11.png")]), (T(54), [f("fig12.png")]),
-         T(55), (T(56), [f("fig13.png")]), T(57)]),
+        [(T(50), []), (T(51), [f("fig10.png")]), (T(54), [f("fig11.png")]),
+         T(55), (T(56), [f("fig12.png")]), T(57)]),
     sec("h3", "Gemma 4 MTP",
-        [(T(59), [f("fig14.png")]), T(60), (T(61), [f("fig15.png")])]),
+        [(T(59), [f("fig13.png")]), T(60), (T(61), [f("fig14.png")])]),
     sec("h3", "EAGLE-3",
-        [T(63), (T(64), [f("fig16.png")]), (T(65), [f("fig17.png")]),
-         T(66), T(67), T(68), T(69), (T(70), [f("fig18.png")]), T(73)]),
+        [T(63), (T(64), [f("fig15.png")]), (T(65), [f("fig16.png")]),
+         T(66), T(67), T(68), T(69), (T(70), [f("fig17.png")]), T(73)]),
     sec("h3", "DFlash",
-        [T(75), T(76), T(77), (T(78), [f("fig19.png")]), T(79),
-         (T(80), [f("fig20.png")]), (T(81), [f("fig21.png")]), T(82),
-         (T(83), [f("fig22.png")]), T(84), T(85), T(87),
-         (T(88), [f("fig23.png")]), T(89), (T(90), [f("fig24.png")]),
-         (T(91), [f("fig25.png")]), T(92)]),
+        [T(75), T(76), T(77), (T(78), [f("fig18.png")]), T(79),
+         (T(80), [f("fig19.png")]), (T(81), [f("fig20.png")]), T(82),
+         (T(83), [f("fig21.png")]), T(84), T(85), T(87),
+         (T(88), [f("fig22.png")]), T(89), (T(90), [f("fig23.png")]),
+         (T(91), [f("fig24.png")]), T(92)]),
     sec("h3", "DSpark",
-        [T(94), T(95), T(96), (T(97), [f("fig26.png")]), T(98), T(99),
-         (T(100), [f("fig27.png")]), (T(101), [f("fig28.png")]),
+        [T(94), T(95), T(96), (T(97), [f("fig25.png")]), T(98), T(99),
+         (T(100), [f("fig26.png")]), (T(101), [f("fig27.png")]),
          T(102), T(103), T(104)]),
     sec("h3", "五种方法对比",
-        [(T(106), [f("fig03.png", CAP3)])], table=tab(0, tfix)),
+        [(T(106), [f("fig28.png", CAP3)])], table=tab(0, tfix)),
     sec("h2", "在 vLLM 中启用投机解码",
         [T(109), T(110), CODE(111, "bash"), T(112), CODE(113, "bash"), T(114),
          T(115), T(116), T(117), T(118), T(119)], table=tab(1, tfix)),
