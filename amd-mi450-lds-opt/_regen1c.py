@@ -105,9 +105,18 @@ for a in list(art.find_all("a")):
 PH_RE = re.compile(
     r"<code[^>]*>.*?</code>|<span class=\"pre\"[^>]*>.*?</span>"
     r"|<span class=\"mathreg\"[^>]*>.*?</span>"
-    r"|<(em|i|strong|b|sup|sub)[^>]*>.*?</\1>",
+    r"|<(sup|sub)[^>]*>.*?</\1>",
     re.S,
 )
+
+
+def mark_emphasis(raw):
+    """粗体/斜体改成可翻译标记，避免整句英文被占位符挡住不译。"""
+    raw = re.sub(r"</?(?:strong|b)\b[^>]*>",
+                 lambda m: "«/B»" if m.group(0).startswith("</") else "«B»", raw)
+    raw = re.sub(r"</?(?:em|i)\b[^>]*>",
+                 lambda m: "«/I»" if m.group(0).startswith("</") else "«I»", raw)
+    return raw
 
 
 def protect(raw):
@@ -123,7 +132,7 @@ def protect(raw):
 
 blocks = []
 for i, el in enumerate(collect(art)):
-    raw = str(el)
+    raw = mark_emphasis(str(el))
     protected, phmap = protect(raw)
     txt = BeautifulSoup(protected, "html.parser").get_text()
     txt = re.sub(r"\s+", " ", txt).strip()
@@ -140,4 +149,6 @@ a = str(art)
 print("pre:", a.count("<pre"), "img:", a.count("<img"), "table:", a.count("<table"),
       "figcaption:", a.count("<figcaption"), "mathblock:", a.count("mathblock"))
 print("残留 latex:", len(re.findall(r"\\\(|\\\[|\\mathbb|\\frac", a)))
+print("粗体标记:", sum(b["txt"].count("«B»") for b in blocks),
+      "斜体标记:", sum(b["txt"].count("«I»") for b in blocks))
 print("块级公式:", [b["txt"] for b in blocks if b["tag"] == "p" and "cycles = " in b["txt"] or b["tag"] == "p" and "TDM 指令数" in b["txt"]])
