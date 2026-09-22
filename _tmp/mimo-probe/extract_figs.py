@@ -50,29 +50,46 @@ def extract(tag, page_idx, pad_top=6, gap=18):
         print(f"[MISS] {tag} on page {page_idx+1}")
         return None
     cbbox, ctext = caps[-1]
-    arr, nonwhite, W, H = row_profile(page)
-    cap_px = int(cbbox[1] * SCALE)
-    # walk upward from caption top to find the first blank gap => figure top
-    y = cap_px
-    blank = 0
-    top = 0
-    while y > 0:
-        if nonwhite[y] <= 2:
-            blank += 1
-            if blank >= gap:
-                top = y + blank
-                break
-        else:
-            blank = 0
-        y -= 1
-    # figure bottom: caption block bottom
-    bottom = int(cbbox[3] * SCALE)
-    top = max(0, top - pad_top)
-    x0, x1 = col_limits(arr, top, bottom)
-    pad = 10
-    x0 = max(0, x0 - pad)
-    x1 = min(W, x1 + pad)
-    rect = fitz.Rect(x0 / SCALE, top / SCALE, x1 / SCALE, bottom / SCALE)
+    cap_top = cbbox[1]
+
+    # collect graphical items (vector drawings + bitmaps) sitting above the caption
+    items = []
+    for d in page.get_drawings():
+        r = d["rect"]
+        big = r.width > 3 and r.height > 3
+        rule = r.width > 20 and r.height >= 0.2
+        if (big or rule) and r.y1 <= cap_top + 3:
+            items.append(r)
+    for info in page.get_image_info():
+        r = fitz.Rect(info["bbox"])
+        if r.width > 3 and r.height > 3 and r.y1 <= cap_top + 3:
+            items.append(r)
+    if not items:
+        print(f"[MISS-GFX] {tag} p{page_idx+1}")
+        return None
+
+    # cluster upward: start from items touching the caption area, expand while gap < 30pt
+    cluster = [r for r in items if r.y1 >= cap_top - 45]
+    if not cluster:
+        cluster = [max(items, key=lambda r: r.y1)]
+    top = min(r.y0 for r in cluster)
+    changed = True
+    while changed:
+        changed = False
+        for r in items:
+            if r in cluster:
+                continue
+            if r.y1 >= top - 30:
+                cluster.append(r)
+                top = min(top, r.y0)
+                changed = True
+    x0 = min(r.x0 for r in cluster)
+    x1 = max(r.x1 for r in cluster)
+    y0 = max(0, top - pad_top)
+    y1 = max(cbbox[3], max(r.y1 for r in cluster))
+    x0 = max(0, x0 - 6)
+    x1 = min(page.rect.width, x1 + 6)
+    rect = fitz.Rect(x0, y0, x1, y1)
     pix = page.get_pixmap(matrix=fitz.Matrix(FINAL, FINAL), clip=rect, alpha=False)
     name = tag.lower().replace(" ", "") + ".png"
     path = os.path.join(OUT, "figs_raw", name)
