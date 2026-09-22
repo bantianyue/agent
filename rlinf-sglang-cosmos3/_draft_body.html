@@ -1,0 +1,146 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+
+<section style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<section style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">接入方式</strong>：RLinf把Cosmos3当作外部Hugging Face模型，经一层适配器引入，不重写模型实现，SFT直接复用既有FSDP2训练后端。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">训练对齐</strong>：用官方LIBERO_LeRobot_v3数据集跑5000步SFT，动作转成10维Rot6D表示并做分位数归一化，训练精度对齐官方实现。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">吞吐提升</strong>：任务调度与推理调度解耦，CPU仿真与GPU推理流水线重叠，完整500集评测相对单批基线最高达到3.33倍吞吐。</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">具身智能模型持续演进，模型本身只是完整开发链路里的一环。一个新的World Action Model（WAM）从模型接入、训练，到推理与仿真评测，都需要一套能快速适配、又能高效跑满的基础设施。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">RLinf此前已经支持DreamZero这类世界模型，这次接入NVIDIA Cosmos 3，并以SGLang-Diffusion（下称SGLang）作为推理后端，把SFT、推理服务与仿真评测串成一条端到端链路。<strong>Cosmos3-Nano在RLinf上的SFT训练精度对齐官方实现，而强化后的SGLang多批推理与流水线并行评测，把评测吞吐拉到3.33倍。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">以这次Cosmos3-Nano接入为例，下面梳理从微调到高吞吐并行评测这条路径上的关键设计决策，以及RLinf的流水线调度是怎么把评测效率继续往上推的。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">01 Cosmos3：RLinf具身技术栈的一次升级</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Cosmos3是NVIDIA的全模态模型，能原生理解和生成文本、图像、视频、环境音频与动作，目标是提供统一的多模态能力，用来建模物理世界并生成动作。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">架构上，Cosmos 3采用Mixture-of-Transformers（MoT）双塔设计，由自回归Transformer与扩散Transformer组成。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:7px;line-height:1;vertical-align:middle;color:#0F4C81;">●</span>&nbsp;自回归Transformer负责多模态理解与推理。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:7px;line-height:1;vertical-align:middle;color:#0F4C81;">●</span>&nbsp;扩散Transformer负责多模态内容生成。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两座塔共享统一的注意力层与3D mRoPE（3D多模态旋转位置编码）位置表示，让模型能在多种模态之间建立共享的时空表示，并跨模态边界建模时空结构。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img data-src="https://mmbiz.qpic.cn/mmbiz_png/MJRkdzPjdxR7ibPM4J1hia1Ve9xYSkgeTFfqVyGJxjiaWY0nNasic2lmZImrC7rSZwtbPicic85IT0ewQrZc5EQgAPsI4Okso0gZt6WSibM1VIXO4c/640?from=appmsg" style="display: block;width: 100%;margin: 0 auto;"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1：（来源：Cosmos3技术报告，https://arxiv.org/pdf/2606.02800）</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Cosmos 3有Edge、Nano、Super三种尺寸。下面描述的整套训练与评测都使用Cosmos3-Nano。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Cosmos3-Nano是一个16B参数的MoT模型，核心沿用Qwen3-VL-8B的架构：36层Transformer、hidden size 4096、32个注意力头、8个KV头。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Cosmos3-Nano并不是完全从零训练。自回归Transformer直接复用Qwen3-VL-8B的预训练权重，扩散Transformer则由Qwen3-VL-8B的权重初始化，并在Cosmos3的训练过程中继续优化。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">目前Cosmos3在RLinf里的技术配置如下：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:7px;line-height:1;vertical-align:middle;color:#0F4C81;">●</span>&nbsp;SFT训练跑在RLinf已有的FSDP2训练后端上。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:7px;line-height:1;vertical-align:middle;color:#0F4C81;">●</span>&nbsp;评测使用SGLang作为推理后端。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Cosmos3是一个相当复杂的新多模态与动作模型，把它接进一套已有的具身训练框架，本身就是一次有代表性的工程实践。选这样的模型等于上了一级台阶：RLinf要支持的不再是一个常规推理任务，而是覆盖多模态理解、动作生成与仿真评测的完整具身工作流。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">02模型SFT：在RLinf既有框架上做轻量接入</h2>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">1. 基于适配器的轻量接入：把模型实现与训练框架解耦</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Cosmos3是一个OmniMoT模型，架构已经在NVIDIA的cosmos-framework里开源。对于一个已经有完整官方实现的新模型，接入成本最高的一环不是“能不能跑起来”，而是在不额外维护第二份模型实现的前提下，把它接进已有的训练框架。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">接入过程中，RLinf没有重写Cosmos3的模型架构，而是把Cosmos3当作外部的Hugging Face模型，通过一层适配器引入。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">模型的构建与初始化仍然由Cosmos自己的配置系统负责，RLinf只是在模型外面加了一层薄封装，把Cosmos3的接口映射到RLinf的接口上。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Cosmos3的SFT跑在RLinf已有的FSDP2训练后端上，不需要为Cosmos3单独搭一套训练循环，checkpoint的保存与加载、日志和监控都复用RLinf现有机制。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这套设计的核心价值在于：尽可能完整地复用Cosmos3的官方实现，而不必在RLinf里再写一份Cosmos3的模型代码。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把模型适配与训练框架这样解耦，也给后续模型留出了一条更干净、成本更低的接入路径：新模型可以直接复用现有训练栈，不需要改动RLinf的训练后端。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">2. Cosmos3-Nano在RLinf上的SFT，训练精度对齐官方实现</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">数据集用的是NVIDIA开源的LIBERO_LeRobot_v3，包含机器人操作任务的多模态轨迹数据：主视角与腕部相机的RGB图像、机器人状态（8维），以及对应的机器人动作（7维）。动作表示为3维平移 + 3维轴角旋转 + 夹爪。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">加载LIBERO_LeRobot_v3之后，Cosmos3在数据处理阶段即时转换并归一化动作表示：原始的3维轴角观测转成6维旋转表示（Rot6D），原始的7维动作转成10维动作表示，然后再做分位数归一化。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">相比轴角，Rot6D避开了 ±π 附近的不连续，动作空间表示更平滑连续，扩散模型更容易稳定学到动作分布，生成的机器人动作质量也更高。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">注意：当前SFT实验使用的是NVIDIA官方LIBERO_LeRobot_v3数据集，视频以10 FPS录制。如果换成其他LIBERO数据集或自建数据集，要特别留意帧率和相关超参数是否仍与当前Cosmos3配置匹配。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Cosmos3在RLinf上跑5000步SFT的结果如下（与官方Cosmos3实现https://github.com/NVIDIA/cosmos对齐）：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img data-src="https://mmbiz.qpic.cn/mmbiz_png/MJRkdzPjdxRmaS1Xv2DWAzJ7icGCRSdIAOBozPBicdwqeYosiaXFHrCkzTdyBXDMFBKiaWGnhrf606gpCmicAo4Mvhe1xuiaveNMTBXxDkNyGAVbg/640?from=appmsg" style="display: block;width: 100%;margin: 0 auto;"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2：Cosmos3-Nano在LIBERO_LeRobot_v3上5000步SFT的整体训练loss</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img data-src="https://mmbiz.qpic.cn/mmbiz_png/MJRkdzPjdxQOZGVKe9tjy1m6kAWWGsvKbqeqCibczuyTVNdFm5Lguha31upD3O3z6dSQCiaFL9SscLQ1GyGL6uAhMutbVibCOua3vH5XnNk5k0/640?from=appmsg" style="display: block;width: 100%;margin: 0 auto;"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：Cosmos3-Nano在SFT过程中的动作流匹配loss</figcaption></figure>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img data-src="https://mmbiz.qpic.cn/mmbiz_png/MJRkdzPjdxSPFohiaMibS1yJib0s84LbT3ic8dn6MhKQiaBlalUic90KojVU13ujtibTQRiaZkibtGoT1r87uRxQybz9NmU2U3w2gCwOmwsl2p1ah6ac/640?from=appmsg" style="display: block;width: 100%;margin: 0 auto;"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4：Cosmos3-Nano在SFT过程中的视觉流匹配loss</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在LIBERO_LeRobot_v3上跑完5000步SFT后，Cosmos3-Nano的整体训练loss稳定收敛。这些结果说明，RLinf上的Cosmos3-Nano接入能有效学到LIBERO数据里的视觉分布与动作分布，整个训练过程也很稳定。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">03评测：调度解耦与流水线执行</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Cosmos3-Nano在LIBERO_LeRobot_v3上微调完成后，下一步就是在仿真里评测训练好的模型，验证它实际生成机器人动作的效果如何。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">1. 任务调度与推理调度解耦：让RLinf和SGLang各司其职</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">RLinf目前支持用SGLang作为Cosmos3评测的推理后端，它作为一个独立的推理服务运行，负责模型推理和并发请求处理。在RLinf这一侧，每个计算组件由一个Worker管理，Worker负责该组件的生命周期，以及它与其他组件之间的数据交换。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这里有一个关键的设计决策：RLinf不接管SGLang内部的推理调度。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SGLang本身已经有成熟的推理优化、自己的Router和自己的请求调度。如果RLinf再在上面叠加生命周期管理或调度，就可能干扰SGLang自身的调度，拖累推理性能。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">所以RLinf采用非侵入式的SGLang Worker架构：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:7px;line-height:1;vertical-align:middle;color:#0F4C81;">●</span>&nbsp;RLinf负责任务编排与数据流。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:7px;line-height:1;vertical-align:middle;color:#0F4C81;">●</span>&nbsp;SGLang负责推理及其自身调度。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SGLang Worker在初始化时启动SGLang推理进程，之后它的主要工作就是RLinf与SGLang之间的数据适配和请求转发，不介入SGLang内部的模型推理与请求调度。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">当其他Worker发起推理请求时，SGLang Worker先把输入转换成SGLang期望的格式，直接发给SGLang服务，然后等待推理任务完成。推理结束后，SGLang Worker取回模型输出、转换回来，再交给下一个Worker。整个过程中，RLinf都不干预SGLang内部的模型推理、请求调度和Router机制。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这样一来，RLinf的任务调度就和SGLang的推理调度解耦：RLinf掌握整体任务流，SGLang掌握自己的推理效率。两套系统集成得很干净，SGLang已有的推理优化也完整保留。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">2. 让CPU仿真与GPU推理重叠，提高硬件利用率与评测吞吐</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">仿真和推理属于同一条任务链，但消耗的算力类型不同。在Cosmos3的LIBERO评测里，不同Worker的计算特征差异很明显：LIBERO模拟器主要用CPU做环境仿真，SGLang用GPU做模型推理。两者严格串行执行时，仿真阶段和推理阶段之间会出现明显的空转，CPU和GPU都没吃满。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">问题因此从“模型能不能跑起来”，变成了：</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">怎么让不同的计算阶段真正并行起来？</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">RLinf的答案是评测流程里的流水线执行机制。给定一批评测任务，RLinf会把它拆成多个batch，放到多条流水线上处理，让不同batch在各Worker之间交错执行，尽可能把LIBERO仿真和SGLang推理重叠起来。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img data-src="https://mmbiz.qpic.cn/mmbiz_png/MJRkdzPjdxSMLYXicRsXgvxI6k0zFs0mlo4gG7icyCpVof6Y6TeZFfQNYPV2FcJsI8N3QMedKUClZvCN8DchFxKDPf3pCCCbhoLof5eYOu0WY/640?from=appmsg" style="display: block;width: 100%;margin: 0 auto;"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5：SglangEmbodiedWorker、SglangServer与LIBERO模拟器之间的数据流</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">以LIBERO-10为例。在单台8卡服务器上跑一次完整评测，覆盖10个任务 × 50个demo = 500个episode。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">RLinf会启动128个并行仿真环境来跑评测，每个环境负责4个仿真任务。当任务数无法被并行环境数整除时，用任务补齐保持并行执行宽度不变。在当前配置下，128个仿真环境均匀分布在8张GPU上，每张卡16个环境，仿真任务并行执行。在此基础上，RLinf还可以把128个并行环境继续拆成N条流水线，每条流水线处理128 // N个环境。在一条流水线内部，任务依次经过LIBERO仿真、SGLang推理、LIBERO动作执行；在流水线之间，则按流水线方式调度执行。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong style="color:#0F4C81;">1</strong>&nbsp;LIBERO模拟器先并行运行各个环境，收集当前观测。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong style="color:#0F4C81;">2</strong>&nbsp;RLinf把多个环境的图像等观测拼成一个batch，发给SGLang。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong style="color:#0F4C81;">3</strong>&nbsp;SGLang用多批、高并发的推理能力同时处理大量请求，生成对应的下一步动作。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong style="color:#0F4C81;">4</strong>&nbsp;RLinf取回推理结果，把每个动作送回到它所属的LIBERO环境执行，环境再产生下一步观测，进入下一轮推理。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这个循环一直重复，直到所有episode评测完成。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">整体上，评测过程变成了并行LIBERO仿真、RLinf流水线调度与高并发SGLang推理之间的流水线协作：CPU上的环境仿真与GPU上的模型推理在时间上重叠，计算阶段之间的等待被压缩，硬件利用率和评测吞吐同时提高。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">3. 结果：相对单批基线最高3.33倍吞吐</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们把RLinf的流水线调度与SGLang的高并发推理结合起来，对当前的Cosmos3仿真评测负载做了优化。端到端结果如下：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img data-src="https://mmbiz.qpic.cn/sz_mmbiz_png/MJRkdzPjdxSovsp313icVyic6ibAIxiaKaccMWYDnsCMuPoZBtCCvFvJOF7iao3Uw0zqA7nmKiajQx6YPaWysuTdKxwraibdulruUmvicHaj5tghwuQ/640?from=appmsg" style="display: block;width: 100%;margin: 0 auto;"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图6：Cosmos3-Nano在SGLang上的评测吞吐，128集 / 32环境最高1.80倍，500集 / 128环境最高3.33倍（相对各自基线）</figcaption></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">128集、32个仿真环境</h3>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">每个请求的观测数</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">pipeline_stage_num</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">相对吞吐</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">4</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1.00x</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">2</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">2</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1.66x</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">4</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1.80x</td></tr>
+</tbody>
+</table>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">完整500集、128个仿真环境</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第一列是每个请求打包发给SGLang的观测数，pipeline_stage_num是任务被拆成的流水线数量，两者的乘积保持恒定。结果显示，把RLinf的流水线调度与SGLang的高并发推理结合起来，可以显著提高Cosmos3仿真评测的吞吐，在完整500集评测上达到单批基线的3.33倍。</p>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">每个请求的观测数</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">pipeline_stage_num</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">相对吞吐</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">16</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1.00x</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">2</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">8</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1.70x</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">4</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">4</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">2.67x</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">8</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">2</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">3.33x</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">16</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">2.33x</td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">04 RLinf × SGLang × Cosmos3：从“多支持一个模型”到“端到端完整具身链路”</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">接入Cosmos3从来不只是让RLinf“多支持一个模型”。在这次工作里，RLinf里的Cosmos3成了一条完整链路，覆盖模型接入、SFT训练、SGLang推理与仿真评测。它展示的不是对某一个模型的支持，而是RLinf怎么以轻量方式持续接入不断演进的具身模型，把训练、推理、评测融进一条端到端流程，再用系统级调度把整体效率继续往上推。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对具身AI来说，基础设施的价值同样不止于“让模型跑起来”，而在于把模型、训练、推理、仿真和任务执行组织成一个能协同高效运转的系统，这也是RLinf在具身AI与Agent基础设施上持续推进的核心方向。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">想了解更多，可以访问RLinf仓库：https://github.com/RLinf/RLinf（欢迎点星、关注与反馈）</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Cosmos3 SFT文档：https://rlinf.readthedocs.io/en/latest/rst_source/examples/embodied/sft_cosmos3.html</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Cosmos3 SGLang评测文档：https://rlinf.readthedocs.io/en/latest/rst_source/evaluations/guides/cosmos3_sglang.html</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<section style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">
+<strong>接入一个新模型的价值，不在于模型列表又长了一行，而在于整条链路能不能真跑快。</strong><br  /><br  />这套方案里最关键的一步，是让RLinf不去接管SGLang的内部调度：任务编排留在RLinf，推理效率交给SGLang，两边互不干扰；再把评测任务拆成多条流水线，让CPU上的仿真与GPU上的推理在时间上重叠，空转被吃掉，吞吐自然上去。完整500集评测因此从单批基线提升到3.33倍。<br  /><br  />对做具身模型和Agent的团队，这里可复用的经验是：新模型接入尽量走适配器、复用既有训练栈；而“仿真 + 推理”这类混合负载，优先考虑流水线重叠，而不是单纯堆硬件。</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="text-align:center;">
+<span class="portal-title" style="font-size:12px;color:#888888;">【传送门】</span>
+<section style="text-align:left;display:inline-block;font-size:12px;color:#888888;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#888888;text-decoration:none;" href="https://mp.weixin.qq.com/s?__biz=MzYzNzE2MDA2Mg==&amp;mid=2247490301&amp;idx=1&amp;sn=80e15a2057f64dd55a333240c9f7edac&amp;scene=21#wechat_redirect" target="_blank" data-linktype="2">AI芯片架构全景: 从NVIDIA到Groq的六条设计路线</a><br  />
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#888888;text-decoration:none;" href="https://mp.weixin.qq.com/s?__biz=MzYzNzE2MDA2Mg==&amp;mid=2247487235&amp;idx=1&amp;sn=9a0097b65720544b4c4ecfab6062d5af&amp;scene=21#wechat_redirect" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br  />
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#888888;text-decoration:none;" href="https://mp.weixin.qq.com/s?__biz=MzYzNzE2MDA2Mg==&amp;mid=2247488779&amp;idx=1&amp;sn=d45689287fdd0d7d6743f88d98ff67a6&amp;scene=21#wechat_redirect" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br  />
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#888888;text-decoration:none;" href="https://mp.weixin.qq.com/s?__biz=MzYzNzE2MDA2Mg==&amp;mid=2247489980&amp;idx=1&amp;sn=dabf429531d8bd86654530f8c80203f5&amp;scene=21#wechat_redirect" target="_blank" data-linktype="2">vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%</a><br  />
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#888888;text-decoration:none;" href="https://mp.weixin.qq.com/s?__biz=MzYzNzE2MDA2Mg==&amp;mid=2247487185&amp;idx=1&amp;sn=7205c7cb651f80174475060314228a03&amp;scene=21#wechat_redirect" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br  />
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#888888;text-decoration:none;" href="https://mp.weixin.qq.com/s?__biz=MzYzNzE2MDA2Mg==&amp;mid=2247487559&amp;idx=1&amp;sn=4e64c85d03dc2916893042526030fa6b&amp;scene=21#wechat_redirect" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br  />
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#888888;text-decoration:none;" href="https://mp.weixin.qq.com/s?__biz=MzYzNzE2MDA2Mg==&amp;mid=2247486798&amp;idx=1&amp;sn=0558ff29d3c016785506b7be4768944d&amp;scene=21#wechat_redirect" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br  />
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#888888;text-decoration:none;" href="https://mp.weixin.qq.com/s?__biz=MzYzNzE2MDA2Mg==&amp;mid=2247488811&amp;idx=1&amp;sn=7e6c7c794696fc1d4f6bfbb393e8ccb3&amp;scene=21#wechat_redirect" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br  />
+</section>
+</section>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:&#39;Courier New&#39;,monospace;">参考：https://www.sglang.io/blog/rlinf-sglang-cosmos3</span></p>
+</section>

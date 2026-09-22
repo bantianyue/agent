@@ -1,25 +1,19 @@
 # 进度追踪 - ultrascale-part4-expert-5d
 
-| Step | 状态 |
-|------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (zh) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json选4-8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | completed |
-| Step 6: 推送草稿 | pending |
+- ✅ 完成 (ultrascale-part4-expert-5d)
+- Step 0: 目录创建与来源确认 completed
+- Step 1: 内容提取（p4 切片，覆盖专家并行/五维总览/最佳配置搜索） completed
+- Step 2: 图片下载（原文 8 张真实示意图转 PNG） completed
+- Step 3: 封面生成（cover.png 900x383 + cover-square.png 500x500） completed
+- Step 4a: 要点速览 summary completed
+- Step 4b: 正文章节翻译（专家并行/五维总览/ZeRO-3 对比/三步配置法/数千配置基准） completed
+- Step 4c: 正文挂图校对（fig_after 索引对齐段落，8 张图全挂） completed
+- Step 4d: 结语 completed
+- Step 4e: 参考区 completed
+- Step 4f: 传送门 completed
+- Step 5: 预发布检查 ALL CHECKS PASSED completed
+- Step 6: 推送草稿 completed
+- Step 7: 验证草稿配图（5/5 正文图） completed
 
-创建时间: 2026-09-08
-来源: https://huggingface.co/spaces/nanotron/ultrascale-playbook
-| Step 4d-i: 传送门 | completed |
+source: https://huggingface.co/spaces/nanotron/ultrascale-playbook
+| Step 5: 预发布检查 | completed |

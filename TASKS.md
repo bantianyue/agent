@@ -1204,6 +1204,7 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-09-08 01:47 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-21 14:31 | ✅ 已推送 | draft.id=TIqnnVEu6Oy3-wtKttGa0bnMo9LasbOdjqzJK3e0TfCFusbYTbYoh6hYoPo3Ee_D，正文图 1/1 verify 通过 |
 
 ### #1 - ultrascale-part3-tp-sp-cp-pp
 
@@ -1216,6 +1217,7 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-09-08 02:59 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-21 15:20 | ✅ 已推送 | media_id: TIqnnVEu6Oy3-wtKttGa0VOiFdP9R7Zbiy5hCuKoflasnceIBUg9anfcKSsDVzRF，正文图 5/5 verify 通过 |
 
 ### #1 - ultrascale-part5-gpu-kernel-precision
 
@@ -1688,3 +1690,59 @@
 |--------|------|------|
 | 2026-09-20 01:28 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-09-20 01:40 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0XbUr2HfJ-dYAoVhSRiELSLWk70vTlrxDlrd4ku-SW9B，draft 回读正文 4 张动图验证齐全 |
+
+### #1 - jev-clearly-explained
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-20 01:53 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - cua-trycua-agent
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-20 19:01 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - jev-101-what-you-can-build
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-20 22:52 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - fa4-low-precision-mxfp8-blackwell
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-20 23:11 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - rlinf-sglang-cosmos3
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-21 13:45 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - sglang-omni-code2wav-batchsize
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-21 14:30 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #1 - ultrascale-part3-tp-sp-cp-pp
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-21 14:58 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-21 15:07 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0f80vzFNgkZuQ9LYHR-AFHs1xGu5-z5j0ZNPMTvyv-nd |
+
+### #1 - pufferlib-5-degrees-parallelism
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-21 16:09 | 📥 开始 | 收到 URL，开始提取内容 |
+| 2026-09-21 16:37 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0ae_6-9WT4nHSWATFRJ0v7G3px_At9OsENdMN92THoWj |
+
+### #1 - nvfp4-kv-cache
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-22 09:07 | 📥 开始 | 收到 URL，开始提取内容 |

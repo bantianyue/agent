@@ -1,0 +1,426 @@
+Low Precision Flash Attention 4: End-to-End Block-Scaled Attention for Blackwell
+
+TL;DR
+
+We extend FlashAttention-4 [1] with MXFP8 forward and backward, reaching 2.85 PF/s forward and 2 PF/s backward on LLM shapes. On our internal shapes, FA4 MX8 reaches 2.54 PF/s forward and 1.58 PF/s backward, delivering up to 1.6× and 1.52× gains over BF16. We fuse quantization into the surrounding producers and develop an end-to-end zero-gather jagged module in which most activations and compute remain in FP8. This module is used internally at Meta for GEM training [2]. To our knowledge, this is one of the first SoTA implementations of MXFP8 FA4 forward and backward being used in production training workloads. We have open sourced the code in https://github.com/facebookresearch/ads_model_kernel_library/tree/main/lp_fa4
+
+1. Introduction
+
+Blackwell’s tensor cores introduce block-scaled MMA instructions (tcgen05.mma.block_scale) that operate natively on microscaling formats — MXFP8, MXFP6, MXFP4 & NVFP4 — delivering 2-4x the throughput of BF16 MMA [4,5]. However, exploiting this in real training workloads requires more than just swapping the attention kernel’s data type. Scale factors must be managed in the already-saturated TMEM, quantization along the GEMM K-dimension must be handled for every operand (including online-computed intermediates like P and dS), and the overhead of converting between precisions must be overlapped so MMA can continue to execute at full speed.
+
+In this work, we extend the FA4 attention kernel with end-to-end MXFP8 support for both forward and backward passes, and integrate it into a cross-attention module for Ads training with fused producer and output epilogues. The key contributions are: (1) TMEM allocation strategies that fit scale factors into fully-utilized 512-column TMEM with minimal new barriers, (2) online transpose invariant square block scale quantization of dS using Blackwell’s redux.sync.max.abs.f32 warp-wide reduction, (3) fused RMSNorm+Quantize and GEMM+Quantize kernels that eliminate quantization overhead by producing FP8 output with dual scale factor layouts in a single pass, and (4) a zero-gather jagged module where FP8 data stays at unpadded positions and only the much smaller scale factors are scattered, padded, and permuted to tensor-core friendly 128-aligned addresses for TMA.
+
+2. Implementation Details
+
+2.1 Attention Forward
+
+Attention forward consists of the following primary operations:
+
+S = Q @ K.T
+
+P = Softmax(S)
+
+O = P @ V
+
+To enable blockscaled MMA, we follow existing CuTe DSL examples from Quack GEMM kernels and CUTLASS C++ examples [5,6]. We use TMA loads to fetch scale factors from GMEM to SMEM, and copy SFs from SMEM to TMEM before triggering the UMMA. The primary challenge here is TMEM contention, which is explained in later.
+
+Currently, in the softmax warp, softmax computation happens in FP32, and then the results are converted to BF16 before the PV multiplication. We convert P to MXFP8 while also computing the scales. We deep dive into the PTX optimizations done to achieve this efficiently later.
+
+One subtle thing to note is that for P.V blockscaled MMA to work, the scales need to be computed along the MMA K-dim. For Q and K, this is the embedding dimension (D) of attention, but for V, the scales and quantization need to be computed along the sequence dimension (N).
+
+2.1.1 TMEM Allocation and barrier synchronization
+
+Blackwell architecture has a fixed TMEM size of 512 column, which is completely utilized for MMA operands and accumulators in existing Blackwell FA kernels. This makes it challenging to add block scaled MMA, since scales also need to be in TMEM.
+
+FA4 forward uses a ping-pong computation between two Q tiles. We load  two Q tiles, Q0 & Q1 of size [128, 128], and loop over K/V tiles (N dimension). The order of GEMMs is:
+
+This is the TMEM Alloc:
+As you can see, TMEM is fully utilized with no spare room for SFs. Note that we cannot overlap input SFs with the accumulator TMEM. To solve this problem, we overlap the SF’s in the following way:
+
+For the prologue S(i) GEMMs, we can use O(i) for S(i) SFs, as O(i) hasn’t started yet
+
+SFs for O(i) can live overlapped with S(i) – this is the same strategy used by regular FA which overlaps P(i) with S(i). Thus, there already exists a barrier which ensures that S(i) TMEM is consumed, before we copy O(i) SFs. We just need to choose a region in S(i) distinct from P(i). Note that for FP8, P(i) is 32 columns, vs S(i) being F32 is 128 columns.
+
+SFs for S(i) live overlap with S(1-i). This requires an additional barrier between the MMA and Softmax warps, since MMA is executed asynchronously, it is possible that there is a write-write conflict between S(1-i) accumulator and S(i) SFs. Hence, we add a barrier in MMA warp which waits before copying S(i) SFs, and arrives when S(1-i)’s accumulator is read by the softmax warp. Note that this barrier doesn’t usually add any extra cost, since there is an O(i) GEMM to overlap the TMEM->reg reads that need to precede the barrier. Typically, the GEMM takes longer than TMEM->reg read.
+
+Concretely, the GEMM execution order with SF placement is shown below:
+
+2.1.2 Improved unroll-KV
+
+As we move to lower precision, MMA throughput increases (2x for MXFP8, 4x for MXFP4 vs BF16), the softmax warp’s SFU-bound computation stays the same. This shifts the bottleneck: softmax bubbles that were hidden behind slow BF16 MMA now become exposed.
+
+In the persistent kernel, the tile boundary is particularly problematic. Without unroll-KV, the last two GEMMs of a tile are both PV, followed by both QK of the next tile. Softmax for the next tile’s Q0 can’t start until QK0 completes — but QK0 can’t start until all of tile(n)’s PV GEMMs finish. This creates a bubble at every tile boundary. Unroll-KV (inspired by GDPA) [3] interleaves the last PV of the current tile with the first QK of the next tile:
+
+Now softmax for Q0 triggers one GEMM earlier, hiding the tile boundary latency behind the PV pipeline.
+
+However, enabling this for BF16 caused a regression: the correction warp (which processes both stages sequentially) was delayed because PV1 was pushed later, which cascaded through the softmax_corr_empty barrier into the next softmax. We fixed this by moving the barrier wait to after the row-sum computation (which has no dependency on the barrier), decoupling the correction pipeline from the critical path.
+
+2.1.3 Optimized Online MXFP8 conversion
+
+Since we want to do both QK and PV GEMMs using block-scaled attention, this necessitates an online conversion of the post-softmax output (P) from FP32 to MXFP8, instead of BF16. Applying blockscaling is a 3-step process. For a block x consisting of 32 elements:
+
+Here, a is the amax for the block, and sigma is the scaling factor. In order to do this optimally in Blackwell, we make use of 3-instruction max, and fmul2 instructions (exposed in CuteDSL nvvm) for step (1) and (3) – which happen for every element. For computing the scale factor (Step 2) – we use an optimized PTX sequence which avoids log2 and division by extracting FP32 exponent and mantissa bits.
+
+Additionally, we notice that computation of softmax already involves calculating row maxes for the 128 elements before the exponentiation. Since exp is a monotonically increasing function, we can re-use the max computed for softmax, thus preventing additional max operations while adding 1 exp operation per 32 elements. We find this approach to yield better performance.
+
+Our recent experiments indicate that performance can be further enhanced via constant scaling for P; this remains numerically robust given that the softmax operator naturally constrains outputs within the [0, 1] interval.
+
+2.1.4 Handling variable sequence length tensors with TMA
+
+Handling jagged data is important in Ads models, but it is especially challenging with MXFP8. Blackwell block-scaled MMA uses a swizzled 512-byte scale-factor atom, corresponding to the scale factors for a 128×128 data tile [5]. Because jagged sequence lengths are arbitrary and often not multiples of 128, their natural offsets do not satisfy this layout requirement. Padding the full data tensors would work, but adds costly memory traffic and storage overhead. Instead, we use split addressing: only the much smaller scale-factor tensors are padded to 128-aligned positions, while the FP8 data remains compact. In the consuming GEMM or attention kernel, TMA loads use padded offsets for the scale factors and the original jagged offsets for the data. We use lightweight scatter and layout-transformation kernels to move scale factors from compact jagged layouts into the padded, swizzled layouts expected by downstream TMA loads. More generally, these kernels rearrange scale-factor bytes without changing their values, allowing each subsequent GEMM or attention kernel to consume scales directly in its preferred layout.
+
+2.2 Attention Backward
+
+Attention backward consists of the following key operations:
+
+GEMMs:
+
+S  = K   @ Q.T
+
+dP = V   @ dO.T
+
+dV = P.T @ dO
+
+dK = dS.T @ Q
+
+dQ = dS  @ K
+
+Compute:
+
+P = softmax(S)
+
+dS = dsoftmax(dP, P)
+
+Notice that in the backward pass, several GEMMs are transposed. For instance, consider:
+
+dP = V   @ dO.T
+
+dV = P.T @ dO
+
+For the dP MMA, the dO quantization needs to be along the D (Embedding dimension), however, for the dV MMA, the quantization needs to be along the M (Sequence dimension). This is similar to what we saw with the P.V MMA in forward, where V needs to be quantized along the M-dim. However, in backward, we have GEMMs that require quantization along both axes. Note that this is a limitation of using block-scaled MMA, as quantization needs to be along the GEMM K-dim.
+
+To solve this problem, we quantize Q, K, and dO using square [32,32] blocks, making the E4M3 payload transpose-invariant. Both GEMMs can therefore reuse one quantized representation instead of storing separate versions. The much smaller E8M0 scales are still laid out and loaded separately for each GEMM’s required Tensor Core scale layout. dS presents a related transpose challenge. The square quantization scheme produces one representation that both dK and dQ can consume.
+
+2.2.1 TMEM Allocation
+
+[Note: This scheme describes the 1-CTA path. We currently are using the 1-CTA path for MX8, as it is performing better currently]
+
+While the forward has 2 GEMMs (S and O) with 2-stage Q pipelining across 4 accumulators, the backward has 5 GEMMs that all need TMEM space for accumulators and scale factors. The TMEM layout packs all 512 columns:
+
+The core constraint: dK and dV are persistent accumulators — they accumulate across the entire M-loop, so their TMEM regions are occupied for the kernel’s entire lifetime. This means SF placement can only use the S and dP regions. We use the dP region for the first 2 GEMMs (S & dK), and the S region for the next 3 GEMMs. We only needed to add one additional barrier before the S GEMM, which should not add any additional cost. The TMEM allocation scheme is detailed below:
+
+2.2.2 Online square dS quantization
+
+In backward, dS is computed in FP32 and consumed by two GEMMs:
+
+dK = dSᵀ @ Q,    dQ = dS @ K.
+
+We quantize each 32×32 block of dS once. Each warp lane owns 32 values and computes a thread-local absolute maximum. Blackwell’s redux.sync.max.abs.f32 instruction then reduces these 32 partial maxima across the warp to obtain the AMAX for the full block. Because the scaling region is square, it remains valid when dS is transposed. The same scale and payload can therefore feed both GEMMs.
+
+Quantizing dS once avoids an additional E8M0 conversion, inverse-scale multiplication, E4M3 conversion, and payload fragment. The dK and dQ MMAs still copy the shared scale into their respective hardware layouts. We find the [32, 32] square quantization to be numerically acceptable in our training workloads.
+
+2.2.3 FP16 dQ Reduction
+
+Through ablation studies, we identified dQ reduction as a critical throughput bottleneck. Because dQ necessitates writing a 128×128 tile to GMEM during every inner-loop iteration, it substantially increases global memory bandwidth consumption. To mitigate this, we evaluated both BF16 and FP16 dQ reduction strategies, finding that FP16 dQ with static scaling yields optimal performance. Given that dQ values remain consistently small in our production workloads, this FP16 approach paired with large scale factors maintains acceptable numerical accuracy. We provide a detailed performance comparison between FP32 and FP16 dQ reduction in the results section to quantify the speedup.
+
+2.3 Hiding the Q/K/V Quantization overhead
+
+While we obtain good speedups for the core attention kernel, one of the key challenges is quantization overhead, especially for smaller sequence lengths. To eliminate the quantization overhead, we fuse the MXFP8 quantization into the epilogue of the preceding kernel. On our shapes, it also speeds up the preceding kernel for several shapes by reducing the data read/write or compute.
+
+Another challenge for the backward pass is the transpose quantization, the fact that we need to quantize Q, dO and K tensors along both axes for the backward pass. Traditional block-scaling is not transpose invariant. Initially, we tried fusing dual quantization [32, 1], [1, 32]  in the epilogue, but we found this to be slow. Our current solution uses [32, 32] square quantization, similar to SFDS_dQ. This makes the quantization transpose invariant and we just need to quantize once.
+
+2.3.1 RMSNorm+Quantize
+
+In the forward pass, the RMSNorm output feeds into Wq and Wk projection MXFP8 GEMMs. Rather than writing BF16 to GMEM and running a separate quantize kernel, we fuse RMSNorm + [32,32] MXFP8 quantization into a single CuTe DSL kernel.
+
+The kernel uses a two-phase persistent design: each CTA processes 4 tiles of 8 rows (= 32 rows, matching the [32,32] block height). Phase 1 computes RMSNorm, stores BF16 to SMEM, and accumulates per-K-block AMAX into a running max. Phase 2 reduces AMAX across all 32 rows, then reads BF16 from SMEM, scales, and converts to FP8. The two-phase split is necessary because the [32,32] AMAX requires seeing all 32 rows before quantizing, but each tile only processes 8.
+
+For the backward pass, we fuse two additional operations into the existing Quack RMSNorm backward kernel at zero additional memory cost: (1) x_norm = x  * rstd *  w reconstruction (x_hat and weight are already in registers), eliminating a separate reconstruct kernel, and (2) inline FP8 dV dequantization — dV from FA4 backward is dequantized per-iteration using scalar SF indexing and added directly to dout.
+
+2.3.2 GEMM+Quantize
+
+For projection GEMMs (e.g., Wq, Wk, Wv), we fuse MXFP8 quantization into the GEMM epilogue. The key idea: after MMA accumulator values move from TMEM to registers (FP32), the conversion to FP8 happens entirely in registers before writing to GMEM. The BF16 intermediate never touches global memory.
+
+Vectorized 128/256-bit stores and batched FP8 conversion were needed for speedups. At compute-bound shapes, the fused FP8 kernel is faster than a BF16 GEMM because FP8 MMA has 2x the throughput.
+
+The [32,32] variant writes FP8 data once and outputs E8M0 scales in two cuBLAS blocked layouts (K-block for FA4 forward, M-block for backward) from a single warp-wide AMAX reduction (redux.sync.max.abs.f32).
+
+2.3.3 Jagged GEMM-Norm backward
+
+The attention output gradient is consumed by two projection-backward GEMMs with different contraction dimensions. For self-attention, (dX = dZ @ W^T) requires scales along the feature dimension, while (dW = X^T @ dZ) requires scales along the token dimension. We therefore treat its 1.76 PFLOP/s result as performance-only, not as an accuracy-qualified comparison, and thus emit it from the above charts. We plan to open an issue in CuDNN github to investigate the issue. The PMA path follows the same principle: FA4 emits FP8 dK and dV with sequence-local [32,32] scales, from which we construct both the row-wise layout used by (dX = dK @ W) and the transposed layout used by (dW = dK^T @ X).
+
+The weight-gradient GEMM is especially challenging for jagged inputs because transposition makes the variable-length token dimension the GEMM K dimension. We extended the downstream Quack GEMM [6] to read FP8 values directly from compact jagged storage while addressing their scales in a separate, padded logical K space. The kernel processes each sequence as an independent K segment and reduces the resulting partial weight gradients, preventing quantization groups from crossing sequence boundaries without padding the activation tensors. Finally, the compact dX output flows directly into the norm backward; in PMA, FP8 dV dequantization and addition are also fused into that norm kernel, avoiding another materialized intermediate.
+
+2.4 E2E Module
+
+A primary bottleneck in optimizing Ads models stems from their relatively small tensor shapes and embedding dimensions compared to LLM workloads, which makes the models more bandwidth bound. Traditional approaches utilizing separate quantization kernels incur memory bandwidth overhead due to redundant global memory traffic, which severely degrades our MFU. To address these constraints, we adopted a specialized module design strategy, developing a suite of high-performance fused kernels and customized modules specifically optimized for the unique requirements of the GEM architecture.
+
+For this work, our focus was on a cross-attention module, that is common in many recommendation modules across Meta. The end-to-end execution flow is illustrated in the following diagram:
+
+3. Results
+
+3.1 Kernel Performance
+
+3.1.1 FA4
+
+In this section we compare the OSS FA4 kernel, CuDNN 9.24, vs our forked FA4 kernel on common LLM Shapes, as well as our internal workload. Our internal workload shapes are somewhat different from the shapes used in FA4 paper, namely: 1) higher batch size, 2) Fewer heads, 3) Lower query lengths, 4) Highly jagged seq len distributions.
+
+We report kernel-level performance using Tensor Core throughput (TFLOP/s) and speedup relative to baseline implementations.  The benchmarks are done on Meta internal Recsys GB300 GPUs. We evaluate the following implementations:
+
+OSS FA4 BF16: A snapshot of the open-source FA4 implementation as of August 2, 2026.
+
+Internal FA4 BF16: Our internal FA4 implementation, which adds persistent execution and improved variable-length scheduling.
+
+Internal FA4 MX8: The MXFP8 extension of our internal FA4 implementation.
+
+cuDNN 9.24: The cuDNN BF16 baseline for forward and backward, with the MXFP8 baseline included where reported.
+
+LLM Shapes
+
+On the forward pass, FA4 MX8 reaches 2.85 PF/s, comparable to cuDNN 9.24 MX8 at 2.82 PF/s, and delivers a 1.43× gain over FA4 Internal BF16 at 2.00 PF/s.
+
+On the backward pass, FA4 MX8 reaches 1.82 PF/s with FP32 dQ accumulation and 1.98 PF/s with FP16 dQ accumulation—1.21× and 1.32× faster, respectively, than cuDNN BF16 at 1.50 PF/s.
+
+In our tests with cuDNN Frontend 1.26 and cuDNN 9.24, MXFP8 backward with nonuniform E8M0 V scales did not match the reference for dQ and dK; uniform V scales removed the discrepancy. We therefore treat its 1.76 PFLOP/s result as performance-only, not as an accuracy-qualified comparison. This backward caveat does not apply to the cuDNN MXFP8 forward results. Another notable difference is that CuDNN returns BF16 dK/dV gradients, while we return quantized gradients.
+
+Internal Shapes
+
+Forward results are shown for both jagged K (sparsity = 0.5) and uniform K (sparsity = 1.0). For shared-Q shapes, the OSS FA4 and cuDNN references use the closest supported independent-Q executions with matched attention arithmetic; the figure legends use presentation names for readability.
+
+For jagged K (sparsity = 0.5) at K max = 16384, FA4 Internal MX8 reaches 2.54 PF/s — 1.59× faster than FA4 Internal BF16 at 1.60 PF/s and within 4% of cuDNN MX8 at 2.64 PF/s.
+
+For uniform K (sparsity = 1.0) at K max = 16384, FA4 Internal MX8 reaches 2.59 PF/s — 1.51× faster than FA4 Internal BF16 at 1.71 PF/s and within 4% of cuDNN MX8 at 2.68 PF/s.
+
+On the backward pass, FA4 Internal MX8 reaches 1.42 PF/s with FP32 dQ accumulation and 1.58 PF/s with FP16 dQ accumulation, corresponding to 1.37× and 1.52× gains over FA4 Internal BF16 at 1.04 PF/s.
+
+OSS FA4 lacks some scheduler and small-Q optimizations we have done in our fork, which is why it is significantly slower on our internal shapes
+
+3.1.2 GEMM+Quantize
+
+On B200 module shapes, fusing quantization into the GEMM epilogue raises throughput from approximately 0.20 PF/s for separate GEMM and quantization to 0.91–0.98 PF/s, a 4.4–4.7× speedup.
+
+3.1.3 Fused RMSNorm+Quantize
+
+On B200 shapes with N=512, fusing RMSNorm and MXFP8 quantization raises effective bandwidth from 0.75–0.87 TB/s to 2.6–4.0 TB/s, reaching up to a 4.7× speedup.
+
+3.2 Module Performance
+
+Benchmarked on a single GB300 GPU with B=768, Q=512 seed queries, D=384, and H=3; values are median compiled forward + backward latency for the PMA module, measured over 1,000 iterations after 200 warmup iterations.
+
+3.3 Numerics
+
+Here we report SQNR (signal-to-quantization-noise ratio), the SNR variant where the “noise” is the difference between the MXFP8 result and the BF16 reference. Higher is better; a 10 dB increase means 10× lower error power relative to the signal. We use SQNR because activation and gradient magnitudes differ widely across tensors.
+
+The following table shares the numbers on production-shape synthetic run (B=768, 5,856,019 total KV tokens, maximum K=14,980, D=384, H=3, and Q=512):
+
+While productionizing this module for GEM training, we found MXFP8 attention to have neutral NE. Achieving numerical stability required techniques inspired by SageAttention3 [7] and Qiu et al. [8].
+
+4. Conclusion
+
+Block-scaled attention on Blackwell is an end-to-end systems problem, not simply a datatype substitution. We extended FA4 with MXFP8 forward and backward by co-designing TMEM allocation, pipeline scheduling, online quantization of P and dS, and lower-bandwidth dQ reduction. We then fused quantization into RMSNorm and GEMM producers and kept jagged FP8 data compact by rearranging only scale metadata, avoiding separate quantization passes and full-tensor gathers.
+
+Together, these techniques turn Blackwell’s block-scaled MMA throughput into a practical training stack for both LLM and recommendation workloads. We plan to open-source Low Precision FA4 and its supporting components in the Ads Model Kernel Library so these techniques can be reused and extended for other low-precision attention workloads.
+
+Acknowledgements
+
+We are thankful to Tri Dao, Markus Hoehnerbach, Jay Shah, Ted Zadouri and Vijay Thakkar for open sourcing FlashAttention-4 [1]. We would like to thank Ying Zhang whose initial work on FP8 attention served as the foundation for this work.
+
+References
+
+T. Zadouri, M. Hoehnerbach, J. Shah, T. Liu, V. Thakkar, and T. Dao. FlashAttention-4: Algorithm and Kernel Pipelining Co-Design for Asymmetric Hardware Scaling. arXiv:2603.05451, 2026.
+
+Meta Engineering. Training GEM at LLM Scale: Meta Ads Recommendation Foundation Model. 2026.
+
+PyTorch. Generalized Dot-Product Attention: Tackling Real-World Challenges in GPU Training Kernels.
+
+B. D. Rouhani et al. Microscaling Data Formats for Deep Learning. arXiv:2310.10537, 2023.
+
+NVIDIA. CUTLASS Blackwell Functionality: Scale-Factor Layouts.
+
+Dao-AILab. Quack: A Quirky Assortment of CuTe Kernels.
+
+J. Zhang et al. SageAttention3: Microscaling FP4 Attention for Inference and An Exploration of 8-Bit Training. arXiv:2505.11594, 2025.
+
+H. Qiu and Q. Yao. Why Low-Precision Transformer Training Fails: An Analysis on Flash Attention. arXiv:2510.04212, 2025.
+
+Docs
+
+Access comprehensive developer documentation for PyTorch
+
+View Docs ›
+
+Tutorials
+
+Get in-depth tutorials for beginners and advanced developers
+
+View Tutorials ›
+
+Resources
+
+Find development resources and get your questions answered
+
+View Resources ›
+
+Stay in touch for updates, event info, and the latest news
+
+By submitting this form, I consent to receive marketing emails from the LF and its projects regarding their events, training, research, developments, and related announcements. I understand that I can unsubscribe at any time using the links in the footers of the emails I receive. Privacy Policy
+
+By submitting this form, I consent to receive marketing emails from the LF and its projects regarding their events, training, research, developments, and related announcements. I understand that I can unsubscribe at any time using the links in the footers of the emails I receive. Privacy Policy.
+
+x-twitter
+
+facebook
+
+linkedin
+
+youtube
+
+github
+
+slack
+
+discord
+
+© 2026 PyTorch. Copyright © The Linux Foundation®. All rights reserved. The Linux Foundation has registered trademarks and uses trademarks. For more information, including terms of use, privacy policy, and trademark usage, please see our Policies page. Trademark Usage. Privacy Policy
+
+Learn
+
+	Get Started
+	Tutorials
+	Learn the Basics
+	PyTorch Recipes
+	Intro to PyTorch – YouTube Series
+	Videos
+	PyTorch Certification
+
+Get Started
+
+Tutorials
+
+Learn the Basics
+
+PyTorch Recipes
+
+Intro to PyTorch – YouTube Series
+
+Videos
+
+PyTorch Certification
+
+Community
+
+	Landscape
+	Join the Ecosystem
+	Community Hub
+	Forums
+	Developer Resources
+	Events
+	Working Groups
+	Meeting Calendar
+	Contributor Awards
+	Ambassadors
+
+Landscape
+
+Join the Ecosystem
+
+Community Hub
+
+Forums
+
+Developer Resources
+
+Events
+
+Working Groups
+
+Meeting Calendar
+
+Contributor Awards
+
+Ambassadors
+
+Projects
+
+	PyTorch
+	
+		Executorch
+	
+
+	vLLM
+	DeepSpeed
+	Ray
+	Helion
+	Safetensors
+	Host Your Project
+
+PyTorch
+	
+		Executorch
+
+Executorch
+
+vLLM
+
+DeepSpeed
+
+Ray
+
+Helion
+
+Safetensors
+
+Host Your Project
+
+Docs
+
+	PyTorch
+	Domains
+
+PyTorch
+
+Domains
+
+Blog & News
+
+	Blog
+	Announcements
+	Case Studies
+	Newsletter
+
+Blog
+
+Announcements
+
+Case Studies
+
+Newsletter
+
+About
+
+	PyTorch Foundation
+	Members
+	Governing Board
+	Technical Advisory Council
+	Cloud Credit Program
+	Staff
+	Contact
+	Brand Guidelines
+
+PyTorch Foundation
+
+Members
+
+Governing Board
+
+Technical Advisory Council
+
+Cloud Credit Program
+
+Staff
+
+Contact
+
+Brand Guidelines
+
+JOIN

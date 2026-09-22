@@ -1,0 +1,53 @@
+PufferLib 5.0 broke 60M step/second training on a single RTX 5090. For most environments, that is months of simulated data every second. This is how we did it.
+
+
+[IMG fig01] cap=
+
+
+## Parallelizing Environments
+
+High-perf RL training uses 100s to 1000s of environments per GPU. The exact number is not chosen to inflate SPS benchmarks; it is the result of a 1000+ experiment hyperparameter sweep that maximizes task performance vs. wall-clock training time. Our results are available in our public dashboard, Constellation, on our website and locally in your downloaded copy of PufferLib 5.0. So while we could crank our numbers well over 100M sps by running a million environments, what we are reporting here is the maximum throughput under useful configurations.
+
+There are two major options for parallelizing environment simulation. Thread-based CPU parallelization is harder on the infra side, but it makes writing environments much easier. GPU parallelization makes infrastructure simple, but writing and debugging environments is much more complicated. PufferLib supports both, but most of our benchmarks are CPU-based. Naive CPU environments will often outperform naive GPU environments given good supporting infrastructure.
+
+Regardless of backend, we allocate a big block of contiguous memory for observations, rewards, and terminals. Environments step in parallel to fill these buffers. CPU environments are managed by OMP threads. GPU environments use either a single large kernel launch or a fixed series of kernel launches, which is important for CUDA graphs.
+
+
+## Parallelizing Rollouts
+
+The complexity in environment infrastructure only arises when you jointly consider the network forward pass on observations required to produce actions. Here, the GPU path is simple: run inference on all environments in a single large batch and graph the entire rollout, including the environment. 
+
+Efficient inference for CPU environments is much harder. You absolutely cannot run the model on CPU like Impala. That only ever makes sense if you have **both** a ludicrously slow environment **and** a ludicrously small model. You also can't just run all the environments in a single large batch like the GPU path. This would leave the CPU idle while the GPU runs forward passes and the GPU idle while the CPU runs the environment step. Even worse, it leaves **both **idle during CPU<->GPU data transfers.
+
+PufferLib splits CPU environments into ~2-8 equally sized buffers. Each buffer runs environments in parallel on multiple CPU threads. The forward passes are CUDA graphed but the environment of course is not. Each buffer also has its own CUDA stream and queues data transfers asynchronously with respect to other buffers. One buffer can be running forward passes while another buffer is stepping environments while yet another is transferring observations to the GPU. This approach is faster than Sample Factory's double buffering and EnvPool-based methods.
+
+
+## Parallelizing Training (New in 5.0)
+
+Up until this point, all of the asynchronous optimizations we have described are fully compatible with synchronous** training**, meaning that the policy used to collect rollouts is the same as the policy used for at least the first minibatch of the subsequent training epoch. In PufferLib 4.0, we alternate between rollouts and training serially. In PufferLib 5.0, we introduce the option to accept exactly 1 epoch of policy lag in exchange for the ability to overlap them. This approach is copied directly from Costa's CleanBA and, compared to uncontrolled asynchronous approaches like Impala, is reproducible and can be made fully deterministic from run to run. It also has the advantage of actually working...  but you can read our 5.0 algo article for that whole debacle.
+
+
+<URL> https://github.com/vwxyzjn/cleanba
+
+We have set SOTA on all major environments in PufferLib with async enabled. While it does introduce a bit of degradation into existing hyperparameters that were tuned for fully synchronous training, our experiments found it is always better after retuning.
+
+
+## Parallelizing the Model
+
+During training, each minibatch typically contains between 4k and 65k observations, arranged into sequences of length 32 to 512.  Recurrent policies typically have to loop over time here, which was one of the original motivations for transformer-based architectures. However, transformers have the downside of requiring an entire state history during both evaluation and rollout collection. They are also incredibly hard to make efficient at small scale. PufferLib's PufferNet architecture instead uses a linear recurrence that has memory but is parallelizable over time. Before introducing this architecture, we were limited to shorter credit assignment horizons per minibatch of typically 16-64. We have seen consistent benefit by increasing to 256-512 on our harder environments.
+
+
+<URL> https://x.com/jsuarez/status/2042273938592407674?s=20
+
+
+## Parallelizing across GPUs
+
+This axis is kind of obvious, but achieving good scaling with tiny models requires a careful design. PufferLib allocates model weights and gradients in contiguous memory. Averaging gradients across processes is therefore a single reduction operation, without any additional overhead from intermediate aggregation. Even our smallest models achieve near-linear scaling up to 8 GPUs.
+
+
+[IMG fig02] cap=Our 60M sps breakout config, scaled to 8 GPUs. We could easily pad these numbers close to 1B with 32k envs/GPU, but this is closer in spirit to scaling a practical single-GPU config.
+
+
+## Conclusion
+
+Async training was the biggest new optimization in 5.0, but it is far from the only one. Many of our most important performance optimizations come from fusing operations, stacking small kernel improvements, and consolidating memory. But still, this is the biggest foreseeable architecture change we were considering making to our training, and it has cut down wall-clock SOTA time by around half on most environments.
