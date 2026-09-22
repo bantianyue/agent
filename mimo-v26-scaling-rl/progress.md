@@ -1,25 +1,22 @@
 # 进度追踪 - mimo-v26-scaling-rl
 
+✅ 完成 (mimo-v26-scaling-rl)
+
+- 来源: https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Pro-RL/blob/main/MiMo_V2_6_technical_report.pdf
+- 正文: 19 节 / 90 段, 图 24 张 (Figure 1-17 + Table 1-7 全部从 PDF 矢量渲染提取)
+- 封面: cover.png 900x383 + cover-square.png 500x500 (取自原文 Figure 2 架构图)
+- preflight-check: ALL CHECKS PASSED
+- 草稿核验: draft/get body 图数 24/24 一致 (verify-draft-images.py)
+
 | Step | 状态 |
 |------|------|
-| Step 0: 目录创建与TASKS.md | completed |
-| Step 0a: 语言类型判断（中/英） | completed (en) |
-| Step 0b: 来源类型确认 | pending |
-| Step 1: 内容提取（全文） | pending |
-| Step 2: 全部图片下载 | pending |
-| Step 3: 封面生成（900×383 + 500×500） | pending |
-| Step 4a: 列出关键素材清单 | pending |
-| Step 4a-i: 写要点速览 | pending |
-| Step 4b: 确定独立观点 | pending |
-| Step 4c: 写正文（含full_translation） | pending |
-| Step 4d: 写结语 | pending |
-| Step 4d-i: 写传送门（published_articles.json 选最多8篇） | pending |
-| Step 4e: 写参考区 | pending |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | completed |
-| Step 6: 推送草稿 | pending |
+| Step 0: 提取原文+下载图片 | completed (PDF 44 页, 用 PyMuPDF 抽取全文 + 渲染 24 张正式图表) |
+| Step 1: 生成封面 | completed (cover.png 来自原文 Figure 2) |
+| Step 2: 写文章 | completed (19 节 90 段, 24 图) |
+| Step 3: Humanizer 兜底 | completed (无破折号, 无 AI 套话词, 代词「它」清零) |
+| Step 4: 预发布检查 | completed (ALL CHECKS PASSED) |
+| Step 5: 推送草稿 | completed (draft.id 已存, 24/24 图核验通过) |
 
 创建时间: 2026-09-22
 来源: https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Pro-RL/blob/main/MiMo_V2_6_technical_report.pdf
-| Step 4d-i: 传送门 | completed |
+| Step 5: 预发布检查 | completed |
