@@ -228,7 +228,7 @@ DATA = {
          "body": "给函数加 __global__ 修饰符、用 cudaMallocManaged 分配统一内存、"
                  "用 <<<1, 1>>> 启动 kernel，一段 C++ 加法程序就搬到了 GPU 上。"},
         {"key": "执行配置",
-         "body": "<<<numBlocks, blockSize>>> 的两个数字决定并行规模，线程用 "
+         "body": "执行配置里的 numBlocks 与 blockSize 决定并行规模，线程用 "
                  "blockIdx.x * blockDim.x + threadIdx.x 找到自己负责的元素。"},
         {"key": "提速结果",
          "body": "统一内存预取把单线程 91.8ms 压到多线程块 47.5 微秒，加速 1932 倍，"
@@ -242,7 +242,7 @@ DATA = {
     "conclusion": [
         "**从 CPU 代码跨到 GPU 并行，改动量比想象中小：一个 __global__ 修饰符、一次 "
         "cudaMallocManaged、两个执行配置参数，就是全部改动。**",
-        "① 并行规模由 <<<numBlocks, blockSize>>> 决定，线程用 blockIdx.x * blockDim.x + threadIdx.x "
+        "① 并行规模由执行配置里的块数与块大小决定，线程用 blockIdx.x * blockDim.x + threadIdx.x "
         "找到自己的数据，网格步长循环让线程数不再受数组长度限制。",
         "② 统一内存不是免费的：页按需迁移会带来几十次缺页，一次 cudaMemPrefetchAsync 预取就把 "
         "kernel 从 4.5ms 压到 47 微秒。",
