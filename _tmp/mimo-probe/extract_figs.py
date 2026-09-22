@@ -83,8 +83,8 @@ def extract(tag, page_idx, pad_top=6, gap=18):
                 cluster.append(r)
                 top = min(top, r.y0)
                 changed = True
-    x0 = min(r.x0 for r in cluster)
-    x1 = max(r.x1 for r in cluster)
+    x0 = min(min(r.x0 for r in cluster), cbbox[0])
+    x1 = max(max(r.x1 for r in cluster), cbbox[2])
     y0 = max(0, top - pad_top)
     y1 = max(cbbox[3], max(r.y1 for r in cluster))
     x0 = max(0, x0 - 6)
@@ -126,9 +126,30 @@ JOBS = [
     ("Table 7", 35),
 ]
 
+MANUAL = {
+    "Table 1": (5, fitz.Rect(64, 74, 532, 604)),
+    "Table 2": (14, fitz.Rect(64, 78, 532, 510)),
+    "Table 3": (25, fitz.Rect(64, 78, 532, 494)),
+    "Table 4": (33, fitz.Rect(64, 80, 532, 232)),
+    "Table 5": (33, fitz.Rect(64, 238, 532, 374)),
+    "Table 6": (34, fitz.Rect(64, 80, 532, 400)),
+    "Table 7": (35, fitz.Rect(64, 80, 532, 339)),
+}
+
 if __name__ == "__main__":
     only = sys.argv[1:] if len(sys.argv) > 1 else None
     for tag, p in JOBS:
         if only and tag not in only:
             continue
-        extract(tag, p)
+        if tag in MANUAL:
+            pi, rect = MANUAL[tag]
+            doc = fitz.open(PDF)
+            page = doc[pi]
+            pix = page.get_pixmap(matrix=fitz.Matrix(FINAL, FINAL), clip=rect, alpha=False)
+            name = tag.lower().replace(" ", "") + ".png"
+            path = os.path.join(OUT, "figs_raw", name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            pix.save(path)
+            print(f"[OK-manual] {tag} p{pi+1} rect={rect} -> {pix.width}x{pix.height}")
+        else:
+            extract(tag, p)
