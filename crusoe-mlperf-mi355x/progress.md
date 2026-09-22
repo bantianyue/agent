@@ -14,3 +14,4 @@ source: https://www.crusoe.ai/resources/blog/serving-5-75-million-tokens-per-sec
 | Step 4: 预发布检查 | completed |
 | Step 5: 推送草稿 | completed |
 | Step 4d-i: 传送门 | completed |
+| Step 5: 预发布检查 | completed |
