@@ -1,0 +1,79 @@
+L0||具身智能模型持续演进，模型本身只是完整开发链路里的一环。一个新的 World Action Model（WAM）从模型接入、训练，到推理与仿真评测，都需要一套能快速适配、又能高效跑满的基础设施。
+L1||RLinf 此前已经支持 DreamZero 这类世界模型，这次接入 NVIDIA Cosmos 3，并以 SGLang-Diffusion（下称 SGLang）作为推理后端，把 SFT、推理服务与仿真评测串成一条端到端链路。**Cosmos3-Nano 在 RLinf 上的 SFT 训练精度对齐官方实现，而强化后的 SGLang 多批推理与流水线并行评测，把评测吞吐拉到 3.33 倍。**
+L2||以这次 Cosmos3-Nano 接入为例，下面梳理从微调到高吞吐并行评测这条路径上的关键设计决策，以及 RLinf 的流水线调度是怎么把评测效率继续往上推的。
+S0||接入方式||RLinf 把 Cosmos3 当作外部 Hugging Face 模型，经一层适配器引入，不重写模型实现，SFT 直接复用既有 FSDP2 训练后端。
+S1||训练对齐||用官方 LIBERO_LeRobot_v3 数据集跑 5000 步 SFT，动作转成 10 维 Rot6D 表示并做分位数归一化，训练精度对齐官方实现。
+S2||吞吐提升||任务调度与推理调度解耦，CPU 仿真与 GPU 推理流水线重叠，完整 500 集评测相对单批基线最高达到 3.33 倍吞吐。
+#### SEC0 [h2] 01 Cosmos3：RLinf 具身技术栈的一次升级
+0.0||Cosmos3 是 NVIDIA 的全模态模型，能原生理解和生成文本、图像、视频、环境音频与动作，目标是提供统一的多模态能力，用来建模物理世界并生成动作。
+0.1||架构上，Cosmos 3 采用 Mixture-of-Transformers（MoT）双塔设计，由自回归 Transformer 与扩散 Transformer 组成。
+0.2||<span style="font-size:7px;line-height:1;vertical-align:middle;color:#0F4C81;">●</span>&nbsp;自回归 Transformer 负责多模态理解与推理。
+0.3||<span style="font-size:7px;line-height:1;vertical-align:middle;color:#0F4C81;">●</span>&nbsp;扩散 Transformer 负责多模态内容生成。
+0.4||两座塔共享统一的注意力层与 3D mRoPE（3D 多模态旋转位置编码）位置表示，让模型能在多种模态之间建立共享的时空表示，并跨模态边界建模时空结构。
+0.5||Cosmos 3 有 Edge、Nano、Super 三种尺寸。下面描述的整套训练与评测都使用 Cosmos3-Nano。
+0.6||Cosmos3-Nano 是一个 16B 参数的 MoT 模型，核心沿用 Qwen3-VL-8B 的架构：36 层 Transformer、hidden size 4096、32 个注意力头、8 个 KV 头。
+0.7||Cosmos3-Nano 并不是完全从零训练。自回归 Transformer 直接复用 Qwen3-VL-8B 的预训练权重，扩散 Transformer 则由 Qwen3-VL-8B 的权重初始化，并在 Cosmos3 的训练过程中继续优化。
+0.8||目前 Cosmos3 在 RLinf 里的技术配置如下：
+0.9||<span style="font-size:7px;line-height:1;vertical-align:middle;color:#0F4C81;">●</span>&nbsp;SFT 训练跑在 RLinf 已有的 FSDP2 训练后端上。
+0.10||<span style="font-size:7px;line-height:1;vertical-align:middle;color:#0F4C81;">●</span>&nbsp;评测使用 SGLang 作为推理后端。
+0.11||Cosmos3 是一个相当复杂的新多模态与动作模型，把它接进一套已有的具身训练框架，本身就是一次有代表性的工程实践。选这样的模型等于上了一级台阶：RLinf 要支持的不再是一个常规推理任务，而是覆盖多模态理解、动作生成与仿真评测的完整具身工作流。
+   FIGAFTER {"4": [{"src": "fig00.png", "caption": "图1：（来源：Cosmos3 技术报告，https://arxiv.org/pdf/2606.02800）"}]}
+#### SEC1 [h2] 02 模型 SFT：在 RLinf 既有框架上做轻量接入
+#### SEC2 [h3] 1. 基于适配器的轻量接入：把模型实现与训练框架解耦
+2.0||Cosmos3 是一个 OmniMoT 模型，架构已经在 NVIDIA 的 cosmos-framework 里开源。对于一个已经有完整官方实现的新模型，接入成本最高的一环不是“能不能跑起来”，而是在不额外维护第二份模型实现的前提下，把它接进已有的训练框架。
+2.1||接入过程中，RLinf 没有重写 Cosmos3 的模型架构，而是把 Cosmos3 当作外部的 Hugging Face 模型，通过一层适配器引入。
+2.2||模型的构建与初始化仍然由 Cosmos 自己的配置系统负责，RLinf 只是在模型外面加了一层薄封装，把 Cosmos3 的接口映射到 RLinf 的接口上。
+2.3||Cosmos3 的 SFT 跑在 RLinf 已有的 FSDP2 训练后端上，不需要为 Cosmos3 单独搭一套训练循环，checkpoint 的保存与加载、日志和监控都复用 RLinf 现有机制。
+2.4||这套设计的核心价值在于：尽可能完整地复用 Cosmos3 的官方实现，而不必在 RLinf 里再写一份 Cosmos3 的模型代码。
+2.5||把模型适配与训练框架这样解耦，也给后续模型留出了一条更干净、成本更低的接入路径：新模型可以直接复用现有训练栈，不需要改动 RLinf 的训练后端。
+#### SEC3 [h3] 2. Cosmos3-Nano 在 RLinf 上的 SFT，训练精度对齐官方实现
+3.0||数据集用的是 NVIDIA 开源的 LIBERO_LeRobot_v3，包含机器人操作任务的多模态轨迹数据：主视角与腕部相机的 RGB 图像、机器人状态（8 维），以及对应的机器人动作（7 维）。动作表示为 3 维平移 + 3 维轴角旋转 + 夹爪。
+3.1||加载 LIBERO_LeRobot_v3 之后，Cosmos3 在数据处理阶段即时转换并归一化动作表示：原始的 3 维轴角观测转成 6 维旋转表示（Rot6D），原始的 7 维动作转成 10 维动作表示，然后再做分位数归一化。
+3.2||相比轴角，Rot6D 避开了 ±π 附近的不连续，动作空间表示更平滑连续，扩散模型更容易稳定学到动作分布，生成的机器人动作质量也更高。
+3.3||注意：当前 SFT 实验使用的是 NVIDIA 官方 LIBERO_LeRobot_v3 数据集，视频以 10 FPS 录制。如果换成其他 LIBERO 数据集或自建数据集，要特别留意帧率和相关超参数是否仍与当前 Cosmos3 配置匹配。
+3.4||Cosmos3 在 RLinf 上跑 5000 步 SFT 的结果如下（与官方 Cosmos3 实现 https://github.com/NVIDIA/cosmos 对齐）：
+3.5||在 LIBERO_LeRobot_v3 上跑完 5000 步 SFT 后，Cosmos3-Nano 的整体训练 loss 稳定收敛。这些结果说明，RLinf 上的 Cosmos3-Nano 接入能有效学到 LIBERO 数据里的视觉分布与动作分布，整个训练过程也很稳定。
+   FIGAFTER {"4": [{"src": "fig01.png", "caption": "图2：Cosmos3-Nano 在 LIBERO_LeRobot_v3 上 5000 步 SFT 的整体训练 loss"}, {"src": "fig02.png", "caption": "图3：Cosmos3-Nano 在 SFT 过程中的动作流匹配 loss"}, {"src": "fig03.png", "caption": "图4：Cosmos3-Nano 在 SFT 过程中的视觉流匹配 loss"}]}
+#### SEC4 [h2] 03 评测：调度解耦与流水线执行
+4.0||Cosmos3-Nano 在 LIBERO_LeRobot_v3 上微调完成后，下一步就是在仿真里评测训练好的模型，验证它实际生成机器人动作的效果如何。
+#### SEC5 [h3] 1. 任务调度与推理调度解耦：让 RLinf 和 SGLang 各司其职
+5.0||RLinf 目前支持用 SGLang 作为 Cosmos3 评测的推理后端，它作为一个独立的推理服务运行，负责模型推理和并发请求处理。在 RLinf 这一侧，每个计算组件由一个 Worker 管理，Worker 负责该组件的生命周期，以及它与其他组件之间的数据交换。
+5.1||这里有一个关键的设计决策：RLinf 不接管 SGLang 内部的推理调度。
+5.2||SGLang 本身已经有成熟的推理优化、自己的 Router 和自己的请求调度。如果 RLinf 再在上面叠加生命周期管理或调度，就可能干扰 SGLang 自身的调度，拖累推理性能。
+5.3||所以 RLinf 采用非侵入式的 SGLang Worker 架构：
+5.4||<span style="font-size:7px;line-height:1;vertical-align:middle;color:#0F4C81;">●</span>&nbsp;RLinf 负责任务编排与数据流。
+5.5||<span style="font-size:7px;line-height:1;vertical-align:middle;color:#0F4C81;">●</span>&nbsp;SGLang 负责推理及其自身调度。
+5.6||SGLang Worker 在初始化时启动 SGLang 推理进程，之后它的主要工作就是 RLinf 与 SGLang 之间的数据适配和请求转发，不介入 SGLang 内部的模型推理与请求调度。
+5.7||当其他 Worker 发起推理请求时，SGLang Worker 先把输入转换成 SGLang 期望的格式，直接发给 SGLang 服务，然后等待推理任务完成。推理结束后，SGLang Worker 取回模型输出、转换回来，再交给下一个 Worker。整个过程中，RLinf 都不干预 SGLang 内部的模型推理、请求调度和 Router 机制。
+5.8||这样一来，RLinf 的任务调度就和 SGLang 的推理调度解耦：RLinf 掌握整体任务流，SGLang 掌握自己的推理效率。两套系统集成得很干净，SGLang 已有的推理优化也完整保留。
+#### SEC6 [h3] 2. 让 CPU 仿真与 GPU 推理重叠，提高硬件利用率与评测吞吐
+6.0||仿真和推理属于同一条任务链，但消耗的算力类型不同。在 Cosmos3 的 LIBERO 评测里，不同 Worker 的计算特征差异很明显：LIBERO 模拟器主要用 CPU 做环境仿真，SGLang 用 GPU 做模型推理。两者严格串行执行时，仿真阶段和推理阶段之间会出现明显的空转，CPU 和 GPU 都没吃满。
+6.1||问题因此从“模型能不能跑起来”，变成了：
+6.2||怎么让不同的计算阶段真正并行起来？
+6.3||RLinf 的答案是评测流程里的流水线执行机制。给定一批评测任务，RLinf 会把它拆成多个 batch，放到多条流水线上处理，让不同 batch 在各 Worker 之间交错执行，尽可能把 LIBERO 仿真和 SGLang 推理重叠起来。
+6.4||以 LIBERO-10 为例。在单台 8 卡服务器上跑一次完整评测，覆盖 10 个任务 × 50 个 demo = 500 个 episode。
+6.5||RLinf 会启动 128 个并行仿真环境来跑评测，每个环境负责 4 个仿真任务。当任务数无法被并行环境数整除时，用任务补齐保持并行执行宽度不变。在当前配置下，128 个仿真环境均匀分布在 8 张 GPU 上，每张卡 16 个环境，仿真任务并行执行。在此基础上，RLinf 还可以把 128 个并行环境继续拆成 N 条流水线，每条流水线处理 128 // N 个环境。在一条流水线内部，任务依次经过 LIBERO 仿真、SGLang 推理、LIBERO 动作执行；在流水线之间，则按流水线方式调度执行。
+6.6||<strong style="color:#0F4C81;">1</strong>&nbsp;LIBERO 模拟器先并行运行各个环境，收集当前观测。
+6.7||<strong style="color:#0F4C81;">2</strong>&nbsp;RLinf 把多个环境的图像等观测拼成一个 batch，发给 SGLang。
+6.8||<strong style="color:#0F4C81;">3</strong>&nbsp;SGLang 用多批、高并发的推理能力同时处理大量请求，生成对应的下一步动作。
+6.9||<strong style="color:#0F4C81;">4</strong>&nbsp;RLinf 取回推理结果，把每个动作送回到它所属的 LIBERO 环境执行，环境再产生下一步观测，进入下一轮推理。
+6.10||这个循环一直重复，直到所有 episode 评测完成。
+6.11||整体上，评测过程变成了并行 LIBERO 仿真、RLinf 流水线调度与高并发 SGLang 推理之间的流水线协作：CPU 上的环境仿真与 GPU 上的模型推理在时间上重叠，计算阶段之间的等待被压缩，硬件利用率和评测吞吐同时提高。
+   FIGAFTER {"3": [{"src": "fig04.png", "caption": "图5：SglangEmbodiedWorker、SglangServer 与 LIBERO 模拟器之间的数据流"}]}
+#### SEC7 [h3] 3. 结果：相对单批基线最高 3.33 倍吞吐
+7.0||我们把 RLinf 的流水线调度与 SGLang 的高并发推理结合起来，对当前的 Cosmos3 仿真评测负载做了优化。端到端结果如下：
+   FIGAFTER {"0": [{"src": "fig05.png", "caption": "图6：Cosmos3-Nano 在 SGLang 上的评测吞吐，128 集 / 32 环境最高 1.80 倍，500 集 / 128 环境最高 3.33 倍（相对各自基线）"}]}
+#### SEC8 [h3] 128 集、32 个仿真环境
+   TABLE {"head": ["每个请求的观测数", "pipeline_stage_num", "相对吞吐"], "rows": [["1", "4", "1.00x"], ["2", "2", "1.66x"], ["4", "1", "1.80x"]]}
+#### SEC9 [h3] 完整 500 集、128 个仿真环境
+9.0||第一列是每个请求打包发给 SGLang 的观测数，pipeline_stage_num 是任务被拆成的流水线数量，两者的乘积保持恒定。结果显示，把 RLinf 的流水线调度与 SGLang 的高并发推理结合起来，可以显著提高 Cosmos3 仿真评测的吞吐，在完整 500 集评测上达到单批基线的 3.33 倍。
+   TABLE {"head": ["每个请求的观测数", "pipeline_stage_num", "相对吞吐"], "rows": [["1", "16", "1.00x"], ["2", "8", "1.70x"], ["4", "4", "2.67x"], ["8", "2", "3.33x"], ["16", "1", "2.33x"]]}
+#### SEC10 [h2] 04 RLinf × SGLang × Cosmos3：从“多支持一个模型”到“端到端完整具身链路”
+10.0||接入 Cosmos3 从来不只是让 RLinf“多支持一个模型”。在这次工作里，RLinf 里的 Cosmos3 成了一条完整链路，覆盖模型接入、SFT 训练、SGLang 推理与仿真评测。它展示的不是对某一个模型的支持，而是 RLinf 怎么以轻量方式持续接入不断演进的具身模型，把训练、推理、评测融进一条端到端流程，再用系统级调度把整体效率继续往上推。
+10.1||对具身 AI 来说，基础设施的价值同样不止于“让模型跑起来”，而在于把模型、训练、推理、仿真和任务执行组织成一个能协同高效运转的系统，这也是 RLinf 在具身 AI 与 Agent 基础设施上持续推进的核心方向。
+10.2||想了解更多，可以访问 RLinf 仓库：https://github.com/RLinf/RLinf（欢迎点星、关注与反馈）
+10.3||Cosmos3 SFT 文档：https://rlinf.readthedocs.io/en/latest/rst_source/examples/embodied/sft_cosmos3.html
+10.4||Cosmos3 SGLang 评测文档：https://rlinf.readthedocs.io/en/latest/rst_source/evaluations/guides/cosmos3_sglang.html
+C0||**接入一个新模型的价值，不在于模型列表又长了一行，而在于整条链路能不能真跑快。**
+C1||这套方案里最关键的一步，是让 RLinf 不去接管 SGLang 的内部调度：任务编排留在 RLinf，推理效率交给 SGLang，两边互不干扰；再把评测任务拆成多条流水线，让 CPU 上的仿真与 GPU 上的推理在时间上重叠，空转被吃掉，吞吐自然上去。完整 500 集评测因此从单批基线提升到 3.33 倍。
+C2||对做具身模型和 Agent 的团队，这里可复用的经验是：新模型接入尽量走适配器、复用既有训练栈；而“仿真 + 推理”这类混合负载，优先考虑流水线重叠，而不是单纯堆硬件。
