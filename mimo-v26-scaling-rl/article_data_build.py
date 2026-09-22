@@ -3,9 +3,23 @@
 """MiMo-V2.6 技术报告 -> 公众号文章 build 文件。"""
 import json
 import os
+import re
 import sys
 
 _article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+
+
+def zh(s):
+    """正文用中文全角标点（标题与图注编号保持半角）。"""
+    return (s.replace(",", "，").replace(":", "：")
+             .replace(";", "；").replace("(", "（").replace(")", "）"))
+
+
+def zh_cap(cap):
+    m = re.match(r"^(图\d+):(.*)$", cap, re.S)
+    if m:
+        return m.group(1) + ":" + zh(m.group(2))
+    return zh(cap)
 
 TITLE = "MiMo-V2.6:小米把强化学习算力推到每步3.7B token"
 
@@ -299,6 +313,19 @@ CONCLUSION = [
     "对做智能体RL的团队,可复用的经验有三条:MoE模型的RL要尽早检查专家负载,router漂移足以让负载在二十步内崩塌;训练推理一致性必须落到离散决策上,专家选择和采样候选集都要重放;奖励设计要从二值结果走向组内比较,否则策略会用更长、更讨好评测的补丁换通过率。开源出来的9B蒸馏模型、环境和框架,把这条路线变成了可以直接起跑的实验。",
 ]
 
+LEAD = [zh(x) for x in LEAD]
+SUMMARY = [
+    {"key": it["key"], "body": zh(it["body"])} for it in SUMMARY
+]
+for _s in sections:
+    _s["paras"] = [zh(p) for p in _s["paras"]]
+    if _s.get("fig_after"):
+        _s["fig_after"] = {
+            k: [{"src": f["src"], "caption": zh_cap(f["caption"])} for f in v]
+            for k, v in _s["fig_after"].items()
+        }
+CONCLUSION = [zh(x) for x in CONCLUSION]
+
 DATA = {
     "title": TITLE,
     "summary": SUMMARY,
@@ -313,4 +340,4 @@ with open(out_path, "w", encoding="utf-8") as f:
     json.dump(DATA, f, ensure_ascii=False, indent=2)
 para_total = sum(len(s["paras"]) for s in sections)
 fig_total = sum(len(v) for s in sections for v in (s.get("fig_after") or {}).values())
-print(f"OK {out_path} sections={len(sections)} paras={para_
+print(f"OK {out_path} sections={len(sections)} paras={para_total} figs={fig_total}")
