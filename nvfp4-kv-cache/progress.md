@@ -15,10 +15,10 @@
 | Step 4d: 写结语 | completed |
 | Step 4d-i: 写传送门（published_articles.json 选最多8篇） | completed |
 | Step 4e: 写参考区 | completed |
-| Step 4f: Humanizer 润色 | pending |
-| Step 4g: 文本格式修复 | pending |
+| Step 4f: Humanizer 润色 | completed (baseline 相同，无残留) |
+| Step 4g: 文本格式修复 | completed (中英间距 591 处已修) |
 | Step 5: 预发布检查 | completed |
-| Step 6: 推送草稿 | pending |
+| Step 6: 推送草稿 | completed (draft.id 已存, 11/11 图核验通过) |
 
 创建时间: 2026-09-22
 来源: https://www.lmsys.org/blog/2026-09-16-nvfp4-kv-cache
