@@ -23,3 +23,4 @@
 创建时间: 2026-09-22
 来源: https://www.lmsys.org/blog/2026-09-16-nvfp4-kv-cache
 | Step 4d-i: 传送门 | completed |
+| 2026-09-22 12:47 重生成 | completed (按 SKILL v2.4.6 文风四条+标题半角重写全文, 13 节 43 段 11 图, preflight ALL CHECKS PASSED, 覆盖草稿 verify 11/11 图) |
