@@ -19,13 +19,13 @@
 
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么要给KV cache上4 bit</h2>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">KV cache是现代LLM推理系统的基础组件。智能体会话里多轮对话的上下文以key和value的形式缓存在GPU显存中，供后续解码步骤复用：每生成一个新token，新的query都要attend到相关的历史KV。上下文窗口越大，KV cache的存储和读取对显存容量与带宽的压力就越大。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">应对这种压力有两条互补的路：扩大缓存可用的存储，或者减少每个token存储的数据量。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GPU显存为活跃KV数据提供快速访问，但容量有限。服务大量用户或长时间运行的会话时，系统无法让所有会话的缓存一直常驻。分层KV缓存HiCache把缓存层级扩展到主机内存和分布式存储，让系统能在GPU之外保留更多上下文。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">KV cache量化从另一侧解决问题。用FP8而不是BF16存K/V，数据占用大约减半，解码时要读的字节数也随之减少，当KV读取是带宽瓶颈时能直接转化为性能。代价是数值精度：低位宽带来量化误差，误差必须小到不破坏有用的模型行为。FP8 KV缓存已经广泛使用，压到4 bit难得多，因为量化误差更大。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">NVIDIA随Blackwell架构引入了NVFP4数据格式。它把4 bit E2M1数值与两级缩放结合：每16个值一个FP8 block scale，再加一个FP32张量级scale。相比单一全局scale，这种结构对动态范围的控制更细，有助于压低量化误差；Blackwell硬件也为这一格式提供了原生支持，计算效率与灵活性都适合KV cache量化。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">缓解这种压力有两条互补的路：扩大缓存可用的存储，或者减少每个token存储的数据量。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GPU显存给活跃KV数据提供快速访问，容量却有限。服务大量用户或长会话时，无法让所有会话的缓存一直常驻。分层KV缓存HiCache把缓存层级扩展到主机内存和分布式存储，在GPU之外保留更多上下文。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">KV cache量化从另一侧解决问题：用FP8而不是BF16存K/V，数据占用大约减半，解码要读的字节数随之减少，KV读取成为带宽瓶颈时能直接转化为性能。代价是数值精度，低位宽带来量化误差，误差必须小到不破坏有用的模型行为。FP8 KV缓存已广泛使用，压到4 bit难得多，因为量化误差更大。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">NVIDIA随Blackwell架构引入了NVFP4数据格式。把4 bit E2M1数值与两级缩放结合：每16个值一个FP8 block scale，再加一个FP32张量级scale。相比单一全局scale，这种结构对动态范围的控制更细，有助于压低量化误差；Blackwell硬件也为这一格式提供了原生支持，计算效率与灵活性都适合KV cache量化。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig01.gif"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1：NVFP4逐块与逐张量两级缩放的量化策略</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下文先讲NVFP4 KV cache在SGLang中的实现，再看它在各类负载下的精度与性能表现。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下文讲NVFP4 KV cache在SGLang里的实现与实测表现。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">SGLang中的NVFP4 KV实现</h2>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">实现把SGLang的分页KV cache系统接到三条注意力路径上：初始prefill、分块prefill或extend、decode。SGLang负责管理缓存及其辅助缓冲区，每条路径的数据流各不相同。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
@@ -38,16 +38,16 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对缓存前缀，SGLang取出相关NVFP4条目，反量化后填充FP8工作区；一对K/V工作区缓冲区跨层共享，避免每层都分配一整份FP8工作区。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">当前分块走另一条路：KV数据在QKV投影后拷入FP8工作区，注意力像初始prefill一样作用于工作区里的KV；这份KV同样被量化存入NVFP4缓存，供后续步骤使用。</p>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">路径3：decode</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">decode阶段，注意力kernel直接从NVFP4 KV cache读数据，在kernel内部即时反量化为FP8，再用反量化后的值做后续计算，因此decode不需要单独的反量化操作。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">decode阶段，注意力kernel直接从NVFP4 KV cache读数据，在kernel内部即时反量化为FP8再参与后续计算，因此不需要单独的反量化操作。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">与prefill不同，decode时query序列长度很短，KV序列长度往往大得多，注意力性能完全受显存读取限制。把反量化放进kernel，省掉了单独反量化操作读写整个KV cache的额外显存往返，性能提升可观。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">NVFP4 KV decode attention kernel</h2>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">当前SM120上的实现消费BF16 query和NVFP4 KV，矩阵乘法在BF16上进行。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">kernel先把打包的K/V tile和对应的E4M3 block scale载入共享内存，再在寄存器中解包并缩放：用<code style="background:#f3f4f5;padding:2px 5px;border-radius:3px;color:#0F4C81;">cvt.rn.bf16x2.e2m1x2</code>把成对的E2M1值转成BF16，E4M3 block scale也转型为BF16，打包乘法指令把缩放因子作用到成对的值上；随后注意力矩阵乘法作用于反量化后的K/V，全局K/V scale通过注意力BMM的缩放参数传入。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3：NVFP4 KV attention decode kernel设计</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每16个NVFP4值占8字节打包数据加1字节block scale元数据，对比FP8的16字节，即 （8+1）/16：同样的K/V数量，打包数据加block scale只需FP8约56% 的存储，这里不计入少量全局scale元数据和池或工作区开销。这正是降低GPU显存读取流量、提升decode效率的空间。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每16个NVFP4值占8字节打包数据加1字节block scale元数据，对比FP8的16字节，即 (8+1)/16 = 0.5625：同样的K/V数量，打包数据加block scale只需FP8约56% 的存储，这里不计入少量全局scale元数据和池或工作区开销。这正是降低GPU显存读取流量、提升decode效率的空间。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">精度：大模型几乎无损，小模型按任务看</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们在Qwen3.5-397B-A17B和Qwen3.8-27B上对比FP8与NVFP4 KV cache，基准覆盖GSM8K、GPQA-Diamond、AIME 2025，以及只在Qwen3.8-27B上跑的SWE-bench。两组配置使用相同的FP8模型权重；SGLang里用<code style="background:#f3f4f5;padding:2px 5px;border-radius:3px;color:#0F4C81;">--kv-cache-dtype nvfp4</code>选择NVFP4 KV存储，复现步骤见原文附录。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">精度对比在Qwen3.5-397B-A17B和Qwen3.8-27B上做，基准覆盖GSM8K、GPQA-Diamond、AIME 2025，以及只在Qwen3.8-27B上跑的SWE-bench。两组配置使用相同的FP8模型权重；SGLang里用<code style="background:#f3f4f5;padding:2px 5px;border-radius:3px;color:#0F4C81;">--kv-cache-dtype nvfp4</code>选择NVFP4 KV存储。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GSM8K评测一次，预留8个样本做few-shot提示后共1,311道计分题；GPQA-Diamond和AIME因任务方差较大各评测两轮，下图汇报两轮汇总的准确率。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Qwen3.5-397B-A17B上的差异很小。NVFP4在GSM8K上少对了一道题，差距约0.08个百分点；GPQA-Diamond和AIME 2025的答对题数完全一致。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
@@ -55,11 +55,11 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Qwen3.8-27B则表现出任务相关的差异。NVFP4在GSM8K上比FP8低0.31个百分点，GPQA-Diamond低1.01个百分点；AIME 2025在thinking/xhigh模式下与FP8持平，都是98.33%。SWE-bench Verified上NVFP4解决500题中的381题（76.20%），FP8为389题（77.80%），差1.60个百分点。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5：Qwen3.8-27B精度基准</figcaption></figure>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这次测量里更大的模型更不敏感，但两个模型加一小撮任务还不足以确立模型大小与量化容忍度之间的一般关系。结果对NVFP4 KV缓存是鼓励性的，部署前仍需按任务做验证。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这次测量里更大模型更不敏感，但两个模型加一小撮任务还不足以确立模型大小与量化容忍度之间的一般关系。结果对NVFP4 KV缓存是正向信号，部署前仍需按任务验证。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">性能：decode提速，prefill持平</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">性能测试在单张NVIDIA RTX PRO 6000 Blackwell Server Edition GPU上跑Qwen3.8-27B，输入长度固定为32,768、163,840和1,048,576 token，每个请求固定输出1,024 token。两组配置使用相同的FP8权重，固定长度测试关闭了radix caching，复现步骤见原文附录。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">性能测试在单张NVIDIA RTX PRO 6000 Blackwell Server Edition GPU上跑Qwen3.8-27B，输入长度固定为32,768、163,840和1,048,576 token，每个请求固定输出1,024 token。两组配置使用相同的FP8权重，固定长度测试关闭了radix caching。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">1M负载是纯性能实验，用了显式的上下文长度覆盖，模型原生上下文上限是262,144 token。1M时NVFP4的static-memory fraction取0.75，给临时prefill工作区留空间，FP8为0.90；更短的上下文长度下两者都用0.90。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们设了两个对照点，把同并发下的性能与能承载更多并发带来的收益分开看。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对照点分两组：一组固定实际并发比性能，一组放开并发看容量收益。</p>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">同并发decode：iso-concurrency</h3>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">iso-concurrency测试让FP8与NVFP4 KV在相同的实际decode并发下对比。调度器在32K、160K和1M下都稳定在44、10、1个decode常驻请求。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
@@ -74,7 +74,7 @@
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图8：Qwen3.8-27B 32K/1K ISL/OSL的Pareto曲线</figcaption></figure>
 <h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">prefill性能</h3>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">decode阶段KV cache读取是主要瓶颈，prefill阶段则是计算受限。我们的方案只改了KV数据类型，计算数据类型不变，prefill注意力本身没有性能收益。同并发下NVFP4的平均首token延迟（TTFT）只增加了0.20% 到0.40%，轻微变慢主要来自KV量化或反量化的开销。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">decode阶段KV cache读取是主要瓶颈，prefill阶段则是计算受限。这套方案只改了KV数据类型，计算数据类型不变，prefill注意力本身没有性能收益。同并发下NVFP4的平均首token延迟（TTFT）只增加了0.20% 到0.40%，轻微变慢主要来自KV量化或反量化的开销。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig09.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图9：以TTFT衡量的Qwen3.8-27B prefill性能</figcaption></figure>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">容量驱动负载下，平均TTFT反而下降0.74% 到10.72%。TTFT包含准入、prefill和排队，这部分改善不能只归功于prefill计算变快：更大的常驻缓存让更多请求无需等其他请求释放KV槽位就能推进，例如1M时NVFP4能同时容纳两个完整请求，FP8只能容纳一个。</p>
@@ -84,7 +84,7 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">需要的前缀一旦从所有可用缓存层级中被逐出，服务端就得重算。对几十万token的上下文，这会明显拉高首token延迟，还占用本可服务新请求的资源。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">NVFP4创造了把更多工作集留在GPU上的机会。打包数据的计算给出约1.78倍于FP8的理想容量比，未计工作区等显存开销，实际可用容量取决于负载与服务配置。让更多前缀常驻，能在内存压力本会触发逐出的场景下减少重复prefill。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">收益取决于负载的复用模式和服务配置。分层缓存与KV量化可以互补：一个扩展缓存层级，一个压缩层级里内容的大小。</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">我们在8卡NVIDIA RTX 6000D节点上以TP8并行测Qwen3.5-397B-A17B，NVFP4与FP8 KV各扫一遍1到16的并发，基准窗口1,200秒。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">AgentX测试在8卡NVIDIA RTX 6000D节点上以TP8并行跑Qwen3.5-397B-A17B，NVFP4与FP8 KV各扫一遍1到16的并发，基准窗口1,200秒。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">结果显示，低并发（C ≤ 8）时NVFP4 KV与FP8 KV表现相当；并发超过12后，FP8 KV的吞吐和交互性急剧下滑，NVFP4 KV的吞吐仍在上升。</p>
 <figure style="margin: 1.5em auto;text-align: center;">
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig10.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图10：Qwen3.5-397B-A17B上的AgentX性能</figcaption></figure>
@@ -93,7 +93,7 @@
 <img style="display: block;width: 100%;margin: 0 auto;" src="fig11.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图11：Qwen3.5-397B-A17B的AgentX输入token缓存命中率分析</figcaption></figure>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">限制与进行中的工作</h2>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SGLang当前的NVFP4 KV支持仍处于实验阶段，团队在持续改进，现状与进展如下：</p>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="color:#0F4C81;font-size:7px;line-height:1;vertical-align:middle;">●</span>&nbsp;<strong>GPU架构支持：</strong> 目前支持SM12x与SM100/SM103，更多架构的适配在推进中，路线图见原文链接。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="color:#0F4C81;font-size:7px;line-height:1;vertical-align:middle;">●</span>&nbsp;<strong>GPU架构支持：</strong> 目前支持SM12x与SM100/SM103，更多架构的适配在推进中。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="color:#0F4C81;font-size:7px;line-height:1;vertical-align:middle;">●</span>&nbsp;<strong>模型支持：</strong> 支持GQA模型和Sparse MLA模型，正在适配更多类型，例如Sparse GQA。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="color:#0F4C81;font-size:7px;line-height:1;vertical-align:middle;">●</span>&nbsp;<strong>精度改进：</strong> 实验没有使用NVFP4的每张量FP32全局scale，为简单起见取1.0；合适的校准可能减少数值上溢与下溢，进一步收窄NVFP4与FP8 KV的精度差距。团队也在试验朴素NVFP4 KV之外的更多4 bit配方，某些模型上可能进一步提升精度。</p>
 
@@ -104,7 +104,7 @@
 <strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
 </section>
 <section style="font-size:14px;color:#3f3f3f;line-height:1.75;">
-NVFP4 KV cache的意义不只是把KV压小44%，而是把省下的显存同时换成两样东西：更快的decode和更多常驻请求。<strong>带宽受限的长上下文decode提速26% 到30%，容量驱动下最高78.46%，这是存储侧优化直接兑换成吞吐的典型样本。</strong><br  /><br  />对做LLM serving的人，AgentX那组数据更关键：高并发下FP8的缓存命中率崩塌、NVFP4仍在持续扩展，说明4 bit KV的真正红利在智能体负载里，显存省下来变成了prefix命中率，而不是单次decode快的那一点。实验未启用FP32全局scale，校准之后精度差距还有收窄空间，任务级验证仍是上线前的必做项。</section>
+<strong>省下的显存同时换来两样东西：更快的decode和更多常驻请求，这是NVFP4 KV cache最值得记住的地方。</strong><br  /><br  />打包数据加block scale只要FP8约56% 的存储，带宽受限的长上下文decode提速26% 到30%，容量驱动下最高78.46%；把反量化放进decode kernel，省掉整块KV cache的显存往返，是这轮收益的直接来源。<br  /><br  />对做LLM serving的人，AgentX那组数据更关键：高并发下FP8的缓存命中率崩塌、NVFP4仍在持续扩展，4 bit KV的真正红利在智能体负载里，显存省下来变成了prefix命中率，而不是单次decode快的那一点。实验未启用FP32全局scale，校准之后精度差距还有收窄空间，任务级验证仍是上线前的必做项。</section>
 </section>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
@@ -112,14 +112,14 @@ NVFP4 KV cache的意义不只是把KV压小44%，而是把省下的显存同时�
 <section style="text-align:center;">
 <span class="portal-title" style="font-size:12px;color:#1a6ba0;font-weight:bold;">【传送门】</span>
 <section style="text-align:left;display:inline-block;font-size:12px;color:#0F4C81;" class="portal-links">
-<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/YHmkt8EHFGm-HeflWCsB2w" target="_blank" data-linktype="2">英伟达Kernel Agent: 编译器与算子调优Agent的协同设计</a><br>
-<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
-<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
-<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
 <a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
 <a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/i-NZ-4oCXs48XpDfdcBfPw" target="_blank" data-linktype="2">在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM</a><br>
-<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
-<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/42s6fk-xdo23L-vtLj6Q8Q" target="_blank" data-linktype="2">vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
 </section>
 </section>
 

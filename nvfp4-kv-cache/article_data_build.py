@@ -28,14 +28,14 @@ def code(s):
 s1 = h2('为什么要给 KV cache 上 4 bit')
 s1["paras"] += [
     'KV cache 是现代 LLM 推理系统的基础组件。智能体会话里多轮对话的上下文以 key 和 value 的形式缓存在 GPU 显存中，供后续解码步骤复用：每生成一个新 token，新的 query 都要 attend 到相关的历史 KV。上下文窗口越大，KV cache 的存储和读取对显存容量与带宽的压力就越大。',
-    '应对这种压力有两条互补的路：扩大缓存可用的存储，或者减少每个 token 存储的数据量。',
-    'GPU 显存为活跃 KV 数据提供快速访问，但容量有限。服务大量用户或长时间运行的会话时，系统无法让所有会话的缓存一直常驻。分层 KV 缓存 HiCache 把缓存层级扩展到主机内存和分布式存储，让系统能在 GPU 之外保留更多上下文。',
-    'KV cache 量化从另一侧解决问题。用 FP8 而不是 BF16 存 K/V，数据占用大约减半，解码时要读的字节数也随之减少，当 KV 读取是带宽瓶颈时能直接转化为性能。代价是数值精度：低位宽带来量化误差，误差必须小到不破坏有用的模型行为。FP8 KV 缓存已经广泛使用，压到 4 bit 难得多，因为量化误差更大。',
-    'NVIDIA 随 Blackwell 架构引入了 NVFP4 数据格式。它把 4 bit E2M1 数值与两级缩放结合：每 16 个值一个 FP8 block scale，再加一个 FP32 张量级 scale。相比单一全局 scale，这种结构对动态范围的控制更细，有助于压低量化误差；Blackwell 硬件也为这一格式提供了原生支持，计算效率与灵活性都适合 KV cache 量化。',
+    '缓解这种压力有两条互补的路：扩大缓存可用的存储，或者减少每个 token 存储的数据量。',
+    'GPU 显存给活跃 KV 数据提供快速访问，容量却有限。服务大量用户或长会话时，无法让所有会话的缓存一直常驻。分层 KV 缓存 HiCache 把缓存层级扩展到主机内存和分布式存储，在 GPU 之外保留更多上下文。',
+    'KV cache 量化从另一侧解决问题：用 FP8 而不是 BF16 存 K/V，数据占用大约减半，解码要读的字节数随之减少，KV 读取成为带宽瓶颈时能直接转化为性能。代价是数值精度，低位宽带来量化误差，误差必须小到不破坏有用的模型行为。FP8 KV 缓存已广泛使用，压到 4 bit 难得多，因为量化误差更大。',
+    'NVIDIA 随 Blackwell 架构引入了 NVFP4 数据格式。把 4 bit E2M1 数值与两级缩放结合：每 16 个值一个 FP8 block scale，再加一个 FP32 张量级 scale。相比单一全局 scale，这种结构对动态范围的控制更细，有助于压低量化误差；Blackwell 硬件也为这一格式提供了原生支持，计算效率与灵活性都适合 KV cache 量化。',
 ]
 fig(s1, 'fig01.gif', '图 1：NVFP4 逐块与逐张量两级缩放的量化策略', 4)
 s1["paras"] += [
-    '下文先讲 NVFP4 KV cache 在 SGLang 中的实现，再看它在各类负载下的精度与性能表现。',
+    '下文讲 NVFP4 KV cache 在 SGLang 里的实现与实测表现。',
 ]
 
 # ── 2. SGLang 中的 NVFP4 KV 实现 ──
@@ -60,7 +60,7 @@ s2b["paras"] += [
 
 s2c = h3('路径 3：decode')
 s2c["paras"] += [
-    'decode 阶段，注意力 kernel 直接从 NVFP4 KV cache 读数据，在 kernel 内部即时反量化为 FP8，再用反量化后的值做后续计算，因此 decode 不需要单独的反量化操作。',
+    'decode 阶段，注意力 kernel 直接从 NVFP4 KV cache 读数据，在 kernel 内部即时反量化为 FP8 再参与后续计算，因此不需要单独的反量化操作。',
     '与 prefill 不同，decode 时 query 序列长度很短，KV 序列长度往往大得多，注意力性能完全受显存读取限制。把反量化放进 kernel，省掉了单独反量化操作读写整个 KV cache 的额外显存往返，性能提升可观。',
 ]
 
@@ -72,13 +72,13 @@ s3["paras"] += [
 ]
 fig(s3, 'fig03.png', '图 3：NVFP4 KV attention decode kernel 设计', 1)
 s3["paras"] += [
-    '每 16 个 NVFP4 值占 8 字节打包数据加 1 字节 block scale 元数据，对比 FP8 的 16 字节，即 （8+1）/16：同样的 K/V 数量，打包数据加 block scale 只需 FP8 约 56% 的存储，这里不计入少量全局 scale 元数据和池或工作区开销。这正是降低 GPU 显存读取流量、提升 decode 效率的空间。',
+    '每 16 个 NVFP4 值占 8 字节打包数据加 1 字节 block scale 元数据，对比 FP8 的 16 字节，即 (8+1)/16 = 0.5625：同样的 K/V 数量，打包数据加 block scale 只需 FP8 约 56% 的存储，这里不计入少量全局 scale 元数据和池或工作区开销。这正是降低 GPU 显存读取流量、提升 decode 效率的空间。',
 ]
 
 # ── 4. 精度 ──
 s4 = h2('精度：大模型几乎无损，小模型按任务看')
 s4["paras"] += [
-    '我们在 Qwen3.5-397B-A17B 和 Qwen3.8-27B 上对比 FP8 与 NVFP4 KV cache，基准覆盖 GSM8K、GPQA-Diamond、AIME 2025，以及只在 Qwen3.8-27B 上跑的 SWE-bench。两组配置使用相同的 FP8 模型权重；SGLang 里用 ' + code('--kv-cache-dtype nvfp4') + ' 选择 NVFP4 KV 存储，复现步骤见原文附录。',
+    '精度对比在 Qwen3.5-397B-A17B 和 Qwen3.8-27B 上做，基准覆盖 GSM8K、GPQA-Diamond、AIME 2025，以及只在 Qwen3.8-27B 上跑的 SWE-bench。两组配置使用相同的 FP8 模型权重；SGLang 里用 ' + code('--kv-cache-dtype nvfp4') + ' 选择 NVFP4 KV 存储。',
     'GSM8K 评测一次，预留 8 个样本做 few-shot 提示后共 1,311 道计分题；GPQA-Diamond 和 AIME 因任务方差较大各评测两轮，下图汇报两轮汇总的准确率。',
     'Qwen3.5-397B-A17B 上的差异很小。NVFP4 在 GSM8K 上少对了一道题，差距约 0.08 个百分点；GPQA-Diamond 和 AIME 2025 的答对题数完全一致。',
 ]
@@ -88,15 +88,15 @@ s4["paras"] += [
 ]
 fig(s4, 'fig05.png', '图 5：Qwen3.8-27B 精度基准', 3)
 s4["paras"] += [
-    '这次测量里更大的模型更不敏感，但两个模型加一小撮任务还不足以确立模型大小与量化容忍度之间的一般关系。结果对 NVFP4 KV 缓存是鼓励性的，部署前仍需按任务做验证。',
+    '这次测量里更大模型更不敏感，但两个模型加一小撮任务还不足以确立模型大小与量化容忍度之间的一般关系。结果对 NVFP4 KV 缓存是正向信号，部署前仍需按任务验证。',
 ]
 
 # ── 5. 性能 ──
 s5 = h2('性能：decode 提速，prefill 持平')
 s5["paras"] += [
-    '性能测试在单张 NVIDIA RTX PRO 6000 Blackwell Server Edition GPU 上跑 Qwen3.8-27B，输入长度固定为 32,768、163,840 和 1,048,576 token，每个请求固定输出 1,024 token。两组配置使用相同的 FP8 权重，固定长度测试关闭了 radix caching，复现步骤见原文附录。',
+    '性能测试在单张 NVIDIA RTX PRO 6000 Blackwell Server Edition GPU 上跑 Qwen3.8-27B，输入长度固定为 32,768、163,840 和 1,048,576 token，每个请求固定输出 1,024 token。两组配置使用相同的 FP8 权重，固定长度测试关闭了 radix caching。',
     '1M 负载是纯性能实验，用了显式的上下文长度覆盖，模型原生上下文上限是 262,144 token。1M 时 NVFP4 的 static-memory fraction 取 0.75，给临时 prefill 工作区留空间，FP8 为 0.90；更短的上下文长度下两者都用 0.90。',
-    '我们设了两个对照点，把同并发下的性能与能承载更多并发带来的收益分开看。',
+    '对照点分两组：一组固定实际并发比性能，一组放开并发看容量收益。',
 ]
 
 s5a = h3('同并发 decode：iso-concurrency')
@@ -121,7 +121,7 @@ fig(s5b, 'fig08.png', '图 8：Qwen3.8-27B 32K/1K ISL/OSL 的 Pareto 曲线', 2)
 
 s5c = h3('prefill 性能')
 s5c["paras"] += [
-    'decode 阶段 KV cache 读取是主要瓶颈，prefill 阶段则是计算受限。我们的方案只改了 KV 数据类型，计算数据类型不变，prefill 注意力本身没有性能收益。同并发下 NVFP4 的平均首 token 延迟（TTFT）只增加了 0.20% 到 0.40%，轻微变慢主要来自 KV 量化或反量化的开销。',
+    'decode 阶段 KV cache 读取是主要瓶颈，prefill 阶段则是计算受限。这套方案只改了 KV 数据类型，计算数据类型不变，prefill 注意力本身没有性能收益。同并发下 NVFP4 的平均首 token 延迟（TTFT）只增加了 0.20% 到 0.40%，轻微变慢主要来自 KV 量化或反量化的开销。',
 ]
 fig(s5c, 'fig09.png', '图 9：以 TTFT 衡量的 Qwen3.8-27B prefill 性能', 0)
 s5c["paras"] += [
@@ -136,7 +136,7 @@ s6["paras"] += [
     '需要的前缀一旦从所有可用缓存层级中被逐出，服务端就得重算。对几十万 token 的上下文，这会明显拉高首 token 延迟，还占用本可服务新请求的资源。',
     'NVFP4 创造了把更多工作集留在 GPU 上的机会。打包数据的计算给出约 1.78 倍于 FP8 的理想容量比，未计工作区等显存开销，实际可用容量取决于负载与服务配置。让更多前缀常驻，能在内存压力本会触发逐出的场景下减少重复 prefill。',
     '收益取决于负载的复用模式和服务配置。分层缓存与 KV 量化可以互补：一个扩展缓存层级，一个压缩层级里内容的大小。',
-    '我们在 8 卡 NVIDIA RTX 6000D 节点上以 TP8 并行测 Qwen3.5-397B-A17B，NVFP4 与 FP8 KV 各扫一遍 1 到 16 的并发，基准窗口 1,200 秒。',
+    'AgentX 测试在 8 卡 NVIDIA RTX 6000D 节点上以 TP8 并行跑 Qwen3.5-397B-A17B，NVFP4 与 FP8 KV 各扫一遍 1 到 16 的并发，基准窗口 1,200 秒。',
     '结果显示，低并发（C ≤ 8）时 NVFP4 KV 与 FP8 KV 表现相当；并发超过 12 后，FP8 KV 的吞吐和交互性急剧下滑，NVFP4 KV 的吞吐仍在上升。',
 ]
 fig(s6, 'fig10.png', '图 10：Qwen3.5-397B-A17B 上的 AgentX 性能', 5)
@@ -149,7 +149,7 @@ fig(s6, 'fig11.png', '图 11：Qwen3.5-397B-A17B 的 AgentX 输入 token 缓存�
 s7 = h2('限制与进行中的工作')
 s7["paras"] += [
     'SGLang 当前的 NVFP4 KV 支持仍处于实验阶段，团队在持续改进，现状与进展如下：',
-    BULLET + '**GPU 架构支持：** 目前支持 SM12x 与 SM100/SM103，更多架构的适配在推进中，路线图见原文链接。',
+    BULLET + '**GPU 架构支持：** 目前支持 SM12x 与 SM100/SM103，更多架构的适配在推进中。',
     BULLET + '**模型支持：** 支持 GQA 模型和 Sparse MLA 模型，正在适配更多类型，例如 Sparse GQA。',
     BULLET + '**精度改进：** 实验没有使用 NVFP4 的每张量 FP32 全局 scale，为简单起见取 1.0；合适的校准可能减少数值上溢与下溢，进一步收窄 NVFP4 与 FP8 KV 的精度差距。团队也在试验朴素 NVFP4 KV 之外的更多 4 bit 配方，某些模型上可能进一步提升精度。',
 ]
@@ -166,8 +166,9 @@ DATA = {
     ],
     "sections": S,
     "conclusion": [
-        'NVFP4 KV cache 的意义不只是把 KV 压小 44%，而是把省下的显存同时换成两样东西：更快的 decode 和更多常驻请求。**带宽受限的长上下文 decode 提速 26% 到 30%，容量驱动下最高 78.46%，这是存储侧优化直接兑换成吞吐的典型样本。**',
-        '对做 LLM serving 的人，AgentX 那组数据更关键：高并发下 FP8 的缓存命中率崩塌、NVFP4 仍在持续扩展，说明 4 bit KV 的真正红利在智能体负载里，显存省下来变成了 prefix 命中率，而不是单次 decode 快的那一点。实验未启用 FP32 全局 scale，校准之后精度差距还有收窄空间，任务级验证仍是上线前的必做项。',
+        '**省下的显存同时换来两样东西：更快的 decode 和更多常驻请求，这是 NVFP4 KV cache 最值得记住的地方。**',
+        '打包数据加 block scale 只要 FP8 约 56% 的存储，带宽受限的长上下文 decode 提速 26% 到 30%，容量驱动下最高 78.46%；把反量化放进 decode kernel，省掉整块 KV cache 的显存往返，是这轮收益的直接来源。',
+        '对做 LLM serving 的人，AgentX 那组数据更关键：高并发下 FP8 的缓存命中率崩塌、NVFP4 仍在持续扩展，4 bit KV 的真正红利在智能体负载里，显存省下来变成了 prefix 命中率，而不是单次 decode 快的那一点。实验未启用 FP32 全局 scale，校准之后精度差距还有收窄空间，任务级验证仍是上线前的必做项。',
     ],
     "reference_url": 'https://www.lmsys.org/blog/2026-09-16-nvfp4-kv-cache',
 }
