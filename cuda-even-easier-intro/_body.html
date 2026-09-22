@@ -1,0 +1,569 @@
+class="entry-content">
+<div style="height:20px" aria-hidden="true" class="wp-block-spacer"></div>
+
+
+
+<p class="wp-block-paragraph"><em>Note: This blog post was originally published on Jan 25, 2017, but has been edited to reflect new updates.</em></p>
+
+
+
+<p class="wp-block-paragraph">This post is a super simple introduction to CUDA, the popular parallel computing platform and programming model from NVIDIA. I wrote a previous post, <a href="https://developer.nvidia.com/blog/easy-introduction-cuda-c-and-c/" data-wpel-link="internal" target="_self" rel="follow">An Easy Introduction to CUDA</a> in 2013 that has been popular over the years. But CUDA programming has gotten easier, and GPUs have gotten much faster, so it’s time for an updated (and even easier) introduction.</p>
+
+
+
+<p class="wp-block-paragraph">CUDA C++ is just one of the ways you can create massively parallel applications with CUDA. It lets you use the powerful C++ programming language to develop high performance algorithms accelerated by thousands of parallel threads running on GPUs. Many developers have accelerated their computation- and bandwidth-hungry applications this way, including the libraries and frameworks that underpin the ongoing revolution in artificial intelligence known as <a href="https://developer.nvidia.com/deep-learning" data-wpel-link="internal" target="_self" rel="follow">Deep Learning</a>.</p>
+
+
+
+<p class="wp-block-paragraph">So, you’ve heard about CUDA and you are interested in learning how to use it in your own applications. If you are a C++ programmer, this blog post should give you a good start. To follow along, you’ll need a computer with a CUDA-capable GPU (Windows, WSL,&nbsp; or 64-bit Linux, and any NVIDIA GPU should do), or a cloud instance with GPUs (<a href="https://marketplace.nvidia.com/en-us/enterprise/cloud-solutions/" data-wpel-link="internal" target="_self" rel="follow">AWS, Azure, Google Colab, and other cloud service providers have them</a>). You’ll also need the free <a href="https://developer.nvidia.com/cuda-toolkit" data-wpel-link="internal" target="_self" rel="follow">CUDA Toolkit</a> installed.</p>
+
+
+
+<p class="wp-block-paragraph">Let’s get started!</p>
+
+
+
+<h2 id="starting_simple"  class="wp-block-heading">Starting Simple<a href="#starting_simple" aria-label="Scroll to Starting Simple section" class="heading-anchor-link"><i class="fas fa-link"></i></a></h2>
+
+
+
+<p class="wp-block-paragraph">We’ll start with a simple C++ program that adds the elements of two arrays with a million elements each.</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: cpp; title: ; notranslate" title="">
+#include &lt;iostream&gt;
+#include &lt;math.h&gt;
+
+// function to add the elements of two arrays
+void add(int n, float *x, float *y)
+{
+ for (int i = 0; i &lt; n; i++)
+     y&#x5B;i] = x&#x5B;i] + y&#x5B;i];
+}
+
+int main(void)
+{
+ int N = 1&lt;&lt;20; // 1M elements
+
+ float *x = new float&#x5B;N];
+ float *y = new float&#x5B;N];
+
+ // initialize x and y arrays on the host
+ for (int i = 0; i &lt; N; i++) {
+   x&#x5B;i] = 1.0f;
+   y&#x5B;i] = 2.0f;
+ }
+
+ // Run kernel on 1M elements on the CPU
+ add(N, x, y);
+
+ // Check for errors (all values should be 3.0f)
+ float maxError = 0.0f;
+ for (int i = 0; i &lt; N; i++)
+   maxError = fmax(maxError, fabs(y&#x5B;i]-3.0f));
+ std::cout &lt;&lt; &quot;Max error: &quot; &lt;&lt; maxError &lt;&lt; std::endl;
+
+ // Free memory
+ delete &#x5B;] x;
+ delete &#x5B;] y;
+
+ return 0;
+}
+</pre></div>
+
+
+<p class="wp-block-paragraph">First, compile and run this C++ program. Put the code above in a file and save it as add.cpp, and then compile it with your C++ compiler. I’m on Linux so I’m using g++, but you can use MSVC on Windows (or g++ on WSL).</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: cpp; title: ; notranslate" title="">
+&gt; g++ add.cpp -o add
+</pre></div>
+
+
+<p class="wp-block-paragraph">Then run it:</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+&gt; ./add
+Max error: 0.000000
+</pre></div>
+
+
+<p class="wp-block-paragraph">(On Windows you may want to name the executable <code>add.exe</code> and run it with <code>.\add</code>.)</p>
+
+
+
+<p class="wp-block-paragraph">As expected, it prints that there was no error in the summation and then exits. Now I want to get this computation running (in parallel) on the many cores of a GPU. It’s actually pretty easy to take the first steps.</p>
+
+
+
+<p class="wp-block-paragraph">First, I just have to turn our&nbsp;<code>add</code>&nbsp;function into a function that the GPU can run, called a&nbsp;<em>kernel</em>&nbsp;in CUDA. To do this, all I have to do is add the specifier&nbsp;<code>__global__</code>to the function, which tells the CUDA C++ compiler that this is a function that runs on the GPU and can be called from CPU code.</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: cpp; title: ; notranslate" title="">
+// Kernel function to add the elements of two arrays
+__global__
+void add(int n, float *sum, float *x, float *y)
+{
+  for (int i = 0; i &lt; n; i++)
+    sum&#x5B;i] = x&#x5B;i] + y&#x5B;i];
+}
+</pre></div>
+
+
+<p class="wp-block-paragraph">This <code>__global__ function</code> is known as a CUDA <em>kernel</em>, and runs on the GPU. Code that runs on the GPU is often called <em>device code</em>, while code that runs on the CPU is <em>host code</em>.</p>
+
+
+
+<h2 id="memory-allocation"  class="wp-block-heading" >Memory Allocation in CUDA<a href="#memory-allocation" aria-label="Scroll to Memory Allocation in CUDA section" class="heading-anchor-link"><i class="fas fa-link"></i></a></h2>
+
+
+
+<p class="wp-block-paragraph">To compute on the GPU, I need to allocate memory accessible by the GPU. <a href="https://developer.nvidia.com/blog/unified-memory-in-cuda-6/" data-wpel-link="internal" target="_self" rel="follow">Unified Memory</a> in CUDA makes this easy by providing a single memory space accessible by all GPUs and CPUs in your system. To allocate data in unified memory, call <code>cudaMallocManaged()</code>, which returns a pointer that you can access from host (CPU) code or device (GPU) code. To free the data, just pass the pointer to <code>cudaFree()</code>.</p>
+
+
+
+<p class="wp-block-paragraph">I just need to replace the calls to new in the code above with calls to <code>cudaMallocManaged()</code>, and replace calls to <code>delete []</code> with calls to <code>cudaFree</code>.</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: cpp; title: ; notranslate" title="">
+   // Allocate Unified Memory -- accessible from CPU or GPU
+   float *x, *y, *sum;
+   cudaMallocManaged(&amp;x, N*sizeof(float));
+   cudaMallocManaged(&amp;y, N*sizeof(float));
+
+   ...
+
+   // Free memory
+   cudaFree(x);
+   cudaFree(y);
+</pre></div>
+
+
+<p class="wp-block-paragraph">Finally, I need to <em>launch</em> the <code>add()</code> kernel, which invokes it on the GPU. CUDA kernel launches are specified using the triple angle bracket syntax <code>&lt;&lt;&lt; &gt;&gt;&gt;</code>. I just have to add it to the call to <code>add</code> before the parameter list.</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: cpp; title: ; notranslate" title="">
+  add&lt;&lt;&lt;1, 1&gt;&gt;&gt;(N, sum, x, y);
+</pre></div>
+
+
+<p class="wp-block-paragraph">Easy! I’ll get into the details of what goes inside the angle brackets soon; for now all you need to know is that this line launches one GPU thread to run <code>add()</code>.</p>
+
+
+
+<p class="wp-block-paragraph">Just one more thing: I need the CPU to wait until the kernel is done before it accesses the results (because CUDA kernel launches don’t block the calling CPU thread). To do this I just call <code>cudaDeviceSynchronize() </code>before doing the final error checking on the CPU.</p>
+
+
+
+<p class="wp-block-paragraph">Here’s the complete code:</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: cpp; title: ; notranslate" title="">
+#include &lt;iostream&gt;
+#include &lt;math.h&gt;
+
+// Kernel function to add the elements of two arrays
+__global__
+void add(int n, float *x, float *y)
+{
+ for (int i = 0; i &lt; n; i++)
+   y&#x5B;i] = x&#x5B;i] + y&#x5B;i];
+}
+
+int main(void)
+{
+ int N = 1&lt;&lt;20;
+ float *x, *y;
+
+ // Allocate Unified Memory – accessible from CPU or GPU
+ cudaMallocManaged(&amp;x, N*sizeof(float));
+ cudaMallocManaged(&amp;y, N*sizeof(float));
+
+ // initialize x and y arrays on the host
+ for (int i = 0; i &lt; N; i++) {
+   x&#x5B;i] = 1.0f;
+   y&#x5B;i] = 2.0f;
+ }
+
+ // Run kernel on 1M elements on the GPU
+ add&lt;&lt;&lt;1, 1&gt;&gt;&gt;(N, x, y);
+
+ // Wait for GPU to finish before accessing on host
+ cudaDeviceSynchronize();
+
+ // Check for errors (all values should be 3.0f)
+ float maxError = 0.0f;
+ for (int i = 0; i &lt; N; i++) {
+   maxError = fmax(maxError, fabs(y&#x5B;i]-3.0f));
+ }
+ std::cout &lt;&lt; &quot;Max error: &quot; &lt;&lt; maxError &lt;&lt; std::endl;
+
+ // Free memory
+ cudaFree(x);
+ cudaFree(y);
+  return 0;
+}
+</pre></div>
+
+
+<p class="wp-block-paragraph">CUDA files have the file extension&nbsp;<code>.cu</code>. So save this code in a file called&nbsp;<code>add.cu</code>&nbsp;and compile it with&nbsp;<code>nvcc</code>, the CUDA C++ compiler.</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: cpp; title: ; notranslate" title="">
+&gt; nvcc add.cu -o add_cuda
+&gt; ./add_cuda
+Max error: 0.000000
+</pre></div>
+
+
+<p class="wp-block-paragraph">This is only a first step, because as written, this kernel is only correct for a single thread, since every thread that runs it will perform the add on the whole array. Moreover, there is a&nbsp;<a href="https://en.wikipedia.org/wiki/Race_condition" data-wpel-link="external" target="_blank" rel="follow">race condition</a>&nbsp;since multiple parallel threads would both read and write the same locations.</p>
+
+
+
+<p class="wp-block-paragraph">Note: on Windows, you need to make sure you set Platform to x64 in the Configuration Properties for your project in Microsoft Visual Studio.</p>
+
+
+
+<h2 id="profile-it"  class="wp-block-heading" >Profile it!<a href="#profile-it" aria-label="Scroll to Profile it! section" class="heading-anchor-link"><i class="fas fa-link"></i></a></h2>
+
+
+
+<p class="wp-block-paragraph">A good way to find out how long the kernel takes to run is to run it with the NSight Systems CLI, `nsys`. We could just type <code>nsys profile -t cuda --stats=true ./add_cuda</code> on the command line. However, this produces verbose statistics, and in this post we really only want to know how long the kernel takes to run. So I wrote a wrapper script called <code>nsys_easy</code> that only produces the output we need and stops nsys from producing intermediate files that will clutter the source directory. <a href="https://github.com/harrism/nsys_easy" data-wpel-link="external" target="_blank" rel="follow">The script is available on GitHub.</a> Just download <code>nsys_easy</code> and put it somewhere in your PATH (or even in the current directory).<br><br>(Note I’ve removed some statistics from the output to better fit the width of this website.)</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+&gt; nsys_easy ./add_cuda
+Max error: 0
+Generating &#039;/tmp/nsys-report-bb25.qdstrm&#039;
+&#x5B;1/1] &#x5B;========================100%] nsys_easy.nsys-rep
+Generated:
+   /home/nfs/mharris/src/even_easier/nsys_easy.nsys-rep
+Generating SQLite file nsys_easy.sqlite from nsys_easy.nsys-rep
+Processing 1259 events: &#x5B;======================================100%]
+Processing &#x5B;nsys_easy.sqlite] with &#x5B;cuda_gpu_sum.py]...
+
+** CUDA GPU Summary (Kernels/MemOps) (cuda_gpu_sum):
+
+Time (%)  Total Time (ns)  Instances  Category   Operation
+--------  ---------------  --------- ----------- --------------------------
+    98.5       75,403,544      1     CUDA_KERNEL add(int, float *, float *)
+     1.0          768,480     48     MEMORY_OPER &#x5B;memcpy Unified H2D]
+     0.5          352,787     24     MEMORY_OPER &#x5B;memcpy Unified D2D]
+</pre></div>
+
+
+<p class="wp-block-paragraph">The CUDA GPU Summary table shows a single call to <code>add</code>. It takes about 75ms on an NVIDIA T4 GPU. Let’s make it faster with parallelism.</p>
+
+
+
+<h2 id="picking-up-the-threads"  class="wp-block-heading" >Picking up the Threads<a href="#picking-up-the-threads" aria-label="Scroll to Picking up the Threads section" class="heading-anchor-link"><i class="fas fa-link"></i></a></h2>
+
+
+
+<p class="wp-block-paragraph">Now that you’ve run a kernel with one thread that does some computation, how do you make it parallel? The key is in CUDA’s <code>&lt;&lt;&lt;1, 1&gt;&gt;&gt;</code> syntax. This is called the execution configuration, and it tells the CUDA runtime how many parallel threads to use for the launch on the GPU. There are two parameters here, but let’s start by changing the second one: the number of threads in a thread block. CUDA GPUs run kernels using blocks of threads that are a multiple of 32 in size; 256 threads is a reasonable size to choose.</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: cpp; title: ; notranslate" title="">
+add&lt;&lt;&lt;1, 256&gt;&gt;&gt;(N, x, y);
+</pre></div>
+
+
+<p class="wp-block-paragraph">If I run the code with only this change, it will do the computation once per thread, rather than spreading the computation across the parallel threads. To do it properly, I need to modify the kernel. CUDA C++ provides keywords that let kernels get the indices of the running threads. Specifically,&nbsp;<code>threadIdx.x</code>&nbsp;contains the index of the current thread within its block, and&nbsp;<code>blockDim.x</code>&nbsp;contains the number of threads in the block. I’ll just modify the loop to stride through the array with parallel threads.</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: cpp; title: ; notranslate" title="">
+__global__
+void add(int n, float *x, float *y)
+{
+  int index = threadIdx.x;
+  int stride = blockDim.x;
+  for (int i = index; i &lt; n; i += stride)
+      y&#x5B;i] = x&#x5B;i] + y&#x5B;i];
+}
+</pre></div>
+
+
+<p class="wp-block-paragraph">The&nbsp;<code>add</code>&nbsp;function hasn’t changed that much. In fact, setting&nbsp;<code>index</code>&nbsp;to 0 and&nbsp;<code>stride</code>&nbsp;to 1 makes it semantically identical to the first version.</p>
+
+
+
+<p class="wp-block-paragraph">Save the file as&nbsp;<code>add_block.cu</code>&nbsp;and compile and run it in&nbsp;<code>nsys_easy</code>&nbsp;again. For the remainder of the post I’ll just show the relevant line from the output.</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+Time (%) Time (ns) Instances  Category   Operation             
+-------- --------- --------- ----------- ----------------------
+79.0     4,221,011     1     CUDA_KERNEL add(int, float *, float *)
+</pre></div>
+
+
+<p class="wp-block-paragraph">That’s a big speedup (75ms down to 4ms), but not surprising since execution went from one thread to 256 threads. Let’s keep going to get even more performance.</p>
+
+
+
+<h2 id="out-of-the-blocks"  class="wp-block-heading" >Out of the Blocks<a href="#out-of-the-blocks" aria-label="Scroll to Out of the Blocks section" class="heading-anchor-link"><i class="fas fa-link"></i></a></h2>
+
+
+
+<p class="wp-block-paragraph">CUDA GPUs have many parallel processors grouped into Streaming Multiprocessors, or SMs. Each SM can run multiple concurrent thread blocks, but each thread block runs on a single SM. As an example, an <a href="https://www.nvidia.com/en-us/data-center/tesla-t4/" data-wpel-link="internal" target="_self" rel="follow">NVIDIA T4</a> GPU based on the Turing GPU Architecture has 40 SMs and 2560 CUDA cores, and each SM can support up to 1024 active threads. To take full advantage of all these threads, I should launch the kernel with multiple thread blocks.</p>
+
+
+
+<p class="wp-block-paragraph">By now you may have guessed that the first parameter of the execution configuration specifies the number of thread blocks. Together, the blocks of parallel threads make up what is known as the <em>grid</em>. Since I have <code>N</code> elements to process, and 256 threads per block, I just need to calculate the number of blocks to get at least N threads. I simply divide <code>N</code> by the block size (being careful to round up in case N is not a multiple of <code>blockSize</code>).</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: cpp; title: ; notranslate" title="">
+int blockSize = 256;
+int numBlocks = (N + blockSize - 1) / blockSize;
+add&lt;&lt;&lt;numBlocks, blockSize&gt;&gt;&gt;(N, x, y);
+</pre></div>
+
+<div class="wp-block-image">
+<figure data-wp-context="{&quot;imageId&quot;:&quot;6ab29427a7149&quot;}" data-wp-interactive="core/image" data-wp-key="6ab29427a7149" class="aligncenter size-full wp-lightbox-container"><noscript><img decoding="async" width="1366" height="618" data-wp-class--hide="state.isContentHidden" data-wp-class--show="state.isContentVisible" data-wp-init="callbacks.setButtonStyles" data-wp-on--click="actions.showLightbox" data-wp-on--load="callbacks.setButtonStyles" data-wp-on--pointerdown="actions.preloadImage" data-wp-on--pointerenter="actions.preloadImageWithDelay" data-wp-on--pointerleave="actions.cancelPreload" data-wp-on-window--resize="callbacks.setButtonStyles" src="https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image.png" alt="Grid block thread image indexing CUDA" class="wp-image-99570" srcset="https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image.png 1366w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-300x136.png 300w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-625x283.png 625w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-179x81.png 179w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-768x347.png 768w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-645x292.png 645w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-500x226.png 500w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-160x72.png 160w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-362x164.png 362w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-243x110.png 243w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-1024x463.png 1024w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-960x434.png 960w" sizes="(max-width: 1366px) 100vw, 1366px" /></noscript><img src='data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%201366%20618%22%3E%3C/svg%3E' decoding="async" width="1366" height="618" data-wp-class--hide="state.isContentHidden" data-wp-class--show="state.isContentVisible" data-wp-init="callbacks.setButtonStyles" data-wp-on--click="actions.showLightbox" data-wp-on--load="callbacks.setButtonStyles" data-wp-on--pointerdown="actions.preloadImage" data-wp-on--pointerenter="actions.preloadImageWithDelay" data-wp-on--pointerleave="actions.cancelPreload" data-wp-on-window--resize="callbacks.setButtonStyles" data-src="https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image.png" alt="Grid block thread image indexing CUDA" class="lazyload wp-image-99570" data-srcset="https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image.png 1366w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-300x136.png 300w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-625x283.png 625w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-179x81.png 179w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-768x347.png 768w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-645x292.png 645w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-500x226.png 500w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-160x72.png 160w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-362x164.png 362w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-243x110.png 243w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-1024x463.png 1024w, https://developer-blogs.nvidia.com/wp-content/uploads/2017/01/Even-easier-intro-to-CUDA-image-960x434.png 960w" data-sizes="(max-width: 1366px) 100vw, 1366px" /><button
+			class="lightbox-trigger"
+			type="button"
+			aria-haspopup="dialog"
+			data-wp-bind--aria-label="state.thisImage.triggerButtonAriaLabel"
+			data-wp-init="callbacks.initTriggerButton"
+			data-wp-on--click="actions.showLightbox"
+			data-wp-style--right="state.thisImage.buttonRight"
+			data-wp-style--top="state.thisImage.buttonTop"
+		>
+			<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="none" viewBox="0 0 12 12">
+				<path fill="#fff" d="M2 0a2 2 0 0 0-2 2v2h1.5V2a.5.5 0 0 1 .5-.5h2V0H2Zm2 10.5H2a.5.5 0 0 1-.5-.5V8H0v2a2 2 0 0 0 2 2h2v-1.5ZM8 12v-1.5h2a.5.5 0 0 0 .5-.5V8H12v2a2 2 0 0 1-2 2H8Zm2-12a2 2 0 0 1 2 2v2h-1.5V2a.5.5 0 0 0-.5-.5H8V0h2Z" />
+			</svg>
+		</button><figcaption class="wp-element-caption"><em>Figure 1. Grid, Block and Thread indexing in CUDA kernels (one-dimensional).</em></figcaption></figure>
+</div>
+
+
+<p class="wp-block-paragraph">I also need to update the kernel code to take into account the entire grid of thread blocks. CUDA provides&nbsp;<code>gridDim.x</code>, which contains the number of blocks in the grid, and&nbsp;<code>blockIdx.x</code>, which contains the index of the current thread block in the grid. Figure 1 illustrates the the approach to indexing into an array (one-dimensional) in CUDA using <code>blockDim.x</code>,&nbsp;<code>gridDim.x</code>, and&nbsp;<code>threadIdx.x</code>. The idea is that each thread gets its index by computing the offset to the beginning of its block (the block index times the block size:&nbsp;<code>blockIdx.x * blockDim.x</code>) and adding the thread’s index within the block (<code>threadIdx.x</code>). The code&nbsp;<code>blockIdx.x * blockDim.x + threadIdx.x</code>&nbsp;is idiomatic CUDA.</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: cpp; title: ; notranslate" title="">
+__global__
+void add(int n, float *x, float *y)
+{
+  int index = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+  for (int i = index; i &lt; n; i += stride)
+    y&#x5B;i] = x&#x5B;i] + y&#x5B;i];
+}
+</pre></div>
+
+
+<p class="wp-block-paragraph">The updated kernel also sets&nbsp;<code>stride</code>&nbsp;to the total number of threads in the grid (<code>blockDim.x * gridDim.x</code>). This type of loop in a CUDA kernel is often called a&nbsp;<a href="https://developer.nvidia.com/blog/cuda-pro-tip-write-flexible-kernels-grid-stride-loops/" data-wpel-link="internal" target="_self" rel="follow"><em>grid-stride loop</em></a>.</p>
+
+
+
+<p class="wp-block-paragraph">Save the file as&nbsp;<code>add_grid.cu</code>&nbsp;and compile and run it in&nbsp;<code>nsys_easy</code>&nbsp;again.</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+Time (%) Time (ns) Instances Category    Operation             
+-------- --------- --------- ----------- ------------------------
+79.6     4,514,384     1     CUDA_KERNEL add(int, float *, float *)
+</pre></div>
+
+
+<p class="wp-block-paragraph">Well, that’s interesting. There’s no speedup from this change, and possibly a slight slowdown. Why is that? If increasing compute by a factor of 40 (the number of SMs) doesn’t bring down total time, then computation was not the bottleneck.</p>
+
+
+
+<h2 id="unified_memory_prefetching"  class="wp-block-heading">Unified Memory Prefetching<a href="#unified_memory_prefetching" aria-label="Scroll to Unified Memory Prefetching section" class="heading-anchor-link"><i class="fas fa-link"></i></a></h2>
+
+
+
+<p class="wp-block-paragraph">There’s a clue to the bottleneck if we look at the full summary table from the profiler:</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+Time (%) Time (ns) Instances  Category    Operation
+-------- --------- --------- ----------- ----------------------
+   79.6 4,514,384      1      CUDA_KERNEL add(int, float *, float *)         
+   14.2   807,245     64      MEMORY_OPER &#x5B;CUDA memcpy Unified H2D]
+    6.2   353,201     24      MEMORY_OPER &#x5B;CUDA memcpy Unified D2H]
+</pre></div>
+
+
+<p class="wp-block-paragraph">Here we can&nbsp; see that there are 64 host-to-device (H2D) and 24 device-to-host (D2H) “unified” <code>memcpy</code> operations. But there are no explicit <code>memcpy</code> calls in the code. Unified Memory in CUDA is virtual memory. Individual virtual memory pages may be resident in the memory of any device (GPU or CPU) in the system, and those pages are migrated on demand. This program first initializes the arrays on the CPU in a for loop, and then launches the kernel where the arrays are read and written by the GPU. Since the memory pages are all CPU-resident when the kernel runs, there are multiple page faults and the hardware migrates the pages to the GPU memory when the faults occur. This results in a memory bottleneck, which is why we don’t see a speedup.</p>
+
+
+
+<p class="wp-block-paragraph">The migration is expensive because page faults occur individually, and GPU threads stall while they wait for the page migration. Because I know what memory is needed by the kernel (x and y arrays), I can use <em>prefetching</em> to make sure that the data is on the GPU before the kernel needs it. I do this by using the <code>cudaMemPrefetchAsync()</code> function before launching the kernel:</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: cpp; title: ; notranslate" title="">
+// Prefetch the x and y arrays to the GPU
+cudaMemPrefetchAsync(x, N*sizeof(float), 0, 0);
+cudaMemPrefetchAsync(y, N*sizeof(float), 0, 0);
+</pre></div>
+
+
+<p class="wp-block-paragraph">Running this with the profiler produces the following output. The kernel now takes under 50 microseconds!</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+Time (%) Time (ns) Instances  Category    Operation
+-------- --------- --------- -----------  ----------------------
+   63.2   690,043     4     MEMORY_OPER  &#x5B;CUDA memcpy Unified H2D]
+   32.4   353,647    24     MEMORY_OPER  &#x5B;CUDA memcpy Unified D2H]
+    4.4    47,520     1     CUDA_KERNEL  add(int, float *, float *)
+</pre></div>
+
+
+<h2 id="summing-up"  class="wp-block-heading" >Summing Up<a href="#summing-up" aria-label="Scroll to Summing Up section" class="heading-anchor-link"><i class="fas fa-link"></i></a></h2>
+
+
+
+<p class="wp-block-paragraph">Prefetching all the pages of the arrays at once is much faster than individual page faults. Note that this change can benefit all versions of the <code>add</code> program, so let’s add it to all three and run them in the profiler again. Here’s a summary table.</p>
+
+
+
+<figure class="wp-block-table aligncenter"><table class="has-fixed-layout"><tbody><tr><td><strong>Version</strong></td><td><strong>Time</strong></td><td><strong>Speedup vs. Single Thread</strong></td><td><strong>Bandwidth</strong></td></tr><tr><td>Single Thread</td><td>91,811,206 ns</td><td>1x</td><td>137 MB/s</td></tr><tr><td>Single Block (256 threads)</td><td>2,049,034 ns</td><td>45x</td><td>6 GB/s</td></tr><tr><td>Multiple Blocks</td><td>47,520 ns</td><td>1932x</td><td>265 GB/s</td></tr></tbody></table></figure>
+
+
+
+<p class="wp-block-paragraph">Once the data is in memory, the speedup going from a single block to multiple blocks is proportional to the number of SMs (40) on the GPU.&nbsp;</p>
+
+
+
+<p class="wp-block-paragraph">As you can see, we can achieve very high bandwidth on GPUs. The add kernel is very bandwidth-bound (265 GB/s is over 80% of the T4’s peak bandwidth of 320GB/s) , but GPUs also excel at heavily compute-bound computations such as dense matrix linear algebra, <a href="https://developer.nvidia.com/deep-learning" data-wpel-link="internal" target="_self" rel="follow">deep learning</a>, image and signal processing, physical simulations, and more.</p>
+
+
+
+<h2 id="exercises"  class="wp-block-heading" >Exercises<a href="#exercises" aria-label="Scroll to Exercises section" class="heading-anchor-link"><i class="fas fa-link"></i></a></h2>
+
+
+
+<p class="wp-block-paragraph">To keep you going, here are a few things to try on your own. Please post about your experience in the comments section below.</p>
+
+
+
+<ol class="wp-block-list">
+<li>Browse the <a href="http://docs.nvidia.com/cuda/index.html" data-wpel-link="internal" target="_self" rel="follow">CUDA Toolkit documentation</a>. If you haven’t installed CUDA yet, check out the <a href="http://docs.nvidia.com/cuda/cuda-quick-start-guide/index.html" data-wpel-link="internal" target="_self" rel="follow">Quick Start Guide</a> and the installation guides. Then browse the <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/index.html" data-wpel-link="internal" target="_self" rel="follow">Programming Guide</a> and the <a href="http://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html" data-wpel-link="internal" target="_self" rel="follow">Best Practices Guide</a>. There are also tuning guides for various architectures.</li>
+
+
+
+<li>Experiment with <a href="http://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#formatted-output" data-wpel-link="internal" target="_self" rel="follow">printf()</a> inside the kernel. Try printing out the values of <code>threadIdx.x</code> and <code>blockIdx.x</code> for some or all of the threads. Do they print in sequential order? Why or why not?</li>
+
+
+
+<li>Print the value of <code>threadIdx.y</code> or <code>threadIdx.z</code> (or <code>blockIdx.y</code>) in the kernel. (Likewise for <code>blockDim</code> and <code>gridDim</code>). Why do these exist? How do you get them to take on values other than 0 (1 for the dims)?</li>
+</ol>
+
+
+
+<h2 id="where-to-from-here"  class="wp-block-heading" >Where To From Here?<a href="#where-to-from-here" aria-label="Scroll to Where To From Here? section" class="heading-anchor-link"><i class="fas fa-link"></i></a></h2>
+
+
+
+<p class="wp-block-paragraph">I hope that this post has whet your appetite for CUDA and that you are interested in learning more and applying CUDA C++ in your own computations. If you have questions or comments, don’t hesitate to reach out using the comments section below.</p>
+
+
+
+<p class="wp-block-paragraph">There is a whole series of older introductory posts that you can continue with:</p>
+
+
+
+<ul class="wp-block-list">
+<li><a href="https://developer.nvidia.com/blog/how-implement-performance-metrics-cuda-cc/" data-wpel-link="internal" target="_self" rel="follow">How to Implement Performance Metrics in CUDA C++</a></li>
+
+
+
+<li><a href="https://developer.nvidia.com/blog/how-query-device-properties-and-handle-errors-cuda-cc/" data-wpel-link="internal" target="_self" rel="follow">How to Query Device Properties and Handle Errors in CUDA C++</a></li>
+
+
+
+<li><a href="https://developer.nvidia.com/blog/how-optimize-data-transfers-cuda-cc/" data-wpel-link="internal" target="_self" rel="follow">How to Optimize Data Transfers in CUDA C++</a></li>
+
+
+
+<li><a href="https://developer.nvidia.com/blog/how-overlap-data-transfers-cuda-cc/" data-wpel-link="internal" target="_self" rel="follow">How to Overlap Data Transfers in CUDA C++</a></li>
+
+
+
+<li><a href="https://developer.nvidia.com/blog/how-access-global-memory-efficiently-cuda-c-kernels/" data-wpel-link="internal" target="_self" rel="follow">How to Access Global Memory Efficiently in CUDA C++</a></li>
+
+
+
+<li><a href="https://developer.nvidia.com/blog/using-shared-memory-cuda-cc/" data-wpel-link="internal" target="_self" rel="follow">Using Shared Memory in CUDA C++</a></li>
+
+
+
+<li><a href="https://developer.nvidia.com/blog/efficient-matrix-transpose-cuda-cc/" data-wpel-link="internal" target="_self" rel="follow">An Efficient Matrix Transpose in CUDA C++</a></li>
+
+
+
+<li><a href="https://developer.nvidia.com/blog/finite-difference-methods-cuda-cc-part-1/" data-wpel-link="internal" target="_self" rel="follow">Finite Difference Methods in CUDA C++, Part 1</a></li>
+
+
+
+<li><a href="https://developer.nvidia.com/blog/finite-difference-methods-cuda-c-part-2/" data-wpel-link="internal" target="_self" rel="follow">Finite Difference Methods in CUDA C++, Part 2</a></li>
+
+
+
+<li><a href="https://developer.nvidia.com/blog/accelerated-ray-tracing-cuda/" data-wpel-link="internal" target="_self" rel="follow">Accelerated Ray Tracing in One Weekend with CUDA</a></li>
+</ul>
+
+
+
+<p class="wp-block-paragraph">There is also a series of <a href="https://developer.nvidia.com/blog/tag/cuda-fortran/" data-wpel-link="internal" target="_self" rel="follow">CUDA Fortran posts</a> mirroring the above, starting with <a href="https://developer.nvidia.com/blog/easy-introduction-cuda-fortran/" data-wpel-link="internal" target="_self" rel="follow">An Easy Introduction to CUDA Fortran</a>.</p>
+
+
+
+<p class="wp-block-paragraph">There is a wealth of other content on CUDA C++ and other GPU computing topics here on the <a href="https://developer.nvidia.com/blog/" data-wpel-link="internal" target="_self" rel="follow">NVIDIA Developer Blog</a>, so look around!</p>
+
+
+
+<p class="wp-block-paragraph">If you enjoyed this post and want to learn more, the<a href="https://nvidia.com/dli" data-wpel-link="internal" target="_self" rel="follow"> NVIDIA DLI</a> offers several in-depth CUDA programming courses.</p>
+
+
+
+<ul class="wp-block-list">
+<li>For those of you just starting out, see <a href="https://learn.nvidia.com/courses/course-detail?course_id=course-v1:DLI+S-AC-04+V1" data-wpel-link="internal" target="_self" rel="follow">Getting Started with Accelerated Computing in Modern CUDA C++</a>, which provides dedicated GPU resources, a more sophisticated programming environment, use of the<a href="https://developer.nvidia.com/nsight-systems" data-wpel-link="internal" target="_self" rel="follow"> NVIDIA Nsight Systems</a> visual profiler, dozens of interactive exercises, detailed presentations, over 8 hours of material, and the ability to earn a DLI Certificate of Competency.</li>
+
+
+
+<li>For Python programmers, see<a href="https://courses.nvidia.com/courses/course-v1:DLI+C-AC-02+V1/about" data-wpel-link="internal" target="_self" rel="follow"> Fundamentals of Accelerated Computing with CUDA Python</a>.</li>
+
+
+
+<li>For more intermediate and advanced CUDA programming materials, see the <em>Accelerated Computing</em> section of the NVIDIA DLI<a href="https://learn.nvidia.com/en-us/training/self-paced-courses" data-wpel-link="internal" target="_self" rel="follow"> self-paced catalog</a>.</li>
+</ul>
+</div>
+
+  <div class="card--post-attributes-secondary">
+            <div class="post--comments-count secondary--attribute">
+      <a href="#entry-content-comments">
+        <i class="fad fa-comment-alt-lines"></i> Discuss (148)
+      </a>
+    </div>
+    
+    <div class="post--rate secondary--attribute">
+      		<div class="wpulike wpulike-heart " ><div class="wp_ulike_general_class wp_ulike_is_not_liked"><button type="button"
+					aria-label="Like Button"
+					data-ulike-id="7501"
+					data-ulike-nonce="8a87b53e8d"
+					data-ulike-type="post"
+					data-ulike-template="wpulike-heart"
+					data-ulike-display-likers=""
+					data-ulike-likers-style="popover"
+					class="wp_ulike_btn wp_ulike_put_text wp_post_btn_7501"><span><i class="far fa-thumbs-up"></i></span>				</button><span class="count-box wp_ulike_counter_up" data-ulike-counter-value="+301"></span>			</div></div>
+	
+      <button type="button" class="js-like-click like-click" aria-label="Like this post">
+  Like
+</button>
+    </div>
+  </div>
+
+  <div class="card--post-attributes-secondary tags">
+    <div class="caption">
+      <h2 class="h--smaller txt-clr--blck">Tags</h2>
+    </div>
+    <div class="content-s post-tags--list mt-0">
+             <a href="https://developer.nvidia.com/blog/category/data-science/" data-wpel-link="internal" target="_self" rel="follow">Data Science</a> | <a href="https://developer.nvidia.com/blog/category/development/" data-wpel-link="internal" target="_self" rel="follow">Developer Tools &amp; Techniques</a> | <a href="https://developer.nvidia.com/blog/recent-posts/?industry=General" data-wpel-link="internal" target="_self" rel="follow">General</a> | <a href="https://developer.nvidia.com/blog/recent-posts/?products=CUDA" data-wpel-link="internal" target="_self" rel="follow">CUDA</a> | <a href="https://developer.nvidia.com/blog/recent-posts/?learning_levels=Beginner+Technical" data-wpel-link="internal" target="_self" rel="follow">Beginner Technical</a> | <a href="https://developer.nvidia.com/blog/recent-posts/?content_types=Tutorial" data-wpel-link="internal" target="_self" rel="follow">Tutorial</a> | <a href="https://developer.nvidia.com/blog/tag/beginner/" data-wpel-link="internal" target="_self" rel="follow">Beginner</a> | <a href="https://developer.nvidia.com/blog/tag/featured/" data-wpel-link="internal" target="_self" rel="follow">featured</a>     </div>
+  </div>
+
+  <div class="post-authors-list">
+    <div 
