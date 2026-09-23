@@ -66,6 +66,8 @@ def clean(t):
     t = t.replace("P:D ratio", "P:D 比例")
     t = t.replace("decode-maximal batching", "解码最大化批处理")
     t = t.replace("decode-maximal 批次", "解码最大化批次")
+    t = t.replace("可与本文优化互补", "可与 Sarathi 的优化互补")
+    t = t.replace("模型创新与本文工作正交", "模型创新与 Sarathi 正交")
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
