@@ -17,7 +17,9 @@ req = urllib.request.Request("https://api.weixin.qq.com/cgi-bin/draft/get?access
                              data=json.dumps({"media_id": mid}).encode())
 d = json.load(op.open(req, timeout=30))
 items = d.get("item", [])
-if items and "articles" in items[0]:
+if items and "news_item" in items[0]:
+    content = items[0]["news_item"][0].get("content", "")
+elif items and "articles" in items[0]:
     content = items[0]["articles"][0].get("content", "")
 elif items:
     content = items[0].get("content", {}).get("html", "") if isinstance(items[0].get("content"), dict) else items[0].get("content", "")
