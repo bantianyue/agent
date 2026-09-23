@@ -23,14 +23,12 @@
       "type": "h2",
       "title": "引言",
       "paras": [
-        "智能体推理把长上下文与多轮交互叠在了一起。每一轮里，一个短的动作或工具调用可能带回长得多的搜索结果、执行轨迹或文档，这些内容必须先做预填，解码才能继续。观测不断累积，智能体要在持续膨胀的历史里检索并合并证据，注意力计算和 KV cache 存储随之上升。这类负载要求高效的预填、紧凑的 KV cache，以及准确的长上下文检索。",
-        "HySparse 用全注意力层与稀疏注意力层交替的方式解决长上下文效率问题。每个全注意力层都向后继稀疏层提供选择索引和一份 KV cache，在不蒸馏辅助 indexer 模块的前提下降低注意力计算量与 KV cache 存储。但对智能体推理来说，HySparse 在缩短预填、进一步压缩 KV cache、提升检索精度三个方面仍留有不小空间。",
-        "HySparse2 在 HySparse 基础上引入两级 KV 共享。参照 YOCO，骨干网络分成 self-decoder 与 cross-decoder 两段：self-decoder 把全注意力与滑动窗口注意力（SWA）混合起来，cross-decoder 把全注意力与稀疏注意力混合起来。外层 KV Bridging 把两个 decoder 里的全注意力层连起来，每个 cross-decoder 全注意力层用各自的 K/V 投影，作用在对应的 self-decoder 全注意力层的输入隐藏状态上。内层 KV Reuse 沿用 HySparse 的做法，在同一个混合块内共享 KV cache 与选择索引。",
-        "两处改动同时改善了精度与效率。其一，用 token 级选择替代块级选择，把稀疏注意力预算更精确地分配给相关 token。其二，用一段强制的近期 token 窗口替代稀疏层里独立的 SWA 分支，让局部与全局 token 共用同一份共享 KV cache。所有 cross-decoder 的 KV cache 因此都能由 self-decoder 的隐藏状态构建，预填可以在 self-decoder 之后就退出。",
-        "在相同数据与训练计划下，用 80B-A3B MoE 模型对比 HySparse2、HySparse 与 Hybrid SWA。预训练之后，HySparse2 通用能力基本持平，长上下文检索更强。轻量后训练之后，MRCR-v2 与 RULER-v2 平均分相对 HySparse 分别提升 11.30 与 19.81 个百分点，在 256k 以内的所有评估长度上，AgentPPL 与 LongPPL 都低于两个基线。在 1M token 上，预填 FLOPs 相对 HySparse 与 Hybrid SWA 分别降低 2.92 倍与 5.02 倍，KV cache 也更小。消融显示，在相同注意力预算下 token 级选择能提升检索，KV Bridging 则保持了基本相当的质量。"
+        "智能体推理把长上下文与多轮交互叠在了一起。每一轮里，一个短的动作或工具调用可能带回长得多的搜索结果、执行轨迹或文档，这些内容必须先做预填，解码才能继续。历史不断累积，注意力计算与 KV cache 存储随之上升，这类负载要求高效的预填、紧凑的 KV cache，以及准确的长上下文检索。",
+        "HySparse 用全注意力层与稀疏注意力层交替的方式降低注意力计算量与 KV cache 存储：每个全注意力层都向后继稀疏层提供选择索引和一份 KV cache，不需要蒸馏辅助 indexer 模块。但对智能体推理来说，HySparse 在缩短预填、进一步压缩 KV cache、提升检索精度三个方面仍有空间。",
+        "HySparse2 在 HySparse 基础上引入两级 KV 共享。参照 YOCO，骨干网络分成 self-decoder（全注意力混合滑动窗口注意力）与 cross-decoder（全注意力混合稀疏注意力）两段：外层 KV Bridging 把两个 decoder 的全注意力层连起来，cross-decoder 每个全注意力层的 KV cache 都由对应 self-decoder 全注意力层的输入隐藏状态经本层 K/V 投影构造；内层 KV Reuse 沿用 HySparse 的做法，在同一个混合块内共享 KV cache 与选择索引。配合 token 级稀疏选择与强制近期窗口，cross-decoder 的 KV cache 全部能由 self-decoder 隐藏状态构建，预填可以在 self-decoder 之后退出。"
       ],
       "fig_after": {
-        "4": [
+        "2": [
           {
             "src": "fig00.png",
             "caption": "图1:HySparse2 用更低的预填开销和更小的 KV cache 存储，换来更好的长上下文表现。"
@@ -136,13 +134,9 @@
       "type": "h3",
       "title": "实验设置",
       "paras": [
-        "对比对象是 HySparse 与 MiMo-V2 系列使用的 Hybrid SWA，比较覆盖模型表现、预填 FLOPs 与 KV cache 存储，并对稀疏选择粒度、强制局部窗口、KV Bridging 做消融。token 级选择针对智能体场景下更强的长上下文精度，同时不牺牲效率；强制局部窗口与 KV Bridging 则针对更低的预填开销，同时保住模型质量。",
-        "除特别说明，实验都用 80B-A3B MoE 模型：49 层 Transformer，隐藏维度 2,048，采用简化版 mHC 变体，残差混合矩阵固定为单位矩阵。",
-        "三个模型只在注意力设计上不同。全部层都用全注意力是评估中最强的参照；选择混合模型保留多少全注意力层时，要避免与这个基线出现明显精度落差：Hybrid SWA 保留 9 个全注意力层，再少会显著掉分，HySparse 与 HySparse2 都只用 5 个全注意力层，精度仍与全注意力基线相当。Hybrid SWA 与 HySparse 用 GQA，HySparse2 用 MQA，KV cache 更小，token 稀疏注意力 kernel 效率也更好。",
-        "HySparse2 的 self-decoder 中，SWA 层用部分旋转位置编码（RoPE），旋转维度 64、base 10,000，全注意力与稀疏注意力用 NoPE，因此长上下文扩展时不需要调整 RoPE。三套配置里，所有稀疏层与 SWA 层都用 sigmoid 输出门与可学习的逐 head sink 偏置。HySparse2 用 token 级选择，强制 128 个局部 token 与 1,024 个全局 token；HySparse 以 64 token 为块选 1,024 个全局 token，并通过 gated fusion 把稀疏注意力与独立的 128 token SWA 分支结合；Hybrid SWA 用 128 token 的滑动窗口。",
-        "80B-A3B 模型在 32k 上下文长度下预训练约 500B token。轻量后训练阶段再增加约 100B token，把智能体数据引入训练混合，并把上下文长度扩展到 256k。两个阶段内三个模型共享同一数据混合与训练计划。优化器用 Muon 配 WSD 调度，预训练峰值学习率 1e-3，后训练 5e-5。整体对比同时给出预训练与后训练结果，消融只报预训练结果。",
-        "预训练评估覆盖知识（MMLU、MMLU-Redux、MMLU-Pro、C-Eval、CMMLU、TriviaQA）、推理（BBH、MATH、DROP、GSM8K、ARC-C、HellaSwag、WinoGrande）、代码（HumanEval+、MBPP+、Repo Code PPL）与长上下文（RULER、NoLiMa）。Repo Code PPL 是内部基准，在带跨文件依赖的长代码仓库上报告字节困惑度，因此也能探测长上下文建模能力。",
-        "轻量后训练之后，重点看多轮检索与智能体轨迹上的长上下文似然。AgentPPL 是内部基准，基于多轮智能体轨迹构建，在 1,000 条轨迹的推理、工具调用与回复片段上测量字节困惑度。LongPPL 在依赖长距离上下文的选定 token 上测困惑度，样本是 349 个智能体轨迹与长上下文任务样本。MRCR-v2 用 2、4、8 个 needle 测多轮检索，RULER-v2 覆盖 12 个检索与问答子任务，GraphWalks 评估多跳图遍历。"
+        "对比对象是 HySparse 与 MiMo-V2 系列使用的 Hybrid SWA，比较覆盖模型表现、预填 FLOPs 与 KV cache 存储。实验用 80B-A3B MoE 模型：49 层 Transformer，隐藏维度 2,048，采用简化版 mHC 变体。三个模型只在注意力设计上不同。",
+        "80B-A3B 模型在 32k 上下文长度下预训练约 500B token；轻量后训练阶段再增加约 100B token，把智能体数据引入训练混合，并把上下文长度扩展到 256k。两个阶段内三个模型共享同一数据混合与训练计划。",
+        "评估覆盖知识、推理、代码与长上下文任务（MMLU、C-Eval、CMMLU、BBH、GSM8K、ARC-C、HumanEval+、RULER、NoLiMa、MRCR-v2、RULER-v2、GraphWalks），长上下文似然用内部基准 AgentPPL 与 LongPPL 衡量，后者在依赖长距离上下文的选定 token 上测困惑度。"
       ],
       "fig_after": {},
       "table": {
@@ -178,20 +172,18 @@
       "type": "h3",
       "title": "整体对比",
       "paras": [
-        "预训练阶段，HySparse2 的通用能力与两个基线总体相当，最明显的增益在长上下文建模：RULER 与 NoLiMa 都是最高，相对 HySparse 分别提升 5.88 与 9.49 分；Repo Code PPL 最低，为 1.1570，略优于 HySparse 的 1.1588 与 Hybrid SWA 的 1.1578。单个通用任务上互有胜负，HySparse2 在 BBH 与 MMLU-Pro 上更强，HySparse 在 DROP 上仍占优。",
-        "后训练阶段用 MRCR-v2 与 RULER-v2 评检索，用 AgentPPL 与 LongPPL 评长上下文似然。检索平均分对各上报的上下文长度等权，困惑度曲线按上下文长度分组。",
-        "在所有评估长度、四项指标上，HySparse2 都领先两个基线，增益最大的是检索：相对 HySparse，MRCR-v2 与 RULER-v2 平均分分别提升 11.30 与 19.81 分，相对 Hybrid SWA 分别提升 6.44 与 18.65 分。到 256k 时优势依然明显，HySparse2 的 RULER-v2 达到 58.45，HySparse 为 32.61，Hybrid SWA 为 35.74。AgentPPL 与 LongPPL 在评估范围内也都更低，说明检索增益伴随的是长智能体轨迹与依赖上下文的 token 上更好的似然。AgentPPL 随上下文长度上升，LongPPL 反而下降，这一反差来自额外上下文的两种相反效应：更长的上下文为 LongPPL 的关键 token 暴露了更多相关信息，同时也带来更多中间轮次与工具输出，让多轮轨迹里相关证据更难被检索到。",
-        "预填计算与 KV cache 的对比在 80B-A3B 配置、FP8 KV cache 存储下进行，覆盖 1k 到 1M token 的各上下文长度。",
-        "在 1M token 上，HySparse2 的预填 FLOPs 相对 HySparse 降低 2.92 倍、相对 Hybrid SWA 降低 5.02 倍；KV cache 只占 2.69 GB，HySparse 为 6.72 GB，Hybrid SWA 为 12.09 GB。"
+        "预训练之后，HySparse2 的通用能力与两个基线基本相当，长上下文建模明显更强：RULER 与 NoLiMa 都是最高，相对 HySparse 分别提升 5.88 与 9.49 分；Repo Code PPL 最低，为 1.1570，略优于 HySparse 的 1.1588 与 Hybrid SWA 的 1.1578。单个通用任务上互有胜负。",
+        "轻量后训练之后，在 256k 以内的所有评估长度上，检索与长上下文似然的四项指标都领先两个基线：相对 HySparse，MRCR-v2 与 RULER-v2 平均分分别提升 11.30 与 19.81 分，相对 Hybrid SWA 分别提升 6.44 与 18.65 分；到 256k 时 HySparse2 的 RULER-v2 达到 58.45，HySparse 为 32.61，Hybrid SWA 为 35.74。",
+        "开销方面，1M token 时 HySparse2 的预填 FLOPs 相对 HySparse 降低 2.92 倍、相对 Hybrid SWA 降低 5.02 倍；KV cache 只占 2.69 GB，HySparse 为 6.72 GB，Hybrid SWA 为 12.09 GB。"
       ],
       "fig_after": {
-        "2": [
+        "1": [
           {
             "src": "fig02.png",
             "caption": "图3:轻量后训练阶段之后的长上下文表现。在所有评估的上下文长度上，HySparse2 的检索分数都高于两个基线，困惑度都更低。"
           }
         ],
-        "4": [
+        "2": [
           {
             "src": "fig03.png",
             "caption": "图4:80B-A3B 模型的预填计算量与 KV cache 存储。相对 HySparse 与 Hybrid SWA，HySparse2 两项开销都更低。"
@@ -340,253 +332,12 @@
           ]
         ]
       }
-    },
-    {
-      "type": "h3",
-      "title": "消融一:token级与块级稀疏选择",
-      "paras": [
-        "块级选择用 64 的块大小。两个变体骨干布局相同，都选 1,024 个全局 token，并保留独立的 128 token 局部窗口。",
-        "在相同注意力预算下，token 级选择在长上下文检索与图推理上有明显增益：RULER-v2 提升 6.57 分，两 needle 的 MRCR-v2 提升 8.14 分，GraphWalks 提升 5.55 分。这些增益出现在 32k 训练上下文之内。",
-        "智能体轨迹反复交替出现推理、工具调用与返回的观测，回答所需的信息可能散落在多轮之间，还夹杂角色分隔符和其他标识边界的特殊 token。在固定注意力预算下，选一个块来留下这类 token，会同时把容量花在相邻位置上；token 级选择可以把预算分配到上下文中任意单个位置，检索与图推理上的增益与这一解释一致。"
-      ],
-      "fig_after": {},
-      "table": {
-        "head": [
-          "任务",
-          "Block",
-          "Token"
-        ],
-        "rows": [
-          [
-            "<span style=\"color:#0F4C81;\">预训练</span>",
-            "",
-            ""
-          ],
-          [
-            "BBH",
-            "<strong style=\"color:#1a7f5a;\">61.93</strong>",
-            "60.70"
-          ],
-          [
-            "MMLU-Pro",
-            "35.74",
-            "<strong style=\"color:#1a7f5a;\">36.97</strong>"
-          ],
-          [
-            "NoLiMa",
-            "<strong style=\"color:#1a7f5a;\">40.27</strong>",
-            "38.43"
-          ],
-          [
-            "<span style=\"color:#0F4C81;\">长上下文（不超过 32k）</span>",
-            "",
-            ""
-          ],
-          [
-            "RULER-v2",
-            "49.56",
-            "<strong style=\"color:#1a7f5a;\">56.13</strong>"
-          ],
-          [
-            "MRCR-v2（2 needle）",
-            "12.94",
-            "<strong style=\"color:#1a7f5a;\">21.08</strong>"
-          ],
-          [
-            "GraphWalks",
-            "29.38",
-            "<strong style=\"color:#1a7f5a;\">34.92</strong>"
-          ]
-        ]
-      }
-    },
-    {
-      "type": "h3",
-      "title": "消融二:稀疏层里的局部窗口",
-      "paras": [
-        "对比稀疏层里处理局部上下文的三种方式：独立的 gated 128 token SWA 分支（Gated SWA）、去掉独立 SWA 分支（No SWA）、把最近 128 个 token 强制塞进稀疏选择（Forced SWA）。三者骨干、KV Bridging 与混合 SWA self-decoder 相同，只在 cross-decoder 稀疏注意力如何处理局部上下文上不同。评估在 32k 训练上下文内做预训练结果对比。",
-        "局部信息对稀疏注意力是必要的：去掉局部分支（No SWA）总体会让模型表现下降，而 Forced SWA 在若干任务上与 Gated SWA 相当。Forced SWA 的 RULER、RULER-v2 与 GraphWalks 最好；相对 Gated SWA，GSM8K 低 5.08 分、MRCR-v2 低 4.99 分，LongPPL 高 1.50%。这个代价可以接受，Forced SWA 省掉了额外投影参数，也不需要局部 KV cache，从而让预填早退成为可能。"
-      ],
-      "fig_after": {},
-      "table": {
-        "head": [
-          "任务",
-          "Gated SWA",
-          "No SWA",
-          "Forced SWA"
-        ],
-        "rows": [
-          [
-            "<span style=\"color:#0F4C81;\">推理</span>",
-            "",
-            "",
-            ""
-          ],
-          [
-            "BBH",
-            "62.23",
-            "60.11",
-            "<strong style=\"color:#1a7f5a;\">62.25</strong>"
-          ],
-          [
-            "MMLU-Pro",
-            "<strong style=\"color:#1a7f5a;\">39.15</strong>",
-            "37.19",
-            "38.12"
-          ],
-          [
-            "MATH",
-            "<strong style=\"color:#1a7f5a;\">35.82</strong>",
-            "33.82",
-            "33.38"
-          ],
-          [
-            "DROP",
-            "<strong style=\"color:#1a7f5a;\">60.06</strong>",
-            "58.94",
-            "56.85"
-          ],
-          [
-            "GSM8K",
-            "<strong style=\"color:#1a7f5a;\">64.52</strong>",
-            "60.35",
-            "59.44"
-          ],
-          [
-            "ARC-C",
-            "<strong style=\"color:#1a7f5a;\">81.06</strong>",
-            "79.01",
-            "78.41"
-          ],
-          [
-            "HellaSwag",
-            "<strong style=\"color:#1a7f5a;\">79.85</strong>",
-            "78.23",
-            "78.42"
-          ],
-          [
-            "WinoGrande",
-            "73.09",
-            "<strong style=\"color:#1a7f5a;\">73.95</strong>",
-            "72.85"
-          ],
-          [
-            "<span style=\"color:#0F4C81;\">长上下文（不超过 32k）</span>",
-            "",
-            "",
-            ""
-          ],
-          [
-            "NoLiMa",
-            "37.62",
-            "<strong style=\"color:#1a7f5a;\">38.37</strong>",
-            "36.16"
-          ],
-          [
-            "RULER",
-            "88.19",
-            "84.55",
-            "<strong style=\"color:#1a7f5a;\">89.84</strong>"
-          ],
-          [
-            "RULER-v2",
-            "53.66",
-            "54.62",
-            "<strong style=\"color:#1a7f5a;\">55.98</strong>"
-          ],
-          [
-            "MRCR-v2",
-            "<strong style=\"color:#1a7f5a;\">27.66</strong>",
-            "20.73",
-            "22.67"
-          ],
-          [
-            "GraphWalks",
-            "35.39",
-            "36.48",
-            "<strong style=\"color:#1a7f5a;\">37.13</strong>"
-          ],
-          [
-            "LongPPL 越低越好",
-            "<strong style=\"color:#1a7f5a;\">6.8807</strong>",
-            "7.1307",
-            "6.9838"
-          ]
-        ]
-      }
-    },
-    {
-      "type": "h3",
-      "title": "消融三:KV Bridging",
-      "paras": [
-        "KV Bridging 首要目标是加速预填，同时保住模型质量。为了检验这套设计是否可扩展，在 290B-A8B 模型、约 1.8T token、32k 上下文的设置下，分别训练带与不带 KV Bridging 的版本。",
-        "带 KV Bridging 的版本质量与不带的基本相当：MMLU 与 TriviaQA 略有提升，RULER 只差 0.31 分，Repo Code PPL 几乎不变，LongPPL 从 3.6053 改善到 3.4202；BBH 与 GSM8K 各降约 1 分，DROP 从 71.37 降到 68.17。",
-        "连接方式上，在共享同一混合骨干与预训练配方的 80B-A3B 模型上对比 KV Bridging 与 KV Mirror。KV Mirror 用 U 形连接把首尾层按逆序配对（1 对 n、2 对 n-1 等），KV Bridging 只连 self-decoder 与 cross-decoder 里的全注意力层。两种方式都通过重新投影源隐藏状态来形成目标 KV 表示。",
-        "KV Bridging 在训练的大部分时间里更强，最终到 87.65，KV Mirror 为 81.28。原因在于全注意力层的状态是更好的来源：全注意力通过注意力分数在整个可见上下文上反向传播，SWA 则把这些直接连接限制在局部窗口内，更密的监督让投影出的表示保留更多全局信息。"
-      ],
-      "fig_after": {
-        "2": [
-          {
-            "src": "fig04.png",
-            "caption": "图5:预训练过程中 KV Bridging 与 KV Mirror 的对比。KV Bridging 的 RULER 分数更高。"
-          }
-        ]
-      },
-      "table": {
-        "head": [
-          "任务",
-          "不带 KV Bridging",
-          "带 KV Bridging"
-        ],
-        "rows": [
-          [
-            "MMLU",
-            "72.68",
-            "<strong style=\"color:#1a7f5a;\">72.80</strong>"
-          ],
-          [
-            "TriviaQA",
-            "73.32",
-            "<strong style=\"color:#1a7f5a;\">74.10</strong>"
-          ],
-          [
-            "BBH",
-            "<strong style=\"color:#1a7f5a;\">70.65</strong>",
-            "69.57"
-          ],
-          [
-            "DROP",
-            "<strong style=\"color:#1a7f5a;\">71.37</strong>",
-            "68.17"
-          ],
-          [
-            "GSM8K",
-            "<strong style=\"color:#1a7f5a;\">77.63</strong>",
-            "76.65"
-          ],
-          [
-            "Repo Code PPL 越低越好",
-            "<strong style=\"color:#1a7f5a;\">1.1351</strong>",
-            "1.1353"
-          ],
-          [
-            "RULER",
-            "<strong style=\"color:#1a7f5a;\">96.32</strong>",
-            "96.01"
-          ],
-          [
-            "LongPPL 越低越好",
-            "3.6053",
-            "<strong style=\"color:#1a7f5a;\">3.4202</strong>"
-          ]
-        ]
-      }
     }
   ],
   "conclusion": [
     "两级 KV 共享真正改的是预填的经济性：cross-decoder 的 KV cache 全部由 self-decoder 隐藏状态生成，预填因此能在半程退出。",
-    "代价也清楚，把独立 SWA 分支换掉、改让局部窗口强制进入稀疏选择，GSM8K 掉 5.08 分、MRCR-v2 掉 4.99 分；换来的是一层全注意力层就够构建预填 KV cache，1M token 下预填 FLOPs 相对 Hybrid SWA 降 5.02 倍，KV cache 从 12.09 GB 压到 2.69 GB，预填节点显存近乎减半。",
-    "对做长上下文与智能体推理的人，可迁移的经验是把稀疏预算从块级换到 token 级：同样的注意力预算下，RULER-v2 涨 6.57 分、两 needle 检索涨 8.14 分。要不要跟着重排整个注意力结构，取决于预填是不是当前瓶颈。"
+    "换来的是实打实的开销下降：一层全注意力层就够构建预填 KV cache，1M token 下预填 FLOPs 相对 Hybrid SWA 降 5.02 倍，KV cache 从 12.09 GB 压到 2.69 GB，预填节点显存近乎减半。代价是局部窗口改由强制选择承担，依赖局部上下文的任务会付一点分数代价。",
+    "对做长上下文与智能体推理的人，可迁移的经验是把稀疏预算从块级换到 token 级：同样的注意力预算下，token 级选择能把预算分配到上下文中的任意单个位置，检索类任务的增益最明显。要不要跟着重排整个注意力结构，取决于预填是不是当前瓶颈。"
   ],
   "reference_url": "https://arxiv.org/abs/2609.26368"
 }
