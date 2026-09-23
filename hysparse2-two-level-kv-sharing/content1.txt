@@ -8,7 +8,7 @@ F fig00.png|图1:HySparse2 用更低的预填开销和更小的 KV cache 存储�
 
 S# 背景与动机
 H3 高效预填
-T 长任务、多轮的智能体让推理越来越由输入主导，工具返回的内容常常比产生它的动作多出大量 token。只降低注意力开销，并不能消除把这些 token 在骨干网络里前向传播所需的计算。跨层 KV cache 共享可以同时降低 KV 存储与预填计算：YOCO 用一个 self-decoder 构建跨 cross-decoder 层共享的全局 KV cache，让预填阶段的 cache 构建在 self-decoder 之后退出；Gemma 3n 采用相关的跨层 KV 共享提升预填效率。HySparse 在混合稀疏注意力块内部做跨层共享，每个全注意力层把自己的全局 KV cache 和 top-k 块索引共享给后续稀疏注意力层，但预填仍要执行全部层。HySparse2 把 YOCO 式结构并入 HySparse，在降低注意力计算与 KV 存储的同时缩短预填路径。
+T 长任务、多轮的智能体让推理越来越由输入主导，工具返回的内容常常比对应的动作多出大量 token。只降低注意力开销，并不能消除把这些 token 在骨干网络里前向传播所需的计算。跨层 KV cache 共享可以同时降低 KV 存储与预填计算：YOCO 用一个 self-decoder 构建跨 cross-decoder 层共享的全局 KV cache，让预填阶段的 cache 构建在 self-decoder 之后退出；Gemma 3n 采用相关的跨层 KV 共享提升预填效率。HySparse 在混合稀疏注意力块内部做跨层共享，每个全注意力层把自己的全局 KV cache 和 top-k 块索引共享给后续稀疏注意力层，但预填仍要执行全部层。HySparse2 把 YOCO 式结构并入 HySparse，在降低注意力计算与 KV 存储的同时缩短预填路径。
 H3 KV cache 压缩
 T 智能体负载需要更紧凑的 KV cache。KV cache 压缩有四个维度：head、序列、层、精度。head 级方法用 GQA/MQA 共享 KV head，或像 MLA 那样把 KV 表示压进潜状态；序列级方法把多个 token 压成更少的 cache 条目；层级方法在层之间共享 KV cache；精度级方法降低缓存 key 与 value 的数值精度。此前工作集中在 head、序列、精度三个方向上的层内压缩，HySparse2 则通过 KV Bridging 与 KV Reuse 推进跨层共享。
 H3 稀疏注意力的选择粒度
@@ -23,11 +23,11 @@ T KV Bridging 只在 self-decoder 与 cross-decoder 的全注意力层之间工�
 T 每个 cross-decoder 全注意力层都有自己的 K/V 投影，共享同一隐藏状态来源的层仍然构造出各自的 KV cache。每层也保留独立的 Q 投影，作用在自己当前的隐藏状态上。KV Bridging 允许两个 decoder 使用不同的混合注意力比例，一个 self-decoder 全注意力层可以供应多个 cross-decoder 全注意力层。
 H3 跨层 KV 复用
 T 相对 HySparse，HySparse2 做了两处关键改进：改用 token 级稀疏选择，去掉独立的 SWA 分支。
-T 在 HySparse 的预训练评估里，块级选择没有明显精度劣势，但它在多轮、长上下文的智能体任务上劣势明显。HySparse2 因此对全注意力层中单个 token 做 top-k 选择，后续稀疏层直接复用被选中 token 的 KV 条目。
+T 在 HySparse 的预训练评估里，块级选择没有明显精度劣势，到了多轮、长上下文的智能体任务上劣势却很明显。HySparse2 因此对全注意力层中单个 token 做 top-k 选择，后续稀疏层直接复用被选中 token 的 KV 条目。
 T 去掉独立 SWA 分支之后，局部建模改由强制窗口承担：最近的 token 窗口总是被选中，随后才是窗口之外得分最高的 token。两组选择都从全注意力 KV cache 里读取，再由后续稀疏注意力层复用。
 T 这个设计还让预填阶段可以在 self-decoder 之后完整退出。cross-decoder 里独立的 SWA 分支需要用自己隐藏状态的投影构建一段后缀 KV cache，而这又依赖前层不断扩大的隐藏状态集合，并随深度线性增长。这种级联的 SWA 依赖要求 cross-decoder 处理远长于窗口尺寸的 token 后缀，这些状态要么在预填阶段算出来，导致 cross-decoder 无法被整体跳过，要么用 bounded replay 之类方法近似。HySparse2 从结构上去掉了这层依赖，预填阶段不需要任何 cross-decoder 计算，去掉该分支也省掉了 gated 基线里那部分独立投影的参数开销。
 H3 全注意力层的角色
-T HySparse2 与 HySparse 都保留少量全注意力层，全注意力对模型质量仍然重要。这些层同时充当 indexer，用精确的注意力分数为后续稀疏层提供 oracle 级的 token 选择，从而支持原生端到端训练，不需要单独的 indexer，也不需要为训练 indexer 引入辅助蒸馏目标。代价是全注意力计算昂贵，所以它的层占比保持很小，在 HySparse2 里预填的 KV cache 构造只需要一个全注意力层。参照近期的稀疏化方案，后续可以在后训练阶段用轻量 indexer 加稀疏注意力近似这些保留的全注意力层；也可以让架构把更少算力分给全注意力、更多分给稀疏注意力，例如减少全注意力层的 query head 数、增加稀疏注意力层的 query head 数。
+T HySparse2 与 HySparse 都保留少量全注意力层，全注意力对模型质量仍然重要。这些层同时充当 indexer，用精确的注意力分数为后续稀疏层提供 oracle 级的 token 选择，从而支持原生端到端训练，不需要单独的 indexer，也不需要为训练 indexer 引入辅助蒸馏目标。代价是全注意力计算昂贵，所以全注意力层的占比保持很小，在 HySparse2 里预填的 KV cache 构造只需要一个全注意力层。参照近期的稀疏化方案，后续可以在后训练阶段用轻量 indexer 加稀疏注意力近似这些保留的全注意力层；也可以让架构把更少算力分给全注意力、更多分给稀疏注意力，例如减少全注意力层的 query head 数、增加稀疏注意力层的 query head 数。
 H3 推理架构
 T 在预填与解码分离的部署下，HySparse2 的预填节点只承载 self-decoder 和 KV Bridging 的投影。对 49 层的模型来说只需部署前 25 层，预填节点的显存需求近乎减半。在较高的 SWA 与全注意力比例下，预填阶段 self-decoder 只有一层做全注意力。cross-decoder 全注意力层的 KV cache 也在预填节点上算好再传给解码节点，因为投影后的 KV cache 比源隐藏状态更小。
-T 预训练阶段，HySparse2 用单个 MTP 层，条件在 self-decoder 与 cross-decoder 边界处的隐藏状态上，帮助收敛。后训练阶段这个 MTP 层可以换成更大的 DFlash 式 drafter，条件在同一批隐藏状态上，它们出现得更早，可以支撑异步的起草与验证。训练更大的 drafter、把异步执行与验证反馈协调起来，留待后续工作。
+T 预训练阶段，HySparse2 用单个 MTP 层，条件在 self-decoder 与 cross-decoder 边界处的隐藏状态上，帮助收敛。后训练阶段这个 MTP 层可以换成更大的 DFlash 式 drafter，条件在同一批隐藏状态上，这批状态出现得更早，可以支撑异步的起草与验证。训练更大的 drafter、把异步执行与验证反馈协调起来，留待后续工作。
