@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
-import os, sys, traceback
+import os, traceback
 LOG = r"D:\06_Hermes\articles\sarathi\_probe2_out.txt"
-buf = []
-def rec(*a):
-    buf.append(" ".join(str(x) for x in a))
+
+def rec(s):
+    with open(LOG, "a", encoding="utf-8") as f:
+        f.write(s + "\n")
+
+if os.path.exists(LOG):
+    os.remove(LOG)
+rec("start")
 try:
     from playwright.sync_api import sync_playwright
     rec("import ok")
@@ -17,6 +22,6 @@ try:
         pg.screenshot(path=r"D:\06_Hermes\articles\sarathi\_test.png")
         rec("shot ok")
         br.close()
+    rec("done")
 except Exception:
     rec("EXC\n" + traceback.format_exc())
-open(LOG, "w", encoding="utf-8").write("\n".join(buf))
