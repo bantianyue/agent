@@ -66,6 +66,11 @@ def clean(t):
     t = t.replace("P:D ratio", "P:D 比例")
     t = t.replace("decode-maximal batching", "解码最大化批处理")
     t = t.replace("decode-maximal 批次", "解码最大化批次")
+    t = t.replace("decode 最大批处理（解码最大化批处理）", "解码最大化批处理")
+    t = re.sub(r"解码最大化批处理\s*（解码最大化批处理）", "解码最大化批处理", t)
+    t = re.sub(r"\s*解码最大化批处理\s*", "解码最大化批处理", t)
+    t = t.replace("如 所述", "如前所述")
+    t = re.sub(r"(P:D 比例)\s+", r"\1", t)
     t = t.replace("可与本文优化互补", "可与 Sarathi 的优化互补")
     t = t.replace("模型创新与本文工作正交", "模型创新与 Sarathi 正交")
     t = re.sub(r"\s+", " ", t).strip()
@@ -81,6 +86,30 @@ PID2ITEM = {v: k for k, v in item2pid.items()}
 PARA[PID2ITEM[36]] = ("Sarathi 的设计与实现采用两项技术：分块预填充（chunked-prefills）与解码最大化批处理"
                       "（decode-maximal batching），以提升 LLM 推理性能。")
 assert PARA[PID2ITEM[36]].count("：") == 1
+
+# —— 编号列表 → 行内 span（源文 ordered-list，见 build-guide「正文格式 100% 保留」） ——
+NUM_TPL = '<span style="color:#0F4C81;font-weight:bold;">%s</span>&nbsp;%s'
+# 源文 4 条贡献无加粗小标题，此处按编号列表映射补语义标签（内容逐条对应原文）
+CONTRIB = {
+    13: "**分块预填充**：可构造计算饱和且均匀的工作单元。",
+    14: "**解码最大化批处理**：使低效的解码（decode）可「搭车」高效预填充（prefill）。",
+    15: "**接入流水线并行**：将分块预填充与解码最大化批处理应用于流水线并行"
+        "（pipeline parallelism），显著减少流水线气泡（pipeline bubble）。",
+    16: "**广泛评估**：在多种模型、硬件与并行策略上验证，吞吐（throughput）提升最高达 1.91 倍。",
+}
+
+def to_num(idx):
+    if idx in CONTRIB:
+        m = re.match(r"^(\d)\.", PARA[idx])
+        assert m, "编号段落格式异常: %r" % PARA[idx][:40]
+        return NUM_TPL % (m.group(1), CONTRIB[idx])
+    t = PARA[idx]
+    m = re.match(r"^(\d)\.\s*(.+)$", t, re.S)
+    assert m, "编号段落格式异常: %r" % t[:40]
+    return NUM_TPL % (m.group(1), m.group(2).strip())
+
+for _i in (13, 14, 15, 16, 92, 93, 94, 95):
+    PARA[_i] = to_num(_i)
 
 FORMULA = "最大批大小按下式求解：**B = ⌊(M(G) − M(S)) / (L × m(kv))⌋**，其中的取整意味着实际可容纳的请求数只能取下界。"
 
