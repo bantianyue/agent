@@ -1,0 +1,281 @@
+Hardware-Agnostic Models in vLLM
+
+Featured projects
+
+TL;DR
+
+To achieve state-of-the-art performance at the frontier, vLLM is changing its internal implementation in ways that make it incompatible with fullgraph torch.compile. This may have consequences for users who care about out-of-tree accelerators, older GPUs, or more exotic models. To address this, we are introducing a new set of “HW agnostic” layers in vLLM. These layers will ensure vLLM can continue to move at the speed of light, while at the same time meeting the needs of users who care about portability. On NVIDIA H100 GPUs, the HW agnostic layers achieve total token throughput within 3.4% of the native implementation (geometric mean across three recent models).
+
+vLLM at the frontier
+
+vLLM has achieved unprecedented success by positioning itself as the abstraction layer supporting a wide variety of models on a wide variety of hardware. By using a set of well-designed abstractions and torch.compile for optimization and fusion, the project has been able to keep the code defining the actual model logic (commonly known as “model definitions”) relatively simple, whilst still achieving high performance across NVIDIA GPUs, AMD GPUs, Intel XPUs, Google TPUs, IBM Spyre, Huawei Ascend and more.
+
+However, the architectures of frontier open-weight models are rapidly diverging, which has led the community to revisit whether some of the existing abstractions are fit for purpose. Models increasingly ship with bespoke layers and optimized kernels. This even extends to the core attention mechanism: DeepSeek V4 and Kimi K3 achieve million-token context via completely different approaches. Fitting one of these into vLLM means composing it from the shared layers in model_executor/layers and keeping the whole model fullgraph compilable: written so that Dynamo can trace it, with each new kernel registered as a torch library op with a fake implementation and correct mutation annotations. That work is a tax on model development, and it is paid by whoever adds the model, including the advanced users who bring their own.
+
+At the same time, NVIDIA Blackwell GPUs and rack-scale systems like NVIDIA GB300 NVL72 require careful kernel engineering to exploit new features and effectively overlap computation with communication.
+
+While all this is happening, we have seen the rise of coding agents like Claude Code and OpenAI Codex, which make generating code much easier. In particular, these agents are very effective at designing optimizations for a specific model on specific hardware. However, they work best if they do not need to worry about whether a particular change will make things worse for a different model, on a different accelerator.
+
+These trends come together and mean that, to achieve state-of-the-art performance on the latest GPU hardware, the community would like to dismantle some of the existing abstractions in vLLM. In particular, vLLM is starting to maintain hardware-specific model definitions, otherwise known as “flat” models. Rather than using torch.compile, flat models use custom fusions and other model-specific and hardware-specific optimizations. New frontier models added to vLLM in recent months all use this flat model definition. Critically, the existing layers and ops consumed by the model definitions are likely to be refactored in a way that makes them fundamentally incompatible with torch.compile.
+
+This effort is necessary to enable vLLM to stay competitive on the latest GPU benchmarks. However, it is also important that vLLM continues to serve its users who care about serving diverse models on diverse hardware like older GPUs or out-of-tree (OOT) accelerators.
+
+So, what can we do about it? Let’s start by reviewing how vLLM handles model definitions today.
+
+How do model definitions work in vLLM?
+
+Today, vLLM offers three flavours of model definitions.
+
+The new “flat” models which live under vllm/models/
+
+The legacy models which live under vllm/model_executor/models
+
+The transformers modeling backend, which imports models from transformers.
+
+A high-level sketch of the current state is shown below.
+
+Figure 1: The current state of model definitions in vLLM. All three flavours resolve to a single implementation of each common layer, shown here for RowParallelLinear. SpyreRowParallelLinear is an out-of-tree plugin overriding that layer on one accelerator.
+
+While the modeling logic may live in different places, most models are composed of common layers like attention, mixture-of-experts, linear projections, norms and activations. It is important to understand that, in all 3 cases above, these common layers are still implemented in a single place. In case (1) and (2) these layers are explicitly imported from vllm/model_executor/layers. In case (3), the transformers model gets automatically fused and re-wired to use the vLLM layers. Thus, wherever the model definition is coming from, we are still using a common implementation of the majority of the layers that underpin it.
+
+vLLM’s layer implementations have evolved over several years and offer two important features that we will now discuss in more detail: (a) torch compile support, and (b) OOT extensibility.
+
+While fullgraph torch compile is not used by the flat models, it remains a critical feature for OOT plugins like IBM Spyre. Spyre relies on TorchDynamo to trace the model graph, and TorchInductor to lower the graph down to representations that run optimally on the target hardware. Crucially, torch compile is also a necessary component for enabling vLLM’s transformers backend to achieve native speed for models like Qwen3 on NVIDIA GPUs.
+
+However, for OOT plugins torch compile is not the whole story. Accelerators like Spyre also occasionally need to inject behaviour into the layers (e.g., custom memory layouts) to achieve optimal performance. vLLM’s layer offers two different mechanisms for injecting custom behaviour: CustomOp (which enables the plugin to override the forward function) and PluggableLayer (which enables the plugin to override the entire layer). Without this extensibility, OOT plugins would need to re-implement many of the layers themselves.
+
+So, what is the problem here?
+
+Aside from the fact that having model definitions in three places is pretty confusing, there is a more pressing issue with the above design.
+
+The flat model workstream needs to change the model definitions, and their underlying layer implementations, to break compatibility with torch compile and remove support for extensibility via CustomOp. This will unlock them to move faster on developing hardware-specific and model-specific performance optimizations, but it also raises some concerns.
+
+Firstly, it leaves OOT plugins facing the prospect of maintaining their own set of model definitions and layers, creating a large maintenance burden. Supporting a new model will involve making pull requests to transformers, vLLM, and then potentially every OOT plugin that wants to support it. Yes, coding agents make this easier but this will still require burning through token budgets across multiple different organizations for ultimately no real benefit.
+
+Second, vLLM is increasingly relying on the transformers backend to provide support for older or more exotic models. Legacy model definitions are actively being removed from model_executor/models and their registry entries updated to point directly at the transformers modeling backend. Without torch compilable layers, performance for these models on GPU will regress significantly.
+
+Finally, while the flat model and layers will be optimized for frontier GPUs, we do not expect them to provide support for older GPUs or consumer/prosumer GPUs. vLLM’s own usage statistics show that a significant portion of the user base continues to use such hardware. We believe the project should also evolve in a way that meets their needs.
+
+What is our solution?
+
+We are building a set of hardware-agnostic layers in-tree in vLLM. The aim of these layers is to ensure that vLLM can continue to support its user base that cares about running diverse models on diverse hardware.
+
+The Hardware-agnostic layers adhere to the following four design principles:
+
+Compilable. The model definitions will be full-graph torch compilable; Accelerators that require compile for performance can continue using it as they do today.
+
+Extensible. We will keep mechanisms like vLLM’s CustomOp and PluggableLayer to ensure that OOT plugins can override the implementation when necessary.
+
+Isolated. The model definitions will be built with their own set of layers and ops that are separate and isolated from the layers and ops used by the hardware-specific paths. This will ensure that development in both directions can move fast without impeding the other.
+
+Portable. We will strive to implement all layers and ops using either native PyTorch code or portable DSLs like Triton and Helion. This will make the models portable across all accelerators that support these frameworks. Those that do not can still rely on (2) when necessary.
+
+The design we are working towards is illustrated below:
+
+Figure 2: Hardware-agnostic Layers in vLLM.
+
+As the legacy model definitions are gradually removed, models will either be re-implemented in the flat way (e.g., a different implementation for NVIDIA, AMD, XPU etc), or they will fallback to the transformers backend. We intended to offer hardware-agnostic support in both of these cases.
+
+For the transformers backend, we have modified the “rewiring” process to target the new HW-agnostic layers which reside at model_executor/hw_agnostic, instead of the existing layers at model_executor/layers. This support has already landed in the main branch of vLLM (for a limited number of layers), and can be enabled by setting USE_HW_AGNOSTIC=1 when running vLLM with the transformers backend:
+
+We have validated this new pathway using the Spyre OOT plugin for models like Gemma 4, Qwen3, and Granite 4.2. Very soon, we will start to include HW agnostic models in our CI, and gradually switch over to using this as our default pathway for serving models on Spyre.
+
+While not yet landed, we plan to provide a new model.py for each flat model, that implements the model using the HW-agnostic layers. Layers that are re-used across multiple flat models will reside in a shared place (model_executor/hw_agnostic), whereas model-specific layers (e.g., DeepSeekV4FlashMLAAttention) will reside in the local directory with the model.py but still adhere to the 4 design principles above. As one example of this, please check out the hardware agnostic DeepSeek V4 PR that is currently under review.
+
+But, how will it perform on GPUs?
+
+We stress that state-of-the-art performance on Blackwell, CDNA 4, and beyond is not the goal of these model definitions. Our aim is to achieve platform and performance portability across diverse hardware, including OOT accelerators, older GPUs, as well as prosumer-grade GPUs.
+
+To evaluate how the new pathway behaves on widely-available GPUs, we ran some experiments on NVIDIA H100 GPUs, for a handful of recent models. We compare the performance of vLLM’s transformers backend using USE_HW_AGNOSTIC=0 vs. USE_HW_AGNOSTIC=1 in Figure 3.
+
+As we can see, despite being built solely from portable implementations of the underlying layers and ops, HW agnostic models achieve relatively close, and in some cases even slightly better, performance, than the native models that use CUDA-optimized libraries like FlashAttention and CUTLASS.
+
+Figure 3: Impact of HW Agnostic layers on performance for H100 GPUs.
+
+Conclusion
+
+We are introducing HW agnostic layers into vLLM to ensure that the project can continue to support diverse models on diverse hardware, without slowing down performance engineering at the frontier. We believe this effort is important for vLLM to continue to serve the needs of the broader open-source ecosystem. While we have started landing PRs to realize this effort, this is still very much a work-in-progress and we welcome any feedback.
+
+For more information, please check out the RFC or follow the slack channel #hw-agnostic-models on vLLM slack. You can also learn more about vLLM at vLLM.ai or the vLLM github project page.
+
+Docs
+
+Access comprehensive developer documentation for PyTorch
+
+View Docs ›
+
+Tutorials
+
+Get in-depth tutorials for beginners and advanced developers
+
+View Tutorials ›
+
+Resources
+
+Find development resources and get your questions answered
+
+View Resources ›
+
+Stay in touch for updates, event info, and the latest news
+
+By submitting this form, I consent to receive marketing emails from the LF and its projects regarding their events, training, research, developments, and related announcements. I understand that I can unsubscribe at any time using the links in the footers of the emails I receive. Privacy Policy
+
+By submitting this form, I consent to receive marketing emails from the LF and its projects regarding their events, training, research, developments, and related announcements. I understand that I can unsubscribe at any time using the links in the footers of the emails I receive. Privacy Policy.
+
+x-twitter
+
+facebook
+
+linkedin
+
+youtube
+
+github
+
+slack
+
+discord
+
+© 2026 PyTorch. Copyright © The Linux Foundation®. All rights reserved. The Linux Foundation has registered trademarks and uses trademarks. For more information, including terms of use, privacy policy, and trademark usage, please see our Policies page. Trademark Usage. Privacy Policy
+
+Learn
+
+	Get Started
+	Tutorials
+	Learn the Basics
+	PyTorch Recipes
+	Intro to PyTorch – YouTube Series
+	Videos
+	PyTorch Certification
+
+Get Started
+
+Tutorials
+
+Learn the Basics
+
+PyTorch Recipes
+
+Intro to PyTorch – YouTube Series
+
+Videos
+
+PyTorch Certification
+
+Community
+
+	Landscape
+	Join the Ecosystem
+	Community Hub
+	Forums
+	Developer Resources
+	Events
+	Working Groups
+	Meeting Calendar
+	Contributor Awards
+	Ambassadors
+
+Landscape
+
+Join the Ecosystem
+
+Community Hub
+
+Forums
+
+Developer Resources
+
+Events
+
+Working Groups
+
+Meeting Calendar
+
+Contributor Awards
+
+Ambassadors
+
+Projects
+
+	PyTorch
+	
+		Executorch
+	
+
+	vLLM
+	DeepSpeed
+	Ray
+	Helion
+	Safetensors
+	Host Your Project
+
+PyTorch
+	
+		Executorch
+
+Executorch
+
+vLLM
+
+DeepSpeed
+
+Ray
+
+Helion
+
+Safetensors
+
+Host Your Project
+
+Docs
+
+	PyTorch
+	Domains
+
+PyTorch
+
+Domains
+
+Blog & News
+
+	Blog
+	Announcements
+	Case Studies
+	Newsletter
+
+Blog
+
+Announcements
+
+Case Studies
+
+Newsletter
+
+About
+
+	PyTorch Foundation
+	Members
+	Governing Board
+	Technical Advisory Council
+	Cloud Credit Program
+	Staff
+	Contact
+	Brand Guidelines
+
+PyTorch Foundation
+
+Members
+
+Governing Board
+
+Technical Advisory Council
+
+Cloud Credit Program
+
+Staff
+
+Contact
+
+Brand Guidelines
+
+JOIN
