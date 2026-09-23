@@ -1,7 +1,7 @@
 import json, io
 d = 'D:/06_Hermes/articles/vllm-hardware-agnostic-models'
 data = json.load(open(d + '/article_data.json', encoding='utf-8'))
-out = io.open('D:/06_Hermes/articles/_chk_json.txt', 'w', encoding='utf-8')
+out = io.open('D:/06_Hermes/articles/_chk_json_out.txt', 'w', encoding='utf-8')
 tot = 0
 for i, s in enumerate(data['sections']):
     paras = s.get('paras', [])
