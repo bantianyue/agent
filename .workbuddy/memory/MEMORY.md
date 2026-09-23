@@ -16,6 +16,13 @@
 - `bun` 位置：`C:\Users\twfehh7\AppData\Roaming\npm\bun.ps1`（v1.3.14）。
 - 统一运行时：`C:/Users/twfehh7/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe`，每条命令前先设 `PYTHONIOENCODING=utf-8`。
 
+## wcsop 稳定踩坑（跨篇复用）
+
+- **figNN.png 必须是真 PNG**：arXiv HTML 的 SVG 图会以 `.svg` 落盘，按 manifest 复制 figNN.png 时可能拿到 SVG 文本（坏图但计数正常）。校验读前 8 字节 == `\x89PNG\r\n\x1a\n`；修复时 `.svg` 换成同 stem 的 `.png`。
+- **编号列表**：`<span style="color:#0F4C81;font-weight:bold;">N</span>&nbsp;` + `**小标题**：正文`（模板不放行 `<ul>/<li>`）。核对口径 `font-weight:bold` 数 == 源文编号条数。
+- **机翻残留三形态**：术语自重复 `X（X）`、术语两侧空格（`在 X 中`、`P:D 比例 为`）、`如 所述`（`§` 清洗残留）。preflight 的中英间距检查不管中日韩间空格。
+- **核验脚本**：`verify-draft-images.py <media_id>`（不是目录）；draft/get 用 `json.loads(r.content.decode('utf-8'))` 才不乱码；草稿里传送门被重写成长链，用 `mp.weixin.qq.com/s\?` 匹配（`/s/` 会数成 0）；覆盖推送回显 `media_id: undefined` 属正常。
+
 ## 待清理的技术债
 
 - 迁移过来的 skill 文档里仍有 18+ 处 Codex/Hermes 专属工具引用（`delegate_task`、`execute_code`、`process poll`、`read_file`、`terminal()`、`hermes send`、ClawBot 通知），WorkBuddy 无对应能力。脚本链本身可正常运行，受影响的是 SOP 中若干编排指令。若要长期用 wcsop，建议按 WorkBuddy 的实际工具名逐条改写。
