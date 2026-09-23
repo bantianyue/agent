@@ -1,0 +1,35 @@
+S# 实验评估
+H3 实验设置
+T 对比对象是 HySparse 与 MiMo-V2 系列使用的 Hybrid SWA，比较覆盖模型表现、预填 FLOPs 与 KV cache 存储，并对稀疏选择粒度、强制局部窗口、KV Bridging 做消融。token 级选择针对智能体场景下更强的长上下文精度，同时不牺牲效率；强制局部窗口与 KV Bridging 则针对更低的预填开销，同时保住模型质量。
+T 除特别说明，实验都用 80B-A3B MoE 模型：49 层 Transformer，隐藏维度 2,048，采用简化版 mHC 变体，残差混合矩阵固定为单位矩阵。
+T 三个模型只在注意力设计上不同。全部层都用全注意力是评估中最强的参照；选择混合模型保留多少全注意力层时，要避免与这个基线出现明显精度落差：Hybrid SWA 保留 9 个全注意力层，再少会显著掉分，HySparse 与 HySparse2 都只用 5 个全注意力层，精度仍与全注意力基线相当。Hybrid SWA 与 HySparse 用 GQA，HySparse2 用 MQA，KV cache 更小，token 稀疏注意力 kernel 效率也更好。
+B table1
+T HySparse2 的 self-decoder 中，SWA 层用部分旋转位置编码（RoPE），旋转维度 64、base 10,000，全注意力与稀疏注意力用 NoPE，因此长上下文扩展时不需要调整 RoPE。三套配置里，所有稀疏层与 SWA 层都用 sigmoid 输出门与可学习的逐 head sink 偏置。HySparse2 用 token 级选择，强制 128 个局部 token 与 1,024 个全局 token；HySparse 以 64 token 为块选 1,024 个全局 token，并通过 gated fusion 把稀疏注意力与独立的 128 token SWA 分支结合；Hybrid SWA 用 128 token 的滑动窗口。
+T 80B-A3B 模型在 32k 上下文长度下预训练约 500B token。轻量后训练阶段再增加约 100B token，把智能体数据引入训练混合，并把上下文长度扩展到 256k。两个阶段内三个模型共享同一数据混合与训练计划。优化器用 Muon 配 WSD 调度，预训练峰值学习率 1e-3，后训练 5e-5。整体对比同时给出预训练与后训练结果，消融只报预训练结果。
+T 预训练评估覆盖知识（MMLU、MMLU-Redux、MMLU-Pro、C-Eval、CMMLU、TriviaQA）、推理（BBH、MATH、DROP、GSM8K、ARC-C、HellaSwag、WinoGrande）、代码（HumanEval+、MBPP+、Repo Code PPL）与长上下文（RULER、NoLiMa）。Repo Code PPL 是内部基准，在带跨文件依赖的长代码仓库上报告字节困惑度，因此也能探测长上下文建模能力。
+T 轻量后训练之后，重点看多轮检索与智能体轨迹上的长上下文似然。AgentPPL 是内部基准，基于多轮智能体轨迹构建，在 1,000 条轨迹的推理、工具调用与回复片段上测量字节困惑度。LongPPL 在依赖长距离上下文的选定 token 上测困惑度，样本是 349 个智能体轨迹与长上下文任务样本。MRCR-v2 用 2、4、8 个 needle 测多轮检索，RULER-v2 覆盖 12 个检索与问答子任务，GraphWalks 评估多跳图遍历。
+H3 整体对比
+T 预训练阶段，HySparse2 的通用能力与两个基线总体相当，最明显的增益在长上下文建模：RULER 与 NoLiMa 都是最高，相对 HySparse 分别提升 5.88 与 9.49 分；Repo Code PPL 最低，为 1.1570，略优于 HySparse 的 1.1588 与 Hybrid SWA 的 1.1578。单个通用任务上互有胜负，HySparse2 在 BBH 与 MMLU-Pro 上更强，HySparse 在 DROP 上仍占优。
+B table2
+T 后训练阶段用 MRCR-v2 与 RULER-v2 评检索，用 AgentPPL 与 LongPPL 评长上下文似然。检索平均分对各上报的上下文长度等权，困惑度曲线按上下文长度分组。
+T 在所有评估长度、四项指标上，HySparse2 都领先两个基线，增益最大的是检索：相对 HySparse，MRCR-v2 与 RULER-v2 平均分分别提升 11.30 与 19.81 分，相对 Hybrid SWA 分别提升 6.44 与 18.65 分。到 256k 时优势依然明显，HySparse2 的 RULER-v2 达到 58.45，HySparse 为 32.61，Hybrid SWA 为 35.74。AgentPPL 与 LongPPL 在评估范围内也都更低，说明检索增益伴随的是长智能体轨迹与依赖上下文的 token 上更好的似然。AgentPPL 随上下文长度上升，LongPPL 反而下降，这一反差来自额外上下文的两种相反效应：更长的上下文为 LongPPL 的关键 token 暴露了更多相关信息，同时也带来更多中间轮次与工具输出，让多轮轨迹里相关证据更难被检索到。
+F fig05.png|图3:轻量后训练阶段之后的长上下文表现。在所有评估的上下文长度上，HySparse2 的检索分数都高于两个基线，困惑度都更低。
+T 预填计算与 KV cache 的对比在 80B-A3B 配置、FP8 KV cache 存储下进行，覆盖 1k 到 1M token 的各上下文长度。
+T 在 1M token 上，HySparse2 的预填 FLOPs 相对 HySparse 降低 2.92 倍、相对 Hybrid SWA 降低 5.02 倍；KV cache 只占 2.69 GB，HySparse 为 6.72 GB，Hybrid SWA 为 12.09 GB。
+F fig03.png|图4:80B-A3B 模型的预填计算量与 KV cache 存储。相对 HySparse 与 Hybrid SWA，HySparse2 两项开销都更低。
+H3 消融一:token 级与块级稀疏选择
+T 块级选择用 64 的块大小。两个变体骨干布局相同，都选 1,024 个全局 token，并保留独立的 128 token 局部窗口。
+B table3
+T 在相同注意力预算下，token 级选择在长上下文检索与图推理上有明显增益：RULER-v2 提升 6.57 分，两 needle 的 MRCR-v2 提升 8.14 分，GraphWalks 提升 5.55 分。这些增益出现在 32k 训练上下文之内。
+T 智能体轨迹反复交替出现推理、工具调用与返回的观测，回答所需的信息可能散落在多轮之间，还夹杂角色分隔符和其他标识边界的特殊 token。在固定注意力预算下，选一个块来留下这类 token，会同时把容量花在它的邻居上；token 级选择可以把预算分配到上下文中任意单个位置，检索与图推理上的增益与这一解释一致。
+H3 消融二:稀疏层里的局部窗口
+T 对比稀疏层里处理局部上下文的三种方式：独立的 gated 128 token SWA 分支（Gated SWA）、去掉独立 SWA 分支（No SWA）、把最近 128 个 token 强制塞进稀疏选择（Forced SWA）。三者骨干、KV Bridging 与混合 SWA self-decoder 相同，只在 cross-decoder 稀疏注意力如何处理局部上下文上不同。评估在 32k 训练上下文内做预训练结果对比。
+B table4
+T 局部信息对稀疏注意力是必要的：去掉局部分支（No SWA）总体会让模型表现下降，而 Forced SWA 在若干任务上与 Gated SWA 相当。Forced SWA 的 RULER、RULER-v2 与 GraphWalks 最好；相对 Gated SWA，GSM8K 低 5.08 分、MRCR-v2 低 4.99 分，LongPPL 高 1.50%。这个代价可以接受，Forced SWA 省掉了额外投影参数，也不需要局部 KV cache，从而让预填早退成为可能。
+H3 消融三:KV Bridging
+T KV Bridging 首要目标是加速预填，同时保住模型质量。为了检验它是否可扩展，在 290B-A8B 模型、约 1.8T token、32k 上下文的设置下，分别训练带与不带 KV Bridging 的版本。
+B table5
+T 带 KV Bridging 的版本质量与不带的基本相当：MMLU 与 TriviaQA 略有提升，RULER 只差 0.31 分，Repo Code PPL 几乎不变，LongPPL 从 3.6053 改善到 3.4202；BBH 与 GSM8K 各降约 1 分，DROP 从 71.37 降到 68.17。
+T 连接方式上，在共享同一混合骨干与预训练配方的 80B-A3B 模型上对比 KV Bridging 与 KV Mirror。KV Mirror 用 U 形连接把首尾层按逆序配对（1 对 n、2 对 n-1 等），KV Bridging 只连 self-decoder 与 cross-decoder 里的全注意力层。两种方式都通过重新投影源隐藏状态来形成目标 KV 表示。
+F fig01.png|图5:预训练过程中 KV Bridging 与 KV Mirror 的对比。KV Bridging 的 RULER 分数更高。
+T KV Bridging 在训练的大部分时间里更强，最终到 87.65，KV Mirror 为 81.28。原因在于全注意力层的状态是更好的来源：全注意力通过注意力分数在整个可见上下文上反向传播，SWA 则把这些直接连接限制在局部窗口内，更密的监督让投影出的表示保留更多全局信息。
