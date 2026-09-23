@@ -23,3 +23,13 @@
 创建时间: 2026-09-23
 来源: https://arxiv.org/html/2308.16369v1
 | Step 4d-i: 传送门 | completed |
+| Step 0b: 来源类型确认 | completed (arXiv HTML) |
+| Step 1: 内容提取（全文） | completed (105 段) |
+| Step 2: 全部图片下载 | completed (20 图) |
+| Step 3: 封面生成（900×383 + 500×500） | completed |
+| Step 4a-i: 写要点速览 | completed |
+| Step 4c: 写正文（含 full_translation） | completed (31 sections / 102 段) |
+| Step 4d: 写结语 | completed |
+| Step 4e: 写参考区 | completed |
+| Step 4f/4g: Humanizer 与格式修复 | completed (preflight 全绿) |
+| Step 6: 推送草稿 | completed (media_id 见 draft.id，20/20 图核验)
