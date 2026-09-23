@@ -1,0 +1,213 @@
+  0 P    [|] Large Language Model (LLM) inference consists of two distinct phases – prefill phase which
+  1 P    [|] We present Sarathi to address these challenges. Sarathi employs chunked-prefills , which s
+  2 P    [|] Our techniques yield significant improvements in inference performance across models and h
+  3 FIG  intro_fig.png | Figure 1 : Example two-stage pipeline parallel schedule. (a) In prior 
+  4 h2   1 Introduction
+  5 P    [1 Introduction|] The scaling up of language models [25,26,38,35] has led to an emergence in their abilities
+  6 P    [1 Introduction|] In this paper, we first analyze a fundamental reason behind the low efficiency of LLM infe
+  7 P    [1 Introduction|] One strategy to improve LLM decode efficiency is to increase batch size using model parall
+  8 P    [1 Introduction|] In this paper, we present the design and implementation of Sarathi , an efficient LLM infe
+  9 P    [1 Introduction|] Since prefill and decode phases have different compute requirements, the key insight of ou
+ 10 P    [1 Introduction|] The hybrid batches constructed in Sarathi have a uniform compute requirement. Thus, when u
+ 11 P    [1 Introduction|] We evaluate Sarathi across different models and hardware — LLaMA-13B on A6000 GPU, LLaMA-3
+ 12 P    [1 Introduction|] The main contributions of our paper include:
+ 13 P    [1 Introduction|L] 1. Chunked-prefills which allows the construction of work units that are compute saturatin
+ 14 P    [1 Introduction|L] 2. Decode-maximal batching which allows inefficient decodes to ‘piggyback’ with efficient 
+ 15 P    [1 Introduction|L] 3. Application of chunked-prefills and decode-maximal batching to pipeline parallelism to 
+ 16 P    [1 Introduction|L] 4. Extensive evaluation over multiple models, hardware, and parallelism strategies demonst
+ 17 h2   2 Background
+ 18 P    [2 Background|] We first give an overview of the transformer architecture, followed by a brief discussion 
+ 19 h3   2.1 The Transformer architecture
+ 20 P    [2.1 The Transformer architecture|] Figure 2 shows the architecture of a transformer decoder block. Each decoder block consist
+ 21 FIG  transformer.svg | Figure 2 : High-level architecture of a decoder block.
+ 22 h3   2.2 The prefill and decode phases
+ 23 P    [2.2 The prefill and decode phases|] Transformer inference begins with the prefill phase that processes all the input tokens of
+ 24 P    [2.2 The prefill and decode phases|] Table 1 shows the shapes of input, output, and weight tensors of the various operations. E
+ 25 P    [2.2 The prefill and decode phases|] Next, the attn computation over Q Q , K K and V V produces a tensor Y Y of shape [B,L,H] [
+ 26 P    [2.2 The prefill and decode phases|] Next, the FFN module performs two batched matrix-matrix multiplications. In ffn_ln1 , Z Z 
+ 27 P    [2.2 The prefill and decode phases|] The decode phase performs the same operations as prefill, but only for the single token wh
+ 28 TBL  Table 1 : Shapes of the input, weight, and output tensors in a transfo
+ 29 h3   2.3 Multi-GPU LLM Inference
+ 30 P    [2.3 Multi-GPU LLM Inference|] As the model sizes of LLMs increase, it becomes necessary to scale them to multi-GPU as we
+ 31 P    [2.3 Multi-GPU LLM Inference|] TP shards each layer across the participating GPUs. This splits both the model weights and
+ 32 P    [2.3 Multi-GPU LLM Inference|] Compared to TP, PP splits a model layer-wise, where each GPU is responsible for a subset o
+ 33 h2   3 Motivation
+ 34 P    [3 Motivation|] In this section, we show that LLM inference is inefficient for two main reasons: (1) the d
+ 35 h3   3.1 Analyzing Prefill and Decode Throughput
+ 36 FIG  pertoken_time_breakup.svg | Figure 3 : Per-token prefill and decode time with different batch size
+ 37 P    [3.1 Analyzing Prefill and Decode Throughput|] Figure 3 shows the per-token cost of each of the six transformer operations ( §2.1 ) for p
+ 38 FIG  analysis_pd_plot_combined.svg | (a) Throughput of a single layer of LLaMA-13B on A6000 GPU.
+ 39 FIG  analysis_pd_plot_combined.svg | (a) Throughput of a single layer of LLaMA-13B on A6000 GPU.
+ 40 FIG  ai_plot.svg | (b) Arithmetic intensity with 1K sequence length (per-request).
+ 41 P    [3.1 Analyzing Prefill and Decode Throughput|] 4(a) shows the throughput of the prefill and decode stages for different batch sizes ( B B
+ 42 P    [3.1 Analyzing Prefill and Decode Throughput|] To explain this behavior, we profile the arithmetic intensity of individual operations: ar
+ 43 P    [3.1 Analyzing Prefill and Decode Throughput|] The difference between the throughput scaling of these two phases stems from the fact that
+ 44 h3   3.2 Pipeline Bubbles in LLM Inference
+ 45 P    [3.2 Pipeline Bubbles in LLM Inference|] Pipeline Parallelism (PP) is a popular strategy for cross-node deployment of large models,
+ 46 P    [3.2 Pipeline Bubbles in LLM Inference|] A challenge with PP, however, is that it introduces pipeline bubbles or periods of GPU ina
+ 47 P    [3.2 Pipeline Bubbles in LLM Inference|] Unlike training, since inference jobs only do forward passes and do not have backward pass
+ 48 P    [3.2 Pipeline Bubbles in LLM Inference|] Orca [48] suggests that the use of iteration-level scheduling eliminates bubbles in pipeli
+ 49 FIG  bubbles.png | Figure 5 : Pipeline bubbles in LLM inference A 2-way PP iteration-leve
+ 50 h3   3.3 Insights
+ 51 P    [3.3 Insights|] Our experiments show that the prefill and decode stages have very different compute utiliz
+ 52 P    [3.3 Insights|] This observation leads us to our key insight that it is possible to construct uniformly co
+ 53 h2   4 Sarathi : Design and Implementation
+ 54 P    [4 Sarathi : Design and Implementation|] In this section, we describe the design and implementation of Sarathi , which employs two 
+ 55 h3   4.1 Overview
+ 56 P    [4.1 Overview|] Conventional inference engines like FasterTransformer [6] perform request-level inference 
+ 57 P    [4.1 Overview|] However, today’s iteration-level scheduling systems do not pay attention to the requests t
+ 58 h3   4.2 Chunked-prefills
+ 59 P    [4.2 Chunked-prefills|] Chunked-prefills is a prefill splitting mechanism hinged on two key insights. First, for a
+ 60 FIG  chunking_attn_mask.svg | Figure 6 : Example of how attention mask is set across different chunk
+ 61 P    [4.2 Chunked-prefills|] Implementing chunked-prefills requires carefully setting the attention mask. If a request’
+ 62 P    [4.2 Chunked-prefills|] Overhead of chunked-prefills . Splicing the input of a prefill sequence into multiple smal
+ 63 P    [4.2 Chunked-prefills|] Second, chunked-prefills pose a slight overhead in attention computation due to repeated m
+ 64 h3   4.3 Decode-Maximal Batching
+ 65 P    [4.3 Decode-Maximal Batching|] Harnessing the benefits of chunked-prefills requires us to carefully construct a hybrid ba
+ 66 P    [4.3 Decode-Maximal Batching|] In decode-maximal batching , we construct a batch by using a single prefill chunk and pigg
+ 67 h4   4.3.1 Piggybacking decodes with prefills
+ 68 P    [4.3 Decode-Maximal Batching|] To piggyback decodes with a prefill, we need to take care of two things. First, we need to
+ 69 P    [4.3 Decode-Maximal Batching|] Decode batch . The maximum decode batch size to be piggybacked with a prefill chunk is det
+ 70 P    [4.3 Decode-Maximal Batching|] In the baseline scheme, decode-only batches can be of size at most B B . In Sarathi , the 
+ 71 P    [4.3 Decode-Maximal Batching|] In decode-maximal batching , we fuse all the linear operations, while letting the attentio
+ 72 P    [4.3 Decode-Maximal Batching|] Decode efficiency . Recall that the prefill and decode phases follow the same computation 
+ 73 P    [4.3 Decode-Maximal Batching|] In contrast, decode-maximal batching computes over the decode tokens using matrix matrix m
+ 74 TBL  Table 2 : Per-token prefill and decode time (in ms) For LLaMA-13B on A
+ 75 P    [4.3 Decode-Maximal Batching|] To illustrate the various costs involved through an example, Table 2 compares the runtime 
+ 76 h3   4.4 Identifying the ideal chunk size
+ 77 P    [4.4 Identifying the ideal chunk size|] An important design consideration in Sarathi is how to pick the most suitable chunk size .
+ 78 P    [4.4 Identifying the ideal chunk size|] To demonstrate the importance of chunk size, we introduce a simple notation “P:D ratio" th
+ 79 FIG  tilecurve.svg | Figure 7 : The effect of tile quantization on the runtime of one itera
+ 80 P    [4.4 Identifying the ideal chunk size|] The size of prefill chunks in Sarathi impacts the number of decodes that can be piggybacke
+ 81 P    [4.4 Identifying the ideal chunk size|] Note that decoding time increases as the the P:D ratio goes down. Therefore, beyond a cert
+ 82 P    [4.4 Identifying the ideal chunk size|] To sum it up, identifying a suitable chunk size involves a trade-off: smaller chunks piggy
+ 83 P    [4.4 Identifying the ideal chunk size|] The tile quantization effect. Additionally, we observe an intricate detail related to the 
+ 84 P    [4.4 Identifying the ideal chunk size|] Notice that the time to compute a prefill sequence suddenly increases when the sequence le
+ 85 P    [4.4 Identifying the ideal chunk size|] Therefore, selecting the ideal chunk size is a two-fold decision. First, pick a chunk size
+ 86 h3   4.5 Implementation
+ 87 P    [4.5 Implementation|] We implement Sarathi on the nanoGPT codebase [12] with support for both chunked-prefills a
+ 88 P    [4.5 Implementation|] We support different model configurations in our codebase to evaluate Sarathi over differe
+ 89 h2   5 Evaluation
+ 90 TBL  Table 3 : Models, GPUs, and mode of evaluation.
+ 91 P    [5 Evaluation|] We evaluate Sarathi on a variety of models and GPUs using physical deployments for single 
+ 92 P    [5 Evaluation|L] 1. What is the impact of Sarathi on the throughput of decodes as well as the end-to-end th
+ 93 P    [5 Evaluation|L] 2. How does Sarathi compare to existing iteration-level scheduling mechanisms like Orca ( 
+ 94 P    [5 Evaluation|L] 3. What is the impact of our techniques on GPU bubbles and the throughput of pipeline-para
+ 95 P    [5 Evaluation|L] 4. What are the overheads of chunked-prefills ( §5.4 )?
+ 96 h3   5.1 Evaluation on a Single GPU
+ 97 P    [5.1 Evaluation on a Single GPU|] In this section, we measure the decode speedup and the end-to-end throughput of Sarathi , 
+ 98 FIG  eval_decode_efficiency.svg | Figure 8 : Decode-only speedup with Sarathi on an A6000 GPU with LLaMA
+ 99 h4   5.1.1 Decode speedup
+100 P    [5.1 Evaluation on a Single GPU|] We first show the impact of our techniques on decode phase throughput that we calculate ba
+101 P    [5.1 Evaluation on a Single GPU|] Figure 8 plots the results for a chunk size of 256 for LlaMa-13B on A6000 GPU, as we vary 
+102 P    [5.1 Evaluation on a Single GPU|] We observe that our decode speedup reduces as we increase the batch size or sequence lengt
+103 TBL  Table 4 : Peak throughput gains with Sarathi for different sequence le
+104 FIG  eval_pd_scenario_1K.svg | (a) Sequence length = 1K, batch size = 18.
+105 FIG  eval_pd_scenario_1K.svg | (a) Sequence length = 1K, batch size = 18.
+106 FIG  eval_pd_scenario_2K.svg | (b) Sequence length = 2K, batch size = 10.
+107 FIG  eval_pd_scenario_3K.svg | (c) Sequence length = 3K, batch size = 6.
+108 FIG  eval_bs_seqlen_combined.svg | Figure 10 : Breakdown of total time spent on different operations for 
+109 h4   5.1.2 Peak throughput gains with Sarathi
+110 P    [5.1 Evaluation on a Single GPU|] Table 4 shows the peak throughput gain that Sarathi achieves over the baseline. To demonst
+111 P    [5.1 Evaluation on a Single GPU|] In the best case, our techniques improve the end-to-end throughput by as much as 1.33× 1.3
+112 h4   5.1.3 Effect of varying P : D P:D ratio
+113 P    [5.1 Evaluation on a Single GPU|] In this subsection, using various sequence lengths and chunk sizes, we investigate the eff
+114 P    [5.1 Evaluation on a Single GPU|] Figure 9 plots the results of our experiments. We find that the peak efficiency of our tec
+115 P    [5.1 Evaluation on a Single GPU|] We achieve peak performance when inference is not entirely dominated by either prefills or
+116 h4   5.1.4 Effect of varying the batch and chunk sizes
+117 P    [5.1 Evaluation on a Single GPU|] In this section, we dive deeper to investigate the performance of Sarathi by varying the b
+118 P    [5.1 Evaluation on a Single GPU|] Figure 10 shows the results for these experiments. For each configuration of sequence leng
+119 P    [5.1 Evaluation on a Single GPU|] Note that decode-maximal batching batches the prefill and decode tokens in linear operatio
+120 P    [5.1 Evaluation on a Single GPU|] We also observe that different linear operations see different speedups using our techniqu
+121 FIG  eval_iterative_scheduling.svg | (a) Varying sequence lengths (chunk size=256 for Sarathi ). We choose 
+122 FIG  eval_iterative_scheduling.svg | (a) Varying sequence lengths (chunk size=256 for Sarathi ). We choose 
+123 FIG  eval_orca_pd_scenario_1K.svg | (b) Varying P:D ratio (sequence length=1K, batch size=18).
+124 h3   5.2 Comparison to Iteration-level Scheduling
+125 P    [5.2 Comparison to Iteration-level Scheduling|] In our evaluation thus far, we have considered a baseline system that processes prefill-on
+126 P    [5.2 Comparison to Iteration-level Scheduling|] Iteration-level scheduling affects GPU utilization as well: when requests arrive or depart
+127 P    [5.2 Comparison to Iteration-level Scheduling|] To understand the effect on overall throughput, we evaluate the state-of-the-art iteration
+128 P    [5.2 Comparison to Iteration-level Scheduling|] Figure 11 shows our results for these experiments. First ( Figure 11 a), we show results f
+129 P    [5.2 Comparison to Iteration-level Scheduling|] Another aspect to consider in iteration-level scheduling is the effect of variable sequenc
+130 P    [5.2 Comparison to Iteration-level Scheduling|] Next, we evaluate the throughput gains at different P : D P:D ratios for different chunk s
+131 FIG  bubble.svg | (a) Comparison of bubble time
+132 FIG  bubble.svg | (a) Comparison of bubble time
+133 FIG  makespan.svg | (b) End-to-end request completion time
+134 h3   5.3 Pipeline Parallelism with Sarathi
+135 P    [5.3 Pipeline Parallelism with Sarathi|] Next, we evaluate how Sarathi reduces pipeline bubbles in a multi-GPU pipeline-parallel se
+136 P    [5.3 Pipeline Parallelism with Sarathi|] We first profile the runtime for each operation in Table 1 in the prefill and decode phase
+137 P    [5.3 Pipeline Parallelism with Sarathi|] We report results for deployment over 64 A100 GPUs across eight servers connected with Inf
+138 FIG  ablation_attn_perf_p_only.svg | (a) Self-attention (prefill-only).
+139 FIG  ablation_attn_perf_p_only.svg | (a) Self-attention (prefill-only).
+140 FIG  ablation_prefill_perf.svg | (b) chunked-prefills vs. full prefill.
+141 FIG  ablation_overall_perf.svg | (c) End-to-end speedup for the entire batch.
+142 P    [5.3 Pipeline Parallelism with Sarathi|] 12(a) plots the cdf of pipeline bubble time per request. We define this as the sum of bubb
+143 P    [5.3 Pipeline Parallelism with Sarathi|] Next, we compare the overall request completion time for the different scenarios in 12(b) 
+144 h3   5.4 Ablation Study of Chunked-prefills
+145 P    [5.4 Ablation Study of Chunked-prefills|] In this subsection, we evaluate how splitting a full prefill computation into multiple sma
+146 P    [5.4 Ablation Study of Chunked-prefills|] Prefill chunking has two potential sources of overheads: (1) it uses smaller chunk sizes c
+147 P    [5.4 Ablation Study of Chunked-prefills|] First, we observe that smaller chunk sizes can add significant overhead, for both attentio
+148 P    [5.4 Ablation Study of Chunked-prefills|] Second, Sarathi can compensate for some loss in prefill efficiency by improving the decode
+149 h2   6 Discussion
+150 P    [6 Discussion|] In this paper, we have comprehensively demonstrated how Sarathi improves the performance o
+151 P    [6 Discussion|] First, we focus only on an efficient scheduling mechanism in Sarathi to improve the throug
+152 h2   7 Related Work
+153 P    [7 Related Work|] In this section, we provide a brief summary of related work along two dimensions: systems 
+154 h3   7.1 Systems Optimizations
+155 P    [7.1 Systems Optimizations|] Memory management: In auto-regressive decoding, the number of tokens that need to be gener
+156 P    [7.1 Systems Optimizations|] Optimizing (self-)attention: In [40] , the authors propose an algorithm to reduce the memo
+157 P    [7.1 Systems Optimizations|] Kernel-level optimizations: FasterTransformer [6] proposed optimized layers for the transf
+158 P    [7.1 Systems Optimizations|] Scheduling optimizations: Orca proposed an iteration-level scheduling framework that avoid
+159 P    [7.1 Systems Optimizations|] The optimizations proposed by several of the prior works can complement our optimizations 
+160 h3   7.2 Model Innovations
+161 P    [7.2 Model Innovations|] A significant body of work around model innovations has attempted to address the shortcomi
+162 h2   8 Conclusion
+163 P    [8 Conclusion|] In this paper, we identify two primary reasons for LLM inference inefficiency: 1) suboptim
+164 h2   References
+165 P    [References|L] [1] Amazon codewhisperer. https://aws.amazon.com/codewhisperer/ .
+166 P    [References|L] [2] Anthropic claude. https://claude.ai .
+167 P    [References|L] [3] Bing ai. https://www.bing.com/chat .
+168 P    [References|L] [4] Character ai. https://character.ai .
+169 P    [References|L] [5] Chatgpt. https://chat.openai.com.
+170 P    [References|L] [6] Faster Transformer. https://github.com/NVIDIA/FasterTransformer .
+171 P    [References|L] [7] Github copilot. https://github.com/features/copilot .
+172 P    [References|L] [8] Google bard. https://bard.google.com .
+173 P    [References|L] [9] Komo. https://komo.ai/ .
+174 P    [References|L] [10] Llama model card. https://huggingface.co/decapoda-research/llama-13b-hf .
+175 P    [References|L] [11] Matrix multiplication background user’s guide. https://docs.nvidia.com/deeplearning/p
+176 P    [References|L] [12] nanogpt. https://github.com/karpathy/nanoGPT .
+177 P    [References|L] [13] NVIDIA Triton Inference Server. https://developer.nvidia.com/nvidia-triton-inference-
+178 P    [References|L] [14] Openai gpt-3: Understanding the architecture. https://www.theaidream.com/post/openai-
+179 P    [References|L] [15] Perplexity ai. https://www.perplexity.ai/ .
+180 P    [References|L] [16] Replit ghostwriter. https://replit.com/site/ghostwriter .
+181 P    [References|L] [17] Text generation inference. https://huggingface.co/text-generation-inference .
+182 P    [References|L] [18] The Secret Sauce behind 100K context window in LLMs: all tricks in one place. https:/
+183 P    [References|L] [19] Using NVIDIA’s AI/ML Frameworks for Generative AI on VMware vSphere. https://core.vmw
+184 P    [References|L] [20] vllm: Easy, fast, and cheap llm serving for everyone. https://github.com/vllm-project
+185 P    [References|L] [21] XFORMERS OPTIMIZED OPERATORS. https://facebookresearch.github.io/xformers/components/
+186 P    [References|L] [22] You.com. https://you.com/ .
+187 P    [References|L] [23] Mikel Artetxe, Shruti Bhosale, Naman Goyal, Todor Mihaylov, Myle Ott, Sam Shleifer, X
+188 P    [References|L] [24] Sanjith Athlur, Nitika Saran, Muthian Sivathanu, Ramachandran Ramjee, and Nipun Kwatr
+189 P    [References|L] [25] Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhari
+190 P    [References|L] [26] Aakanksha Chowdhery, Sharan Narang, Jacob Devlin, Maarten Bosma, Gaurav Mishra, Adam 
+191 P    [References|L] [27] Daniel Crankshaw, Xin Wang, Guilio Zhou, Michael J Franklin, Joseph E Gonzalez, and I
+192 P    [References|L] [28] Tri Dao. Flashattention-2: Faster attention with better parallelism and work partitio
+193 P    [References|L] [29] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention:
+194 P    [References|L] [30] Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. Llm.int8(): 8-bit mat
+195 P    [References|L] [31] Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. Qlora: Efficient 
+196 P    [References|L] [32] Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. Gptq: Accurate post
+197 P    [References|L] [33] Haiyang Huang, Newsha Ardalani, Anna Sun, Liu Ke, Hsien-Hsin S. Lee, Anjali Sridhar, 
+198 P    [References|L] [34] Yanping Huang, Youlong Cheng, Ankur Bapna, Orhan Firat, Dehao Chen, Mia Chen, HyoukJo
+199 P    [References|L] [35] Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B. Brown, Benjamin Chess, Rewon Child
+200 P    [References|L] [36] Jiamin Li, Yimin Jiang, Yibo Zhu, Cong Wang, and Hong Xu. Accelerating distributed Mo
+201 P    [References|L] [37] Deepak Narayanan, Aaron Harlap, Amar Phanishayee, Vivek Seshadri, Nikhil R Devanur, G
+202 P    [References|L] [38] OpenAI. GPT-4 technical report. CoRR , abs/2303.08774, 2023.
+203 P    [References|L] [39] Reiner Pope, Sholto Douglas, Aakanksha Chowdhery, Jacob Devlin, James Bradbury, Ansel
+204 P    [References|L] [40] Markus N. Rabe and Charles Staats. Self-attention does not need o ( n 2 ) o(n^{2}) me
+205 P    [References|L] [41] Noam Shazeer. Fast transformer decoding: One write-head is all you need, 2019.
+206 P    [References|L] [42] Ying Sheng, Lianmin Zheng, Binhang Yuan, Zhuohan Li, Max Ryabinin, Daniel Y. Fu, Zhiq
+207 P    [References|L] [43] Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Br
+208 P    [References|L] [44] Yutao Sun, Li Dong, Shaohan Huang, Shuming Ma, Yuqing Xia, Jilong Xue, Jianyong Wang,
+209 P    [References|L] [45] Jason Wei, Yi Tay, Rishi Bommasani, Colin Raffel, Barret Zoph, Sebastian Borgeaud, Da
+210 P    [References|L] [46] Bingyang Wu, Yinmin Zhong, Zili Zhang, Gang Huang, Xuanzhe Liu, and Xin Jin. Fast dis
+211 P    [References|L] [47] Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. Smoothq
+212 P    [References|L] [48] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and Byung-Gon Chun. Orca: 
