@@ -43,6 +43,18 @@ def strip_repeat_gloss(t):
     return re.sub(r"([\u4e00-\u9fff]{2,8})[（(]([A-Za-z0-9 ,\-:\./]{2,40})[)）]", rep, t)
 
 
+def fix_quotes(t):
+    out = []
+    open_q = True
+    for ch in t:
+        if ch == '"':
+            out.append("「" if open_q else "」")
+            open_q = not open_q
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def clean(t):
     t = t.replace("計算", "计算")
     t = t.replace("——", "：")
@@ -50,10 +62,7 @@ def clean(t):
     t = re.sub(r"\s*§[0-9\.]+", "", t)
     t = re.sub(r"如\s*[0-9]\.[0-9]\s*所述", "如前所述", t)
     t = t.replace("：：", "：")
-    t = t.replace('"', "「", 1)
-    if "「" in t:
-        idx = t.find("「")
-        t = t[:idx] + t[idx:].replace('"', "」", 1)
+    t = fix_quotes(t)
     t = t.replace("P:D ratio", "P:D 比例")
     t = t.replace("decode-maximal batching", "解码最大化批处理")
     t = t.replace("decode-maximal 批次", "解码最大化批次")
@@ -65,9 +74,11 @@ PARA = {}
 for i, pid in item2pid.items():
     PARA[i] = strip_repeat_gloss(clean(tr[pid]))
 
-# —— 定点修补 ——
-PARA[36] = "Sarathi 的设计与实现采用两项技术：分块预填充（chunked-prefills）与解码最大化批处理（decode-maximal batching），以提升 LLM 推理性能。"
-PARA[43] = PARA[43].replace("提出的解码最大化批处理（decode-maximal batching）", "提出的解码最大化批处理（decode-maximal batching）")
+# —— 定点修补（按 item 索引） ——
+PID2ITEM = {v: k for k, v in item2pid.items()}
+PARA[PID2ITEM[36]] = ("Sarathi 的设计与实现采用两项技术：分块预填充（chunked-prefills）与解码最大化批处理"
+                      "（decode-maximal batching），以提升 LLM 推理性能。")
+assert PARA[PID2ITEM[36]].count("：") == 1
 
 FORMULA = "最大批大小按下式求解：**B = ⌊(M(G) − M(S)) / (L × m(kv))⌋**，其中的取整意味着实际可容纳的请求数只能取下界。"
 
@@ -80,7 +91,9 @@ def F(n):
 def build_paras(idxs, extra=None):
     ps = []
     for x in idxs:
-        if isinstance(x, tuple) and x[0] == "RAW":
+        if x == "FORMULA":
+            ps.append("FORMULA")
+        elif isinstance(x, tuple) and x[0] == "RAW":
             ps.append(x[1])
         else:
             ps.append(PARA[x])
@@ -131,9 +144,8 @@ T4 = {"head": ["模型 (GPU)", "序列长度", "批大小", "P:D 比例", "解�
                ["LLaMA-33B (A100)", "3K", "3", "127:1", "3.51×", "1.14×"]]}
 
 # 1
-sec("h2", "引言：预填充吃满算力，解码却在等内存", [5, 6, 7])
+sec("h2", "引言：预填充吃满算力，解码却在等内存", [])
 sec("h3", "从两个阶段到一处失衡", [5, 6, 7], figs={2: [F(1)]})
-SECTIONS.pop(0)  # 去掉重复的 h2 占位段（h2 只作标题壳）
 sec("h3", "Sarathi 的思路、结果与贡献", [8, 9, 10, 11, 12, 13, 14, 15, 16])
 
 # 2
