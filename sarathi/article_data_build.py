@@ -600,7 +600,7 @@ DATA = {
    "type": "h3",
    "title": "模型层创新",
    "paras": [
-    "围绕模型创新的大量工作试图解决基于 Transformer 的语言模型的缺陷，或在模型架构上实现超越 Transformer 的跨越。例如，multi-query attention 在所有注意力头上共享相同的 keys 与 values，以减小 KV 缓存大小 [41]，从而支持更大批大小。近期多项工作还表明，量化可显著压缩模型规模 [47,32,31,30]。Mixture-of-expert 模型主要旨在减少单次迭代中激活的模型参数量 [23,36,33]。更近期，retentive networks 被提出作为 Transformer 的后继 [44]。本工作从 GPU 视角出发，聚焦解决最流行的 Transformer 模型的性能问题。模型创新与本文工作正交。"
+    "围绕模型创新的大量工作试图解决基于 Transformer 的语言模型的缺陷，或在模型架构上实现超越 Transformer 的跨越。例如，multi-query attention 在所有注意力头上共享相同的 keys 与 values，以减小 KV 缓存大小 [41]，从而支持更大批大小。近期多项工作还表明，量化可显著压缩模型规模 [47,32,31,30]。Mixture-of-expert 模型主要旨在减少单次迭代中激活的模型参数量 [23,36,33]。更近期，retentive networks 被提出作为 Transformer 的后继 [44]。本工作从 GPU 视角出发，聚焦解决最流行的 Transformer 模型的性能问题。模型创新与 Sarathi 正交。"
    ]
   }
  ],
