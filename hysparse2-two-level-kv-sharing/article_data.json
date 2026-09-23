@@ -1,5 +1,5 @@
 {
-  "title": "小米:HySparse2两级KV共享,预填算力降5倍,长文检索涨19.8分",
+  "title": "小米:HySparse2两级KV共享,预填算力降5倍、长文检索涨19.8分",
   "summary": [
     {
       "key": "核心结论",
@@ -23,9 +23,9 @@
       "type": "h2",
       "title": "引言",
       "paras": [
-        "智能体推理把长上下文与多轮交互叠在了一起。每一轮里，一个短的动作或工具调用可能带回长得多的搜索结果、执行轨迹或文档，这些内容必须先做预填，解码才能继续。历史不断累积，注意力计算与 KV cache 存储随之上升，这类负载要求高效的预填、紧凑的 KV cache，以及准确的长上下文检索。",
-        "HySparse 用全注意力层与稀疏注意力层交替的方式降低注意力计算量与 KV cache 存储：每个全注意力层都向后继稀疏层提供选择索引和一份 KV cache，不需要蒸馏辅助 indexer 模块。但对智能体推理来说，HySparse 在缩短预填、进一步压缩 KV cache、提升检索精度三个方面仍有空间。",
-        "HySparse2 在 HySparse 基础上引入两级 KV 共享。参照 YOCO，骨干网络分成 self-decoder（全注意力混合滑动窗口注意力）与 cross-decoder（全注意力混合稀疏注意力）两段：外层 KV Bridging 把两个 decoder 的全注意力层连起来，cross-decoder 每个全注意力层的 KV cache 都由对应 self-decoder 全注意力层的输入隐藏状态经本层 K/V 投影构造；内层 KV Reuse 沿用 HySparse 的做法，在同一个混合块内共享 KV cache 与选择索引。配合 token 级稀疏选择与强制近期窗口，cross-decoder 的 KV cache 全部能由 self-decoder 隐藏状态构建，预填可以在 self-decoder 之后退出。"
+        "智能体推理把长上下文与多轮交互叠在了一起：一轮里一个短的动作或工具调用，常常带回长得多的搜索结果或执行日志，必须先做预填才能继续解码。历史不断累积，预填算力与 KV cache 存储被同时推高。",
+        "HySparse 用全注意力层与稀疏注意力层交替省下注意力开销，但预填仍要跑完所有层。HySparse2 引入两级 KV 共享：外层 KV Bridging 让 cross-decoder 每个全注意力层的 KV cache 都由对应 self-decoder 全注意力层的隐藏状态经本层 K/V 投影构造，内层 KV Reuse 在同一个混合块内共享 KV cache 与选择索引；稀疏选择由块级改为 token 级，并用强制近期窗口替代独立的 SWA 分支。",
+        "cross-decoder 的 KV cache 因此全部由 self-decoder 隐藏状态生成，预填只跑半个模型就能退出：1M token 下预填 FLOPs 相对 Hybrid SWA 降 5.02 倍，KV cache 从 12.09 GB 压到 2.69 GB；轻量后训练后，MRCR-v2 与 RULER-v2 平均分相对 HySparse 分别提升 11.30 与 19.81 分。"
       ],
       "fig_after": {
         "2": [
@@ -46,15 +46,15 @@
       "type": "h3",
       "title": "高效预填",
       "paras": [
-        "长任务、多轮的智能体让推理越来越由输入主导，工具返回的内容常常比对应的动作多出大量 token。只降低注意力开销，并不能消除把这些 token 在骨干网络里前向传播所需的计算。跨层 KV cache 共享可以同时降低 KV 存储与预填计算：YOCO 用一个 self-decoder 构建跨 cross-decoder 层共享的全局 KV cache，让预填阶段的 cache 构建在 self-decoder 之后退出；Gemma 3n 采用相关的跨层 KV 共享提升预填效率。HySparse 在混合稀疏注意力块内部做跨层共享，每个全注意力层把自己的全局 KV cache 和 top-k 块索引共享给后续稀疏注意力层，但预填仍要执行全部层。HySparse2 把 YOCO 式结构并入 HySparse，在降低注意力计算与 KV 存储的同时缩短预填路径。"
+        "长任务、多轮的智能体让推理由输入主导，工具返回的内容常常比对应的动作多出大量 token。只压低注意力开销，并不能消除把这些 token 在骨干网络里前向传播的计算；跨层 KV cache 共享可以同时降低 KV 存储与预填计算，YOCO 用一个 self-decoder 构建跨层共享的全局 KV cache、让 cache 构建在 self-decoder 之后退出，Gemma 3n 也采用相关的跨层共享。HySparse 只在混合稀疏注意力块内部共享（全注意力层把全局 KV cache 与 top-k 块索引交给后续稀疏层），预填仍要执行全部层，HySparse2 则把 YOCO 式结构并进来，缩短预填路径。"
       ],
       "fig_after": {}
     },
     {
       "type": "h3",
-      "title": "KV cache压缩",
+      "title": "KV cache 压缩",
       "paras": [
-        "智能体负载需要更紧凑的 KV cache。KV cache 压缩有四个维度：head、序列、层、精度。head 级方法用 GQA/MQA 共享 KV head，或像 MLA 那样把 KV 表示压进潜状态；序列级方法把多个 token 压成更少的 cache 条目；层级方法在层之间共享 KV cache；精度级方法降低缓存 key 与 value 的数值精度。此前工作集中在 head、序列、精度三个方向上的层内压缩，HySparse2 则通过 KV Bridging 与 KV Reuse 推进跨层共享。"
+        "智能体负载需要更紧凑的 KV cache，压缩维度有四个：head 级用 GQA/MQA 共享 KV head，或像 MLA 那样把 KV 表示压进潜状态；序列级把多个 token 压成更少的 cache 条目；层级在层之间共享；精度级降低 key 与 value 的数值精度。此前工作集中在 head、序列、精度三个方向上的层内压缩，HySparse2 通过 KV Bridging 与 KV Reuse 推进跨层共享。"
       ],
       "fig_after": {}
     },
@@ -62,7 +62,7 @@
       "type": "h3",
       "title": "稀疏注意力的选择粒度",
       "paras": [
-        "稀疏注意力把每个 query 限制在一部分 KV 条目上，以此降低长上下文注意力开销，选择粒度在建模精度与推理效率之间存在固有取舍。HySparse 采用块级稀疏作为折中：评估显示精度损失不明显，规则的块结构又便于高效 kernel 实现。但现代智能体负载是长任务、多轮轨迹，需要从很长的历史里精确检索，在这类模式下块级选择的精度劣势明显，token 级选择能更如实地取回相关证据，近期稀疏 kernel 的进展也让 token 级实现变得可行。HySparse2 因此改用 token 级稀疏，做更精确的上下文选择。"
+        "稀疏注意力把每个 query 限制在一部分 KV 条目上，选择粒度在建模精度与推理效率之间存在固有取舍。HySparse 用块级稀疏折中：精度损失不明显，规则块结构也便于高效 kernel 实现；但智能体负载是长任务、多轮轨迹，要从很长的历史里精确检索，块级选择在这方面劣势明显，token 级选择能更如实地取回相关证据，近期稀疏 kernel 的进展也让 token 级实现可行。HySparse2 因此改用 token 级稀疏。"
       ],
       "fig_after": {}
     },
@@ -89,7 +89,7 @@
     },
     {
       "type": "h3",
-      "title": "只连接全注意力层的KV Bridging",
+      "title": "只连接全注意力层的 KV Bridging",
       "paras": [
         "KV Bridging 只在 self-decoder 与 cross-decoder 的全注意力层之间工作。取一对全注意力层 i 与 j，i 在 self-decoder，j 在 cross-decoder，记两者的输入隐藏状态分别为 Hself(i) 与 Hcross(j)。cross-decoder 第 j 层的 key 与 value 由 self-decoder 第 i 层的隐藏状态经本层的 K/V 投影得到，query 则由本层当前的隐藏状态 Hcross(j) 经 Q 投影得到。",
         "每个 cross-decoder 全注意力层都有自己的 K/V 投影，共享同一隐藏状态来源的层仍然构造出各自的 KV cache。每层也保留独立的 Q 投影，作用在自己当前的隐藏状态上。KV Bridging 允许两个 decoder 使用不同的混合注意力比例，一个 self-decoder 全注意力层可以供应多个 cross-decoder 全注意力层。"
@@ -98,7 +98,7 @@
     },
     {
       "type": "h3",
-      "title": "跨层KV复用",
+      "title": "跨层 KV 复用",
       "paras": [
         "相对 HySparse，HySparse2 做了两处关键改进：改用 token 级稀疏选择，去掉独立的 SWA 分支。",
         "在 HySparse 的预训练评估里，块级选择没有明显精度劣势，到了多轮、长上下文的智能体任务上劣势却很明显。HySparse2 因此对全注意力层中单个 token 做 top-k 选择，后续稀疏层直接复用被选中 token 的 KV 条目。",
