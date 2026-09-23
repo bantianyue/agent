@@ -19,6 +19,8 @@ d = json.load(op.open(req, timeout=30))
 items = d.get("item", [])
 if items and "news_item" in items[0]:
     content = items[0]["news_item"][0].get("content", "")
+elif "news_item" in d:
+    content = d["news_item"][0].get("content", "")
 elif items and "articles" in items[0]:
     content = items[0]["articles"][0].get("content", "")
 elif items:
