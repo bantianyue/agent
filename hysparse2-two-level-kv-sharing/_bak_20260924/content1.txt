@@ -1,7 +1,9 @@
 S# 引言
-T 智能体推理把长上下文与多轮交互叠在了一起。每一轮里，一个短的动作或工具调用可能带回长得多的搜索结果、执行轨迹或文档，这些内容必须先做预填，解码才能继续。历史不断累积，注意力计算与 KV cache 存储随之上升，这类负载要求高效的预填、紧凑的 KV cache，以及准确的长上下文检索。
-T HySparse 用全注意力层与稀疏注意力层交替的方式降低注意力计算量与 KV cache 存储：每个全注意力层都向后继稀疏层提供选择索引和一份 KV cache，不需要蒸馏辅助 indexer 模块。但对智能体推理来说，它在缩短预填、进一步压缩 KV cache、提升检索精度三个方面仍有空间。
-T HySparse2 在 HySparse 基础上引入两级 KV 共享。参照 YOCO，骨干网络分成 self-decoder（全注意力混合滑动窗口注意力）与 cross-decoder（全注意力混合稀疏注意力）两段：外层 KV Bridging 把两个 decoder 的全注意力层连起来，cross-decoder 每个全注意力层的 KV cache 都由对应 self-decoder 全注意力层的输入隐藏状态经本层 K/V 投影构造；内层 KV Reuse 沿用 HySparse 的做法，在同一个混合块内共享 KV cache 与选择索引。配合 token 级稀疏选择与强制近期窗口，cross-decoder 的 KV cache 全部能由 self-decoder 隐藏状态构建，预填可以在 self-decoder 之后退出。
+T 智能体推理把长上下文与多轮交互叠在了一起。每一轮里，一个短的动作或工具调用可能带回长得多的搜索结果、执行轨迹或文档，这些内容必须先做预填，解码才能继续。观测不断累积，智能体要在持续膨胀的历史里检索并合并证据，注意力计算和 KV cache 存储随之上升。这类负载要求高效的预填、紧凑的 KV cache，以及准确的长上下文检索。
+T HySparse 用全注意力层与稀疏注意力层交替的方式解决长上下文效率问题。每个全注意力层都向后继稀疏层提供选择索引和一份 KV cache，在不蒸馏辅助 indexer 模块的前提下降低注意力计算量与 KV cache 存储。但对智能体推理来说，HySparse 在缩短预填、进一步压缩 KV cache、提升检索精度三个方面仍留有不小空间。
+T HySparse2 在 HySparse 基础上引入两级 KV 共享。参照 YOCO，骨干网络分成 self-decoder 与 cross-decoder 两段：self-decoder 把全注意力与滑动窗口注意力（SWA）混合起来，cross-decoder 把全注意力与稀疏注意力混合起来。外层 KV Bridging 把两个 decoder 里的全注意力层连起来，每个 cross-decoder 全注意力层用各自的 K/V 投影，作用在对应的 self-decoder 全注意力层的输入隐藏状态上。内层 KV Reuse 沿用 HySparse 的做法，在同一个混合块内共享 KV cache 与选择索引。
+T 两处改动同时改善了精度与效率。其一，用 token 级选择替代块级选择，把稀疏注意力预算更精确地分配给相关 token。其二，用一段强制的近期 token 窗口替代稀疏层里独立的 SWA 分支，让局部与全局 token 共用同一份共享 KV cache。所有 cross-decoder 的 KV cache 因此都能由 self-decoder 的隐藏状态构建，预填可以在 self-decoder 之后就退出。
+T 在相同数据与训练计划下，用 80B-A3B MoE 模型对比 HySparse2、HySparse 与 Hybrid SWA。预训练之后，HySparse2 通用能力基本持平，长上下文检索更强。轻量后训练之后，MRCR-v2 与 RULER-v2 平均分相对 HySparse 分别提升 11.30 与 19.81 个百分点，在 256k 以内的所有评估长度上，AgentPPL 与 LongPPL 都低于两个基线。在 1M token 上，预填 FLOPs 相对 HySparse 与 Hybrid SWA 分别降低 2.92 倍与 5.02 倍，KV cache 也更小。消融显示，在相同注意力预算下 token 级选择能提升检索，KV Bridging 则保持了基本相当的质量。
 F fig00.png|图1:HySparse2 用更低的预填开销和更小的 KV cache 存储，换来更好的长上下文表现。
 
 S# 背景与动机
