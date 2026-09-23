@@ -5,6 +5,7 @@
 - **Bash 工具在本机不可用**（shim 报 `dirname: command not found`）。所有命令走 PowerShell。
 - **PowerShell 的 stdout 不回传**给 agent。需要看输出时一律 `... | Out-File <path> -Encoding UTF8`，再用 Read 工具读该文件。
 - PowerShell 捕获子进程**中文**输出会乱码（`Out-File -Encoding UTF8` 也救不回），属工具链现象，不代表文件损坏。
+- `Remove-Item` 走 safe-delete 包装，**D 盘回收站操作会 fail-closed**（`[SAFE_DELETE_FAIL_CLOSED] reason: trash-failed`），文件删不掉。清理临时文件时要么接受残留，要么改用移动/覆盖，别在这上面反复重试。
 
 ## Skill 资产
 
