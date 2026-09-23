@@ -1787,3 +1787,4 @@
 |--------|------|------|
 | 2026-09-23 14:28 | 📥 开始 | 收到 URL，开始提取内容 |
 | 2026-09-23 14:41 | ✅ 已推送 | 首次推送成功，media_id: TIqnnVEu6Oy3-wtKttGa0dmUUgm-nstdmM0Lq8hAwQsaYLvTTbjk8sbr4Fi_cMd-，14图全部验证齐全（arXiv 论文 DeepSeek Elastic Compute/DSec） |
+| 2026-09-23 14:42 | ✅ 已推送 | 覆盖重推（微调「云上突发与选择性卸载」「由Agent构建,为Agent服务的环境」两个章节标题），覆盖模式 media_id 回显 undefined（已知现象），draft.id 不变，图数复核 14/14 |
