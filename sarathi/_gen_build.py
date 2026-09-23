@@ -68,7 +68,7 @@ def clean(t):
     t = t.replace("decode-maximal 批次", "解码最大化批次")
     t = t.replace("decode 最大批处理（解码最大化批处理）", "解码最大化批处理")
     t = re.sub(r"解码最大化批处理\s*（解码最大化批处理）", "解码最大化批处理", t)
-    t = re.sub(r"\s*解码最大化批处理\s*", "解码最大化批处理", t)
+    t = re.sub(r"\s*(解码最大化批处理|解码最大化批次)\s*", r"\1", t)
     t = t.replace("如 所述", "如前所述")
     t = re.sub(r"(P:D 比例)\s+", r"\1", t)
     t = t.replace("可与本文优化互补", "可与 Sarathi 的优化互补")
