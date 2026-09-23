@@ -7,8 +7,8 @@ for line in open(os.path.expanduser("~/.baoyu-skills/.env"), encoding="utf-8"):
     if "=" in line and not line.startswith("#"):
         k, _, v = line.partition("=")
         env[k.strip()] = v.strip().strip('"').strip("'")
-appid = env.get("WECHAT_APPID") or env.get("APPID") or env.get("app_id")
-secret = env.get("WECHAT_APP_SECRET") or env.get("APP_SECRET") or env.get("secret")
+appid = env.get("WECHAT_APP_ID")
+secret = env.get("WECHAT_APP_SECRET")
 
 op = urllib.request.build_opener(urllib.request.ProxyHandler({"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}))
 tok = json.load(op.open("https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=%s&secret=%s" % (appid, secret), timeout=30))["access_token"]
@@ -17,10 +17,16 @@ req = urllib.request.Request("https://api.weixin.qq.com/cgi-bin/draft/get?access
                              data=json.dumps({"media_id": mid}).encode())
 d = json.load(op.open(req, timeout=30))
 items = d.get("item", [])
-content = items[0]["content"]["html"] if items else ""
+if items and "articles" in items[0]:
+    content = items[0]["articles"][0].get("content", "")
+elif items:
+    content = items[0].get("content", {}).get("html", "") if isinstance(items[0].get("content"), dict) else items[0].get("content", "")
+else:
+    content = ""
 open("_draft.html", "w", encoding="utf-8").write(content)
 out = []
-out.append("errcode=%s title=%s" % (d.get("errcode"), items[0].get("title", "?")[:40] if items else "?"))
+out.append("errcode=%s itemtype=%s title=%s" % (d.get("errcode"), type(items[0]).__name__ if items else "-",
+          (items[0].get("articles", [{}])[0].get("title", "?")[:40] if items and "articles" in items[0] else "?")))
 out.append("img=%d gif=%d placeholder=%d" % (content.count("<img"), content.count("sz_mmbiz_gif"),
           len(re.findall(r'placeholder|待插图', content))))
 out.append("strong=%d pre=%d br=%d" % (content.count("<strong"), content.count("<pre"), content.count("<br")))
