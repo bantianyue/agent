@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>700 TPS on Kimi K3: A Case for TPU Megakernels | Inferact</title>
+    <meta name="description" content="How our Kimi K3 megakernel on TPU v7 reaches over 700 tokens/s with speculative decoding and nearly 2&times; GB200&#39;s batch-one decode throughput.">
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <link rel="canonical" href="https://inferact.ai/blog/tpu-megakernels">
+
+    <!-- Open Graph / Facebook / LinkedIn / Slack -->
+    <meta property="og:type" content="article">
+    <meta property="og:title" content="700 TPS on Kimi K3: A Case for TPU Megakernels">
+    <meta property="og:description" content="How our Kimi K3 megakernel on TPU v7 reaches over 700 tokens/s with speculative decoding and nearly 2&times; GB200&#39;s batch-one decode throughput.">
+    <meta property="og:image" content="https://inferact.ai/blog/tpu-megakernels/og-image.png">
+    <meta property="og:image:secure_url" content="https://inferact.ai/blog/tpu-megakernels/og-image.png">
+    <meta property="og:image:type" content="image/png">
+    <meta property="og:image:width" content="3360">
+    <meta property="og:image:height" content="1960">
+    <meta property="og:image:alt" content="TPU Megakernel: 709 tokens per second on Kimi K3, 16x TPU v7 vs 452 on 16x GB200 (1.6x)">
+    <meta property="og:url" content="https://inferact.ai/blog/tpu-megakernels">
+    <meta property="og:site_name" content="Inferact">
+    <meta property="og:locale" content="en_US">
+
+    <!-- Twitter / X -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:site" content="@inferact">
+    <meta name="twitter:creator" content="@inferact">
+    <meta name="twitter:title" content="700 TPS on Kimi K3: A Case for TPU Megakernels">
+    <meta name="twitter:description" content="How our Kimi K3 megakernel on TPU v7 reaches over 700 tokens/s with speculative decoding and nearly 2&times; GB200&#39;s batch-one decode throughput.">
+    <meta name="twitter:image" content="https://inferact.ai/blog/tpu-megakernels/og-image.png">
+    <meta name="twitter:image:alt" content="TPU Megakernel: 709 tokens per second on Kimi K3, 16x TPU v7 vs 452 on 16x GB200 (1.6x)">
+    <style>
+        /* ---- Brand tokens — see INFERACT-CLAUDE.md ---- */
+        :root {
+            --ink: #323842;         /* Deep Charcoal */
+            --paper: #FAFAFD;       /* White */
+            --cornflower: #3B9EFF;  /* Cornflower Blue */
+
+            /* Diagram categoricals — the brand palette, unchanged in both modes.
+               Identity is never colour-alone: every chip also carries a lane,
+               a text label, and an outline or dash treatment. */
+            --dma:     #3B9EFF;     /* Cornflower Blue — HBM / local DMA */
+            --ici:     #70C1FF;     /* Clear Sky — remote DMA / collective */
+            --vmem:    #C4B5FD;     /* Soft Lavender — VMEM residency */
+            --vec:     #F0EE82;     /* Lemon Cream — vector / permute */
+            --compute: #323842;     /* Deep Charcoal — MXU */
+            --wait:    rgba(50, 56, 66, 0.16);
+            --baseline: #D7D8D7;    /* --wait flattened onto the page: GB200 series */
+            --rule:    rgba(50, 56, 66, 0.15);
+            --muted:   #666;
+            --field:   #E2F1FB;
+
+            --font-display: "STK Bureau Serif", "Source Serif 4", Optima, Georgia, serif;
+            --font-body: "STK Bureau Sans", "Geist", Optima, Candara, sans-serif;
+            --font-label: "STK Bureau Sans Semi-Mono", "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+
+        body.dark {
+            /* Accent fills stay the brand hexes in dark mode; only the
+               neutrals and page surfaces change. */
+            --wait:    rgba(226, 241, 251, 0.16);
+            --baseline: #3A3C3E;
+            --rule:    rgba(226, 241, 251, 0.15);
+            --muted:   #999;
+            --field:   rgba(226, 241, 251, 0.07);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html {
+            overflow-y: scroll;
+        }
+
+        body {
+            font-family: var(--font-body);
+            background: #f7f6f3;
+            color: #111;
+            font-size: 1.125rem;
+            line-height: 1.5;
+            padding: 3rem 1.5rem;
+            max-width: 900px;
+            margin: 0 auto;
+            position: relative;
+            transition: background 0.3s, color 0.3s;
+        }
+
+        body.dark {
+            background: #1a1a1a;
+            color: #e5e5e5;
+        }
+
+        body.dark .theme-toggle { color: #fff; }
+
+        a { color: inherit; }
+        body.dark a { color: #e5e5e5; }
+
+        .theme-toggle {
+            position: fixed;
+            top: 1.5rem;
+            right: 1.5rem;
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 1.5rem;
+            opacity: 0.6;
+            transition: opacity 0.2s;
+            -webkit-tap-highlight-color: transparent;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+            outline: none;
+            color: inherit;
+        }
+
+        .theme-toggle:hover,
+        .theme-toggle:focus,
+        .theme-toggle:active {
+            opacity: 1;
+            outline: none;
+            background: none;
+            color: inherit;
+        }
+
+        header { margin-bottom: 1.5rem; }
+
+        .logo {
+            height: auto;
+            width: 100%;
+            max-width: 150px;
+            display: block;
+            margin-left: -3px;
+        }
+
+        .back-link {
+            display: inline-block;
+            font-size: 0.9rem;
+            margin-bottom: 2rem;
+            text-decoration: none;
+            opacity: 0.7;
+            transition: opacity 0.2s;
+        }
+
+        .back-link:hover { opacity: 1; text-decoration: underline; }
+
+        .article-label {
+            font-family: var(--font-label);
+            font-size: 0.75rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--muted);
+            margin-bottom: 0.75rem;
+        }
+
+        h1 {
+            font-family: var(--font-display);
+            font-size: 2rem;
+            line-height: 1.2;
+            font-weight: 600;
+            margin-bottom: 0.75rem;
+        }
+
+        .subtitle {
+            font-size: 1.125rem;
+            line-height: 1.45;
+            color: var(--muted);
+            margin-bottom: 1.75rem;
+            padding-bottom: 1.75rem;
+            border-bottom: 1px solid var(--rule);
+        }
+
+        h2 {
+            font-family: var(--font-display);
+            font-size: 1.375rem;
+            font-weight: 600;
+            margin-top: 2.75rem;
+            margin-bottom: 0.75rem;
+            padding-top: 0.75rem;
+            border-top: 1px solid var(--rule);
+        }
+
+        h3 {
+            font-family: var(--font-label);
+            font-size: 0.8125rem;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            font-weight: 500;
+            margin-top: 1.75rem;
+            margin-bottom: 0.5rem;
+        }
+
+        p { margin-bottom: 0.75rem; }
+        strong { font-weight: 600; }
+
+        ul { margin: 0 0 0.75rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+
+        /* ---- Figures & diagrams ---- */
+        figure { margin: 1.75rem 0; }
+
+        .fig-frame {
+            overflow-x: auto;
+        }
+
+        figure svg {
+            display: block;
+            width: 100%;
+            height: auto;
+            min-width: 560px;
+        }
+
+        figcaption {
+            font-family: var(--font-label);
+            font-size: 0.75rem;
+            line-height: 1.55;
+            color: var(--muted);
+            margin-top: 0.625rem;
+        }
+
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem 1.25rem;
+            list-style: none;
+            margin: 0.75rem 0 0;
+            font-family: var(--font-label);
+            font-size: 0.6875rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+
+        .legend li {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            margin: 0;
+        }
+
+        .legend .sw {
+            width: 14px;
+            height: 14px;
+            flex: none;
+            border: 1px solid var(--ink);
+        }
+
+        body.dark .legend .sw { border-color: rgba(226, 241, 251, 0.5); }
+
+        /* svg text */
+        .svg-label { font-family: var(--font-label); font-size: 11px; fill: var(--ink); }
+        .svg-label-sm { font-family: var(--font-label); font-size: 9.5px; fill: var(--muted); }
+        body.dark .svg-label { fill: #e5e5e5; }
+        body.dark .svg-label-sm { fill: #999; }
+        /* Deep Charcoal reads on every accent; paper reads on Deep Charcoal. */
+        .svg-on-accent, body.dark .svg-on-accent { fill: var(--ink); }
+        .svg-on-compute, body.dark .svg-on-compute { fill: var(--paper); }
+        .svg-rule { stroke: var(--rule); stroke-width: 1; }
+        .svg-box { stroke: var(--ink); stroke-width: 1.25; }
+        body.dark .svg-box { stroke: rgba(226, 241, 251, 0.6); }
+        body.dark .svg-compute-fill { stroke: rgba(226, 241, 251, 0.45); stroke-width: 1; }
+        .svg-arrow { stroke: var(--ink); stroke-width: 1.25; fill: none; }
+        body.dark .svg-arrow { stroke: rgba(226, 241, 251, 0.7); }
+
+        /* ---- Tables ---- */
+        .spec-table-wrap {
+            margin: 1.5rem 0 1rem;
+            overflow-x: auto;
+            border-top: 3px solid var(--cornflower);
+        }
+
+        .spec-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-family: var(--font-label);
+            font-size: 0.8125rem;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .spec-table th,
+        .spec-table td {
+            text-align: left;
+            vertical-align: top;
+            padding: 0.625rem 0.875rem;
+            white-space: nowrap;
+            border-bottom: 1px solid var(--rule);
+        }
+
+        .spec-table thead th {
+            background: var(--ink);
+            color: var(--paper);
+            font-weight: 500;
+            font-size: 0.6875rem;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            border-bottom: none;
+        }
+
+        .spec-table tbody th { font-weight: 400; }
+        .spec-table tbody tr:nth-child(even) { background: var(--field); }
+
+        .table-note {
+            font-family: var(--font-label);
+            font-size: 0.75rem;
+            line-height: 1.55;
+            color: var(--muted);
+            margin-bottom: 0.75rem;
+        }
+
+        /* ---- Byline ---- */
+        .byline {
+            font-family: var(--font-label);
+            font-size: 0.75rem;
+            letter-spacing: 0.04em;
+        }
+
+        .byline-label {
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin-right: 0.75rem;
+        }
+
+        footer {
+            margin-top: 3rem;
+            padding-top: 1.5rem;
+            border-top: 1px solid var(--rule);
+            color: var(--muted);
+            font-size: 0.9rem;
+        }
+
+        @media (max-width: 640px) {
+            h1 { font-size: 1.625rem; }
+            h2 { font-size: 1.1875rem; }
+        }
+    </style>
+</head>
+<body>
+    <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle dark mode">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+            <circle cx="12" cy="12" r="5"/>
+            <line x1="12" y1="1" x2="12" y2="4" stroke="currentColor" stroke-width="2"/>
+            <line x1="12" y1="20" x2="12" y2="23" stroke="currentColor" stroke-width="2"/>
+            <line x1="4.22" y1="4.22" x2="6.34" y2="6.34" stroke="currentColor" stroke-width="2"/>
+            <line x1="17.66" y1="17.66" x2="19.78" y2="19.78" stroke="currentColor" stroke-width="2"/>
+            <line x1="1" y1="12" x2="4" y2="12" stroke="currentColor" stroke-width="2"/>
+            <line x1="20" y1="12" x2="23" y2="12" stroke="currentColor" stroke-width="2"/>
+            <line x1="4.22" y1="19.78" x2="6.34" y2="17.66" stroke="currentColor" stroke-width="2"/>
+            <line x1="17.66" y1="6.34" x2="19.78" y2="4.22" stroke="currentColor" stroke-width="2"/>
+        </svg>
+    </button>
+
+    <header>
+        <a href="/"><img src="/logo_and_text.svg" alt="Inferact" class="logo" id="logo"></a>
+    </header>
+
+    <a href="/" class="back-link">&larr; Back</a>
+
+    <article>
+        <div class="article-label">Engineering &middot; September 23, 2026</div>
+
+        <h1>700 TPS on Kimi K3: A Case for TPU Megakernels</h1>
+
+        <p class="byline"><span class="byline-label">Written by</span>George&nbsp;Novack, Xuting&nbsp;Liu, Jeff&nbsp;Ma, and Woosuk&nbsp;Kwon</p>
+
+        <p class="subtitle"></p>
+
+        <p>Today we released <a href="https://github.com/Inferact/tpu-megakernels" target="_blank">inferact/tpu-megakernels</a>, a collection of megakernels for TPU v7. Our Kimi K3 implementation delivers over 700 tokens/s with speculative decoding, compared with 452 tokens/s on GB200. Without speculative decoding, our megakernels for K3 and Qwen 3.8 27B deliver roughly 1.4 to 2&times; the decode throughput of the GB200 baseline at batch sizes 1 through 8.</p>
+
+        <figure>
+            <div class="fig-frame">
+                <svg viewBox="0 0 720 272" role="img" aria-label="Two panels of speculative decode throughput at an acceptance length of 6, one per model, each with its own scale. On Kimi K3, served on 16 chips each, the TPU megakernel reaches 709 accepted tokens per second against the GB200 baseline's 452, 1.57 times faster. On Qwen 3.8 27B, served on 4 chips each, it reaches 1,515 against 695, 2.18 times faster.">
+                    <!-- panel headers -->
+                    <text x="70" y="22" class="svg-label">Kimi K3</text>
+                    <text x="340" y="22" class="svg-label-sm" text-anchor="end">tokens / second</text>
+                    <text x="430" y="22" class="svg-label">Qwen 3.8 27B</text>
+                    <text x="700" y="22" class="svg-label-sm" text-anchor="end">tokens / second</text>
+
+                    <!-- hard cut between the two fields -->
+                    <line x1="385" y1="10" x2="385" y2="266" class="svg-rule"/>
+
+                    <!-- LEFT PANEL — Kimi K3, 0-800 -->
+                    <!-- <text x="62" y="44" class="svg-label-sm" text-anchor="end">tok/s</text> -->
+                    <line x1="70" y1="240.0" x2="340" y2="240.0" class="svg-rule"/>
+                    <!-- <text x="62" y="244.0" class="svg-label-sm" text-anchor="end">0</text> -->
+                    <line x1="70" y1="195.6" x2="340" y2="195.6" class="svg-rule" stroke-dasharray="2 4"/>
+                    <!-- <text x="62" y="199.6" class="svg-label-sm" text-anchor="end">200</text> -->
+                    <line x1="70" y1="151.1" x2="340" y2="151.1" class="svg-rule" stroke-dasharray="2 4"/>
+                    <!-- <text x="62" y="155.1" class="svg-label-sm" text-anchor="end">400</text> -->
+                    <line x1="70" y1="106.7" x2="340" y2="106.7" class="svg-rule" stroke-dasharray="2 4"/>
+                    <!-- <text x="62" y="110.7" class="svg-label-sm" text-anchor="end">600</text> -->
+                    <line x1="70" y1="62.2" x2="340" y2="62.2" class="svg-rule" stroke-dasharray="2 4"/>
+                    <!-- <text x="62" y="66.2" class="svg-label-sm" text-anchor="end">800</text> -->
+                    <path d="M 128 85.4 Q 128 82.4 131 82.4 H 199 Q 202 82.4 202 85.4 V 240 H 128 Z" fill="var(--dma)"/>
+                    <text x="165" y="76.4" class="svg-label-sm" text-anchor="middle">709</text>
+                    <text x="165" y="258" class="svg-label-sm" text-anchor="middle">16&times; TPU v7</text>
+                    <path d="M 208 142.5 Q 208 139.5 211 139.5 H 279 Q 282 139.5 282 142.5 V 240 H 208 Z" fill="var(--baseline)"/>
+                    <text x="245" y="133.5" class="svg-label-sm" text-anchor="middle">452</text>
+                    <text x="245" y="258" class="svg-label-sm" text-anchor="middle">16&times; GB200</text>
+
+                    <!-- RIGHT PANEL — Qwen 3.8 27B, 0-1600 -->
+                    <!-- <text x="422" y="44" class="svg-label-sm" text-anchor="end">tok/s</text> -->
+                    <line x1="430" y1="240.0" x2="700" y2="240.0" class="svg-rule"/>
+                    <!-- <text x="422" y="244.0" class="svg-label-sm" text-anchor="end">0</text> -->
+                    <line x1="430" y1="195.6" x2="700" y2="195.6" class="svg-rule" stroke-dasharray="2 4"/>
+                    <!-- <text x="422" y="199.6" class="svg-label-sm" text-anchor="end">400</text> -->
+                    <line x1="430" y1="151.1" x2="700" y2="151.1" class="svg-rule" stroke-dasharray="2 4"/>
+                    <!-- <text x="422" y="155.1" class="svg-label-sm" text-anchor="end">800</text> -->
+                    <line x1="430" y1="106.7" x2="700" y2="106.7" class="svg-rule" stroke-dasharray="2 4"/>
+                    <!-- <text x="422" y="110.7" class="svg-label-sm" text-anchor="end">1,200</text> -->
+                    <line x1="430" y1="62.2" x2="700" y2="62.2" class="svg-rule" stroke-dasharray="2 4"/>
+                    <!-- <text x="422" y="66.2" class="svg-label-sm" text-anchor="end">1,600</text> -->
+                    <path d="M 488 74.6 Q 488 71.6 491 71.6 H 559 Q 562 71.6 562 74.6 V 240 H 488 Z" fill="var(--dma)"/>
+                    <text x="525" y="65.6" class="svg-label-sm" text-anchor="middle">1,515</text>
+                    <text x="525" y="258" class="svg-label-sm" text-anchor="middle">4&times; TPU v7</text>
+                    <path d="M 568 165.8 Q 568 162.8 571 162.8 H 639 Q 642 162.8 642 165.8 V 240 H 568 Z" fill="var(--baseline)"/>
+                    <text x="605" y="156.8" class="svg-label-sm" text-anchor="middle">695</text>
+                    <text x="605" y="258" class="svg-label-sm" text-anchor="middle">4&times; GB200</text>
+                </svg>
+            </div>
+            <ul class="legend">
+                <li><span class="sw" style="background:var(--dma)"></span>TPU megakernel</li>
+                <li><span class="sw" style="background:var(--baseline)"></span>vLLM baseline</li>
+            </ul>
+            <figcaption>Output tokens per second with speculative decoding at an acceptance length of 6.</figcaption>
+        </figure>
+
+        <p>Decode speed is bound by the hardware's peak memory bandwidth. Our megakernels push end-to-end performance closer to this theoretical peak through effective use of TPU's large on-chip VMEM, sequential programming model, and explicit asynchronous pipelines to prefetch weights across layer boundaries. This post explains our design and why megakernels and TPUs are a good fit.</p>
+
+        <h2>Background &mdash; TPUs vs. GPUs</h2>
+
+        <p>Considering only the top-level specs, Google's TPU v7 Ironwood chip is comparable to NVIDIA's GB200 GPU.</p>
+
+        <div class="spec-table-wrap">
+            <table class="spec-table">
+                <thead>
+                    <tr>
+                        <th scope="col">Spec</th>
+                        <th scope="col">Google TPU v7</th>
+                        <th scope="col">NVIDIA GB200 (per GPU)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><th scope="row">Peak BF16 Compute</th><td>2.31 PFLOPS</td><td>2.5 PFLOPS</td></tr>
+                    <tr><th scope="row">Peak FP8 Compute</th><td>4.61 PFLOPS</td><td>5 PFLOPS</td></tr>
+                    <tr><th scope="row">HBM capacity</th><td>206 GB</td><td>186 GB</td></tr>
+                    <tr><th scope="row">HBM bandwidth</th><td>7,380 GB/s</td><td>8,000 GB/s</td></tr>
+                    <tr><th scope="row">Interconnect</th><td>1,200 GB/s (ICI)</td><td>1,800 GB/s (NVLink 5)</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <p class="table-note">Sources: <a href="https://docs.cloud.google.com/tpu/docs/tpu7x" target="_blank">Google Cloud TPU7x docs</a>, <a href="https://www.nvidia.com/en-us/data-center/gb200-nvl72/" target="_blank">NVIDIA GB200 NVL72</a>.</p>
+
+        <p>This apples-to-apples comparison glosses over one of the TPU's most interesting features: the shape and size of its on-chip memory. Decode speed depends mostly on moving data efficiently from HBM to fast on-chip memory, which makes those dimensions a key design consideration.</p>
+        
+        <p>Compared to a GPU's multi-level memory hierarchy of hardware-managed L1/L2 caches and program-managed Shared Memory and Tensor Memory spaces, a TPU's memory hierarchy is simple. Data from HBM is transferred to a large pool of on-chip SRAM called Vector Memory (VMEM); the TPU's vector registers (VREGs) are populated directly from VMEM. Importantly, the lifespan of all data in VMEM is managed entirely by our TPU program: when we move some data to VMEM, it stays there until we explicitly overwrite it with something else.</p>
+
+        <figure>
+            <div class="fig-frame">
+                <svg viewBox="0 0 720 300" role="img" aria-label="Side-by-side memory hierarchies. On one NVIDIA GB200 GPU, HBM feeds a hardware-managed L2, which feeds 152 SMs, each holding up to 228 KB of shared memory and 256 KB of tensor memory, which feed the tensor and CUDA cores. On TPU v7, HBM feeds VMEM directly by program-issued DMA with no hardware-managed cache in the path, and VMEM is a single 64 MiB software-managed pool per TensorCore feeding the MXU, VPU and XLU.">
+                    <line x1="360" y1="6" x2="360" y2="292" class="svg-rule"/>
+                    <text x="8" y="18" class="svg-label">NVIDIA GB200 (per GPU)</text>
+                    <text x="376" y="18" class="svg-label">TPU v7</text>
+
+                    <!-- HBM row -->
+                    <rect x="8" y="28" width="336" height="32" class="svg-box" fill="none"/>
+                    <text x="176" y="49" class="svg-label" text-anchor="middle">HBM &mdash; 186 GB</text>
+                    <rect x="376" y="28" width="336" height="32" class="svg-box" fill="none"/>
+                    <text x="544" y="49" class="svg-label" text-anchor="middle">HBM &mdash; 206 GB</text>
+
+                    <line x1="176" y1="60" x2="176" y2="66" class="svg-arrow"/>
+                    <path d="M 176 74 l -5 -8 l 10 0 z" fill="var(--ink)"/>
+                    <line x1="544" y1="60" x2="544" y2="110" class="svg-arrow" stroke="var(--dma)" stroke-width="2"/>
+                    <path d="M 544 118 l -5 -8 l 10 0 z" fill="var(--dma)"/>
+                    <text x="558" y="93" class="svg-label-sm">program-issued DMA</text>
+
+                    <!-- cache row -->
+                    <rect x="8" y="76" width="336" height="28" class="svg-box" fill="none" stroke-dasharray="4 3"/>
+                    <text x="176" y="94" class="svg-label-sm" text-anchor="middle">L2 cache &mdash; hardware managed</text>
+
+                    <line x1="176" y1="104" x2="176" y2="110" class="svg-arrow"/>
+                    <path d="M 176 118 l -5 -8 l 10 0 z" fill="var(--ink)"/>
+
+                    <!-- on-chip working memory row -->
+                    <rect x="8" y="120" width="336" height="92" class="svg-box" fill="none"/>
+                    <text x="20" y="136" class="svg-label-sm">SM &mdash; &times;152</text>
+                    <rect x="16" y="144" width="150" height="26" class="svg-box" fill="none"/>
+                    <text x="91" y="155" class="svg-label-sm" text-anchor="middle">shared mem</text>
+                    <text x="91" y="166" class="svg-label-sm" text-anchor="middle">228 KB</text>
+                    <rect x="178" y="144" width="150" height="26" class="svg-box" fill="none"/>
+                    <text x="253" y="155" class="svg-label-sm" text-anchor="middle">tensor mem</text>
+                    <text x="253" y="166" class="svg-label-sm" text-anchor="middle">256 KB</text>
+                    <text x="176" y="190" class="svg-label-sm" text-anchor="middle">a block addresses only its own SM's</text>
+                    <text x="176" y="202" class="svg-label-sm" text-anchor="middle">shared memory</text>
+
+                    <rect x="376" y="120" width="336" height="92" fill="var(--vmem)" stroke="var(--ink)" stroke-width="1.25"/>
+                    <text x="544" y="148" class="svg-label svg-on-accent" text-anchor="middle">VMEM &mdash; 64 MiB per TensorCore</text>
+                    <text x="544" y="168" class="svg-label-sm svg-on-accent" text-anchor="middle">one pool, software managed</text>
+                    <text x="544" y="190" class="svg-label-sm svg-on-accent" text-anchor="middle">the program decides what lives here,</text>
+                    <text x="544" y="202" class="svg-label-sm svg-on-accent" text-anchor="middle">and for how long</text>
+
+                    <line x1="176" y1="212" x2="176" y2="218" class="svg-arrow"/>
+                    <path d="M 176 226 l -5 -8 l 10 0 z" fill="var(--ink)"/>
+                    <line x1="544" y1="212" x2="544" y2="218" class="svg-arrow"/>
+                    <path d="M 544 226 l -5 -8 l 10 0 z" fill="var(--ink)"/>
+
+                    <!-- compute row -->
+                    <rect x="8" y="228" width="336" height="30" fill="var(--compute)" class="svg-compute-fill"/>
+                    <text x="176" y="247" class="svg-label-sm svg-on-compute" text-anchor="middle">tensor cores / CUDA cores</text>
+                    <rect x="376" y="228" width="336" height="30" fill="var(--compute)" class="svg-compute-fill"/>
+                    <text x="544" y="247" class="svg-label-sm svg-on-compute" text-anchor="middle">MXU / VPU / XLU</text>
+
+                    <text x="176" y="278" class="svg-label-sm" text-anchor="middle">~111 MiB of SRAM, split 152 ways</text>
+                    <text x="544" y="278" class="svg-label-sm" text-anchor="middle">128 MiB per chip, addressed as two pools</text>
+                </svg>
+            </div>
+        </figure>
+
+        <p>With 64 MiB of VMEM per TensorCore, we can prefetch most model weight tensors, ensuring they are staged in fast on-chip SRAM by the time any operation needs to use them. The GPU's Tensor Memory (TMEM) is organized differently. An entire GPU holds ~38 MiB of it, but that capacity is divided among all 152 SMs, and 256 KB per SM leaves little room to stage weights ahead of time.</p>
+
+
+        <h2>Why megakernels?</h2>
+
+        <p>Most kernels have the same rough outline: load weights and activations from HBM, perform some computation, then store the result back. Only the load phase pulls a large amount of data from HBM, leaving bandwidth underutilized during the other phases. Well-designed kernels mitigate these bandwidth bubbles by subdividing and overlapping each phase, but only to a degree. A single decode step might dispatch hundreds of kernels like this, one after another, and these bubbles add up.</p>
+
+        <figure>
+            <div class="fig-frame">
+                <svg viewBox="0 0 720 200" role="img" aria-label="Timeline of one software-pipelined kernel over three tiles. The load track is idle during setup, runs Load n, Load n+1 and Load n+2 back to back, then goes idle again once the last tile has been fetched. Compute runs one tile behind the loads and stalls at the start waiting for Load n. Stores trail the compute and continue through the drain.">
+                    <!-- edge guides -->
+                    <line x1="168" y1="12" x2="168" y2="116" class="svg-rule" stroke-dasharray="3 3"/>
+                    <line x1="522" y1="12" x2="522" y2="116" class="svg-rule" stroke-dasharray="3 3"/>
+
+                    <!-- LOAD lane, with its own idle bubbles at both edges -->
+                    <text x="0" y="34" class="svg-label-sm">LOAD</text>
+                    <rect x="128" y="20" width="40" height="24" fill="var(--wait)" stroke="var(--ink)" stroke-width="1" stroke-dasharray="3 3"/>
+                    <rect x="168" y="20" width="118" height="24" fill="var(--dma)"/><text x="227" y="37" class="svg-label-sm svg-on-accent" text-anchor="middle">Load n</text>
+                    <rect x="286" y="20" width="118" height="24" fill="var(--dma)"/><text x="345" y="37" class="svg-label-sm svg-on-accent" text-anchor="middle">Load n+1</text>
+                    <rect x="404" y="20" width="118" height="24" fill="var(--dma)"/><text x="463" y="37" class="svg-label-sm svg-on-accent" text-anchor="middle">Load n+2</text>
+                    <rect x="522" y="20" width="184" height="24" fill="var(--wait)" stroke="var(--ink)" stroke-width="1" stroke-dasharray="3 3"/><text x="614" y="37" class="svg-label-sm" text-anchor="middle">no loads in flight</text>
+
+                    <!-- COMPUTE lane -->
+                    <text x="0" y="66" class="svg-label-sm">COMPUTE</text>
+                    <rect x="128" y="52" width="40" height="24" fill="var(--compute)" class="svg-compute-fill"/><text x="148" y="69" class="svg-label-sm svg-on-compute" text-anchor="middle">setup</text>
+                    <rect x="168" y="52" width="118" height="24" fill="var(--wait)" stroke="var(--ink)" stroke-width="1" stroke-dasharray="3 3"/><text x="227" y="69" class="svg-label-sm" text-anchor="middle">wait for Load n</text>
+                    <rect x="286" y="52" width="118" height="24" fill="var(--compute)" class="svg-compute-fill"/><text x="345" y="69" class="svg-label-sm svg-on-compute" text-anchor="middle">Compute n</text>
+                    <rect x="404" y="52" width="118" height="24" fill="var(--compute)" class="svg-compute-fill"/><text x="463" y="69" class="svg-label-sm svg-on-compute" text-anchor="middle">Compute n+1</text>
+                    <rect x="522" y="52" width="118" height="24" fill="var(--compute)" class="svg-compute-fill"/><text x="581" y="69" class="svg-label-sm svg-on-compute" text-anchor="middle">Compute n+2</text>
+
+                    <!-- STORE lane -->
+                    <text x="0" y="98" class="svg-label-sm">STORE</text>
+                    <rect x="404" y="84" width="66" height="24" fill="var(--dma)"/><text x="437" y="101" class="svg-label-sm svg-on-accent" text-anchor="middle">Store n</text>
+                    <rect x="522" y="84" width="66" height="24" fill="var(--dma)"/><text x="555" y="101" class="svg-label-sm svg-on-accent" text-anchor="middle">Store n+1</text>
+                    <rect x="640" y="84" width="66" height="24" fill="var(--dma)"/><text x="673" y="101" class="svg-label-sm svg-on-accent" text-anchor="middle">Store n+2</text>
+
+                    <!-- edge annotations -->
+                    <path d="M 128 118 L 128 126 L 168 126 L 168 118" class="svg-arrow"/>
+                    <text x="128" y="142" class="svg-label-sm">ramp: no loads</text>
+                    <text x="128" y="154" class="svg-label-sm">issued yet</text>
+
+                    <path d="M 522 118 L 522 126 L 706 126 L 706 118" class="svg-arrow"/>
+                    <text x="706" y="142" class="svg-label-sm" text-anchor="end">drain: last load issued,</text>
+                    <text x="706" y="154" class="svg-label-sm" text-anchor="end">compute and stores finish</text>
+
+                    <text x="345" y="142" class="svg-label-sm" text-anchor="middle">steady state &mdash; Load n+1</text>
+                    <text x="345" y="154" class="svg-label-sm" text-anchor="middle">overlaps Compute n</text>
+
+                    <line x1="128" y1="172" x2="706" y2="172" class="svg-rule"/>
+                    <text x="128" y="190" class="svg-label-sm">Time &rarr; (not to scale)</text>
+                </svg>
+            </div>
+            <ul class="legend">
+                <li><span class="sw" style="background:var(--dma)"></span>HBM traffic</li>
+                <li><span class="sw" style="background:var(--compute)"></span>Compute</li>
+                <li><span class="sw" style="background:var(--wait);border-style:dashed"></span>Idle (bubble)</li>
+            </ul>
+        </figure>
+
+        <p>GPUs already provide ways to address this. CUDA Graphs reduce host launch overhead, streams allow independent branches to execute concurrently, and programmatic dependent launch (PDL) lets a dependent kernel begin preparation and weight loading before its producer finishes. These mechanisms recover some overlap while retaining separate kernels.</p>
+
+        <p>A megakernel removes the boundary. With the whole decoder step inside one program, a weight load is no longer tied to the kernel that uses it — it can be issued as early as on-chip storage allows. The binding constraints become buffer lifetimes and capacity. On TPU v7, large VMEM and explicit asynchronous transfers let us stage the next layer's weights while the current layer is still computing or communicating. The goal is to keep the HBM interface busy throughout a decode step whose cost is dominated by moving weights.</p>
+
+        <p>Existing TPU implementations rely on XLA to perform fusion and scheduling, but finding an optimal cross-layer pipeline requires joint decisions about storage reuse, transfer timing, and synchronization. Automatic optimization may not discover the schedule we want. Pallas lets us express those decisions directly while leaving instruction scheduling to the compiler.</p>
+
+        <h2>Writing TPU megakernels with Pallas</h2>
+
+        <p><a href="https://docs.jax.dev/en/latest/pallas/tpu/details.html" target="_blank">Pallas</a> is the kernel language for TPUs. To our knowledge this is the first open-source inference megakernel written in Pallas, and we found the language surprisingly well suited to it. Below are the Pallas features that mattered most in this work.</p>
+
+        <h3>Grid-less kernel launch</h3>
+
+        <p>The Pallas language can be used to write kernels for both TPU and GPU. As such, it is possible to write Pallas kernels in a way that will feel familiar to any GPU kernel engineer: we can launch our kernels as a grid of programs, with each program receiving and operating on a specific tile of the input.</p>
+
+        <p>TPUs, though, follow an inherently single-threaded execution model. Even if we launch our kernel as a grid, each individual program is still run sequentially, one at a time. While the grid-based programming model has its advantages, we found that for megakernel development, embracing TPU's single-threaded nature is the way to go for both readability and fine-grained control. Our megakernel is launched as a single program with no explicit grid.</p>
+
+        <h3>Scoped VMEM allocations</h3>
+
+        <p>Our megakernel must balance aggressive prefetching of model weights against the limited pool of 64 MiB VMEM per TensorCore. Some data, like activations, remain resident in VMEM throughout the entire forward pass, while others, like the KV cache used in MLA, have a very short lifetime. The Pallas <code>run_scoped</code> primitive enables fine-grained control over the lifetime of specific VMEM allocations. This simplifies the task of the programmer: rather than explicitly managing which byte ranges in VMEM are safe to read and write at any point in time, we can write self-contained "mini-kernels" that define exactly the shape and size of the VMEM they need.</p>
+
+        <h3>Asynchronous DMAs</h3>
+
+        <p>Asynchronous DMAs between HBM and VMEM are what make the megakernel possible. Our implementation makes heavy use of <code>make_async_copy(...).start()</code> and <code>make_async_copy(...).wait()</code> to specify when weight prefetching should be initiated and when to pause execution until it completes. Managing asynchronous dependencies between operations is <a href="https://docs.jax.dev/en/latest/pallas/design/async_note.html#why-doesnt-this-work" target="_blank">notoriously awkward in JAX</a>: XLA schedules chains of operations as a unit and reserves the right to reorder them or reclaim their buffers. Inside a single kernel the problem does not arise: a copy we start and wait on never crosses a boundary XLA is free to schedule across.</p>
+
+        <h2>Our Kimi K3 megakernel</h2>
+
+        <p>The Kimi K3 megakernel combines K3's 92 Mixture-of-Experts (MoE) layers into a single Pallas call, conditionally choosing between Kimi Delta Attention (KDA) and Multi-head Latent Attention (MLA) operations based on the layer index. Inside the kernel, every weight tensor is staged into VMEM by a transfer issued during an earlier phase so that it is, ideally, already resident when its consumer runs. Because the layer loop lives inside the kernel, asynchronous copies can reach across layer boundaries. For example, layer N+1's attention projection weights start moving while layer N is still in its MoE phase. A simplified view of the cross-layer prefetching strategy is shown below.</p>
+
+        <figure>
+            <div class="fig-frame">
+                <svg viewBox="0 0 720 215" role="img" aria-label="Timeline spanning the tail of layer N minus 1, all of layer N, and the head of layer N plus 1. Layer N computes attention, router, a short shared expert phase, a longer routed experts phase, and communications. Beneath it, HBM to VMEM transfers overlap that compute: layer N's attention projections arrive during the tail of layer N minus 1, the shared expert weights land before the shared expert phase, the larger routed expert weights stream from the moment the router finishes and continue through the routed experts phase, and layer N plus 1's attention projections are issued during routed experts and communications so they are resident when layer N plus 1 begins.">
+                    <text x="100" y="52" class="svg-label-sm" text-anchor="end">COMPUTE</text>
+                    <text x="100" y="66" class="svg-label-sm" text-anchor="end">layer N</text>
+
+                    <rect x="108" y="34" width="88" height="28" class="svg-box" fill="none" stroke-dasharray="4 3"/>
+                    <text x="152" y="52" class="svg-label-sm" text-anchor="middle">communications</text>
+                    <rect x="196" y="34" width="92" height="28" fill="var(--compute)" class="svg-compute-fill"/>
+                    <text x="242" y="52" class="svg-label-sm svg-on-compute" text-anchor="middle">attention</text>
+                    <rect x="288" y="34" width="46" height="28" fill="var(--vec)"/>
+                    <text x="311" y="52" class="svg-label-sm svg-on-accent" text-anchor="middle">router</text>
+                    <rect x="334" y="34" width="82" height="28" fill="var(--compute)" class="svg-compute-fill"/>
+                    <text x="375" y="52" class="svg-label-sm svg-on-compute" text-anchor="middle">shared expert</text>
+                    <rect x="416" y="34" width="132" height="28" fill="var(--compute)" class="svg-compute-fill"/>
+                    <text x="482" y="52" class="svg-label-sm svg-on-compute" text-anchor="middle">routed experts</text>
+                    <rect x="548" y="34" width="88" height="28" fill="var(--ici)"/>
+                    <text x="592" y="52" class="svg-label-sm svg-on-accent" text-anchor="middle">communications</text>
+                    <rect x="636" y="34" width="76" height="28" class="svg-box" fill="none" stroke-dasharray="4 3"/>
+                    <text x="674" y="52" class="svg-label-sm" text-anchor="middle">attention</text>
+
+                    <line x1="196" y1="24" x2="196" y2="172" class="svg-rule" stroke-dasharray="3 3"/>
+                    <line x1="636" y1="24" x2="636" y2="172" class="svg-rule" stroke-dasharray="3 3"/>
+                    <text x="192" y="20" class="svg-label-sm" text-anchor="end">layer N&minus;1</text>
+                    <text x="640" y="20" class="svg-label-sm">layer N+1</text>
+
+                    <text x="100" y="124" class="svg-label-sm" text-anchor="end">HBM &rarr; VMEM</text>
+                    <rect x="108" y="78" width="80" height="24" fill="var(--dma)"/>
+                    <text x="148" y="94" class="svg-label-sm svg-on-accent" text-anchor="middle">layer N attn</text>
+                    <rect x="226" y="78" width="102" height="24" fill="var(--dma)"/>
+                    <text x="277" y="94" class="svg-label-sm svg-on-accent" text-anchor="middle">shared experts</text>
+                    <rect x="334" y="108" width="210" height="24" fill="var(--dma)"/>
+                    <text x="439" y="124" class="svg-label-sm svg-on-accent" text-anchor="middle">routed experts</text>
+                    <rect x="424" y="138" width="200" height="24" fill="var(--dma)"/>
+                    <text x="524" y="154" class="svg-label-sm svg-on-accent" text-anchor="middle">layer N+1 attention</text>
+
+                    <path d="M 424 168 L 424 176 L 624 176 L 624 168" class="svg-arrow"/>
+                    <text x="524" y="192" class="svg-label-sm" text-anchor="middle">issued during layer N, resident before layer N+1 needs it</text>
+
+                    <text x="0" y="208" class="svg-label-sm">Time &rarr; (not to scale)</text>
+                </svg>
+            </div>
+            <ul class="legend">
+                <li><span class="sw" style="background:var(--dma)"></span>HBM &rarr; VMEM transfer</li>
+                <li><span class="sw" style="background:var(--compute)"></span>Matrix work</li>
+                <li><span class="sw" style="background:var(--vec)"></span>Vector work</li>
+                <li><span class="sw" style="background:var(--ici)"></span>Collective</li>
+            </ul>
+        </figure>
+
+        <p>The kernel shards the model across 16 TPU v7 chips, a total of 32 TensorCores. Attention heads are split across all 32 ranks, while routed experts use TP4 &times; EP8. The MoE latent-to-hidden projection is sharded within each host (8 TensorCores) and replicated across hosts, trading additional weight reads for cheaper collective communications.</p>
+
+        <p>Tuning megakernels for a specific target request concurrency requires exploring more bespoke means of parallelizing work across chips beyond the familiar tensor, expert, and data parallel strategies. For example, even the seemingly modest increase in decode batch size from 1 to 8 exposed new bottlenecks in operations that primarily perform vector arithmetic on the residual stream (e.g., attention residuals and RMSNorm); to address this, we combine tensor parallelism with residual stream sequence parallelism to split vector arithmetic in addition to matrix multiplication across TPUs.</p>
+
+        <p>One benefit of the megakernel approach that we did not foresee is fast compilation. In hindsight it makes sense: the kernel author pays by hand, and only once, for the ordering and overlap that XLA must otherwise rediscover across every operation on every new compile. On TPU, compiling a large model made up of hundreds or thousands of XLA ops can regularly take 30+ minutes; our entire megakernel, on the other hand, compiles from scratch in less than 90 seconds, enabling much more rapid development and experimentation cycles.</p>
+
+        <h3>DSpark</h3>
+
+        <p>With support for batch size 8, the megakernel can also serve as the verifier when using DSpark speculative decoding. Each kernel launch evaluates 1 anchor and 7 proposed continuations in a single step. Depending on the exact workload, the draft model typically yields between 3 and 6 accepted tokens per step. At ~8.5 ms per decode step, the megakernel can deliver over 700 tokens per second to a single user.</p>
+
+        <figure>
+            <div class="fig-frame">
+                <svg viewBox="0 0 720 260" role="img" aria-label="Horizontal bar chart of accepted output tokens per second with DSpark speculative decoding. At an acceptance length of 3 the TPU megakernel reaches 350 tokens per second against the GB200 baseline's 229, 1.53 times faster. At an acceptance length of 6 it reaches 709 against 452, 1.57 times faster.">
+                    <line x1="170.0" y1="34" x2="170.0" y2="212" class="svg-rule"/>
+                    <text x="170.0" y="228" class="svg-label-sm" text-anchor="middle">0</text>
+                    <line x1="292.5" y1="34" x2="292.5" y2="212" class="svg-rule" stroke-dasharray="2 4"/>
+                    <text x="292.5" y="228" class="svg-label-sm" text-anchor="middle">200</text>
+                    <line x1="415.0" y1="34" x2="415.0" y2="212" class="svg-rule" stroke-dasharray="2 4"/>
+                    <text x="415.0" y="228" class="svg-label-sm" text-anchor="middle">400</text>
+                    <line x1="537.5" y1="34" x2="537.5" y2="212" class="svg-rule" stroke-dasharray="2 4"/>
+                    <text x="537.5" y="228" class="svg-label-sm" text-anchor="middle">600</text>
+                    <line x1="660.0" y1="34" x2="660.0" y2="212" class="svg-rule" stroke-dasharray="2 4"/>
+                    <text x="660.0" y="228" class="svg-label-sm" text-anchor="middle">800</text>
+                    <line x1="170" y1="212" x2="660" y2="212" class="svg-rule"/>
+                    <text x="415" y="248" class="svg-label-sm" text-anchor="middle">accepted output tokens / second</text>
+                    <path d="M 170 40 H 381.4 Q 384.4 40 384.4 43 V 69 Q 384.4 72 381.4 72 H 170 Z" fill="var(--dma)"/>
+                    <text x="392.4" y="61" class="svg-label-sm">350</text>
+                    <path d="M 170 76 H 307.3 Q 310.3 76 310.3 79 V 105 Q 310.3 108 307.3 108 H 170 Z" fill="var(--baseline)"/>
+                    <text x="318.3" y="97" class="svg-label-sm">229</text>
+                    <text x="158" y="68" class="svg-label" text-anchor="end">acceptance length 3</text>
+                    <text x="158" y="84" class="svg-label-sm" text-anchor="end">1.53&times; faster</text>
+                    <path d="M 170 128 H 601.3 Q 604.3 128 604.3 131 V 157 Q 604.3 160 601.3 160 H 170 Z" fill="var(--dma)"/>
+                    <text x="612.3" y="149" class="svg-label-sm">709</text>
+                    <path d="M 170 164 H 443.9 Q 446.9 164 446.9 167 V 193 Q 446.9 196 443.9 196 H 170 Z" fill="var(--baseline)"/>
+                    <text x="454.9" y="185" class="svg-label-sm">452</text>
+                    <text x="158" y="156" class="svg-label" text-anchor="end">acceptance length 6</text>
+                    <text x="158" y="172" class="svg-label-sm" text-anchor="end">1.57&times; faster</text>
+                </svg>
+            </div>
+            <ul class="legend">
+                <li><span class="sw" style="background:var(--dma)"></span>Kimi K3 megakernel &mdash; 16&times; TPU v7</li>
+                <li><span class="sw" style="background:var(--baseline)"></span>vLLM baseline &mdash; 16&times; GB200</li>
+            </ul>
+            <figcaption>Speculative decode throughput by acceptance length using the <a href="https://huggingface.co/RedHatAI/Kimi-K3-speculator.dspark" target="_blank">RedHatAI/Kimi-K3-speculator.dspark</a> speculator.</figcaption>
+        </figure>
+
+        <h2>Results</h2>
+
+        <p>We evaluate the megakernel on 16 TPU v7 Ironwood chips and take vLLM's published Kimi K3 recipe on 16 GB200 GPUs as our baseline. With no speculative decoding, the megakernel leads at every batch size from 1 through 8, delivering nearly twice the throughput at batch size 1.</p>
+
+        <figure>
+            <div class="fig-frame">
+                <svg viewBox="0 0 720 280" role="img" aria-label="Grouped vertical bar chart of aggregate decode throughput in tokens per second at batch sizes 1, 2, 4 and 8. The Kimi K3 TPU megakernel reaches 249, 392, 515 and 865 tokens per second against the GB200 baseline's 127, 227, 373 and 636, an advantage of 1.96, 1.73, 1.38 and 1.36 times respectively. The lead is widest at batch size 1 and narrows as batch size grows.">
+                    <line x1="70" y1="240.0" x2="700" y2="240.0" class="svg-rule"/>
+                    <text x="62" y="244.0" class="svg-label-sm" text-anchor="end">0</text>
+                    <line x1="70" y1="195.6" x2="700" y2="195.6" class="svg-rule" stroke-dasharray="2 4"/>
+                    <text x="62" y="199.6" class="svg-label-sm" text-anchor="end">200</text>
+                    <line x1="70" y1="151.1" x2="700" y2="151.1" class="svg-rule" stroke-dasharray="2 4"/>
+                    <text x="62" y="155.1" class="svg-label-sm" text-anchor="end">400</text>
+                    <line x1="70" y1="106.7" x2="700" y2="106.7" class="svg-rule" stroke-dasharray="2 4"/>
+                    <text x="62" y="110.7" class="svg-label-sm" text-anchor="end">600</text>
+                    <line x1="70" y1="62.2" x2="700" y2="62.2" class="svg-rule" stroke-dasharray="2 4"/>
+                    <text x="62" y="66.2" class="svg-label-sm" text-anchor="end">800</text>
+                    <text x="62" y="30" class="svg-label-sm" text-anchor="end">tok/s</text>
+                    <path d="M 90.5 187.7 Q 90.5 184.7 93.5 184.7 H 137.5 Q 140.5 184.7 140.5 187.7 V 240 H 90.5 Z" fill="var(--dma)"/>
+                    <text x="115.5" y="178.7" class="svg-label-sm" text-anchor="middle">249</text>
+                    <path d="M 144.5 214.9 Q 144.5 211.9 147.5 211.9 H 191.5 Q 194.5 211.9 194.5 214.9 V 240 H 144.5 Z" fill="var(--baseline)"/>
+                    <text x="169.5" y="205.9" class="svg-label-sm" text-anchor="middle">127</text>
+                    <text x="142.5" y="260" class="svg-label" text-anchor="middle">1</text>
+                    <path d="M 235.5 156.0 Q 235.5 153.0 238.5 153.0 H 282.5 Q 285.5 153.0 285.5 156.0 V 240 H 235.5 Z" fill="var(--dma)"/>
+                    <text x="260.5" y="147.0" class="svg-label-sm" text-anchor="middle">392</text>
+                    <path d="M 289.5 192.6 Q 289.5 189.6 292.5 189.6 H 336.5 Q 339.5 189.6 339.5 192.6 V 240 H 289.5 Z" fill="var(--baseline)"/>
+                    <text x="314.5" y="183.6" class="svg-label-sm" text-anchor="middle">227</text>
+                    <text x="287.5" y="260" class="svg-label" text-anchor="middle">2</text>
+                    <path d="M 380.5 128.5 Q 380.5 125.5 383.5 125.5 H 427.5 Q 430.5 125.5 430.5 128.5 V 240 H 380.5 Z" fill="var(--dma)"/>
+                    <text x="405.5" y="119.5" class="svg-label-sm" text-anchor="middle">515</text>
+                    <path d="M 434.5 160.2 Q 434.5 157.2 437.5 157.2 H 481.5 Q 484.5 157.2 484.5 160.2 V 240 H 434.5 Z" fill="var(--baseline)"/>
+                    <text x="459.5" y="151.2" class="svg-label-sm" text-anchor="middle">373</text>
+                    <text x="432.5" y="260" class="svg-label" text-anchor="middle">4</text>
+                    <path d="M 525.5 50.7 Q 525.5 47.7 528.5 47.7 H 572.5 Q 575.5 47.7 575.5 50.7 V 240 H 525.5 Z" fill="var(--dma)"/>
+                    <text x="550.5" y="41.7" class="svg-label-sm" text-anchor="middle">865</text>
+                    <path d="M 579.5 101.7 Q 579.5 98.7 582.5 98.7 H 626.5 Q 629.5 98.7 629.5 101.7 V 240 H 579.5 Z" fill="var(--baseline)"/>
+                    <text x="604.5" y="92.7" class="svg-label-sm" text-anchor="middle">636</text>
+                    <text x="577.5" y="260" class="svg-label" text-anchor="middle">8</text>
+                    <text x="62" y="260" class="svg-label-sm" text-anchor="end">batch size</text>
+                </svg>
+            </div>
+            <ul class="legend">
+                <li><span class="sw" style="background:var(--dma)"></span>Kimi K3 megakernel &mdash; 16&times; TPU v7</li>
+                <li><span class="sw" style="background:var(--baseline)"></span>vLLM baseline &mdash; 16&times; GB200</li>
+            </ul>
+        </figure>
+
+        <p>We validated the accuracy of our implementation end to end by exposing it through a simple API server. With greedy decoding and max reasoning effort, the megakernel scores 0.944 on GPQA-Diamond and 0.972 on GSM8K. Scripts to reproduce these results are included alongside the implementation.</p>
+
+        <h2>Future work</h2>
+
+        <p>This kernel is a first step. The ideas it is built from &mdash; whole-model visibility, explicit VMEM staging, transfers issued layers ahead of the phase that consumes them &mdash; are not specific to Kimi K3, and most of the work ahead is about making them reusable and pushing them further. A few directions we are taking from here:</p>
+
+        <p><strong>More workloads.</strong> This work shows that megakernels can be effective for small-batch decode, but production traffic can take many more shapes. Higher concurrency moves the bottleneck, since vector work and cross-device traffic grow with the batch size, and agentic workloads make KV cache movement and management crucial for performance.</p>
+        
+        <p><strong>More topologies.</strong> Our implementation is tailored to a 2&times;2&times;4 TPU chip topology. Supporting other shapes means writing new collectives, since our communication and parallelization strategies are built around how those 16 chips are wired. On NVIDIA's rack-scale systems every GPU in an NVLink domain is equally close, so the only decision is how many to use; on TPU we choose the topology as well, which adds a dimension to the search.</p>
+
+        <p><strong>Better tooling.</strong> Pallas worked well for writing the kernel. Some bottlenecks, though, only become visible through direct analysis of compiled instruction bundles. Tooling that points at those inefficiencies, for people and for the coding agents that will write more of these kernels, would matter a lot as this work grows.</p>
+
+        <h2>What Inferact does</h2>
+
+        <p>This work comes out of what we do at Inferact. We optimize inference on our customers' infrastructure, which means optimizing against the specific hardware, model, and workload shape in front of us. Kernel work is one example of the inference optimizations we provide in the platform and to our customers, and because the platform builds on open-source vLLM, customers pick these up without having to change how they already serve.</p>
+
+    </article>
+
+    <footer>
+        <p><strong>We're hiring.</strong> For Inferact, we're hiring engineers and researchers to work at the frontier of inference, where models meet hardware at scale. <a href="https://jobs.ashbyhq.com/Inferact" target="_blank">Come build with us.</a></p>
+
+        <p>Follow <a href="https://x.com/inferact" target="_blank">@inferact</a> for updates. <a href="mailto:contact@inferact.ai">Contact us</a>.</p>
+    </footer>
+
+    <script>
+        function toggleTheme() {
+            const body = document.body;
+            const logo = document.getElementById('logo');
+            body.classList.toggle('dark');
+
+            if (body.classList.contains('dark')) {
+                logo.src = '/logo_and_text_white.svg';
+            } else {
+                logo.src = '/logo_and_text.svg';
+            }
+        }
+    </script>
+</body>
+</html>
