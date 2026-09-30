@@ -25,6 +25,7 @@
 | 20 | 2026-09-30 | https://x.com/OpenRelayInc/status/2105046346722058495 | openrelay-x-post | openrelay-x-post | TBD | TBD | 📥 进行中 |
 | 21 | 2026-09-30 | https://mooler0410.github.io/puguJin/blog/llal-change/ | pugujin-llal-change | pugujin-llal-change | TBD | TBD | 📥 进行中 |
 | 22 | 2026-09-30 | https://arxiv.org/html/2609.32577v1 | groupwise-agentic-grading-code-rl | groupwise-agentic-grading-code-rl | TBD | TBD | 📥 进行中 |
+| 23 | 2026-09-30 | https://arxiv.org/html/2607.01523v1 | multi-head-recurrent-memory-agents | multi-head-recurrent-memory-agents | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -166,3 +167,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-09-30 11:33 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #23 - multi-head-recurrent-memory-agents
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-30 15:56 | 📥 开始 | 收到 URL，开始提取内容 |
