@@ -1,0 +1,107 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class；真身在内联style，class仅兜底） */
+.portal-title { font-size:12px; color:#1a6ba0; font-weight:bold; }
+.portal-links { font-size:12px; color:#0F4C81; }
+.portal-links a { color:#0F4C81; text-decoration:none; }
+</style>
+<section style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<section style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">目标</strong>：把GLM-5.2学到的稀疏变成TPU上真实的内存与时间节省<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">路线</strong>：从索引器到分页稀疏decode、稀疏prefill、流式打分、查询块、写回<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">结果</strong>：110k decode从46.2降到17.1毫秒每token，48k prefill从155.7秒降到28.7秒</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GLM-5.2自带学习索引器，但SGLang-JAX最初还是走稠密MLA缓存，直接把索引器的输出扔了。MoonMath这篇是把稀疏真正落到TPU上的施工记录：一连串PR，从分页稀疏decode到流式索引器、查询块、写回优化。下文拆解每一步的瓶颈与收益。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">背景:让TPU跑稀疏不是理所当然</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SemiAnalysis最近详细介绍了Google的TPU推理栈，主题是把TPU做成Google生态之外推理服务的一等公民。背景文章接在TPU-Inference系列优化之后，TPU-Inference是公开的vLLM TPU后端，目标是在TPU v7 Ironwood上高效跑Qwen3.5-397B。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这篇是SGLang生态的互补视角。不用TPU-Inference，而用SGLang-JAX，以DSA稀疏为具体例子，讲GLM-5.2推理的持续优化。下文是一连串PR的施工记录，逐步提升GLM-5.2服务性能，展示实现怎么演进、收益从哪来。其中几个已合并PR有MoonMath的贡献，这也是选这个案例的原因。例子用GLM-5.2，技术同样适用于GLM-5.3。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GLM-5.2本来就有学习索引器和层间共享调度。SGLang-JAX最初能加载模型，但还是遍历稠密MLA缓存，把索引器的输出丢掉。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">优化路线：第一步吃掉索引器的输出，后面几步让稀疏执行在内存、计算、服务上都高效。每一步都暴露下一个瓶颈：稠密读让位给页面读，页面读让位给过大的索引器中间量，再到重复页面抓取，最后是追加时整个缓存被搬动。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">把索引器和它控制的注意力分开</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">多头隐注意力把历史token的KV压缩；DeepSeek稀疏注意力决定注意力读哪些位置。GLM-5.2存512维KV隐向量加64维位置键分量，64个注意力头共享。索引器是32个头、宽128，checkpoint预算2048 token。几个prefill实验用4096 token预算，即32个128 token的页，和checkpoint默认设置不可互换。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">索引器用ReLU变换后query-key点积的加权和给候选键打分。分数决定选哪些位置，不决定最终注意力概率。IndexShare跨层复用结果：21个完整层刷新，57个共享层复用到下一个完整层为止。这里的完整指索引器归属，不是稠密注意力。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">TPU路径用吸收式MLA：键投影搬到query上，值投影跟在隐向量的加权和之后。避免把缓存的隐向量展开成每头键值。目标是少读已有的压缩缓存。没被选中的条目要留给后面的query，索引器保留自己的键历史。注意力缩放绑在原始的192加64 query/key维度，不是吸收后的576维表示。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">所以要的是从现有压缩缓存里少读，而不是换缓存。没选中的行完整保留，索引器的键历史独立维护。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">稀疏单位对齐内存单位</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">稀疏decode给现有MLA kernel一个更短的物理页列表。kernel直接从原始缓存读，省掉HBM gather；新token的页显式处理，保证缓存写落到正确位置。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">token top-k不是页top-k。分散的高分token可能碰到大多数页，把这些页的每个token都读进来，注意力支撑就被撑大了。直接的页预算改为按每页最高合法token分数给页排序。四个四token页里各一个高分token的例子：token top-k点名4个位置，页展开读16个，两页预算读8个。页预算限定了读量，但近似变了。因果与有效长度掩码必须在取页最大值之前，否则不可见token会把它的页抬上去，挤掉合法页。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">配对测稠密与分页稀疏decode，两边都开AOT分发：110k上下文的早期decode从46.2降到17.1 ms/token，选128页。1k上下文稀疏反而更慢，13.7对11.8 ms/token：索引器与元数据开销需要省下足够的注意力工作才划算。有界页预算没让decode与上下文无关，索引器还要扫候选键。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1:整页展开抹掉token级稀疏：固定页预算读得少，但注意力支撑不同</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">图1是玩具例子：整页展开能把token级稀疏抹掉，固定页预算减少读量但选了不同的注意力支撑。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">稀疏读进prefill</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">融合稀疏prefill把新隐行写进分页缓存，再用在线softmax遍历选中的页：工作形状静态，地址动态。T个query、每query Kp页、每页b token，选中注意力的计算量约O(T × Kp × b)，不计头与特征维。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">TP16下每设备只剩4个注意力头。per-query kernel把充裕的选中键轴放在lane维，小的头轴放在sublane维，避免过度padding。早期的三个完整索引器层走了稠密路，留下三个共享跟随层没有页列表。把稀疏路由补进这六层区域，路径就通了：配对的48k prefill从155.7秒稠密降到38.4秒稀疏，再到28.7秒完整路由。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">打包请求与前缀复用</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">单请求kernel变成服务路径，靠每个query自带请求ID、绝对位置、有效KV长度、页表基址。缓存前缀与分块都是extend操作，decode可以是一个query的extend。前缀长P、本地偏移i，因果用P加i，不是在每块重置偏移。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这些元数据让变长请求共享一个执行网格，不用单独launch，也不用把每个请求padding到最长。前缀复用省重算，分块限定活跃query数。索引器的页号仍要经正确请求的页表翻译。打包与前缀复用不改变query能读哪些键。下一个瓶颈在上游：索引器还在给预留容量打分。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">流式索引器打分</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">参考的prefill索引器给配置的全部KV范围打分，先把token分数物化出来再池化成页分数。流式路径读有效KV块，算分、加掩码、在片上VMEM里池化页最大值。只有页分数进HBM，最后的页top-k还是单独一步。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">数字：8192个query、135168个配置位置，FP32 token分数占4.125 GiB。128 token页池化后，逻辑分数输出33 MiB，小128倍。索引器还是给访问过的块内token打分，长上下文prefill保留二次项。请求长L、配置容量Lmax、整块C token且无缓存前缀时，按容量打分的计算量随L乘Lmax涨，逐段扫有效前缀随 (L² 加LC)/2涨。这个工作模型解释省了多少，不宣称线性时间prefill。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">块固定4096 token，流式索引器把76k TTFT从62.1降到44.5秒。更小的临时量让8k token块在约135k容量下可行。另一个并发8、4096输入128输出的负载，输出吞吐从2.8涨到29.6 token/s，靠的是缓解服务卡顿，不是把decode算术加速10.6倍。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2:流式索引器：扫有效KV、片上池化页最大值，只把页分数写进HBM</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">图2：停在有效KV减少扫描量，写HBM前池化减少中间存储。索引器剩下的打分工作，两者都没消掉。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">查询间复用页面</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">索引器不再写巨大中间量之后，重复的稀疏读就显眼了。相邻query常选重叠的页，per-query kernel却各自独立重载。查询块把并集载一次，再用成员掩码恢复每个query自己的支撑，然后在线softmax。因果与有效长度掩码照加。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">和页预算选择不同，这步可以保持已选的注意力支撑。并集不能截断：无损容量是min(QB × Kp，单元数)。成员按紧凑并集槽索引，不按全部可能的页表ID。支撑相同，数学操作不变，但浮点规约顺序可能变，不保证字节级相同的生成。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">QB个query、每query Kp页、并集大小U，理想权衡是：页面加载减少QB × Kp / U，分数计算膨胀U / Kp。QB=64、Kp=32、U约69时，逻辑页面加载少29.7倍，分数计算多2.16倍。这是解析比值，不是延迟预测：没算kernel外的缓存复用，也没覆盖DMA重叠、占用率、前处理开销。kernel花被掩码的算术，换不连续的数据搬运减少。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">实现把并集排序压紧，不用多维scatter建成员关系，用四槽DMA环重叠抓取。分块还改善矩阵形状：TP16下4个本地头，64 query的块变成256个query-头位置。收益是复用、延迟重叠、计算几何三项叠加。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">配对的110k实验TTFT从65.54降到30.40秒，decode基本不变。局部性形状的微基准从43.3降到8.1 ms。均匀随机的选择把并集撑到约880页里的795页，分块反而慢约2倍。查询块依赖局部性，块越大不一定越好。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3:查询块：8个query页成员关系变成3次唯一页加载加12个候选分数块</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">追加KV不动常驻缓存</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">索引器与注意力优化完，缓存维护成了下一个可见开销。平坦视图的scatter看似只更新新行，但编译器的布局转换把整个分页池拷了两遍。改写成四维scatter也没去掉这些变换。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">直接分页写回把目标槽按连续段分组，写进别名化的缓存存储。对齐的内部用直接拷贝，打包字边界用读改写保护相邻token。碎片过多走保正确的回退。追加的代价随新行涨，不随常驻分配涨。跨很多层和块，一个常驻容量项能把注意力加速的收益吃光。这是缓存维护，不是淘汰：已存的行完整保留，给后面的query用。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">同一个后续PR把查询块从64提到256。110k序列：QB64时30.20秒，加分页写回24.43秒，QB256到21.89秒，降27.5%。这是独立基准，不是和前面30.40秒连起来的瀑布。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4:分页写回：新行经连续段直接写入别名化分页存储</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">图4：保持缓存的物理布局，新行直接写。稀疏读不能成为每次追加都搬整个池的理由。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">测试每一步改动的契约</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">索引器测试查合法页集合，分块注意力测试查掩码softmax等价，服务测试查请求置换、隔离、前缀复用、分块、缓存写哨兵。三类检查分开回答：索引器选的支撑合不合法，kernel保不保这个支撑的计算，服务保不保kernel的输入。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">图5：独立比较尺寸、真实分配与上报。故意删掉一个组件，要求对应测试必须失败。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5:缓存记账独立测试：尺寸预测、真实分配、上报三方对账</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">独立的Oracle:测试测试本身</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">选全所有合法页应该复现稠密注意力，但这只验证执行路径。比索引器预算短的prompt几乎测不到剪枝。长上下文质量要单独评。索引器缓存记账是比对两份尺寸公式更强的资源测试：准入最初漏了索引器键，8.75 GiB隐缓存之外约0.47 GiB没进预算。测试在单设备CPU mesh上分配真实的MLATokenToKVPool，对存活数组的nbytes求和，拿真实驻留和预测、上报两边对。备用页slack显式列出。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">形状要有区分度。GLM的512/64宽度分不清分段对齐和拼接对齐：128特征对齐下都是640特征。合成的192/64宽度能分清，384对256，页大小1暴露BF16打包padding。回退预算修复，7个新用例挂5个；回退上报，真实分配检查挂。冗余用例按能抓到哪种变异删。这些检查证明对这类看似合理的错误实现敏感，不只是把通过数刷上去。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">开放的数据并行提案在kernel之上测：固定注意力TP，比较单个请求和DP2/DP4批里的请求，要求rank隔离，在该用本地页ID的地方注入全局页ID。非平凡TP能暴露TP1下藏着的分片错误。注入的页ID故障报出3.4的输出差，FP32容差1e-5。这是纯测试工作，不是没合并的加速。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">栈的现状</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">分页稀疏读限定了昂贵的注意力工作量，IndexShare跨层复用页列表，打包的元数据把它带进服务。流式索引器减少padding工作与中间量，查询块复用页面加载，分页写回让追加保持局部。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">DSA_PREFILL_SPARSE=1和DSA_INDEXER_KERNEL_PREFILL=1还是两个独立开关；查询块在稀疏prefill内默认QB256。decode的页预算和token top-k索引器路线是二选一，不是叠加阶段。后者在单请求并发下从15.9退到34.2 ms/token，高并发下反而变好。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">目标不是简单地打开DSA，而是别让索引器、kernel、运行时把稀疏省掉的工作重新加回来。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<section style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">① SGLang-JAX把GLM-5.2的学习索引器做成覆盖decode、prefill、批处理、缓存更新的完整稀疏服务路径。② 长上下文稀疏decode从46.2降到17.1 ms/token；完整稀疏路由把配对的48k prefill从155.7秒压到28.7秒。③ 后续收益来自流式索引器打分、查询间复用页面、追加新KV不动常驻缓存。<br  /><br  />目标不是打开DSA，而是别让索引器、kernel、运行时把稀疏省掉的工作重新加回来。长上下文的每一GiB都要对账。</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="text-align:center;">
+<span class="portal-title" style="font-size:12px;color:#1a6ba0;font-weight:bold;">【传送门】</span>
+<section style="text-align:left;display:inline-block;font-size:12px;color:#0F4C81;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/YHmkt8EHFGm-HeflWCsB2w" target="_blank" data-linktype="2">英伟达Kernel Agent: 编译器与算子调优Agent的协同设计</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/i-NZ-4oCXs48XpDfdcBfPw" target="_blank" data-linktype="2">在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/4aEYa-5J2Ir82V_1_9anDA" target="_blank" data-linktype="2">AI芯片架构全景: 从NVIDIA到Groq的六条设计路线</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+</section>
+</section>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://zro.moonmath.ai/posts/making-glm-5-2-sparse-on-tpus</span></p>
+</section>

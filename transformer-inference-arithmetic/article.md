@@ -1,0 +1,161 @@
+/* 传送门统一样式（add-portal.py动态注入时引用此class；真身在内联style，class仅兜底） */
+.portal-title { font-size:12px; color:#1a6ba0; font-weight:bold; }
+.portal-links { font-size:12px; color:#0F4C81; }
+.portal-links a { color:#0F4C81; text-decoration:none; }
+
+要点速览
+
+- 核心方法：只用纸笔算式估计推理延迟，简单延迟模型与实测结果高度吻合- 关键数字：A100算力带宽比208是分水岭：batch小于208访存受限，大于则算力受限- 实战结论：52B模型4卡batch256约21ms每token，中间激活只占5%，通信计算并行是关键
+
+不用跑实验、不碰高深数学，只靠纸笔算式就能相当准确地预测 Transformer 推理延迟。下文用第一性原理拆解 KV Cache、显存、并行、batch size 与 FLOPs，还原这套推理算术。
+
+用第一性原理算推理性能
+这篇文章用少而精的第一性原理推演大模型推理性能，不做实验，也没有高深数学。这样能获得的理解深度和实用性都相当惊人。一个极其简单的推理延迟模型，居然和实测结果拟合得很好，帮作者做出更准的预测、给出更好的解释。
+阅读需要一些 Transformer 先验知识，大致理解图解 Transformer 的程度即可，配合作者的参数量估算文章食用更佳。
+KV Cache
+采样时，Transformer 推理分两步：先并行处理输入的 prompt 上下文，再逐个采样新 token，自回归就发生在这一步。采样时 Transformer 做自注意力，需要序列中每个位置的 k、v 值，无论来自 prompt 还是已生成的 token。这些向量存在一个叫 kv cache 的矩阵里，也叫 past cache，GPT-2 开源实现里就叫 past，形状是 [batch, 2, num_heads, seq_len, features]。
+
+图1:KV Cache 示意：缓存自注意力的 k、v 向量，避免重复计算
+这么做的目的是采样每个 token 时不再重算这些向量。有了算好的 k、v，省下大量计算，代价是一些存储。每个 token 存的字节数是：
+2 × 2 × n_layers × n_heads × d_head
+第一个 2 是 k 和 v 两个向量；每层都存，每个值是 n_heads × d_head 的矩阵；再乘一个 2 是因为全文假设 16 位格式，每个数 2 字节。
+token embedding 要乘的权重是：
+W_k, W_v ∈ R^(d_model×d_model)
+每个 token embedding 是：
+t_e ∈ R^(1×d_model)
+于是算所有层的 k 和 v 需要的 FLOPs 是：
+2 × 2 × n_layers × d_model²
+t_e 乘 W_k 一次要 2×d_model² FLOPs，k 和 v 各算一次再乘 2，最后乘层数。
+矩阵乘法有多少 FLOPs？ 矩阵乘向量是 2mn，A∈R^(m×n)，b∈R^n；矩阵乘矩阵是 2mnp。因为 matmul 由乘加操作组成，乘算 1、加算 1。
+拿 52B 参数模型算一笔，d_model=8192，n_layers=64。假设 A100，312e12 FLOPS 算力，1.5e12 bytes/s 显存带宽，只算 kv 相关权重与计算：
+memory = 2 × 2 × n_layers × d_model² / 1.5e12；compute = 2 × 2 × n_layers × d_model² / 312e12
+FLOPs 受限 vs 访存受限：做计算要先把权重载入，耗显存带宽。假设载入与计算可以重叠，FLOPs 受限指有段时间内存闲着，访存受限指有段时间算力闲着。NVIDIA 把这叫 math bandwidth。这个划分细到每个 kernel，但可以抽象到一组操作。
+模型结构此时不重要了，这个硬件规格下算出一个明确的比值 208。给一个 token 算 kv，和给 208 个 token 算 kv 花的时间一样！208 以下访存受限，以上算力受限。拿剩下权重给上下文做完整前向，同样是 208，分子分母各多一个 6 的因子，后面细说。下图的交点就在 208，实际中内存线略有斜率，因为中间计算也有内存开销，最后一节讲。
+
+图2:Roofline 模型：208 是访存受限与算力受限的分水岭
+52B 模型完整前向一次，12 × 2 × n_layers × d_model² / 1.5e12 ≈ 69 毫秒，可覆盖到 208 个 token。实际会用 4 卡并行，约 17 毫秒，后面细说。上下文 416 个 token 花双倍时间，312 个 token 花 1.5 倍。
+算一个 kv cache token 的计算量，正好是 token 过一遍模型的 1/6。一般来说前向传播很便宜，因为上下文可以并行算；采样贵，因为每个 token 都要把全部权重读一遍，还得自回归。
+但这不等于省 1/6 的时间！假设算力受限，每采样一步省下 2×2×n_tokens×n_layers×d_model²/312e12 FLOPs，而解码一步本身要 2×12×n_layers×d_model²/312e12。于是每步省下 FLOPs 时间的 1/6 再乘序列 token 数，这个数随采样增长。没有 kv cache，采样时间复杂度是 token 数的二次方。
+故事没完，存这个 cache 有开销和 tradeoff。batch 很小时可能访存受限，那时连 past cache 都不想用，宁愿重算，把 FLOPs 花掉，反正访存的钱已经付了。
+GPU 里存的两样东西已经清楚了：kv cache 和权重。显存容量确实影响 Transformer 推理性能，现在有足够理解来评估它了。
+显存容量
+A100 是推理能拿到的最好 GPU 之一，标准 40GB 显存。有 80GB、带宽 2e12 的版本，但云厂商还没上架，对作者来说等于不存在。
+参数量乘 2 就是字节数。52B 模型的权重：
+52e12 × 2 = 104e12 bytes ≈ 104GB
+装不进单卡！至少 3 张卡才放得下权重，切分方法后面讲。3 卡共 120GB，剩 120-104=16GB 给 kv cache。够吗？回到 kv cache 单 token 内存公式，52B 模型：
+4 × n_layers × n_heads × d_head = 4 × 64 × 8192 = 2,097,152 bytes ≈ 0.002GB
+16/0.002 ≈ 8000 个 token 能进 kv cache；或者 batch 4、每请求 2048 token，更少 token 的话 batch 还能更大。
+这很憋屈：想上更大 batch 提升效率，却被容量卡住。batch 越大，处理同样请求的 GPU 时间越少。但 batch 这么小注定访存受限，不如扔掉 kv cache 直接付 FLOPs。
+4 卡的话 56/0.002 ≈ 23000。肯定选 4 卡：想做大 batch，而且把 2 的幂次拆到 3 张卡上很别扭。不只是 batch，高并发下会有多个模型实例，每个实例都想 batch 尽量大，反正存权重的钱已经付了。
+中间计算步骤也占一点空间，但可忽略。
+模型并行
+模型并行的完整实现细节不展开，资料很多。这里只讲对性能决策和通信开销计算有用的部分。
+模型并行的效果：把所有权重过一遍内存的开销和 FLOPs，都除以并行度，即加速卡数量。
+假设张量并行，把模型从中间劈开。每张卡拿着权重分片尽量算，同步时再通信。更 naive 的是流水线并行，每卡拿一部分层，权重载入开销倒是摊匀了，但同一时刻只有一卡在干活。训练时可以流水打拍，但单样本推理不行。流水线还有个问题是吃不满内存带宽，不过算力受限时无所谓。流水线唯一赢的是通信：流水线每卡通信 d_model，张量并行每层通信 N×d_model，N 是加速卡数。
+再补一个 A100 常数：通信带宽 300GB/s。官方文档写 600GB/s，是把进出各 300GB/s 加起来了，算的时候用双向数更直观。
+
+图3:张量并行示意：权重分片、注意力按头切分、MLP 两次通信
+看图跟着走：token embedding 从模型底部进入，紫色框是权重在各卡上的切分，模型画得很小以便按比例画。X 和 Y 都切分后相乘，拼起来会得到过大的矩阵，正确做法是通信、算分片和、把和通信回去再拼，得到 X 与 Y 相乘的输出。
+注意力的并行很直观，因为有多头。大部分注意力层不用通信，直到多头结果拼起来乘 Wo。乘完 v 再乘自己分片的 Wo，得到 o 的分片 o∈R^(d×h/N)。每卡把自己的分片发给所有卡，也收回别人的分片，通信量 (N-1)×d_model/N。每卡做一份加法得到输出投影，再通信一次，各自拼起来，近乎瞬间。
+MLP 层同理：W1∈R^(4d×d) 把维度放大 4 倍，W2∈R^(d×4d) 投影回来，MLP 末尾做同样的两次通信。
+最终通信量是 4×(N-1)×d_model/N 字节，kv cache 按头分到各卡。
+延迟计算
+容量讲透了，模型并行的通信也画出来了，计算步骤也清楚了，现在组装成估计延迟的公式！
+
+图4:延迟计算：小 batch 访存受限、大 batch 算力受限，通信是加项
+延迟计算核心是 FLOPs 受限还是访存受限。每参数的乘法少就可能被带宽卡住。FLOPs 随 batch 和参数量涨，内存只随参数量涨。
+通信不看受限类型，直接加延迟项和吞吐项，带宽 300GB/s。延迟项不好估计，只能猜个很小的值，约 8 微秒每条消息，数字来自一篇 V100 NVLink 的论文。
+算单 token 解码延迟有两个公式：小 batch 走访存带宽 bound，大 batch 走 FLOPs bound，大 batch 下通信的延迟项可扔掉。
+小 batch，比如 1，batch 因子可省掉的公式，N 是加速卡数，P 是参数量，b 是字节单位：
+compute = 2 × P × b / (N × A_bm)；comms = 4 × n_layers × 8μs
+2×P 是因为全部参数过一遍内存，每个参数 2 字节；A_bm 是加速卡内存带宽，开销由各卡分摊。通信每层 4 次，每次一个请求的延迟。通信通常很小，算力受限时更不用管，吞吐开销也约得掉。
+还有个时而显著的因子是 kv cache 读取时间，这里先略去，因为它随上下文 token 数变，batch 内也可能各不相同，按内存带宽时间算。另一个漏掉的内存带宽时间是每采样步读 unembedding 算 logits，形状 R^(d×n)。
+内存其实不恒定，每 batch 的中间激活多占一些。没法细算，因为随软件栈、编译器优化变很多，干脆不计。
+大 batch，比如 512，B 是 batch size：
+A_f 是加速卡 FLOPs，A_c 是通信带宽。做 2×P 的 FLOPs 操作，直觉是把全部参数 matmul 一遍，矩阵乘向量就是 2mn。
+通信是每层 4 次、每次一个 d_model 向量，N-1 约成 N，延迟换成吞吐算法，再除以通信带宽。
+拿 Gopher 级 260B 模型、16 卡玩一下：小 batch 每生成一个 token 22ms。通信吞吐开销按大 batch 公式算约 35 微秒，扔掉是安全的。
+batch 512 的大 batch，每 batch 每 token 53ms，62ms 内生成 512 个 token。通信延迟开销约 3ms，延迟不随 batch 放大，消息可以一起准备，假设通信计算并行，扔掉也还好。
+通信和计算取大者，因为假设它俩并行。绝不能让通信超过计算，否则加卡也降不到零延迟，通信会越来越拖后腿。当然不是所有系统都并行，更不是完美并行。
+这些数字比真实沙盒低得多：假设硬件利用率最优，没算 softmax，通信延迟按零，大量小因子全忽略。但这套数学背后的推理，对找优化方向、估计优化收益很有用。
+Batch Size的影响
+Batch size 是性能的关键因子，尤其要理解具体场景的性能。
+上一节有两个公式，分访存受限和算力受限。比一下就知道谁在起作用：
+用的还是 kv cache 那节的比值：访存受限的最小 batch 是 A_bw/A_f=208，很好用的比值！有负载就选算力受限，计算效率更高。但算力受限时再加大 batch，速度不会更快。
+kv cache 占主导还是权重占主导，算一下就行，也不是非黑即白，kv cache 超过权重没什么神奇的事发生。通信也没什么神奇点。batch 加大到某点，吞吐压过延迟，延迟项就扔了。之前观察到延迟变得不重要的点很靠后，52B 模型 batch 512 时通信开销还有 11% 是延迟。
+通信有个被过度简化的地方：它分 4 步发生。所以不只要计算时间大于通信时间，每一步都要大于，前提是计算通信能并行。这里有个更怪的比值：每字节通信的 FLOPs。下面这张表很有用，下一节也用得上：
+312e12/300e9=1040，这是 A100 每字节通信的 FLOPs。希望表里最后一行的值大于硬件值，这样就保持算力受限，前提是访存不拖后腿。embedding 维度超过 1024 的模型每卡都安全，512 就有点别扭。
+低负载 API 的 batch 会很小，扔掉 kv cache 是合理决定。有大 batch 负载的 API，可能想取刚好算力受限的最小 batch，哪怕还有容量空着，这样单请求延迟最优。像 AlphaCode 这种大批量推理任务，卡有多少上多少，batch 拉到容量顶。
+说了很多可能，其实这三类场景的结论作者认为是绝对的。
+
+q,k,vow_1w_2
+
+flops3B(d_model²)B(d_model²)4B(d_model²)4B(d_model²)
+bytes of commsB(d_model)B(d_model)B(d_model)B(d_model)
+flops/byte3(d_model)d_model4(d_model)4(d_model)
+
+FLOPs拆解
+前面说过 matmul 过全部参数是 2×P 的 FLOPs，直觉没错，现在把 Transformer 每一步走一遍，验证确实是 2P。
+以下按每 token、每层算。先写 W_q, W_k, W_v ∈ R^(d_model×d_model)，更准确的是每个头 W_q^i, W_k^i, W_v^i ∈ R^(d_model×d_head)，i 到 n_heads。为算延迟，把多头并进 Wq、Wk、Wv 里简化。
+算 qkv：t_e∈R^(1×d_model) 乘 Wq、Wk、Wv∈R^(d_model×d_model)，FLOPs 数 2×3×d_model²。
+算 z：softmax((q·k)/d_head)·v=z，没有矩阵乘法，FLOPs 量级是 d_model 的常数倍。
+乘输出投影：Wo∈R^(d_model×d_model) 乘 z∈R^(d_model×1)，FLOPs 数 2×d_model²。
+前馈：MLP 权重 W1∈R^(4d×d)、W2∈R^(d×4d) 做两次线性变换，中间一个 ReLU 很小，FLOPs 数 2×8×d_model²。
+其他：每次注意力后有 layernorm，权重是长 d_model 的向量；顶上还有一层线性和 softmax，就是输出 token embedding，即 unembedding；原始 Transformer 还有余弦绝对位置编码，是 token embedding 上的加法。
+把 FLOPs 加起来！代入 8192 的模型，应该约 100B FLOPs：
+103079215104 除以 2 约 51.5B。比 52B 少一点，因为 token embedding 表快 10 亿参数。用 2×12×n_layers×d_model² 代替 2×P 做延迟计算也合理，差不到 2%。
+z 的计算和其他没数的步骤呢？都是向量-向量甚至向量-标量操作，量级是 d_model 不是 d_model²。每层就算有 100 个这种操作，也才 1 亿 FLOPs，是数过的 FLOPs 的 0.1%。
+Data Movement Is All You Need 这篇论文有个漂亮的分类法：张量缩并，即关心的大 matmul 和线性层；统计归一化，即 softmax 和 layernorm；最后是逐元素操作，bias、dropout、激活函数，本文到现在一直忽略。
+那 matmul、layernorm 这些的延迟怎么算？硬件标的 FLOPs 专指乘加操作，别的就算数得出 FLOPs 也不能往里计。意外的是 softmax 只耗内存读写，因为带宽 FLOPs 比摆在那。这就是之前说的延迟因子！
+中间激活的内存开销
+这里要破一下第一性原理的人设，讲讲那篇论文的表 A.1。softmax 延迟居然比 qkv 计算还略高，qkv 只占 1/3 时间，有点吓人。
+
+图5:论文表 A.1：softmax 的延迟高于 qkv 计算，主因是访存
+同理 qk 乘法、ReLU、dropout 也贵，因为访存受限。
+GPU Kernel 融合：GPU 按 kernel 为单位执行操作。kernel 融合是把两个 kernel 并成一个，主要复用内存载入、减少冗余读写。比如乘加是一个 kernel，拆成两个的话，一个做载入加法存储，另一个做载入乘法存储，并成载入加法乘法存储，省很多趟内存。
+数读写次数能看出这里的 softmax 没融合好：理论上一次读一次写就够，业界标准是 4 次，这里算宽容了。qk 该是两次读一次写，两次读多半能省。三比一说明 softmax 的内存趟数没做到最优。这也说明这种计数多依赖软件实现，得靠实验估计，理论上开销甚至可以是零。
+还值得注意：模型越大，这些操作的时间占比掉得越快，内存按 d_model 涨，FLOPs 按 d_model² 涨，都是每层。那篇论文的模型 336M 参数，d_model=1024，n_layers=24。
+把 Ours 列里访存受限的值连逐元素操作一起加起来，中间步骤占 43% 时间。放到 52B 模型，d_model 大 8 倍，这些操作就不显著了。
+这些访存受限的中间操作，耗时随 d_model 线性涨 8 倍；FLOPs 涨 64 倍，FLOPs 时间也涨 64 倍。
+用那篇论文的优化，52B 模型推理延迟里这些没计入的中间计算约占 5%。
+与真实Benchmark对照
+作者在做语言模型的公司，有自己的 infra 和 benchmark，但 IP 敏感。公开的模型并行推理 benchmark 很少，只有 NVIDIA FasterTransformer 和微软 DeepSpeed，论文里可能还散落一些。不管怎样，可以拿计算结果和真实 benchmark 对一对！
+只用 2 卡，在 FasterTransformer 上跑 13B 参数模型，它做了不错的 kernel 融合，支持张量并行。13B 是 40 层、40 头、每头 128 维，d_model=5120。有 profile 截图，里面不少有意思的东西，够另写一篇。
+上下文 512、batch 1、输出 10 个 token 起步。小 batch 单 token：2 卡预期 8.4ms、通信约 1ms；1 卡则是 16.8ms、零通信。公式：2×40×12×5120²/1.5e12。
+有效数字有点乱，内存带宽本该用 1.555 不用 1.5。
+1 卡实测 22.0ms，猜中了 76%。差的部分都能解释：中间激活占一点，实际拿不到 100% 理论带宽。按 profile，这个维度下 matmul kernel 能跑到约 90% 带宽，计入后期望 18.5ms；中间激活从 profile 加 2.2ms，到 20.7ms；剩 1.4ms 是 token embedding、top-k/top-p 采样、带宽不到 90%、kernel 启动时间这些亚毫秒小项。
+2 卡实测 13.5ms，这次只猜中 62%。再看 profile 查带宽，小 tensor 带宽利用率更低，这次不到 90，只有 87 左右，得到 9.5ms；中间激活类似，2ms，到 11.7ms；剩 1.5ms 找通信！算出的 1ms 通信没并行，正好覆盖。profile 里通信每层 40-50 微秒，共约 1.7ms，账全对上了。
+两次的中间激活计数都偏高了，因为 profile 给的延迟比裸 benchmark 稳定偏高。benchmark 输出是 180.86ms、283.60ms，其中上下文部分各 45.45ms、63.17ms。
+前向传播呢？预期是解码步乘以 token 数除以 FLOPs 带宽比，因为所有 token 要发给所有卡，每卡做自己头的注意力并存 kv。内存带宽按 90% 折算更新为 312e12/(1.5e12×0.9)=231。1 卡 setup，解码步 22ms，22×(512/231)=48ms，离声称的 63ms 差一截；2 卡 13.5×(512/231)=30ms，差更多！
+1 卡缺的时间，一部分是存 kv。profile 里每层 18 微秒，共 0.7ms；还有 Memset 0.2ms。MLP 乘法的 FLOPs 时间预期 512×4×5120²×2/312e12=344 微秒，实际最低 476 微秒，只拿到 72% 的 FLOPs；注意力投影预期 512×5120²×2/312e12=86 微秒，实际最低 159 微秒，只有 54%。吓一跳，但这就是实际 FLOPs 效率，那篇论文图 14 里 512×4000×4000 的 matmul 也跑不到 150TFLOPs。
+练习题
+留 12 道练习题，检验这套算术：
+1. 给定 batch、上下文长度和 next_n，怎么算用 kv cache 省多少？
+2. kv cache 在内存时间上加了哪些开销？
+3. 前向传播访存受限、采样步算力受限，可能吗？
+4. 超出容量需求多上卡，比如 52B 上 8 卡或 16 卡，有什么 tradeoff 和算法？
+5. 有了单 token 时间公式，怎么做完整采样的总时间，从上下文前向到采完所有 token？
+6. 容量节说中间计算内存可忽略，到底小到什么程度？
+7. batch 节跑题讲了每字节通信 FLOPs，embedding 维度 512 时 tradeoff 是什么？
+8. 假设同机多卡，如果像训练那样跨机通信呢？AWS 有 400Gb/s 网卡，怎么看？
+9. 模型并行节里，可以让各卡通信全部 shard 再各自做完整加法，不只做一份，延迟影响是什么？
+10. 算 52B 在 4 卡、batch 256 的大 batch 速度：计算约 21ms，通信约 4ms。
+11. 最后一层向量乘 unembedding 矩阵、存 logits、再做 top-k/top-p 采样要排序，52B 上多久？哪些能并行？
+12. token embedding 怎么切？输入 embedding 和 unembedding 切法一样吗？layernorm 呢？多哪些通信？
+
+结语
+
+① 延迟只用除法：单 token 时间约等于 2×参数量×字节数除以带宽，batch 小于 208 访存说了算。② 容量决定并行度：52B 权重 104GB 至少 3 卡，kv cache 单 token 约 0.002GB，batch 天花板是容量。③ 通信是加法：每层 4 次、每次 d_model 向量，和计算取大者，并行是关键。这套算术的价值不在数字本身，而在拿到新硬件、新模型时，五分钟在纸上估出延迟量级，知道优化该往哪使劲。FLOPs、带宽、容量三个数在手，推理系统的性能直觉就有了。
+
+【传送门】
+
+Kimi K3技术报告-后训练Infra: 三阶段 RL,MoonEP3,五千万沙箱,KDA感知缓存
+vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%
+KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍
+Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能
+把KVCache变成可训练记忆：Context Tuning让LLM免权重微调
+在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM
+AI芯片架构全景: 从NVIDIA到 Groq的六条设计路线
+小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读
+
+参考：https://kipp.ly/p/transformer-inference-arithmetic

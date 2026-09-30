@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""KernelAgent 文章 DATA 构建脚本"""
+
+import json, os, sys
+
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+
+# ---------- 代码块常量 ----------
+NCU_JSON = """__CODE__json::{
+   "sm__inst_executed_pipe_tensor.avg.pct_of_peak_sustained_active": 0.41,
+   "smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct": 5.63,
+   "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": 48.86
+  ...
+}"""
+
+DIAG_JSON = """__CODE__json::"category": "memory",
+"summary": "Kernel is memory-bound at 70.3% DRAM throughput with significant long scoreboard stalls from memory latency",
+"reasoning": "The roofline analysis shows Memory SOL at 70.3% while Compute SOL is only 45.2%...",
+"root_causes": [
+    { "cause": "High memory latency stalls due to long scoreboard waits blocking warp execution",
+      "evidence": [
+       {"metric": "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct", "value": 37.69, "interpretation": "37.7% of warp stalls are due to waiting for memory operations, indicating memory latency is a significant bottleneck"},
+            {"metric": "sm__warps_active.avg.pct_of_peak_sustained_active", "value": 30.08, "interpretation": "Only 30% warp occupancy suggests insufficient parallelism to hide memory latency"}
+        ]...
+    },"""
+
+PRESC_JSON = """__CODE__json::"recommended_fixes": [
+         {"fix": "Increase pipeline depth with more stages (num_stages=4-5) and reduce register pressure by using smaller BLOCK_K or enabling register spilling to shared memory",
+    "rationale": "More pipeline stages help hide memory latency by overlapping loads with computation. Reducing register usage from 91 per thread would allow more concurrent warps to better hide the 37.7% long scoreboard stalls and improve the 30% warp occupancy"}
+...
+        ]"""
+
+REFL_JSON = """__CODE__json::"was_diagnosis_correct": true,
+    "was_fix_effective": false,
+    "expected_outcome": "...should reduce memory latency stalls by allowing more in-flight memory operations, improving memory throughput and reducing warp stalls",
+    "actual_outcome": "Performance degraded significantly by 37.4% (1.0910ms to 1.4996ms)....",
+    "reasoning": "The fix backfired because: 1) Doubling BLOCK_N (128 to 256) and BLOCK_K (32 to 64) dramatically increased shared memory and register usage per block, likely reducing occupancy significantly....",
+    "lessons": [
+        "Increasing BLOCK_N and BLOCK_K together with num_stages creates compound pressure on shared memory and registers",
+        ...
+    ],
+    "avoid_patterns": [
+        "Simultaneously increasing multiple tile dimensions (BLOCK_N, BLOCK_K) along with pipeline stages",
+        ...
+    ],
+    "try_patterns": [
+        "Try smaller BLOCK_K (16 or 32) with increased num_stages to reduce register pressure while improving pipelining",
+      ..."""
+
+BEAM_TXT = """__CODE__text::BeamSearch initialized: 2 kernels x 2 bottlenecks = 4 workers
+---------------------------------------
+Round 1: 4/4 workers succeeded
+--------------------------------
+Round 2: 3/4 workers succeeded
+..."""
+
+BENCH_TXT = """__CODE__text::Round 1: 4 successful, best new: 7.8000ms
+Round 2: 4 successful, best new: 4.0457ms
+Round 3: 4 successful, best new: 3.1118ms
+..."""
+
+MATVEC1 = """__CODE__python::# NUM_ROWS=4: four scalar accumulators instead of a vector
+acc0 = 0.0
+acc1 = 0.0
+acc2 = 0.0
+acc3 = 0.0
+for k0 in range(0, K, BLOCK_K):
+    # Load B vector tile once [BLOCK_K]
+    b = tl.load(b_ptrs, mask=k_mask, other=0.0).to(tl.float32)
+    # Process each row individually with its own 1D load
+    if row_start + 0 < M:
+        a0 = tl.load(a_ptr + (row_start + 0) * stride_am + offs_k * stride_ak,
+                      mask=k_mask, other=0.0).to(tl.float32)
+        acc0 += tl.sum(a0 * b)
+    if row_start + 1 < M:
+        a1 = tl.load(a_ptr + (row_start + 1) * stride_am + offs_k * stride_ak,
+                      mask=k_mask, other=0.0).to(tl.float32)
+        acc1 += tl.sum(a1 * b)
+    # ... (acc2, acc3 similar)
+# Launch config: BLOCK_K=512, NUM_ROWS=4, num_warps=4, num_stages=4
+# Grid: (cdiv(M, 4),) = (512,)"""
+
+MATVEC2 = """__CODE__python::# Before: sequential scalar accumulators, NUM_ROWS=4
+# acc0 = 0.0; acc1 = 0.0; acc2 = 0.0; acc3 = 0.0
+# ...process rows one at a time with branching...
+
+@triton.jit
+def matvec_kernel(A_ptr, x_ptr, C_ptr, M, K, stride_am, stride_ak,
+                  BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_K: tl.constexpr):
+    pid_m = tl.program_id(0)
+    row_start = pid_m * BLOCK_SIZE_M
+    row_offsets = row_start + tl.arange(0, BLOCK_SIZE_M)
+    row_mask = row_offsets < M
+    # Back to vector accumulator, but only 32 elements (not 128)
+    acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+    for k_start in range(0, K, BLOCK_SIZE_K):
+        k_offsets = k_start + tl.arange(0, BLOCK_SIZE_K)
+        k_mask = k_offsets < K
+        x_vals = tl.load(x_ptr + k_offsets, mask=k_mask, other=0.0)
+        a_ptrs = A_ptr + row_offsets[:, None] * stride_am + k_offsets[None, :] * stride_ak
+        a_vals = tl.load(a_ptrs, mask=row_mask[:, None] & k_mask[None, :], other=0.0)
+        acc += tl.sum(a_vals.to(tl.float32) * x_vals.to(tl.float32)[None, :], axis=1)
+    tl.store(C_ptr + row_offsets, acc.to(tl.bfloat16), mask=row_mask)
+# Launch: BLOCK_SIZE_M=32, BLOCK_SIZE_K=512, num_stages=1, num_warps=4
+# Grid: (cdiv(M, 32),) = (64,)"""
+
+MATVEC3 = """__CODE__python::@triton.jit
+def matvec_kernel(A_ptr, x_ptr, C_ptr, M, K, stride_am, stride_ak,
+                  BLOCK_SIZE_K: tl.constexpr):
+    pid_m = tl.program_id(0)
+    if pid_m >= M:
+        return
+    # Scalar accumulator: minimal register usage
+    acc = 0.0
+    a_row_ptr = A_ptr + pid_m * stride_am
+    num_k_blocks = tl.cdiv(K, BLOCK_SIZE_K)
+    for k_block in range(num_k_blocks):
+        k_start = k_block * BLOCK_SIZE_K
+        k_offsets = k_start + tl.arange(0, BLOCK_SIZE_K)
+        k_mask = k_offsets < K
+        x_vals = tl.load(x_ptr + k_offsets, mask=k_mask, other=0.0)
+        a_vals = tl.load(a_row_ptr + k_offsets * stride_ak, mask=k_mask, other=0.0)
+        prod = a_vals.to(tl.float32) * x_vals.to(tl.float32)
+        block_sum = tl.sum(prod, axis=0)  # Scalar reduction
+        acc += block_sum
+    tl.store(C_ptr + pid_m, acc.to(tl.bfloat16))
+# Launch: BLOCK_SIZE_K=1024, grid=(M,) = (2048,)
+# No explicit num_warps or num_stages (defaults)"""
+
+CAP0 = "图1:KernelAgent六智能体优化闭环：ProfilerAgent采集硬件信号，JudgeAgent诊断瓶颈，AnalyzerAgent开优化处方，OrchestratorAgent综合知识定搜索策略，Optimization Manager并行探索，BenchmarkAgent实测验证。"
+CAP1 = "图2:各轮带来性能提升的内核数：首轮75个内核获益最大，随后逐轮递减，系统持续爬坡挖掘次级瓶颈。"
+CAP2 = "图3:矩阵向量乘法8轮优化收敛曲线：KernelAgent稳步降到1.95ms，纯LLM基线震荡剧烈且困在局部最优。"
+CAP3 = "图4:8轮优化中DRAM吞吐从631 GB/s爬到2229 GB/s，达到94.1% SOL，DRAM读取字节数保持稳定。"
+
+DATA = {
+    "title": "PyTorch:用硬件信号指导多智能体优化GPU内核",
+    "summary": [
+        {"key": "核心突破", "body": "KernelAgent在正确性流水线之上叠加硬件感知优化层，100个KernelBench L1任务几何平均加速2.02倍，相对开箱即用torch.compile加速1.56倍，H100上达到89% roofline效率。"},
+        {"key": "关键数据", "body": "65/100个L1任务超越torch.compile；矩阵向量乘法案例从9.52ms优化到1.95ms，DRAM吞吐从631 GB/s爬升到2229 GB/s。"},
+        {"key": "方法创新", "body": "Profile到Measure六阶段闭环，六类智能体分工协作，用Nsight Compute硬件信号驱动，跨轮共享记忆沉淀经验、避免重复踩坑。"},
+    ],
+    "lead": [
+        "手写GPU内核优化是专家密集型工作：要懂体系结构、存储层次和性能权衡，**新硬件一出优化策略就得重想，一个内核调优动辄数天到数周**。",
+        "KernelAgent把这套专家工作流拆成六个协作智能体，**用Nsight Compute硬件信号驱动诊断、开方、探索、实测的闭环**。下文完整呈现六阶段流水线、矩阵向量乘法的端到端优化案例，以及H100上的实测数据。",
+    ],
+    "sections": [
+        {"type": "h2", "title": "调优一个GPU内核，为什么动辄数周", "paras": [
+            "GPU内核优化对现代AI负载越来越关键。模型越来越大、越来越专用，性能瓶颈往往不在高层算法，而在实现这些算法的内核效率。",
+            "但手动优化内核是专家密集型工作：要深懂GPU体系结构、存储层次和性能权衡。更麻烦的是，每出一代新GPU架构，优化策略就得重新思考。",
+            "实践中，有经验的内核工程师遵循一套系统化工作流：用NVIDIA Nsight Compute做profile，查看硬件性能计数器诊断瓶颈，再针对性地应用优化。是寄存器压力拖累了occupancy？tiling策略浪费了访存带宽？内核需要的是架构重设计，还是调调参数就行？这个过程要推理多个瓶颈各异的内核架构，才能收敛到榨干硬件的设计，通常耗时数天到数周。",
+            "现代编译器栈在自动化内核生成上进展显著：torch.compile抓取计算图，用图变换、模式匹配和编译器启发式生成Triton内核；TVM、XLA等系统类似，覆盖了很多常见模式，开箱性能不错。但多数编译器启发式基于静态模型，而不是来自真实硬件执行的直接测量。",
+            "KernelAgent要自动化的，正是这个诊断驱动的优化循环：一切扎根真实硬件信号。它瞄准前向（推理）内核，因为那里的延迟和吞吐直接决定服务成本和用户体验。",
+        ]},
+        {"type": "h2", "title": "KernelAgent优化工作流", "paras": [
+            "KernelAgent把专家已经在用的工作流（profile、诊断瓶颈、提优化、迭代）自动化，拆成一组协作智能体。每个智能体负责优化循环中定义明确的一个阶段，合起来形成闭环的硬件感知反馈系统。",
+            "从输入内核开始，KernelAgent反复做：profile内核、诊断性能瓶颈、开架构感知的优化处方、综合优化知识、并行探索替代优化路径、实测每个候选。箭头表示各优化轮次之间智能体的信息流。",
+            "高层看，每轮优化由六个阶段组成：Profile到Diagnose到Prescribe到Orchestrate到Explore到Measure。每个阶段产出结构化输出，直接喂给下一阶段，实现快速的数据驱动迭代。",
+        ], "fig_after": {
+            "2": [{"src": "fig00.png", "caption": CAP0}],
+        }},
+        {"type": "h2", "title": "数据如何流经系统", "paras": [
+            "下面按六个阶段展开，看数据如何在智能体之间流动。",
+        ]},
+        {"type": "h3", "title": "Profiling:采集硬件信号", "paras": [
+            "优化循环从Profiling Agent用NVIDIA Nsight Compute检查输入内核开始。KernelAgent集成NCU采集硬件级性能指标，包括DRAM吞吐与利用率、L2缓存命中率、warp占用与stall原因、计算与tensor core利用率，以及SOL指标。这些指标是所有下游决策的经验基础。",
+            "输入：内核代码加输入规约（形状、dtype）。输出：硬件指标的结构化字典。",
+            "示例输出：",
+            NCU_JSON,
+        ]},
+        {"type": "h3", "title": "Diagnosis:用roofline分析定位瓶颈", "paras": [
+            "Diagnose Agent解读profiling指标，给内核的主导性能瓶颈分类。它用SOL指标做roofline风格分析，再结合LLM推理做根因分析。",
+            "输入：NCU指标加当前内核代码。输出：BottleneckReport，包含主瓶颈类别、效率百分比、带证据的根因。",
+            "示例诊断：",
+            DIAG_JSON,
+        ]},
+        {"type": "h3", "title": "Prescribing:架构感知的优化处方", "paras": [
+            "给定诊断出的瓶颈，Analyzer（Prescriber）Agent生成具体、架构感知的优化建议。它结合瓶颈分类、GPU规格（比如A100对比H100）、从精选优化模式库检索到的模式，给目标硬件量身定做建议。",
+            "输入：BottleneckReport加GPU规格加优化数据库加内核代码。输出：带理由的处方列表。",
+            "示例处方：",
+            PRESC_JSON,
+        ]},
+        {"type": "h3", "title": "Orchestration:把分析变成搜索策略", "paras": [
+            "Orchestrator Agent综合当前诊断和历史优化数据，为下一轮制定具体的搜索策略。它聚合历史诊断、处方和结果，结合搜索策略（beam search、greedy search等），决定下一轮探索哪些处方。",
+            "每轮结束后，KernelAgent生成结构化自我分析：诊断对了吗？处方命中根因了吗？什么有效、为什么？这就是inference-time learning。",
+            "输入：处方加尝试历史加Reflexion。输出：定稿的优化提示词。",
+            "示例reflexion：",
+            REFL_JSON,
+        ]},
+        {"type": "h3", "title": "Exploration:并行优化", "paras": [
+            "Optimization Manager执行探索阶段。它维护top-K内核，每个内核派多个优化worker并行尝试不同处方。一条优化路径掉坑，另一条试不同处方的worker可能走通，避免搜索卡在局部最优。每个worker应用不同优化、编译内核，交给Measure阶段。",
+            "输入：候选内核加不同优化方案。输出：编译好的优化内核，待评测。",
+            "示例结果：",
+            BEAM_TXT,
+        ]},
+        {"type": "h3", "title": "Measure:验证正确性与性能", "paras": [
+            "Benchmarking Agent验证正确性，并实测探索阶段每个候选内核的真实性能。每个候选先对可信参考实现做正确性检查，通过验证才进入benchmark。用受控的benchmark协议保证稳定、可复现。",
+            "性能测量：warmup 25次排除冷启动影响，重复100次取稳定值，共享benchmark锁防止worker之间GPU争用。",
+            "输入：编译好的内核变体、参考实现、测试输入。输出：正确性结论、实测内核运行时间。",
+            "示例结果：",
+            BENCH_TXT,
+        ]},
+        {"type": "h2", "title": "性能总结", "paras": [
+            "用triton.testing.do_bench做一致的性能测量，H100上每个内核变体100次重复取均值（1秒以上warmup）。对比两个基线：KernelAgent纯正确性循环生成的内核（早前基线）；开箱即用torch.compile（PyTorch Inductor默认模式，静态形状，CUDA graphs关闭）。",
+            "100个L1任务上，KernelAgent在65个任务上超越torch.compile。几何平均：相对早前纯正确性基线加速2.02倍，相对开箱即用torch.compile加速1.56倍。在NVIDIA H100上达到89%硬件roofline效率，其中roofline效率取计算SOL和访存SOL的较高者，即流多处理器或访存吞吐占硬件峰值的比例，经Nsight Compute测得。",
+            "端到端优化产物已在开源仓库分享；还在每类挑几个内核测了不同输入形状，12个内核乘144个形状，加速比类似。",
+            "测试时扩展效应：首轮拿走大部分性能收益，说明硬件诊断加粗粒度修复见效快；但增加轮次后系统继续稳步爬坡。轮次越多，KernelAgent越能hill climb超越初始改进，打磨早期优化、挖掘主瓶颈解决后才显形的次级瓶颈。这正是迭代反馈式优化的价值。",
+        ], "fig_after": {
+            "3": [{"src": "fig01.png", "caption": CAP1}],
+        }},
+        {"type": "h2", "title": "案例:矩阵向量乘法", "paras": [
+            "下面用一个端到端案例，看KernelAgent在不同轮次学到并应用了哪些优化技术。",
+            "配置：操作C = A @ x；形状M=2048，K=1,048,576；dtype为BF16输入、FP32累加、BF16输出；硬件H100。",
+            "结果总览：PyTorch compile基线2.09ms；KernelAgent纯正确性pipeline 9.52ms；LLM基线（直接prompt、无硬件反馈，8轮串行，opus-4.5）最优3.1985ms；KernelAgent优化层（4 worker，8轮，opus-4.5）最优1.95ms。",
+        ], "fig_after": {
+            "2": [{"src": "fig02.png", "caption": CAP2}],
+        }},
+        {"type": "h3", "title": "关键洞见", "paras": [
+            "第一，LLM里的启发式优化知识是有效的，比如大block提带宽。但没有性能反馈，这些启发式把内核带到局部最优就失效了，因为LLM感知不到自己正在走的性能权衡曲线。",
+            "第二，没有结构化探索，LLM被锁死在seed内核的轨迹里。它从没想过从split-K切到更简单的one-row-per-thread设计，连eager的性能都超不过。",
+            "第三，KernelAgent的多worker探索、基于profiling的方法、反思式知识共享，能尝试不同路线并找到最优路径。",
+        ]},
+        {"type": "h3", "title": "为什么基线慢", "paras": [
+            "初始Triton内核用2D tile加向量累加器。profiling显示内核主要被寄存器限制occupancy，发不出足够并发访存请求来掩盖DRAM延迟。",
+        ]},
+        {"type": "h3", "title": "第一轮改进:先降寄存器压力", "paras": [
+            "瓶颈：寄存器压力限制occupancy，SM利用不足。处方：大向量累加器换标量累加器，每program处理少量行，提高grid并行。性能：9.52ms到6.80ms，occupancy涨8倍，Memory SOL从18.5%升到25.8%。反思：先把寄存器状态降下来，其他优化才有效。",
+            MATVEC1,
+        ]},
+        {"type": "h3", "title": "第二轮改进:给向量x加缓存", "paras": [
+            "瓶颈：仍被访存延迟主导，提升进入平台期。处方：给向量x加有限缓存和复用，减少冗余全局访存；别加num_stages，之前已经涨过寄存器压力。性能：6.80ms到6.20ms，共享内存缓存B向量带来温和收益。反思：矩阵向量乘和GEMM很不一样，tiling策略不能直接搬。",
+        ]},
+        {"type": "h3", "title": "第三轮改进:向量化2D load，严格控寄存器", "paras": [
+            "瓶颈：寄存器压力降下来后，卡在低效访存事务，而不是缺warp。处方：回到向量化2D load改善合并，但严格控寄存器：小tile（BLOCK_M=32）、大K tile（BLOCK_K=512）、num_stages=1消除流水线寄存器开销。性能：6.20ms到4.03ms。反思：先把寄存器状态降下来，其他优化才有效。",
+            MATVEC2,
+        ]},
+        {"type": "h3", "title": "最终改进:one-row-per-program架构跃迁", "paras": [
+            "瓶颈：寄存器压力限制occupancy，SM利用不足。处方：做架构变更，一行一个program：标量累加器（寄存器最少）、超大grid并行（2048个program）、纯1D流式load、大BLOCK_K摊销循环开销。性能：4.03ms到1.95ms，warp active约95%。反思：这个负载本质是访存带宽bound，最大化occupancy和并行比tiling优雅更重要；逃离局部最优有时需要架构变更。",
+            MATVEC3,
+        ], "fig_after": {
+            "1": [{"src": "fig03.png", "caption": CAP3}],
+        }},
+        {"type": "h2", "title": "经验教训", "paras": [
+            "分享编排多智能体攻坚复杂内核工程问题时的心得。",
+        ]},
+        {"type": "h3", "title": "Q:没有人工盯，怎么保证智能体不跑偏？", "paras": [
+            "关键是硬的、可验证的约束。在KernelAgent里，正确性和性能都走门禁评测：每个内核变体必须通过数值验证，性能用真实硬件benchmark测。进展由可执行、可测量的结果定义，智能体就不会跑偏。",
+        ]},
+        {"type": "h3", "title": "Q:多智能体并行推进，又共享工作上下文怎么做到的？", "paras": [
+            "光并行不够，没有协调智能体会重复造轮子、走冗余路线。每轮内优化worker独立并行，试不同优化策略；轮结束后，所有结果（成功失败都算）汇总成共享的结构化上下文：试了什么、什么有效、为什么。这份共享记忆广播给下一轮所有智能体，后轮站在前轮肩膀上。",
+        ]},
+        {"type": "h3", "title": "Q:怎么防局部最优？什么时候停？", "paras": [
+            "防局部最优靠探索多样性加清晰的终止准则。KernelAgent维护top-K beam而不是单个incumbent，并行探索降低早期次优决策主导搜索的风险。",
+            "GPU优化有个特点：单看优化A不行、B不行，AB组合可能突破。KernelAgent的目标就是最大化可探索的想法。",
+            "系统监控性能增量和硬件利用率：连续多轮roofline效率或运行时间没有实质改善，就判定继续优化不太可能有回报。",
+        ]},
+    ],
+    "conclusion": [
+        "KernelAgent证明，上一版正确性循环里的deep agent原则（扎根工具使用、并行探索、确定性控制）可以自然延伸到性能优化。",
+        "给循环加上硬件profiling和工作记忆，让多智能体学习并探索不同优化路径，就能把验证过的内核从正确推到正确且快。",
+        "开源项目，持续开发中。欢迎反馈、贡献和新用例，希望推进PyTorch生态里实用、可扩展的内核优化。",
+    ],
+    "reference_url": "https://pytorch.org/blog/kernelagent-hardware-guided-gpu-kernel-optimization-via-multi-agent-orchestration/",
+}
+
+if __name__ == "__main__":
+    out = os.path.join(_article_dir, "article_data.json")
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(DATA, f, ensure_ascii=False, indent=2)
+    print(f"wrote {out}: {len(DATA['sections'])} sections")

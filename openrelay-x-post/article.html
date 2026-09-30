@@ -1,0 +1,109 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class；真身在内联style，class仅兜底） */
+.portal-title { font-size:12px; color:#1a6ba0; font-weight:bold; }
+.portal-links { font-size:12px; color:#0F4C81; }
+.portal-links a { color:#0F4C81; text-decoration:none; }
+</style>
+<section style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<section style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心观点</strong>：OpenRelay把Gemma 4 31B从NVIDIA B200搬到AMD MI355X，派两个智能体干了一晚上：研究智能体读内核源码排优先级，调优智能体在真卡上一次改一处，正确性门槛卡死GSM8K不低于96.5%。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">关键数据</strong>：4秒p95 TTFT目标下单卡负载从2.0涨到3.0请求每秒，prefill从27.8K涨到41.9K token/s，每输出token从40到43毫秒降到22毫秒，GSM8K保持98.8%不变。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">方法创新</strong>：五个修法提成上游PR：AITER补512维头的prefill tile、Triton编译常量改运行参数、Gemma形状的GEMM配置、推测解码的split-KV注意力、vLLM的融合激活加MXFP4量化核。</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">参数表告诉你一块卡理论上能干什么，实际能干什么是另一回事：一堆内核、查找表和开关，多数是为别的模型调的。新卡上跑新模型，第一版往往是能跑、对、但卡在空等。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">OpenRelay把Gemma 4 31B搬到MI355X只花了一天跑通，然后让智能体调了一晚上，单卡承载涨了1.5倍。下面把循环机制、四个优化和天花板分析逐一拆开。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">从B200搬到MI355X:跑通只花一天</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Blackwell的NVFP4权重在MI355X上跑不了，于是换成AMD的Quark MXFP4检查点，保留Google的推测解码小模型。权重加小模型约20GB，芯片288GB的HBM大头留给KV缓存，内存这关好过。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">计算是另一回事。第一版配置每卡prefill 27.8K token/s，听着还行，算笔账就露馅：矩阵运算只跑到芯片MXFP4峰值的五分之一不到。卡着延迟目标，一块卡最多扛2.0请求每秒。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">双智能体循环:研究与调优分工</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">研究智能体读内核库源码和公开PR，按对这个模型加这块卡的可能收益排序；调优智能体在真卡上一次只改一处， profiling、提假设、跑实验，更快且GSM8K不低于96.5%才保留。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">正确性门是绝不跳过的一步：更快的内核如果改变模型答案，直接当bug处理。调优智能体把一切写进日志，错的也写。这次它就抓到自己一个乌龙：新引擎因旧引擎占着端口没起来，一轮benchmark悄悄测的是旧引擎，它扔掉那批数字，还把启动器改成拒绝占用的卡。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Gemma 4这轮给了它四块MI355X和一个晚上。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1:内核智能体的循环。 profiling找时间花在哪，研究智能体排优先级，真卡上一次改一处，精度门要求GSM8K不低于96.5%，保留或回滚并记入日志，然后重复</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">战果:同延迟目标,1.5倍负载</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">基线是自家第一版MI355X配置，跑stock vllm/vllm-openai-rocm:v0.30.0，不跟B200比厂商。负载测试开环，每档300秒、两个种子，请求平均输入9.5K token、输出380个。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">4秒p95 TTFT目标下，单卡从2.0涨到3.0请求每秒；16个10K token提示并发下prefill从27.8K涨到41.9K token/s；该负载下每输出token中位数从40到43毫秒降到22毫秒；GSM8K（250题）98.8%对98.8%，纹丝不动。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2:同延迟目标，1.5倍负载。p95 TTFT随负载变化，请求平均输入9.5K token、输出380个。优化前2.0请求每秒触4秒线，优化后3.0才触线</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">prefill涨幅的三分之二在前十分钟落地，剩下的是长尾小胜，每一处单独计量。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3:一晚上的智能体调优。每卡prefill token/s，16个10K token提示并发，每步都过精度门。从27.8K涨到41.9K，注意力表项贡献33%，原生RMSNorm收尾</figcaption></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">优化1:缺失的表项</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">开工七分钟，第一份profile回来：prefill的GPU时间里注意力占43%，对这个尺寸的模型来说太多了。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">AITER按GPU架构从JSON表里选注意力tile尺寸，MI355X（gfx950）的表里没有256维及以上头的prefill项，而Gemma 4两种都有：50层滑动窗口层是256维头，10层全局层是512维头。于是prefill回退到给decode准备的tile，每program只算16个query行；全局层8个query头共享一个KV头，16行就是2个token，每个K/V tile每2个token被重读一遍。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">研究智能体读AITER源码时已把这条排在最前。修法就是加一条表项，按长query键控，decode继续用它的tile：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4:decode尺寸的tile为什么伤prefill。Gemma 4全局层8个query头共享一个KV头，16行tile只覆盖2个token，同一份K/V被扫8遍；换128行tile后16个token一遍过</figcaption></figure>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #FF4689">"D_GEQ_512.Q_GEQ_256.DT_fp8_fp8"</span><span style="color: #F8F8F2">:&nbsp;{</span><span style="color: #FF4689">"BLOCK_M"</span><span style="color: #F8F8F2">:&nbsp;</span><span style="color: #AE81FF">128</span><span style="color: #F8F8F2">,&nbsp;</span><span style="color: #FF4689">"TILE_SIZE_MIN"</span><span style="color: #F8F8F2">:&nbsp;</span><span style="color: #AE81FF">64</span><span style="color: #F8F8F2">,&nbsp;</span><span style="color: #FF4689">"TILE_SIZE_MAX"</span><span style="color: #F8F8F2">:&nbsp;</span><span style="color: #AE81FF">64</span><span style="color: #F8F8F2">,</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span><span style="color: #FF4689">"num_warps"</span><span style="color: #F8F8F2">:&nbsp;</span><span style="color: #AE81FF">4</span><span style="color: #F8F8F2">,&nbsp;</span><span style="color: #FF4689">"num_stages"</span><span style="color: #F8F8F2">:&nbsp;</span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">,&nbsp;</span><span style="color: #FF4689">"waves_per_eu"</span><span style="color: #F8F8F2">:&nbsp;</span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">}</span></code></pre>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5:prefill时间花在哪，tile修复前后。三个10K token提示的GPU毫秒数：注意力从482降到185，总时间从1121毫秒降到742毫秒</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">全局层内核从每步10.6毫秒降到3.9毫秒，滑动窗口内核从1.37毫秒降到0.59毫秒，prefill涨三分之一，GSM8K不动。修完矩阵乘法占prefill的61%，GPU的时间就该花在这。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">优化2:GPU在等CPU</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">有负载时，一个约30请求的decode步要57.7毫秒，其中内核只占21.3毫秒，GPU忙碌率37%。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">引擎的CUDA graph（ROCm上叫HIP graph）只capture到64个token。加2个draft token后每个请求每decode步3个token，batch超过21个请求就miss graph，每个内核都由CPU逐个发射。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">capture到256个token就是一个开关的事，代价是7秒启动时间和3.1GiB内存，decode步缩到原来的2.7分之一。32用户下每秒请求从2.42涨到2.88。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图6:GPU在等CPU。约30个请求的一个decode步：优化前57.7毫秒里内核只占21.3毫秒，其余GPU空转等CPU；graph capture到256个token后内核独占21.3毫秒</figcaption></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">优化3:编译风暴</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个融合GELU加MXFP4量化的内核初看像regression，trace解释了一切：服务中段七个约190毫秒的空转间隙。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">AITER把填充行数scaleM_pad声明成Triton编译期常量，每个新batch大小（按256向上取整）都编译一个内核变体。改成运行期参数就好。在AITER主分支上，14种batch大小现在只要编译4次而不是12次，输出逐比特一致。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图7:服务中途的内核重编译。scaleM_pad是Triton编译期常量，每个新batch大小编译一个变体，每次约190毫秒；改运行期参数后服务不再卡顿</figcaption></figure>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">优化4:小优化们</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="color:#0F4C81;font-size:7px;line-height:1;vertical-align:middle;">●</span>&nbsp;按Gemma 4精确形状调的MXFP4 GEMM配置：prefill加4%。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="color:#0F4C81;font-size:7px;line-height:1;vertical-align:middle;">●</span>&nbsp;融合GELU、上投影和MXFP4量化内核：加1.5%。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图8:一次只改一处。累积收益，同卡同harness，蓝色标出对该指标贡献最大的一项：注意力表项把prefill推到37.3K，graph到256个token把请求每秒推到2.88</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="color:#0F4C81;font-size:7px;line-height:1;vertical-align:middle;">●</span>&nbsp;推测解码步上512维层的split-KV注意力。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="color:#0F4C81;font-size:7px;line-height:1;vertical-align:middle;">●</span>&nbsp;原生RMSNorm，让torch.compile把周围的切分、norm、RoPE融起来：加6%。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="color:#0F4C81;font-size:7px;line-height:1;vertical-align:middle;">●</span>&nbsp;8192个token的prefill分块，每输出token时间下降，prefill不涨。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">没起作用的：Triton和hipBLASLt的MXFP4 GEMM比AITER汇编内核慢2.5倍；vLLM的QK-norm和RoPE融合pass对不上Gemma 4的布局；CUDA graph capture到16K token，白花14GiB没收益；128并发序列，吞吐多1到3%，每token时间翻倍；第三个draft token，每token时间降7%到10%，但容量不涨。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">离天花板多远</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">现在矩阵运算占prefill的61%，这些内核在负载时钟下跑到MXFP4峰值的55%到61%。更好的内核也许再买1.2到1.3倍；注意力加小算子如果免费，prefill到68K token/s；matmul也跑满峰值，到125K。第一版的10倍需要线性层alone约17 PFLOP/s，远超芯片约10 PFLOP/s的MXFP4峰值，不可能。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig09.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图9:离天花板多远。首版27.8K，一晚上41.9K；更好内核估计50K到55K；注意力和小算子免费则68K；matmul跑满峰值125K；首版10倍的278K不可能，远超芯片峰值</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">全部开源,外加五个上游PR</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">智能体改的所有东西都在OpenRelayInc/inference-recipes：Dockerfile、调好的表、补丁、每个数字背后的benchmark harness。该进上游的修法都提成PR，在项目主分支的MI355X上重测：ROCm/aiter#5926（512维头的prefill tile）、#5927（batch大小不再重编译）、#5928（Gemma 4形状的GEMM配置）、#5929（推测解码的split-KV注意力）、vllm-project/vllm#59153（融合激活加MXFP4量化）。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">有一个修法没进：AITER主分支的新MI355X注意力内核跑Gemma 4滑动窗口层比调好的tile还快（0.55毫秒对0.61），就让它留在上游了。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">升级注意：vLLM v0.30.0之后AITER汇编MXFP4 GEMM改成opt-in，不开VLLM_ROCM_USE_AITER_FP4_ASM_GEMM=1的话，新nightly上Gemma 4 prefill从27.7K掉到18.9K token/s。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig10.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图10:上游PR。每个都在项目主分支的MI355X上重测：512维头prefill tile快2.7倍，batch大小不再重编译（12次变4次），Gemma形状GEMM配置最高1.8倍，推测解码split-KV注意力最高3.8倍，融合激活加MXFP4量化prefill加1.8%</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">三个改动是stock镜像上的纯开关：</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code>--max-num-batched-tokens<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">8192</span><br/>--compilation-config<span style="color: #F8F8F2">&nbsp;</span><span style="color: #E6DB74">'{"cudagraph_capture_sizes":[1,2,4,8,16,24,32,48,64,80,96,112,128,144,160,176,192,224,256]}'</span><br/>--kernel-config<span style="color: #F8F8F2">&nbsp;</span><span style="color: #E6DB74">'{"ir_op_priority":{"rms_norm":["native"]}}'</span></code></pre>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<section style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">一个晚上的1.5倍，拆开看全是脏活：表里缺一项、graph没capture够、编译期常量放错地方。智能体的价值不在想出奇招，而在于不知疲倦地profiling、假设、实验、回滚，外加一个绝不妥协的精度门。<br  /><br  />对用AMD卡跑推理的团队，这篇最值钱的是那张修法清单和五个PR：tile表、GEMM配置、graph capture尺寸，开箱即用。以及那个升级gotcha：记得开AITER汇编GEMM的开关，不然prefill直接掉三成。<br  /><br  />vLLM双厂商通吃，模型上两家芯片是容易的部分；难的是每对模型加芯片组合都有一套没人为它调过的默认参数。这个gap值1.5倍，智能体一晚上填上了。</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="text-align:center;">
+<span class="portal-title" style="font-size:12px;color:#1a6ba0;font-weight:bold;">【传送门】</span>
+<section style="text-align:left;display:inline-block;font-size:12px;color:#0F4C81;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/YHmkt8EHFGm-HeflWCsB2w" target="_blank" data-linktype="2">英伟达Kernel Agent: 编译器与算子调优Agent的协同设计</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/4aEYa-5J2Ir82V_1_9anDA" target="_blank" data-linktype="2">AI芯片架构全景: 从NVIDIA到Groq的六条设计路线</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/42s6fk-xdo23L-vtLj6Q8Q" target="_blank" data-linktype="2">vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/i-NZ-4oCXs48XpDfdcBfPw" target="_blank" data-linktype="2">在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+</section>
+</section>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://x.com/OpenRelayInc/status/2105046346722058495</span></p>
+</section>

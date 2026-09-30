@@ -1,0 +1,297 @@
+{
+  "summary": [
+    {
+      "key": "范式",
+      "body": "KITE：扩容只加不影响KV的区域，prefill成本不涨"
+    },
+    {
+      "key": "实例",
+      "body": "SST双塔：Prefiller产KV，Decoder读KV，33.8B长到67B"
+    },
+    {
+      "key": "结果",
+      "body": "同等训练算力loss更低，75:25下推理成本比63B低31.6%"
+    }
+  ],
+  "lead": [
+    "把模型做大，训练和推理的账要一起算。StepFun 的 KITE 提出一种扩容范式：新增参数全部放在不影响 KV 的区域，prefill 只用小模型部分算，推理不涨价；新增容量在训练中途加入，训练也省钱。下文拆解。"
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "问题:单边省钱等于没省",
+      "paras": [
+        "大模型的规模红利是祝福也是诅咒：更大带来更强，但训练和推理都要天价算力。扩容研究的核心问题是怎么用更低的算力把模型做大， MoE 是个成功例子：稠密 FFN 换成稀疏专家路由，同等参数量下训练和推理计算都降，或者说同等算力下容量更大。",
+        "MoE 容易被忽略的一点是它同时省了训练和推理。只省一边的方案，另一边会把账要回来。渐进式 upcycling 先训小模型，中途长成目标模型，大部分 token 预算跑在便宜图上；但 upcycle 出来的模型通常打不过同尺寸从零训的，训练省的钱在推理端还回去： serve 的是完整目标模型，拿到的却是打折的质量。",
+        "KV 复用走另一边。深层复用浅层算好的 key 和 value，YOCO 一系让模型长大时 prefill 依然便宜；但砍掉产 KV 的层会伤质量，追回质量要更大模型或更长训练，等于训练端亏了。两边都是一轴赚一轴亏。",
+        "KITE 把两个成本一起算：扩容时把模型分成两个区域，决定 KV 张量的区域，和不影响 KV 的区域，容量只往后者加。新增容量在训练中途出现，买到的质量训练成本划算；KV 计算不动，推理的 prefill 成本也不动。质量、训练成本、推理成本三者同时向好。",
+        "这对 Agent 负载尤其值钱：反复调用处理累积上下文和新工具输出，即使有 prompt 缓存，仍有大量未缓存输入。OpenRouter 公开流量显示，六个模型未缓存输入的 token 量都超过输出，占了费用大头。省 prefill 就是省大钱。",
+        "图 1 是 KITE 的训练路线与三向权衡：以 47B 从零训的 Transformer 为参照，内圈为优。SST 67B 的推理代理成本比 47B 低 6.7%，比 63B 低 31.6%。"
+      ],
+      "table": {
+        "head": [
+          "模型",
+          "输入/输出token",
+          "未缓存输入/输出token",
+          "未缓存输入费用占比"
+        ],
+        "rows": [
+          [
+            "GPT-6 Astra",
+            "106.43×",
+            "14.64×",
+            "74.6%"
+          ],
+          [
+            "GPT-6 Astra Pro",
+            "63.15×",
+            "14.01×",
+            "73.8%"
+          ],
+          [
+            "Claude Fable 5",
+            "63.38×",
+            "16.29×",
+            "76.7%"
+          ],
+          [
+            "Claude Sonnet 5",
+            "59.88×",
+            "12.12×",
+            "70.8%"
+          ],
+          [
+            "Gemini 3.7 Flash",
+            "37.79×",
+            "10.15×",
+            "67.4%"
+          ],
+          [
+            "Gemini 3.8 Flash",
+            "46.14×",
+            "10.51×",
+            "67.9%"
+          ]
+        ]
+      },
+      "fig_after": {
+        "4": [
+          {
+            "src": "fig01.png",
+            "caption": "图1:KITE训练路线与三向权衡：训练loss、训练算力、推理成本，内圈为优"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "SST:产KV的塔与读KV的塔",
+      "paras": [
+        "KITE 的具体实例叫 Step Scale Transformer。两个同深度解码器塔顺序执行：Prefiller 产出逐层 KV，Decoder 复用这些 KV 预测下一个 token。生成时 bulk prefill 只跑第一个塔，prompt 边界预测和 decode 跑两个塔。先训好源模型，扩容后双塔联合继续训。",
+        "设计原则写成式子：(M_t, z_t) = P(x_1:t; θ_P)，l_t = D(x_t, z_t, M_t; θ_D)。M_t 是可复用的注意力记忆，z_t 是位置 t 的可选 Prefiller 特征，l_t 是下一个 token 的 logits。不变量是结构性的：权重和 KV 值都不冻结，但 Decoder 不得产出未来位置需要的记忆；生成时要跳过历史 Decoder 计算，被保留的 Decoder 位置在给定 Prefiller 输出下必须与被跳过的位置独立。这样预测容量增长，bulk prefill 不动。首 token 的最终位置读出和 decode 时 Decoder 的工作依然必要。",
+        "SST 里 Prefiller 先跑完产出逐层 KV，每 Decoder 块自己算 query，读对应 Prefiller 层的 KV：q^D_l,t = Q^D_l(h^D_l-1,t)，a^D_l,t = Attn(q^D_l,t, K^P_l[I_l(t)], V^P_l[I_l(t)])。I_l(t) 是原始因果全/滑动注意力掩码允许的位置。Decoder 块参数独立，残差与 FFN/MoE 都是 token 局部的。",
+        "双塔共享 embedding，Decoder 入口用 token 局部桥接：h^D_0,t = RMS_ε(e_t) + RMS_ε(h^P_L,t)，其中 RMS_ε(v) = v / √(mean(v²) + ε)，ε 取 1e-5，无训练参数。预测用 Decoder 末态：l_t = W_out Norm_out(h^D_L,t)。梯度经入口桥和复用的 KV 流回 Prefiller；给定 Prefiller 输出，每 Decoder 位置与更早的 Decoder 状态独立。",
+        "执行上：训练时 Prefiller 跑全序列，Decoder 算每个监督位置；prefill 时 Prefiller 处理完整 prompt 产出 KV cache，Decoder 只算最后一个 prompt 位置就能预测首 token，更早的 Decoder 位置可省；decode 时每新 token 过双塔，Prefiller 扩展 KV cache，Decoder 读 KV 预测。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "fig02.png",
+            "caption": "图2:SST实例：阶段一训Prefiller，扩容加Decoder，阶段二双塔联合训，Decoder读对齐的Prefiller KV"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "训练路线:33.8B长到67B",
+      "paras": [
+        "SST 把 33.819B 参数的源模型扩到 66.959B，源塔原样保留为 Prefiller。评测的路线是 167.98B 源阶段 token 加 222.55B 延续 token。47B 和 63B 经典基线是同一模型家族 scaling ladder 上源模型之上的两档，加深加宽、保留 MoE 与注意力模式。",
+        "扩容时把源 checkpoint 的每层同时拷进 Prefiller 和 Decoder 对应层，双塔共享一份 embedding、输出 norm 和输出头。之后 BF16 联合训双塔，优化器沿用源模型的 Muon 和 Adam 参数组：Prefiller 与共享参数保留优化器状态，Decoder 用新状态；全组沿源余弦学习率继续，剩余衰减铺到延续阶段，Decoder 不单独 warmup。",
+        "算力按有效架构的理论 FLOPs 比：C_train = 3(D_s f_s + D_c f_c)，3 倍是前向加反向。47B 经典 checkpoint 定义 B_ref ≈ 5.16836×10²¹ FLOPs，最终 SST 与 63B 端点都约用满 100% 这份预算，SST 的两阶段全计入。",
+        "图 3 是到评测 checkpoint 的训练路线：13350 步源训练接 17687 步延续。"
+      ],
+      "table": {
+        "head": [
+          "配置",
+          "源模型",
+          "SST",
+          "47B经典",
+          "63B经典"
+        ],
+        "rows": [
+          [
+            "层数",
+            "18",
+            "18+18",
+            "20",
+            "22"
+          ],
+          [
+            "隐宽",
+            "2304",
+            "2304",
+            "2560",
+            "2816"
+          ],
+          [
+            "MoE层",
+            "16",
+            "16+16",
+            "18",
+            "20"
+          ],
+          [
+            "路由/选中专家",
+            "512/8",
+            "512/8",
+            "512/8",
+            "512/8"
+          ],
+          [
+            "注意力模式",
+            "SSSF",
+            "SSSF",
+            "SSSF",
+            "SSSF"
+          ],
+          [
+            "总参数(B)",
+            "33.819",
+            "66.959",
+            "46.727",
+            "62.691"
+          ],
+          [
+            "decode活跃body参数(B/token)",
+            "1.120",
+            "2.155",
+            "1.477",
+            "2.016"
+          ]
+        ]
+      },
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig03.png",
+            "caption": "图3:训练路线：源阶段167.98B token，延续阶段222.55B token"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "结果:loss更低,推理更便宜",
+      "paras": [
+        "SST 的 loss 在转换点上跳然后随延续训练下降。终点 EMA-200：SST 1.5900（390.54B token），47B 经典 1.6006（443.16B token），63B 经典 1.5921（334.62B token）。可比累计训练算力下 SST 的训练 loss 最低。",
+        "七个下游任务同 checkpoint 评测，SST 全面最好：OpenBookQA 75.00 对 68.50/71.00，MMLU 60.54 对 58.44/59.39，GSM8K 58.38 对 56.56/55.04，MATH 34.36 对 33.06/33.14，HumanEval 37.80 对 35.98/32.93，MBPP 51.40 对 50.40/50.80，BBH 52.74 对 50.36/52.56；ARXIV held-out NLL 1.4421 对 1.4521/1.4424。最低的训练 loss 确实转化成了最好的下游表现。",
+        "推理成本按 prefill:decode 混合看，代理成本 = 0.75p + 0.25d，p、d 是相对 47B 归一化的 bulk-prefill 与 decode 活跃 body 数。SST 与 63B 在 13.4:86.6 打平，与 47B 在 65.5:34.5 打平，prefill 占比越高 SST 越便宜。75:25 下 SST 比 47B 低 6.7%，比 63B 低 31.6%。OpenRouter 六个模型的未缓存输入账单占比 67.4 到 76.7%，落在这个区间 SST 全程比两个基线便宜：比 47B 低 1.3 到 7.9%，比 63B 低 27.7 到 32.5%。",
+        "注意这是解析代理成本比较，不是实测服务加速。相对 47B，SST 拿更低的 bulk-prefill 计算换更高的 decode 计算，prefill 重的负载下代理成本更低。"
+      ],
+      "table": {
+        "head": [
+          "任务",
+          "47B经典",
+          "63B经典",
+          "67B SST"
+        ],
+        "rows": [
+          [
+            "OpenBookQA",
+            "68.50",
+            "71.00",
+            "75.00"
+          ],
+          [
+            "MMLU",
+            "58.44",
+            "59.39",
+            "60.54"
+          ],
+          [
+            "GSM8K",
+            "56.56",
+            "55.04",
+            "58.38"
+          ],
+          [
+            "MATH",
+            "33.06",
+            "33.14",
+            "34.36"
+          ],
+          [
+            "HumanEval",
+            "35.98",
+            "32.93",
+            "37.80"
+          ],
+          [
+            "MBPP",
+            "50.40",
+            "50.80",
+            "51.40"
+          ],
+          [
+            "BBH",
+            "50.36",
+            "52.56",
+            "52.74"
+          ],
+          [
+            "ARXIV NLL(越低越好)",
+            "1.4521",
+            "1.4424",
+            "1.4421"
+          ]
+        ]
+      },
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig04.png",
+            "caption": "图4:训练LM loss(EMA-200)对token与累计算力：转换点在167.98B token"
+          }
+        ],
+        "2": [
+          {
+            "src": "fig05.png",
+            "caption": "图5:按prefill:decode成本混合的估计推理成本，相对47B归一，阴影是OpenRouter账单区间"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "设计空间:KV分配不止一种连法",
+      "paras": [
+        "SST 是 KITE 的一个具体实现，不是唯一答案。对齐的逐层 KV 复用、入口桥、Decoder 独立读出都是设计选择。核心要求只有一条：新增容量不延长产 KV 的计算，不引入需要历史 Decoder 状态的依赖。",
+        "Prefiller KV 与 Decoder 层的配对不必一一对应，也不必保序。Decoder 层可以倒序读 Prefiller KV，也可以多层复用同一个 KV 源。图 6 展示了几种连法。",
+        "隐状态连接是另一个自由度：Prefiller 表示可以在 Decoder 入口进，也可以在中间层进，还可以参与最终读出。桥算子、两部分的深度与宽度都可以变，只要保持因果访问与接口兼容，不必同成本同质量。",
+        "实验只探了这个设计空间的一小块，报告的是选定 SST 配置的性能，没找最优连法。KITE 的价值是给这些选择一个公共的研究框架，不把架构锁死在 SST 的连法上。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig06.png",
+            "caption": "图6:KITE内的连接选择：(a)SST式主干与可选隐状态连接，(b)三种KV分配示例"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "相关工作一句话",
+      "paras": [
+        "Net2Net 研究保函数的模型增长，SPARKLING 看宽度渐进学习的信号保持；dense 转 MoE 的 upcycling 用稠密 checkpoint 初始化稀疏专家，SST 则是在训练中途给已稀疏的源模型加 Decoder。MQA/GQA/CLM 降的是存的注意力状态，KITE 扩的是容量而不延长产 KV 路径。YOCO 把产缓存与用缓存的计算分开并做 prefill 早退，SST 把这个执行模式用在分阶段增长上；Mixture-of-Recursions 的固定 KV 循环可看作 KITE 家族中参数绑定的特例，SST 用独立参数在训练中扩容。"
+      ]
+    }
+  ],
+  "conclusion": [
+    "① KITE：扩容只往不影响 KV 的区域加参数，prefill 成本不涨，新增容量训练中途加入也省训练钱。② SST 把 33.8B 源模型扩到 67B，可比训练算力下 loss 1.5900，低于 47B 的 1.6006 和 63B 的 1.5921，下游七项全胜。③ 75:25 的 prefill:decode 下，推理代理成本比 47B 低 6.7%，比 63B 低 31.6%。",
+    "扩容的账要三本一起算：训练、推理、智能。只省一边的方案，另一边会把账要回来。"
+  ],
+  "reference_url": "https://arxiv.org/html/2609.27294v1",
+  "title": "KITE:模型长大但KV不变,Agent推理更便宜"
+}

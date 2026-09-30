@@ -1,0 +1,141 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class；真身在内联style，class仅兜底） */
+.portal-title { font-size:12px; color:#1a6ba0; font-weight:bold; }
+.portal-links { font-size:12px; color:#0F4C81; }
+.portal-links a { color:#0F4C81; text-decoration:none; }
+</style>
+<section style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<section style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">场景</strong>：GB300单NVL72域TP8，长多轮SWE-Smith Agent负载，并发1到16<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">优化</strong>：EAGLE3投机解码、LatentMoE通信感知切分、Replay SSM、形状感知路由<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">结果</strong>：省7.7GiB参数显存，验证工作区从16.7GiB降到0.4GiB</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把Kimi K3跑在GB300上是个系统问题：KDA、Gated MLA、LatentMoE和通信、持久状态搅在一起，长多轮Agent负载把孤立decode测不出的开销全暴露出来。LightSeek这篇三部曲的第一部，讲单NVL72域TP8的优化：EAGLE3、通信感知切分、Replay SSM。下文拆解。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">端到端:长上下文Agent服务</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">服务曲线上每个点是一个实测并发。往右是每个用户生成更快，往上是每GPU聚合吞吐更高。对比的是EAGLE3与非投机执行，workload与服务配置冻结一致。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">基准契约：GB300 GPU，8卡跨两个4卡计算托盘但同属一个NVL72 NVLink域；注意力TP8、MoE TP8；目标模型nvidia/Kimi-K3-NVFP4；draft模型lightseekorg/kimi-k3-eagle3-mla，BF16未量化；MLA后端TokenSpeed MLA；KDA后端CuTe DSL prefill加fused Triton decode/verify；MoE后端FlashInfer TensorRT-LLM；KV cache FP8；workload是冻结的多轮SWE-Smith trace；上下文从约50K input token起，每轮加约800 token，最多约68K；生成10到15轮，每轮最多500输出token；并发1、2、4、8、16；EAGLE3验证3个draft步、4位置目标窗口。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">8个TP rank跨两个托盘但不出NVL72域，这组实验没有跨机架网络跳。SWE-Smith trace模拟Agent编程会话的形状：长prompt、重复工具调用trace、多轮不断延长同一对话。每轮复用大段历史，追加工具输出，再要一段相对短的回复。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">指标是每GPU每分钟token数TPM/GPU，和每用户每秒生成token数TPS/user，由TPOT换算。TPS/user不含首token时间。两个指标一起看，加并发时系统吞吐与单用户体验怎么变。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对比范围声明：所有点用同一trace集、同一目标模型、同一服务配置，意图是EAGLE3对非投机的配对比较；别家系统的结果要先对齐workload与指标定义才可比。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">图1横轴TPS/user、纵轴TPM/GPU，标签标出每点的实测并发。EAGLE3把整条曲线往外推：低并发和高吞吐区都受益。在50 TPS/user的参考生成速度下，对EAGLE3并发8和16两点线性插值，约459K TPM/GPU，这是曲线上的插值点，不是独立测量。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1:多轮SWE-Smith trace上的聚合吞吐对每用户生成速度：EAGLE3把曲线往外推</figcaption></figure>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">组件</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">配置</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">GPU</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">NVIDIA GB300 GPU</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">拓扑</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">8卡跨两个4卡计算托盘，同属一个NVL72 NVLink域</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">并行</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">注意力TP8，MoE TP8</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">目标模型</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">nvidia/Kimi-K3-NVFP4</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Draft模型</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">lightseekorg/kimi-k3-eagle3-mla</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Draft精度</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">BF16，未量化</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">MLA后端</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">TokenSpeed MLA</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">KDA后端</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">CuTe DSL prefill；fused Triton decode/verify</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">MoE后端</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">FlashInfer TensorRT-LLM</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">KV cache类型</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">FP8</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">负载</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">冻结的多轮SWE-Smith trace</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">上下文增长</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">约50K input token起；每轮约800 token；最多约68K</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">生成</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">10到15轮；每轮最多500输出token</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">并发</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1、2、4、8、16</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">EAGLE3验证</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">3个draft步；4位置目标窗口</td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">LatentMoE通信感知切分</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">profile拆出三类反复出现的开销：LatentMoE里复制投影与通信感知切分的权衡，KDA的临时状态存储，以及主模型算子周围的小M执行。这些开销在93个decoder层里反复出现，包括69个KDA层、24个MLA层、92个MoE块。多token验证让某些形状与状态生命周期约束更显眼，但下面讲的是K3目标路径，不是投机解码算法本身。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最初实现把两个路由隐投影都复制：每TP rank存并算完整的hidden到隐down投影，以及专家之后完整的隐到hidden up投影。省了显式拼装投影分片，但权重存储和投影计算都翻了8倍。理想是两个投影都切，但MoE块两侧的通信权衡不同：切down投影要新增拼装本地隐分片；切up投影反而能重构专家后的通信路径，把路由与共享专家的规约、本地投影分片、最终hidden组装合成一步。目标是down路径的拼装代价尽量小，up路径的切分同时降复制计算和专家后尾巴的通信。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">路由down投影：每MoE块先把7168维hidden投到3584维路由隐空间。复制形态下每rank存完整 [3584, 7168] BF16权重、算全部输出列。列切分把输出轴按TP8分：rank r存并算 [448, 7168] 块，覆盖隐列448r到448r+447，再拼回完整路由隐。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">拼装路径按M选：M≤8用静态M的SIMT kernel，算完本地块直接经NVLink SHARP多播虚地址发布；8<M≤1280 用 tensor core kernel 写进同一多播地址的跨步视图，省掉单独发布 kernel；两种都用 Lamport 协议 gather，在池化的双槽 mailbox 里等齐 8 rank 的分片再拼。超过 mailbox 上限，每 rank 写普通内存，最后一维 all-gather 拼。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2:路由down投影的列切分与跨8个TP rank的隐拼装</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">切路由down投影，每rank权重从49.0 MiB降到6.1 MiB每MoE块，92个块在每GPU省约3.9 GiB。延迟也不只小形状受益：M=4整操作14.9降到12.8μs；M=8192从225.1降到138.9μs，含all-gather。M=1280到1281的跳变是mailbox拼装切到GEMM加all-gather，大M点测的是投影可扩展性，超出本workload的decode与验证区间。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3:路由down投影延迟：复制路径对切分路径</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>路由up投影：最初实现把路由和共享专家的部分和分别规约，再在每rank算完整复制up投影。切分路径每rank只算hidden_size/TP个输出元素。关键是块注入：每rank把自己的投影块和前缀张量的对应切片，加进共享专家部分和的匹配列。块互不相交，一次共享all-reduce既求和又拼装，省掉单独的路由all-gather。GB300上这条路径基于TensorRT-LLM的多节点NVLink all-reduce设计，经FlashInfer承接，一shot和两shot的Lamport协议用NVLink多播内存做小TP规约，TokenSpeed加K3专用epilogue让规约后的相邻计算保持融合。小M时融合尾巴改走reduce-scatter共享分支，在投影epilogue里加本地共享分片，多播发布合并块再做Lamport gather，同时加上前缀张量。这部分集成有NVIDIA DevTech的技术指导与优化支持。</strong></p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4:路由up投影切分与专家后尾巴融合：一次共享all-reduce又规约又拼装</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">down和up投影权重一样大，各省约3.9 GiB/GPU，两处合计相对复制布局省约7.7 GiB/GPU。从路由与共享专家产出本地部分和算起，完整尾巴M=4从32.34降到18.28μs，扣掉空事件开销1.77倍，用原始事件间隔算是1.69倍；M=8192从915.77降到656.22μs，1.40倍。M=256处过渡形态比对照慢19.4%，对照侧M=2049的跳变是它从MNNVL回退到NCCL。这些是局部组合对比，不是孤立finalize融合收益，更不是端到端加速。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5:路由up投影与融合尾巴延迟对复制对照</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Replay SSM:KDA验证状态</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每个token在每KDA层推进卷积与循环状态。多token验证下，接受长度要等整个候选窗口评完才知道，每位置都快照完整状态，内存随batch和验证宽度涨。Replay SSM只留已提交状态做锚，记重建要的小投影与门输入；采样返回接受长度后，一个batched kernel重放接受前缀加目标采样token。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">TP8的K3上，快照一行每请求每KDA层795 KiB：27 KiB BF16卷积状态加768 KiB FP32循环矩阵。batch 64时，存锚加4个验证位置、69个KDA层，要16.7 GiB/GPU。Replay只要0.4 GiB/GPU，省16.4 GiB/GPU，即97.8%，45倍，用fused verify和replay kernel没观测到延迟增加。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">内存换算：这里cache几何下，投影切分的7.7 GiB参数缩减和Replay SSM的16.4 GiB验证工作区缩减，按每逻辑token 14.1 KiB/GPU，分别约等于0.6M和1.2M个目标加draft的FP8 cache token。这不是分配器峰值测量，也不保证理论容量能同时分配出来。</p>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">KDA验证工作区，max_num_seqs=64</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">每GPU</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">逐位置状态快照</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">16.7 GiB</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Replay SSM工作区</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">0.4 GiB</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">省下内存</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">16.4 GiB (97.8%)</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">等价FP8 cache容量</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">约1.2M token</td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Kernel融合与形状感知路由</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">通信与状态优化之外，剩下的decode与验证开销不再被单个大算子主导，而是一堆短投影、中间交接、路由步骤、元数据准备，围着4位置验证窗口转。单个都很小，但在模型里反复出现，decode与验证的低token数下就显眼了。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">形状感知投影路由：没有一种GEMV或GEMM实现通吃所有投影形状。按 (M,N,K) 区域在Triton row-per-CTA GEMV、CuTe DSL skinny GEMM、FlashInfer TGV、torch.mm里选。图6覆盖NVFP4目标的未量化共享专家投影和选定的BF16 EAGLE3 draft投影，目标FP8注意力投影不在比较里。基线全用torch.mm，路由决策按冷L2测量，更接近服务行为；选定的瘦形状在指针允许时再加256-bit load。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图6:形状感知投影路由相对torch.mm：按 (M,N,K) 在四种实现里选最优</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">KDA融合：多token验证在卷积与循环更新周围引入一串小操作。短卷积与循环能融则融，门准备按形状在切分与融合间选，跨步切片直接从合并输入投影里吃，不repack成连续中间量。目标是砍掉循环核心周围的launch与内存搬运，不动KDA计算本身。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">MLA decode与验证融合：MLA路径上注意力之前的几处decode交接可以压掉。FP8 KV cache下，优化路径在同一launch里构造FP8 query并写隐KV cache，中间物化省了。这些融合针对小decode与验证形状，大prefill形状继续用现有kernel。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">AttnRes与投机元数据：现有fused AttnRes路径扩展到更小的多token验证形状。模型算子之外，低M下显眼的元数据链也压掉：分页位置与页表准备，加KDA replay元数据准备。专用launch按步或按cache组跑，不再按层跑。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">局部消融：MLA query加cache写，M=4，6.43降到4.39μs；AttnRes输出RMSNorm，M=4加7个历史块，10.48降到8.20μs；写槽准备，1请求4位置窗口，30.49降到4.30μs；KDA已提交状态元数据，1请求4位置窗口，21.35降到4.40μs。这些路径都有形状门限，门限外运行时保留参考实现。计时是单GB300 GPU上NVFP4兼容的TP8 per-rank形状、合成输入、冷L2准备、CUDA Graph回放加图内计时的局部消融，两次独立运行，不是端到端收益的加总估计。</p>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">路径</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">测量形状</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">基线→优化</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">比较边界</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">MLA query与cache写</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">M=4</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">6.43 → 4.39μs</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">合并的query/cache写阶段</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">AttnRes输出RMSNorm</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">M=4，7个历史块</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">10.48 → 8.20μs</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">全混合epilogue，非上提部分和路径</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">写槽准备</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1请求，4位置窗口</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">30.49 → 4.30μs</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">完整元数据链</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">KDA已提交状态元数据</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1请求，4位置窗口</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">21.35 → 4.40μs</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">完整元数据链</td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">边界与下一步</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Part I说明K3在TP8上的优化是系统级协同设计。受控服务负载下，EAGLE3改善聚合吞吐对每用户生成速度的曲线；目标路径里，LatentMoE投影切分拿回约7.7 GiB/GPU参数存储，Replay SSM把验证工作区从16.7 GiB/GPU压到0.4 GiB/GPU；局部消融指出通信感知拼装与形状专用融合砍掉剩下的算子与元数据开销。这些结果边界各不相同，不能加总成一个端到端加速比。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">专家并行：EP同时改变MoE路由与通信，值得单独的吞吐与尾延迟研究。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">P/D分离：长Agent prompt让prefill放置与KV传输重要，但这里故意排除。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">单NVLink域之外的通信：跨机架多一跳网络，可能偏好不同的collective或投影策略。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">其他投机路径：这里没评，另有一篇博客专门对比投机解码算法与draft配置。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Part II讲专家并行执行，覆盖WideEP与prefill-decode分离；Part III回到端到端视角，用企业部署案例讲分布式调度、多级缓存，以及长多轮Agent负载生产运行的经验。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">服务启动配置</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">代表性服务启动配置如下。复现端到端结果还需要冻结的SWE-Smith trace与客户端并发调度，原文未附带。</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code>tokenspeed<span style="color: #F8F8F2">&nbsp;</span>serve<span style="color: #F8F8F2">&nbsp;</span>nvidia/Kimi-K3-NVFP4<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>--served-model-name<span style="color: #F8F8F2">&nbsp;</span>kimi-k3<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>--attn-tp-size<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">8</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>--moe-tp-size<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">8</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>--mm-encoder-tp-mode<span style="color: #F8F8F2">&nbsp;</span>data<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>--max-num-seqs<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">64</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>--gpu-memory-utilization<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">0</span>.92<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>--trust-remote-code<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>--attention-backend<span style="color: #F8F8F2">&nbsp;</span>tokenspeed_mla<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>--kda-backend<span style="color: #F8F8F2">&nbsp;</span>cutedsl_kda<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>--moe-backend<span style="color: #F8F8F2">&nbsp;</span>flashinfer_trtllm<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>--kv-cache-dtype<span style="color: #F8F8F2">&nbsp;</span>fp8<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>--speculative-algorithm<span style="color: #F8F8F2">&nbsp;</span>EAGLE3<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>--speculative-draft-model-path<span style="color: #F8F8F2">&nbsp;</span>lightseekorg/kimi-k3-eagle3-mla<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>--speculative-num-steps<span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">3</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #AE81FF">\</span><br/><span style="color: #F8F8F2">&nbsp;&nbsp;</span>--drafter-attention-backend<span style="color: #F8F8F2">&nbsp;</span>tokenspeed_mla</code></pre>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<section style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">① EAGLE3在1到16并发的全区间把吞吐对生成速度的曲线往外推，50 TPS/user下插值约459K TPM/GPU。② LatentMoE两投影通信感知切分省7.7 GiB/GPU参数显存，专家后尾巴延迟M=4下1.77倍。③ Replay SSM把KDA验证工作区从16.7 GiB/GPU压到0.4 GiB/GPU，省97.8%。<br  /><br  />系统优化没有银弹，只有把每一处的10μs都算清楚。Part II见专家并行。</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="text-align:center;">
+<span class="portal-title" style="font-size:12px;color:#1a6ba0;font-weight:bold;">【传送门】</span>
+<section style="text-align:left;display:inline-block;font-size:12px;color:#0F4C81;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/42s6fk-xdo23L-vtLj6Q8Q" target="_blank" data-linktype="2">vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/i-NZ-4oCXs48XpDfdcBfPw" target="_blank" data-linktype="2">在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+</section>
+</section>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://lightseek.org/blog/kimi-k3-optimization-gb300-part-i.html</span></p>
+</section>

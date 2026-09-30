@@ -1,0 +1,111 @@
+# -*- coding: utf-8 -*-
+# unified-radix-cache build 草稿（图待补）
+DATA = {
+    "title": "SGLang统一RadixCache:一棵树管住混合模型的前缀缓存",
+    "summary": [
+        {"key": "核心观点", "body": "SGLang推出统一RadixCache，用一棵共享基数树同时管FULL、SWA、MAMBA三种注意力组件的前缀缓存，每个组件定义自己的复用规则，同一前缀在GPU、主机内存和外部存储三层之间保持同一身份。"},
+        {"key": "关键数据", "body": "DeepSeek-V4-Flash多轮对话下，有效输入吞吐从纯GPU缓存的9.4K token/s涨到加Mooncake L3层的145.5K token/s，后期轮次缓存命中率接近98%；SWE-bench上TTFT最多降低16.6%。"},
+        {"key": "方法创新", "body": "每个基数树节点为每个组件存一个槽位，SWA窗口外的数据可独立淘汰留墓碑，MAMBA检查点用写时复制共享；匹配时各组件在每个候选边界独立投票，从所有组件都接受的最深边界恢复计算。"},
+    ],
+    "lead": [
+        "前缀缓存的思路很直白：请求共享一段token前缀，后到的请求直接复用算好的KV，只算新增的token。但混合模型把事情搞复杂了：全注意力要整段前缀的KV，滑动窗口注意力只要复用边界前一小段连续窗口，Mamba则要边界处循环状态的一个快照。",
+        "SGLang的统一RadixCache把这三种复用语义塞进一棵树：一个节点存一段token和每个组件一个槽位，各组件自己管分裂、插入、加锁和淘汰。下面把设计、跨层缓存、会话感知淘汰和Rust树核心逐一拆开。",
+    ],
+    "sections": [
+        {
+            "type": "h2",
+            "title": "背景:三种注意力，三种复用规则",
+            "paras": [
+                "前缀缓存复用的是请求之间共享的token前缀。在全注意力下，后到的请求可以直接复用缓存的前缀，只计算新增token。混合模型组合了三种数据，各有不同的复用规则：FULL需要匹配前缀全程的KV，SWA需要复用边界紧前方一段连续窗口，MAMBA需要在边界处取循环状态的一个快照，也就是检查点。",
+                "DeepSeek-V4把FULL和SWA配对，Kimi-K3把FULL和MAMBA配对（KDA循环状态），Inkling则三种全用。SGLang用一棵共享树处理这些组合，每个组件定义自己的复用规则。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig01.png", "caption": "图1:复用语义示意。候选边界t8，SWA窗口W=4，灰色格子在所需范围之外。FULL复用整条路径，SWA只要边界前一个窗口，MAMBA要边界处的精确检查点"}],
+            },
+        },
+        {
+            "type": "h2",
+            "title": "统一RadixCache:设计与机制",
+            "paras": [
+                "以前每种组合配一个专用缓存类，FULL一种、FULL+SWA一种，能力一多就爆炸。现在是一棵统一树加可插拔组件：UnifiedTreeCore管共享的匹配、分裂、插入、加锁、淘汰机制，UnifiedRadixCache做池编排，FULL、SWA、MAMBA等组件各管一摊，sidecar可按需挂N个。",
+                "每个基数树节点存一段token，外加每个组件一个槽位。FULL和SWA槽位存KV页索引，MAMBA槽位存前缀端点处的检查点。SWA在所需窗口之外的数据可以留着，也可以独立淘汰，淘汰后留下一个空槽位，叫墓碑。",
+                "各组件自己处理分裂、插入、加锁和淘汰。回收节点的部分SWA数据时，先在保留边界处把节点分裂；MAMBA检查点留在它原来的前缀端点，复用它的请求通过写时复制拿到私有拷贝，再继续更新状态。",
+            ],
+            "fig_after": {
+                "0": [{"src": "fig02.png", "caption": "图2:类矩阵对组件。之前：每种组合一个专用缓存类，共2个；之后：一棵树加可插拔组件，组件数翻倍。UnifiedTreeCore负责共享的匹配、分裂、插入、加锁、淘汰，UnifiedRadixCache负责池编排"}],
+                "2": [{"src": "fig03.png", "caption": "图3:统一基数树回放。窗口W=4，每格一token。请求1的token流为A B C S F A，t=0/8，请求2之后仍保留早先的CSFA"}],
+            },
+        },
+        {
+            "type": "h3",
+            "title": "安全复用边界:各组件投票",
+            "paras": [
+                "匹配时沿着匹配路径走，每个组件在每个候选边界检查自己的数据，每个候选独立评估。计算从所有组件都接受的最深边界恢复。比如n3的SWA窗口槽位已成墓碑、n4没有MAMBA检查点，投票后安全边界就停在各组件都点头的最深处，之后的部分重算。",
+            ],
+            "fig_after": {
+                "0": [{"src": "fig04.png", "caption": "图4:复用边界投票。场景：n3的SWA窗口槽位已墓碑化，n4没有MAMBA检查点。t=0/5，n1到n4四个候选边界各自投票，标出安全边界，直接复用或从此处重算"}],
+            },
+        },
+        {
+            "type": "h2",
+            "title": "HiCache:缓存打通三层内存",
+            "paras": [
+                "HiCache把统一RadixCache扩展到GPU L1、主机内存L2和外部存储L3三层。DeepSeek-V4的FULL和SWA用各自独立的页索引，由分配器映射。压缩KV、索引器缓冲、压缩器状态等辅助池作为sidecar：它们共享所属组件的索引和传输，三个跟FULL，两个跟SWA。",
+                "归一化的六页例子里，Page 4上FULL的F4和它的三个sidecar共享页号4，分配器把F4翻译成SWA的S0，SWA的两个sidecar复制页号0。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig05.png", "caption": "图5:索引复用。博客归一化六页例子，这里只保留最后两页SWA。Page 4上FULL的F4和它的三个sidecar共享页号4，分配器把F4翻译成SWA的S0，SWA的两个sidecar复制页号0"}],
+            },
+        },
+        {
+            "type": "h3",
+            "title": "多轮对话基准:145.5K token/s",
+            "paras": [
+                "多轮对话不断拉长可复用前缀。对比纯L1、L1+L2、再加500GiB Mooncake L3三档：DeepSeek-V4-Flash在4×H200、TP4、48客户端、60轮、每轮输入4096输出16的配置下，加L3后有效输入吞吐145.5K token/s，纯L1只有9.4K，平均TTFT不到9秒，后期轮次命中率约98%。",
+                "Inkling-Small是FULL+SWA+MAMBA三种全上，在8×H200、TP8、64客户端、30轮、每轮输入1216输出64下，L3档67.1K token/s，纯L1档15.5K，命中率96.8%，平均TTFT 1.23秒。有效输入吞吐按总完整提示长度除以墙钟时间算，命中缓存的前缀token计入分子。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig06.png", "caption": "图6:多轮对话基准结果。DeepSeek-V4-Flash：L1档9.4K、L1+L2档14.3K、L1+L2+L3档145.5K token/s；Inkling-Small：15.5K、21.1K、67.1K。L3档命中率约98%和96.8%，平均TTFT分别小于9秒和1.23秒"}],
+            },
+        },
+        {
+            "type": "h2",
+            "title": "会话感知淘汰:别误杀别人的前缀",
+            "paras": [
+                "应用用稳定的session_id标识同一会话的请求，SGLang跟踪该会话对缓存条目的引用。调用/close_session移除它的引用，被多会话共享的前缀保留其他会话的引用。",
+                "FULL对未加锁、可淘汰的条目按引用情况、引用计数排序，再走基础淘汰策略，通常先回收无引用的数据。会话保留作用于L1/L2，L3的淘汰由存储后端管。",
+            ],
+            "fig_after": {
+                "1": [{"src": "fig07.png", "caption": "图7:会话感知淘汰。FULL条目，未加锁可淘汰，AB被A和B共享。普通LRU按最近使用排A1、AB、B1、C1、C2；会话感知下A1记A活跃、AB记A+B共2个引用、B1记B活跃，C1/C2无引用先被回收"}],
+            },
+        },
+        {
+            "type": "h3",
+            "title": "SWE-bench:TTFT最多降16.6%",
+            "paras": [
+                "SWE-bench上，同时开统一RadixCache和会话感知淘汰，相对HiRadixCache加LRU基线，DeepSeek-V4-Pro的TTFT最多降11.0%，Qwen3.5-397B-A17B最多降16.6%。batch 128下DeepSeek-V4-Pro降11%，设备命中率从42%提到51%；Qwen3.5-397B-A17B在batch 64下降16.6%，设备加主机命中率从58%提到67%。",
+            ],
+            "fig_after": {
+                "0": [{"src": "fig08.png", "caption": "图8:SWE-bench会话感知结果。DeepSeek-V4-Pro TP8相对基线的TTFT下降：batch 128降11%，batch 256降2.9%，设备命中率42%到51%。Qwen3.5-397B-A17B TP8：batch 32降13.5%，batch 64降16.6%，batch 32设备命中率5%到34%，batch 64设备加主机命中率58%到67%"}],
+            },
+        },
+        {
+            "type": "h2",
+            "title": "Rust树核心:把调度器热路径搬出Python",
+            "paras": [
+                "SGLang把树遍历、锁记账、LRU更新搬到Rust做，降低调度器上的CPU开销。Python管物理KV分配和缓存编排，把Rust返回的操作应用到各个池。分工明确：Python拥有请求到token的映射、物理KV分配、池操作与编排；Rust树核心拥有基数拓扑、每组件锁记账、侵入式LRU链表和淘汰遍历。调用是match/insert/evict过去，deferred actions回来。",
+                "只跑L1的Rust原型在200轮对话基准里，相对Python树把SWA的TTFT降了38%，全注意力降10%，混合SSM降5%。后继合入的Rust TreeCore支持FULL、SWA、MAMBA组合和HiCache，会话感知缓存继续用Python树核心。",
+            ],
+            "fig_after": {
+                "0": [{"src": "fig09.png", "caption": "图9:Rust与Python权责。Python拥有请求到token映射、物理KV分配、池操作与编排；Rust树核心拥有基数拓扑、每组件锁记账、侵入式LRU链表、淘汰遍历。match/insert/evict调用过去，deferred actions返回"}],
+                "1": [{"src": "fig10.png", "caption": "图10:Rust原型基准。原型只跑L1，200轮、每轮输入输出各100、6次试验、同GPU顺序跑。SWA gpt-oss-20b TP2全200轮降38%，后25轮降42%；全注意力Qwen3-32B TP2全程降10%，后25轮降18%；混合SSM Qwen3-Next-80B-A3B TP4全程降5%，后25轮降7%"}],
+            },
+        },
+    ],
+    "conclusion": [
+        "统一RadixCache的核心洞察是：前缀的身份可以跨组件、跨内存层级统一，复用规则却可以各管各的。一棵树、每个组件一个槽位、GPU/主机/外部三层同一前缀身份，再配上墓碑淘汰和写时复制的检查点共享，混合模型的前缀缓存就有了统一底座。",
+        "工程上有两点值得抄作业。其一，会话感知淘汰：用session_id跟踪引用再排序淘汰，SWE-bench这种多会话 agent 负载上TTFT直降16.6%，LRU一刀切确实误伤太多。其二，把树遍历和锁记账下沉到Rust，Python只做编排，SWA场景TTFT降38%说明调度器CPU开销此前被低估了。",
+        "局限也有：batch下各请求掩码不重叠仍会稀释复用，会话感知目前只在Python树核心生效。但方向已经清楚：前缀缓存正在从单机的KV复用，变成跨层级、跨会话的统一数据面。",
+    ],
+    "reference_url": "https://www.sglang.io/blog/unified-radix-cache",
+}

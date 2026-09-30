@@ -1,0 +1,121 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class；真身在内联style，class仅兜底） */
+.portal-title { font-size:12px; color:#1a6ba0; font-weight:bold; }
+.portal-links { font-size:12px; color:#0F4C81; }
+.portal-links a { color:#0F4C81; text-decoration:none; }
+</style>
+<section style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<section style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心观点</strong>：Google这篇MLSys 2023论文给出Transformer推理的工程原则：用解析模型选多维切分策略，配Looped CollectiveEinsum等底层优化，在TPU v4上用int8权重把PaLM 540B的生成延迟做到29ms/token、prefill的MFU做到76%。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">关键数据</strong>：2D权重静止切分让通信随芯片数以1/√nchips下降；多查询注意力加按batch切分让KV缓存加载省nchips倍，上下文长度撑到32倍；64路张量并行仍有44% MFU，FasterTransformer的32路只能到33%。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">方法创新</strong>：权重聚集布局在大batch/prefill时反转搬运方向：权重全量广播、激活静止，通信量从正比于BL降到正比于√BL；并行Transformer块把每层两次all-reduce砍成一次。</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">把540B参数的模型跑起来做推理，难的不是算力，是访存和通信：每个token都要把全部参数从HBM搬一遍，KV缓存随batch和上下文膨胀，芯片一多通信就封顶。Google这篇论文把PaLM推理的每一笔账都算清楚了。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">核心方法是先建模再选型：解析地算出每种切分策略的通信量，按应用场景选1D、2D还是权重聚集；再用多查询注意力瘦身KV缓存、并行块砍通信。下面逐节拆开。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">推理成本的三个账本</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">推理成本记三笔账：延迟、吞吐、模型FLOPS利用率。延迟拆成prefill和decode：输入token在prefill一次性并行处理，输出token在decode逐个自回归生成；decode延迟也可按步计量。MFU是实测吞吐除以硬件峰值FLOPS下的理论最大吞吐。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">访存账：权重和KV缓存存在HBM里，每次前向都要搬进计算核心一次，小batch时搬权重主导，大batch加长序列时搬KV缓存主导。计算账：N参数解码器模型每token要2N次matmul FLOP。通信账：模型切到多芯片上就有芯片间通信，芯片越多通信占比越大。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">三个典型场景：要最低延迟就堆芯片、多维切分，小batch延迟低但MFU差、单token成本高；要长上下文，500B+模型多头注意力的KV缓存在batch 512、上下文2048时达3TB，是参数量的3倍，每个生成步都要搬一遍，计算核心基本空转；要离线高吞吐就拉大batch，MFU好看，单token成本低。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">64块TPU v4上，PaLM 540B用int8权重做到生成29ms/token，大batch处理输入token时MFU达76%，上下文2048。图1是8B、62B、540B三个模型在bf16和int8下的成本-延迟帕累托前沿：左图生成64个token的每token延迟，右图处理2048个输入token的时间，C是芯片数，B是batch大小。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1:PaLM模型的成本对延迟。上下文长度2048，每条线上的点是效率对延迟的帕累托前沿。C为芯片数，B为batch大小。左：生成64个token的每token延迟；右：处理2048个输入token的时间</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">切分符号与通信原语</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">论文基于TPU v4的3D torus拓扑X×Y×Z描述切分。记号BLExyz表示逻辑形状BLE的张量按最后一维E切成X×Y×Z份，每芯片分到[B, L, E/(X×Y×Z)]；某轴上复制则省略该轴。后缀partialsum-x表示已在芯片本地求和、还需沿x轴跨芯片求和。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">通信原语来自MPI：all-reduce(x)把partialsum张量沿x轴求和再广播；拆成两步就是reduce-scatter(x)和all-gather(x)：前者求和但结果按轴分片，后者广播拼接后输出变大X倍；all-to-all把分片从一个张量维度搬到另一个，比如BLHxQ变为BxLHQ。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">前馈层切分:从1D到2D再到权重聚集</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最简单的1D权重静止：E×F权重矩阵沿E或F轴切到nchips块，每块权重固定在芯片上，激活在芯片间搬运。算连续两个matmul时有个经典技巧：第一个按输出轴切，第二个按输入轴切，中间不需要通信。但通信量恒定不随芯片数下降，芯片一多就封顶。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">2D权重静止把E×F矩阵沿E和F双轴切，每块近似正方形。E=1024、F=4096、64芯片时，E切4份、F切16份，每芯片存256×256。交替在两个轴上做激活聚合，每芯片永远有算自己权重块所需的激活分片，不再需要完整复制激活。通信量按O(1/√nchips)下降，加芯片就能继续降延迟。dff=4dmodel时，nchips>16后2D比1D省通信。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2:前馈层切分布局。(a)1D权重静止，(b)2D权重静止，(c)权重聚集。绿色为all-gather，红色为reduce-scatter，标注了每步的张量形状</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">细节上，2D布局权重为ExFyz，dmodel切X份、dff切Y×Z份。最优取X=0.5×√nchips、YZ=2×√nchips，总通信时间Tcomm=8BLE/(√nchips×带宽)，而1D是Tcomm=2BLE/带宽。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">batch再放大，输出激活可能比权重还大，这时反过来更划算：激活静止在芯片上，权重在芯片间搬运，这就是权重聚集。batch中等用X或XY聚集，大batch用XYZ全聚集，prefill和decode可以混用不同布局。最优聚集轴数N=√(BL·nchips/F)，总通信时间Tcomm=4E√(BLF)/(√nchips×带宽)，正比于√BL而非BL。图3显示batch以token计越大，最优布局越往权重聚集滑。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3:前馈层通信量随batch大小变化。batch以token计，X=Y=Z=4、dmodel=16384、dff=65536。低token数时2D权重静止最优，token数大了切到不同权重聚集布局</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">多查询注意力:KV缓存瘦身32倍</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">多头注意力可以照前馈层的方式切，把nheads当dff。但KV缓存的访存开销在大batch、长上下文下会压过一切。多查询注意力只给K、V留一个头，nheads个查询头共享，KV缓存直接小nheads倍，代价是少了一个可并行的轴。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4:多查询注意力按batch切分后KV缓存加载成本更低。上：多头对多查询的Q、K/V形状；下：(a)多头注意力按头切分，(b)多查询按头切分浪费了省内存的效果，(c)多查询按batch切分，每芯片只需一片K</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">直接照搬多头那种按头切分，会把唯一的K、V头复制到每块芯片，省内存的效果全丢。论文的切法是按batch维B切Q、K、V：每芯片只加载1/nchips的KV缓存，访存时间同比例下降。代价是输入激活要用all-to-all重分片，但decode时Q、K、V每样本只有一个token，KV缓存却有2048个token，花小通信省大访存非常划算。prefill时Q有2048个token，K、V访存被摊薄，就不按batch切，仍用按头切。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">效果上，64芯片、batch 128时优化后的多查询布局支持43000的上下文长度，多头只有1320，基线多查询只有660，直接撑到32倍。8层540B、batch 256下，上下文拉长时优化布局的每token延迟远低于多头和基线布局，8192到32768的序列上注意力只占总运行时间的8%到31%。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5:注意力层切分布局对比。(a)多头注意力按头切，(b)多查询注意力按batch切。标注了WQ/WK/WV投影后、softmax、WO投影的每步形状与通信原语</figcaption></figure>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">模型变体</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">dhead</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">最大上下文长度(batch=128)</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">最大上下文长度(batch=512)</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">多头</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">128</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1320</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">330</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">基线多查询</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">256</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">660</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">165</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">优化多查询</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">256</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong style="color:#1a7f5a;">43,000</strong></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong style="color:#1a7f5a;">10,700</strong></td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">并行块,底层优化与量化</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">PaLM用的并行Transformer块把注意力和前馈并行算再相加，好处有三：一是每层只有一个layernorm，小batch延迟低；二是前馈输入矩阵可与WQ融合、WK/WV互融、前馈输出与WO融合，大matmul跑得更满；三是每层少一次all-reduce，dff/nheads轴通信砍半。串行版decode每步延迟高14%。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图6:PaLM 540B在64芯片上做文本生成，2D与1D权重静止布局的每token延迟随芯片数变化。两者都趋向通信受限，2D因渐近扩展性更好而胜出</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">底层用Looped CollectiveEinsum让通信和计算重叠，把大部分reduce-scatter和all-gather的通信时间藏起来，比朴素的编译器切分调度快约1.4倍。reduce-scatter选在隐维度（E/F）而非batch/序列维上做，就是为了给CollectiveEinsum更多重叠机会。另有张量内存布局、top-k/top-p采样、log2底的Softmax/Swish、prefill增量处理等优化。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">量化用AQT库把16位权重转int8，质量无感，省权重加载的访存时间，低batch场景最受益，权重聚集布局的通信量也跟着降。batch 64下int8权重28.5ms/token，bf16要36.9ms；大batch下两者成本接近，因为瓶颈在计算而matmul仍是bf16。激活量化还没做，作者认为能进一步降大batch成本。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图7:PaLM 540B在64芯片上做prefill的MFU，序列长度2048，batch以token计。batch以token计越大，越该从2D权重静止切到权重聚集，大batch下MFU达76%</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">PaLM实测:29ms/token与76% MFU</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">方法跑在JAX/XLA/T5X上，最多256块TPU v4。每块275 TFLOPS bf16算力、32GiB HBM、1200GB/s带宽、270GB/s互连。540B的注意力头从48补到64以便在64+芯片上切分，多18B参数、花3% MFU，但切分效率赚回来更多。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">端到端看，低延迟场景用batch-1 prefill配batch 32到64 decode：prefill batch 1延迟最优，decode加到64对延迟几乎无影响、MFU却好得多，实际可用多采样或prefill/decode流水线实现。高吞吐场景切大batch并在prefill/decode间换布局，大batch下权重加载不重要就用bf16。成本按chip-seconds/token=nchips×时间/(BL)算，与运营成本成正比、与MFU成反比。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">表2是540B的四个典型配置：低延迟prefill 64芯片batch 1、0.29秒、MFU 43%；低延迟decode 64芯片batch 64、1.82秒、MFU 14%；高吞吐prefill 64芯片batch 512、85.2秒、MFU 76%；高吞吐decode 64芯片batch 512、6.0秒、MFU 33%。62B的配置见表3，芯片数减半，MFU相近，低batch延迟随模型规模亚线性增长，大致是平方根关系。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个直观的例子：跑在64块TPU v4上的PaLM 540B int8版，处理用户64个token、查1920个token的缓存对话历史、生成64个token回复，总共1.9秒。离线场景处理1984个输入token、生成64个输出token，整体FLOPS效率73%。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图8:8层PaLM 540B在64芯片、batch 256下每生成token延迟对序列长度。虚线表示完整118层模型上，上下文超过512后多头或基线多查询的KV缓存装不进内存</figcaption></figure>
+<table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
+<thead style="font-weight: bold;color: #3f3f3f;">
+<tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);"></th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">低延迟Prefill</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">低延迟Decode</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">高吞吐Prefill</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">高吞吐Decode</th></tr>
+</thead>
+<tbody>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">芯片数</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">64</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">64</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">64</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">64</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">Batch</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">64</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">512</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">512</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">FFN布局</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">WS 2D</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">WS 2D</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">WG XYZ</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">WS 2D</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">注意力切分</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">按头</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">按batch</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">按batch</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">按batch</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">权重格式</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">int8</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">int8</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">bfloat16</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">bfloat16</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">MFU</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">43%</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">14%</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;"><strong style="color:#1a7f5a;">76%</strong></td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">33%</td></tr>
+<tr class="tr"><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">延迟</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">0.29s</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">1.82s</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">85.2s</td><td class="td" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;">6.0s</td></tr>
+</tbody>
+</table>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">对打FasterTransformer:64路并行不封顶</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">对比FasterTransformer基准，用16到32块A100 80GiB，，用MFU归一化芯片数和算力后比较。跑60个输入token、20个输出token的推理，PaLM 540B实现绝对延迟最优；Megatron 530B模型上除一个延迟目标外MFU全面最优。PaLM版比Megatron版MFU高最多10%，主要靠并行注意力/前馈层。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">FasterTransformer的32路张量并行最多33% MFU，16路反而有46%，说明张量并行过16路后通信封顶。而这套实现能扩展到64路张量并行仍有44% MFU，2D权重静止在TPU v4大互连域上的扩展性明显更好。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig09.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图9:60个输入token、20个输出token推理的MFU对总延迟。Ours在64芯片上跑PaLM和Megatron模型，对比FasterTransformer的TP8/PP3、TP16、TP32三档</figcaption></figure>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<section style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">这篇论文的价值在于把推理优化变成了可计算的选择题：1D、2D、权重聚集三种布局的通信量都有解析式，按batch大小和阶段选型；多查询注意力加按batch切分把KV缓存这个最大包袱卸掉32倍；并行块和CollectiveEinsum把剩下的通信latency榨干。<br  /><br  />放到今天看，结论依然硬核：decode是访存bound，堆芯片降延迟但MFU掉；prefill是计算bound，大batch加权重聚集MFU冲到76%。PaLM 540B在64块TPU v4上29ms/token、1.9秒完成一轮对话，放在2023年是新的帕累托前沿。<br  /><br  />作者也留了口子：FLOP数和通信量最终会卡住稠密Transformer，稀疏MoE和自适应计算是下一步。今天回头看，这个判断相当准。</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="text-align:center;">
+<span class="portal-title" style="font-size:12px;color:#1a6ba0;font-weight:bold;">【传送门】</span>
+<section style="text-align:left;display:inline-block;font-size:12px;color:#0F4C81;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/HPaDwcT_4Rw5ty7LwDG4Ng" target="_blank" data-linktype="2">Torch Profiler在Trace里分析性能瓶颈: 剖析SGLang LLM推理</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+</section>
+</section>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://proceedings.mlsys.org/paper_files/paper/2023/file/c4be71ab8d24cdfb45e3d06dbfca2780-Paper-mlsys2023.pdf</span></p>
+</section>
