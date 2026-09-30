@@ -27,6 +27,7 @@
 | 22 | 2026-09-30 | https://arxiv.org/html/2609.32577v1 | groupwise-agentic-grading-code-rl | groupwise-agentic-grading-code-rl | TBD | TBD | 📥 进行中 |
 | 23 | 2026-09-30 | https://arxiv.org/html/2607.01523v1 | multi-head-recurrent-memory-agents | multi-head-recurrent-memory-agents | TBD | TBD | 📥 进行中 |
 | 24 | 2026-09-30 | https://arxiv.org/pdf/2609.36802 | easyppo-stabilizing-critic | easyppo-stabilizing-critic | TBD | TBD | 📥 进行中 |
+| 25 | 2026-09-30 | https://x.com/NowledgeMem/status/2105134977210056804 | nowledgemem-x-post | nowledgemem-x-post | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -180,3 +181,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-09-30 16:00 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #25 - nowledgemem-x-post
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-30 16:05 | 📥 开始 | 收到 URL，开始提取内容 |
