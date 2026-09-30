@@ -26,6 +26,7 @@
 | 21 | 2026-09-30 | https://mooler0410.github.io/puguJin/blog/llal-change/ | pugujin-llal-change | pugujin-llal-change | TBD | TBD | 📥 进行中 |
 | 22 | 2026-09-30 | https://arxiv.org/html/2609.32577v1 | groupwise-agentic-grading-code-rl | groupwise-agentic-grading-code-rl | TBD | TBD | 📥 进行中 |
 | 23 | 2026-09-30 | https://arxiv.org/html/2607.01523v1 | multi-head-recurrent-memory-agents | multi-head-recurrent-memory-agents | TBD | TBD | 📥 进行中 |
+| 24 | 2026-09-30 | https://arxiv.org/pdf/2609.36802 | easyppo-stabilizing-critic | easyppo-stabilizing-critic | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -173,3 +174,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-09-30 15:56 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #24 - easyppo-stabilizing-critic
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-09-30 16:00 | 📥 开始 | 收到 URL，开始提取内容 |

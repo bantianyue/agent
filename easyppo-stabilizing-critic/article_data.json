@@ -1,0 +1,156 @@
+{
+  "title": "伯克利EasyPPO:稳定Critic是关键",
+  "summary": [
+    {
+      "key": "核心观点",
+      "body": "PPO的Critic用历史轨迹估计期望回报、降低策略梯度方差，但它也是LLM强化学习不稳定的主因。论文定位两个Critic失败模式：截断过滤同时作用于actor和critic会把策略目标改写成给定完成条件下的回报；跨prompt的回报噪声不均会让高方差prompt主导有限batch的critic更新。"
+    },
+    {
+      "key": "关键数据",
+      "body": "FrontierCS连续奖励代码、AIME24数学推理、Search-R1多轮搜索三个任务上，EasyPPO全程稳定，最佳验证分相对PPO提升14.89%、2.28%、9.47%。三个随机种子下EasyPPO零崩溃，最强基线三个里崩两个。"
+    },
+    {
+      "key": "方法创新",
+      "body": "三个简单改动：截断rollout只从actor更新里过滤、critic照单全收；按prompt回报标准差的倒数给critic损失加权，抹平噪声尺度差异；用稍小的critic mini-batch把离群点的影响锁在更少的rollout里。"
+    }
+  ],
+  "lead": [
+    "PPO做大模型推理后训练，靠的就是Critic：从历史rollout里学token级的回报估计，信用分配更细，策略梯度方差更小。但伯克利这篇说，Critic也是PPO在LLM上最不稳定的那个部件。",
+    "他们抓出两个Critic失败模式，给出三个简单改动，合称EasyPPO。下面拆开两个病因和三味药，再看三个任务的实验。"
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "Critic:方差杀手,也是失稳之源",
+      "paras": [
+        "PPO的actor-critic框架里，Critic V_φ(s)要预测给定prompt的平均回报E[R|s]，用(V_φ(s)−R)²的采样损失学。学好了，优势估计方差小，策略更新稳；学歪了，传给actor的优势全是偏的。",
+        "论文的诊断是：Critic的两个系统性失败模式，一个改写策略目标，一个扭曲梯度方向。三处改动各治一个，合起来叫EasyPPO。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "fig01.png",
+            "caption": "图1:EasyPPO治两种Critic失稳。上行两种失败模式：左，截断rollout同时从actor和critic过滤会抬升截断率、拉低总回报；中，跨prompt回报方差不均导致critic梯度尺度不均；右，离群点主导更新方向。下行三处改动：截断只给actor过滤、按1/√Var(R|s)归一化梯度尺度、稍小的mini-batch把离群点影响锁住"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "失败模式1:截断过滤改写了策略目标",
+      "paras": [
+        "超长rollout直接截断是常见做法（Nemotron-Cascade就这么干），但把过滤同时用在critic更新上会出事。Critic本来该学E[R|s]，只在完成的rollout上训，它学的就变成E[R|s,完成]。在critic准确的极限下，策略目标被改写成给定完成条件下的回报E[R|s,not truncated]：完成条件下的回报涨了，截断率却可以同步涨，总回报原地踏步。",
+        "FrontierCS上Qwen3.5-9B的对照很直观：actor加critic一起过滤，完成rollout的平均回报涨了，但截断率一路冲向1，总回报趴在地上；完全不过滤则反复出现回报崩溃；只给actor过滤最稳、总分最高，但160步附近的截断尖峰和回报下跌说明还有残余不稳定，光留全量rollout不够。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "fig02.png",
+            "caption": "图2:只给actor做截断过滤改善稳定但未根除。左截断率、中完成rollout平均回报、右总回报：actor加critic一起过滤（橙虚线）截断率冲向1；不过滤（蓝）反复崩溃；只给actor过滤（红）最高最稳，但160步附近仍有尖峰"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "失败模式2:回报噪声跨prompt不均",
+      "paras": [
+        "留住所有rollout给critic，又引出第二个问题：同一个batch里不同prompt的回报噪声天差地别。连续奖励的代码任务里，有的prompt只能小步改进，有的能大起大落。梯度二阶矩分解写得很清楚：E[‖∇_W L_V(φ)‖²|s]=‖h_φ(s)‖²[(V_φ(s)−E[R|s])²+Var(R|s)]，预测误差加回报噪声。随着预测误差变小，回报噪声项会主导，高方差prompt在有限batch里不成比例地左右更新。",
+        "解法是噪声归一化：每个前缀的critic损失除以它自己的条件回报标准差，w(s)=1/√Var(R|s)。归一化后梯度二阶矩里噪声项恒为1，抹掉跨prompt的噪声尺度差，只留归一化预测误差。实现上用prompt在token状态上的回报标准差估计，权重在batch内归一化到均值1，加权损失L_V^weighted(φ)=1/(2ΣT_i)·Σ_i w(s_i)Σ_t(V_φ(s_{i,t})−R_i)²。",
+        "离线诊断验证：30、60、90步三个检查点，不归一化时回报越不稳定、梯度越大，且越到后期越明显；归一化后这种依赖基本消失，梯度贡献在prompt间拉平。"
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": "fig03.png",
+            "caption": "图3:噪声归一化拉平跨prompt的critic梯度贡献。30、60、90步三列加汇总：上行不归一化，回报标准差越大梯度越大；下行归一化后依赖基本消失"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "第三味药:稍小的critic mini-batch",
+      "paras": [
+        "组内估计会低估某些prompt的回报方差、给过大权重，离群点还在。把critic batch切成B/m个mini-batch逐个裁剪更新：小mini-batch把离群点引发的联合缩放锁在更少的rollout里，但平均掉的回报噪声也少。理想化分析给出单离群点影响的O(m)界，实践取B/m=4个critic mini-batch。",
+        "这三味药互相独立：actor-only过滤保住critic目标E[R|s]；噪声归一化抹平跨prompt噪声尺度；小mini-batch裁剪锁住离群点。缺任何一味，训练都可能飘。"
+      ]
+    },
+    {
+      "type": "h2",
+      "title": "三个任务:全程稳定,基线全崩过",
+      "paras": [
+        "三个任务：FrontierCS连续奖励代码（200个FrontierSmith生成题训练，算法赛道验证）、DAPO-Math-17K配AIME24验证、Search-R1混合配7个验证集。对照组是原生PPO、PPO加actor-only过滤、HL-Gauss PPO、VAPO，全部用verl实现，30步critic热身，严格on-policy。",
+        "EasyPPO在三个任务上全程稳定、验证分全场最佳。最佳验证分（0到100分制）相对PPO涨1.92、1.46、3.74分，相对涨幅14.89%、2.28%、9.47%。每个基线至少在一个设置下崩过：VAPO在AIME上掉到0，PPO在Search-R1上归零，HL-Gauss在FrontierCS上熄火。EasyPPO零崩溃。",
+        "PPO加actor-only过滤在FrontierCS上分比原生PPO高，但波动大、AIME上照样崩，说明光过滤不够，critic那两味药才是稳定器。"
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": "fig04.png",
+            "caption": "图4:EasyPPO三个任务全程稳定。左FrontierCS、中AIME、右Search-R1，上训练分下验证分：EasyPPO（红）一路向上，四个基线各在至少一个任务上崩盘归零"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "Critic诊断:梯度下来,解释方差上去",
+      "paras": [
+        "看Critic本体的学习曲线：热身后EasyPPO的critic梯度范数持续下降，解释方差稳步爬升、波动小；基线的解释方差剧烈摇摆，HL-Gauss的解释方差冲到1恰恰发生在它actor崩掉之后，是假繁荣。",
+        "Critic学得稳，策略分才涨得住。这正是论文标题的意思：稳定Critic是关键。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "fig05.png",
+            "caption": "图5:EasyPPO稳定Critic学习。左裁剪前critic梯度范数，右价值预测的解释方差：EasyPPO（红）梯度下降、解释方差稳步上升；基线解释方差大起大落"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "种子敏感性:三个种子零崩溃",
+      "paras": [
+        "跟最强的基线（PPO加actor-only过滤）各跑三个种子：EasyPPO三个全程不崩，验证分带很窄；基线三个里崩两个。稳定不是运气，是critic改动带来的。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig06.png",
+            "caption": "图6:跨种子稳定性。三个种子下EasyPPO（红）验证分稳步上升、带窄；PPO加actor-only过滤（绿）三个里崩两个"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "mini-batch的权衡:K=4是甜点",
+      "paras": [
+        "噪声归一化让1个和4个mini-batch两种配置都稳住：不归一化时，1个mini-batch的崩还能恢复，切成4个小mini-batch就变成持续崩溃；归一化后两种配置都保住涨幅。",
+        "再把K=B/m从1扫到16：解释方差首次转正的步数随log K近似线性下降（42、36、34、31、26步），细粒度裁剪早期控离群点更有效；但训练后段K=4和8的解释方差更高，预测误差变小后噪声平均更重要。默认取K=4，学习率按η∝1/√K缩放。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig07.png",
+            "caption": "图7:噪声归一化在两种mini-batch配置下都稳住训练。左训练分右验证分：不归一化（虚线）4个mini-batch持续崩溃，归一化（实线）两种配置都稳定"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig08.png",
+            "caption": "图8:解释方差随critic mini-batch数变化。左平滑解释方差，右首次转正步数：42、36、34、31、26随K增大下降；K=4和8后段解释方差更高，默认取K=4"
+          }
+        ]
+      }
+    }
+  ],
+  "conclusion": [
+    "EasyPPO的论点很集中：PPO在LLM上失稳，病根在Critic。截断过滤别碰critic的目标，回报噪声用归一化抹平，离群点用小mini-batch加裁剪锁住。三味药都不花哨，但三个任务、三个种子全程零崩溃，基线轮流翻车。",
+    "对做RL后训练的人，这篇最值得抄的是诊断思路：先看critic的梯度范数和解释方差曲线，再调actor。Critic学得稳不稳，直接决定训练能不能跑完。",
+    "局限也写得明白：权重估计和critic训练用的是同一批rollout，有偏但实用；方差下限ε的选取、离线profiling加在线更新都留给后续。以及这篇的验证全在Qwen3.5-9B量级，更大模型的critic行为还是开放问题。"
+  ],
+  "reference_url": "https://arxiv.org/pdf/2609.36802"
+}
