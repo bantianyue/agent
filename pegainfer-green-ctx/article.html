@@ -1,0 +1,99 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class；真身在内联style，class仅兜底） */
+.portal-title { font-size:12px; color:#1a6ba0; font-weight:bold; }
+.portal-links { font-size:12px; color:#0F4C81; }
+.portal-links a { color:#0F4C81; text-decoration:none; }
+</style>
+<section style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<section style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心观点</strong>：CUDA Green Context能把GPU的SM切开分给不同stream。PegaInfer用它在一张卡上同时跑prefill和decode：decode这种访存密集型kernel用很少SM就到顶，多给SM是浪费，把省下的SM给计算密集的prefill，两边并行反而比单流快。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">关键数据</strong>：5070 Ti上单流交替1860毫秒、朴素双流1812毫秒、Green Context双流1173毫秒，快近60%；H200上4717、4446、3522毫秒，快34%。Qwen3-4B多轮压测里ITL分布被压得极稳。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">方法创新</strong>：三stream设计：全SM流兜底纯P或纯D，P流和D流按Green Context切分；prefill异步化，两个inflight batch解决D先跑完SM闲置；decode标成streaming缓存策略，别让它的一次性数据污染L2。</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">P/D分离的出发点是别让prefill打断decode，保住稳定的TPOT。但把decode和prefill分到两张卡上，TTFT要付传输和重调度的代价。PegaInfer这篇问了个反直觉的问题：能不能用CUDA Green Context在一张卡上把SM切开，让prefill和decode同时跑？</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">答案是能，而且总吞吐还涨了。下面拆开Green Context是什么、为什么隔离反而提速、SM经济学，以及PegaInfer的落地和压测。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Green Context:把GPU切开</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Green Context是CUDA 12.4出的功能：把GPU资源切开，应用层还是走stream和kernel那套写法，区别是stream由Green Context创建（创建时走Driver API，CUDA 13.1在Runtime API也暴露了）。能切两种资源：SM和WQ。SM简单理解成GPU核心，限制一个负载能用多少核心，给别的负载留位置，避免大任务占满GPU、小任务跑不起来。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">NVIDIA官方的例子很直观：kernel1长计算任务占满GPU时，关键任务kernel2来了没资源，只能等；切开之后（比如16个SM给stream2、112个给stream1），kernel1从10毫秒涨到12毫秒，kernel2端到端只用95微秒就跑完。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">乍一看这是多租户公平性隔离的工具。用在推理上，直觉是给decode留一部分SM保TPOT稳定。但隔离意味着一部分SM会闲置，总吞吐不是该跌吗？这篇的实验说：不但没跌，还涨了。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1:NVIDIA的Green Context示意。左：关键任务B来了没资源，只能等；右：用两个Green Context按80%和20%切SM，B来了有资源直接跑</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">实验:隔离反而快了60%</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">作者做了和NVIDIA类似的对照：两个stream，一个跑计算密集的prefill-like负载，一个跑访存密集的decode-like负载，每个stream各提交100个kernel。三种跑法：单流交替两个kernel、朴素双流、Green Context双流。在5070 Ti和H200上都测。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2:单流下两个kernel交替执行：计算kernel（紫）和访存kernel（绿）轮流占满GPU</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">5070 Ti：单流1860毫秒，朴素双流1812毫秒（快3%），Green Context双流1173毫秒，比单流快近60%。H200：单流4717毫秒，朴素双流4446毫秒（快6%），Green Context 3522毫秒，快34%。朴素双流就算开高优先级、调负载构造，也只能再快几个点，够不到Green Context。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3:朴素双流依然交替：两个stream的kernel没有真正并行起来</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">看profile：单流下两个kernel如期交替；朴素双流居然也是交替的，根本没并行起来；Green Context下两个kernel真正并发了，代价是计算kernel的SM变少、时间从7毫秒涨到11毫秒。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4:Green Context双流真正并发：两个kernel同时跑，计算kernel因SM变少从7毫秒涨到11毫秒，但总时间大降</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">为什么朴素双流并行不起来</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">作者的猜测：大家写kernel习惯把grid开得很大，直接填满GPU调度队列，而调度队列是FIFO、无抢占、无work stealing。一种缓解是降低kernel的SM占用，属于“软分区”，能让双流再快一点；更激进的是Megakernel：起一个大kernel自己在所有SM上调度任务、实现自己的调度逻辑，比如DeepSeek的MegaMOE。NVIDIA社区也有人在Blackwell上给了MegaMOE的Green Context版本（DeepGEMM PR #357），数据量大时甚至比mega快。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">换个角度看，Green Context是不是另一种形式的Megakernel？都是绕开GPU默认的FIFO调度，只是一个在硬件资源层切，一个在软件层自己调度。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">SM经济学:decode用16个SM就到顶</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">要解释为什么并发能提速，得分别看decode和计算kernel随SM数的缩放。5070 Ti上访存密集的decode kernel到16个SM就不涨了，已经摸到80%以上的理论带宽；计算kernel的时间几乎按理想曲线随SM增加而下降。H200上decode要48个SM才接近平台期，之后再加SM只有小幅提升。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5:5070 Ti上kernel随SM数缩放。左decode到16个SM就平台期；右计算kernel接近理想1/SM曲线，54个SM是切分点</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这就是SM经济学的核心：decode这种访存密集负载，多给SM是纯浪费；省下来的SM给计算密集的prefill，两边同时跑，总时间反而下来。作者把问题形式化成运筹学里的可塑并行任务调度，也就是二维strip packing：每个kernel是个宽为SM数、高为时间的矩形，塞进宽为S的条带里最小化总高度，一般是NP-hard的。静态求解等价于分组背包，复杂度是kernel数乘SM分配选项数的平方。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图6:H200上的缩放。decode要48个SM才接近平台期，之后再加SM提升很小</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">实际中不需要最优解，暴力搜个合适的切分比就行。理想时间是两者取慢：ideal=max（decode单独跑，prefill单独跑）。实测里计算密度高时基本贴着理想值，计算密度低时最多偏离10%左右。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">L2污染:decode把计算kernel拖慢了10%</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">并发跑时还有个暗坑：decode读大量数据会把L2冲掉，拖慢计算密度低的计算kernel。对比实验：decode扫4GB时计算kernel要16.6毫秒，decode只扫4MB时降到12.99毫秒，接近理想值；计算密度高的kernel两种都不受影响。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">CPU侧有PREFETCHNTA这种“只读一次别污染缓存”的hint，GPU侧PTX的cache operator也有对应选项：.ca全级缓存（默认），.cg只缓存到L2不进L1，.cs按streaming处理、L1和L2都优先淘汰，.lu最后一次用，.cv不缓存。sm70起能给L1 hint，Blackwell起L2也能设evict first。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">枚举decode的缓存策略：默认.ca时计算kernel 24.2毫秒，.cg恶化到25.8毫秒，.cs、L1 no_allocate、L1 evict_first、Blackwell的L2 evict first都能优化到22.3到22.5毫秒，L2 evict last退化到24.7毫秒。结论：decode这种一次性扫描就该标成streaming或优先淘汰，别让它的一次性数据赖在缓存里污染计算的热数据。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">PegaInfer的落地:三个stream</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">直接把decode定死20%、prefill定死80%有个明显问题：系统里只有prefill或只有decode的时段，SM就浪费了；就算两者都稳定到达，一次也只能重叠一个batch，prefill跑几百毫秒、decode只跑几十毫秒，收益有限。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">PegaInfer的设计是三个stream：全SM流，纯decode batch和纯prefill batch都走它，没混合负载时零性能损失；Green Context切出来的prefill-SM流，专门跑prefill kernel；decode-SM流，专门跑decode kernel。全SM流和decode-SM流抓CUDA Graph。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">朴素调度很简单：纯P或纯D就走全SM流，混合batch才分开提交到P流和D流再等完。但prefill跑得久、decode跑得快，D的SM会闲。解法是引入两个inflight batch：prefill batch异步化，提交prefill kernel后打一个cuEvent，调度器非阻塞查这个event，观察到完成再真正sync、做采样、提交KV块和offload等收尾活。这是Rust单进程的好处：worker和调度器传这些东西很方便。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最麻烦的集成问题是GPU内存管理是异步的：原来分配、kernel、释放在一个stream上是安全的，现在kernel跑在另一个stream，启动前要先sync第一次分配所在的stream，不然可能Xid；释放时机也要对。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">压测:Qwen3-4B多轮对话</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">压测用vllm-bench，一个Rust写的多轮对话模拟器，贴今天的agent负载。两组：重prefill（首轮2k、后续512）和轻prefill（首轮512、后续256），输出都是256 token，并发16。图里off是PegaInfer默认流，stream是朴素双流，gc x%是decode用x%的SM。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig07.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图7:Qwen3-4B多轮压测（首轮2048、后续512，并发16）。左输出吞吐，右吞吐与TTFT权衡：gc10/gc20接近默认，gc30/gc40吞吐降但TTFT尾延迟大降</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">重prefill组下Green Context有性能回退，很可能和前面测的L2问题有关，作者的decode kernel还没换缓存策略。轻prefill组收益明显。最有吸引力的是ITL分布图：开了Green Context之后ITL变得极稳，输出速度一条直线。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig08.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图8:轻prefill组（首轮512、后续256）。Green Context在轻prefill下收益明显，off和stream基线吞吐583，gc10/gc20保持561/554</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">看ITL的p99：vLLM基线在512/256组p99到88.1毫秒、2048/512组到109.8毫秒；gc40直接压到14.6和14.5毫秒，gc30到17.3和17.4毫秒。decode分到固定SM之后，输出间隔不再被prefill的进入抖动，这是P/D分离想达到的效果，在一张卡上实现了。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig09.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图9:ITL分布。开了Green Context后p99 ITL被压到20毫秒以内（gc30/gc40），输出速度极稳；vLLM基线p99到88到110毫秒</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">重prefill怎么办:CPD</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">重prefill难搞的话，还有P/D分离那条路：Mooncake后面那篇《Prefill As a Service》，把长prefill拿出去，普通节点只处理短prefill和decode。Together的博客《Cache-Aware Disaggregated Inference》把这种架构叫CPD，是P/D的改进版，Green Context可以在CPD上面再叠一层收益。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一个有趣的观察：开了Green Context之后，5090经常撞到功耗墙，消费级卡的功耗封顶可能先成为瓶颈。作者下一步的想法是路由、引擎、KV缓存三位一体的协同设计，引擎部分还要补投机解码和大MoE的推理建模，下一篇博客写投机解码（草稿DFlash已经有了）。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<section style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">这篇最漂亮的地方是把直觉掰过来了：Green Context看起来是隔离公平性的工具，实际是SM经济学的工具。decode这种访存密集负载用16个SM就到顶，多给的全是浪费；切开让prefill和decode真正并发，总吞吐反而涨60%。<br  /><br  />两个工程细节值得抄：一是decode的一次性扫描要标成streaming或evict-first，别让它冲掉计算kernel的L2热数据；二是三stream设计，全SM流兜底纯负载，混合才走切分，异步prefill解决长短batch错位。<br  /><br  />局限作者也写明白了：重prefill下还有回退，decode kernel的缓存策略还没换；消费级卡先撞功耗墙。但方向是对的：在一张卡上把P和D的干扰管住，比急着上P/D分离便宜得多。</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="text-align:center;">
+<span class="portal-title" style="font-size:12px;color:#1a6ba0;font-weight:bold;">【传送门】</span>
+<section style="text-align:left;display:inline-block;font-size:12px;color:#0F4C81;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/42s6fk-xdo23L-vtLj6Q8Q" target="_blank" data-linktype="2">vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/4aEYa-5J2Ir82V_1_9anDA" target="_blank" data-linktype="2">AI芯片架构全景: 从NVIDIA到Groq的六条设计路线</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/i-NZ-4oCXs48XpDfdcBfPw" target="_blank" data-linktype="2">在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/nWrqMnkObaZI2tx6VtnpSA" target="_blank" data-linktype="2">Kimi K3技术报告-后训练Infra: 三阶段RL,MoonEP3,五千万沙箱,KDA感知缓存</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/HPaDwcT_4Rw5ty7LwDG4Ng" target="_blank" data-linktype="2">Torch Profiler在Trace里分析性能瓶颈: 剖析SGLang LLM推理</a><br>
+</section>
+</section>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://pegainfer.org/blog/green-ctx/</span></p>
+</section>

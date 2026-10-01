@@ -30,6 +30,7 @@
 | 25 | 2026-09-30 | https://x.com/NowledgeMem/status/2105134977210056804 | nowledgemem-x-post | nowledgemem-x-post | TBD | TBD | 📥 进行中 |
 | 26 | 2026-09-30 | https://blog.mlc.ai/2026/09/29/tirx-harness-an-open-compiler-harness-for-agentic-gpu-programming | tirx-harness-agentic-gpu-programming | tirx-harness-agentic-gpu-programming | TBD | TBD | 📥 进行中 |
 | 27 | 2026-10-01 | https://vllm-project.github.io/2026/08/07/decode-context-parallelism.html | vllm-decode-context-parallelism | vllm-decode-context-parallelism | TBD | TBD | 📥 进行中 |
+| 28 | 2026-10-01 | https://pegainfer.org/blog/green-ctx/ | pegainfer-green-ctx | pegainfer-green-ctx | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -201,3 +202,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-01 17:34 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #28 - pegainfer-green-ctx
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-01 17:40 | 📥 开始 | 收到 URL，开始提取内容 |
