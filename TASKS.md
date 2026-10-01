@@ -32,6 +32,7 @@
 | 27 | 2026-10-01 | https://vllm-project.github.io/2026/08/07/decode-context-parallelism.html | vllm-decode-context-parallelism | vllm-decode-context-parallelism | TBD | TBD | 📥 进行中 |
 | 28 | 2026-10-01 | https://pegainfer.org/blog/green-ctx/ | pegainfer-green-ctx | pegainfer-green-ctx | TBD | TBD | 📥 进行中 |
 | 29 | 2026-10-01 | https://pytorch.org/blog/from-upstream-changes-to-downstream-confidence-inside-torch-spyres-integration-with-pytorch-crcr/ | torch-spyre-crcr-integration | torch-spyre-crcr-integration | TBD | TBD | 📥 进行中 |
+| 30 | 2026-10-01 | https://flowtivity.ai/blog/tensorfold-inference-engine-review/ | tensorfold-inference-engine-review | tensorfold-inference-engine-review | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -215,3 +216,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-01 18:40 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #30 - tensorfold-inference-engine-review
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-01 19:23 | 📥 开始 | 收到 URL，开始提取内容 |
