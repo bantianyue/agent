@@ -1,0 +1,86 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class；真身在内联style，class仅兜底） */
+.portal-title { font-size:12px; color:#1a6ba0; font-weight:bold; }
+.portal-links { font-size:12px; color:#0F4C81; }
+.portal-links a { color:#0F4C81; text-decoration:none; }
+</style>
+<section style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<section style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心观点</strong>：长上下文推理里，纯张量并行按注意力头切KV缓存，GQA切到每卡一个头就没法再切，MLA的单latent向量干脆在每卡全复制。Decode Context Parallelism改按序列维度切，每卡只存读一部分KV，省下的显存换成更大的batch。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">关键数据</strong>：单8卡B200节点跑Kimi K2.6 NVFP4，并发16到512：基线TP在并发64就把KV用满、吞吐卡在1,863 token/s/GPU；DCP并发512只用82%显存，吞吐到6,091 token/s/GPU，超3倍。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">方法创新</strong>：decode走AllGather Q、本地算注意力、AllGather加ReduceScatter合并的老套路；MLA后端按序列切latent，GQA后端把本来要复制的KV头换成不同的序列分片。vLLM里加一个参数decode_context_parallel_size就能开。</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Agent类应用把长上下文推理推成了刚需：代码库、长聊天记录动不动64K到1M token，KV缓存也跟着大。vLLM博客这篇把Decode Context Parallelism拿出来讲透：纯TP按头切KV缓存有个硬地板，DCP改按序列切。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下面拆开TP为什么撞墙、8卡B200上的实测、DCP的通信流程，以及MLA和GQA两种后端的用法。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">TP切KV缓存有个硬地板</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">标准张量并行按注意力头切KV缓存，一个KV头是一整套K和V张量，是能分给一张卡的最小单位。有K个KV头，最多分到每卡一个头，TP再往上加就没有新头可分了，多出来的卡只能复制。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GQA模型KV头本来就少，切到每卡一个头之后TP超过KV头数，缓存开始跨卡复制。MLA更糟：它把Key和Value压成一个所有query头共享的低秩latent向量，相当于只有一个KV头，纯TP下根本没头可切，latent KV缓存在每个TP rank上完整复制一份。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两种情况复制的KV缓存都在吃显存，留给新请求的空间所剩无几，并发上不去，吞吐和token成本都跟着遭殃。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1:TP按头切KV缓存的困境与DCP的解法。左GQA：TP超过KV头数后多余rank复制；中MLA：单个latent在每卡全复制；右DCP按序列切，每卡只存1/N，无复制，省下的显存装更多请求</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">实测:8卡B200跑Kimi K2.6</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">实验固定模型、硬件、工作负载，只换decode时KV缓存怎么切。数据是公开的Mooncake格式agent长上下文trace，多轮长输入配短生成：输入中位约67K token、输出约400 token，分布双峰，一半64K以上、长尾到1M。单8卡B200节点，Kimi K2.6 NVFP4，并发从16扫到512。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2:吞吐与交互性Pareto前沿。DCP（蓝，TP8加EP8加DCP8）从并发16到512整条前沿压过基线（灰）；基线并发超过64后KV耗尽撞墙</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">基线TP在并发64就把KV用到100%撞墙，吞吐停在1,863 token/s/GPU，再也加不进请求。DCP按序列切，每卡只存1/N，同样并发64只用19%，一路加到并发512才用82%，吞吐到6,091 token/s/GPU。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3:KV缓存占用。基线（灰）并发64到100%耗尽；DCP（蓝）并发512只到82%，并发64时只用19%</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">吞吐和交互性（每用户输出token/s）的Pareto前沿上，DCP整条线压过基线：高并发下吞吐继续涨，每用户速度还保持在可交互区间，而基线在并发64之后直接没有点了。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4:KV占用与吞吐对照表。8卡B200、Kimi K2.6 NVFP4、中位68K上下文：基线并发64后无法再加请求，DCP并发512吞吐6,091 token/s/GPU</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">200K以上的前沿照样稳</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">按完整序列长度（输入加输出）分成5档画前沿：DCP在200K以上的档位前沿依然又高又稳，短档和长档的曲线几乎重合。吞吐随并发涨，每用户速度在长上下文下还保持可用，正是复制KV的基线先耗尽显存、没法扩展的区间。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5:DCP在各序列长度档的前沿。5条线（32K以下到200K以上）几乎重合：长短上下文性能一致，200K以上档位依然稳定</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">DCP是什么:按token位置切</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">DCP不按头切，按序列（上下文）维度切。一个200K token的请求，GPU 0存0到50K的缓存，GPU 1存50K到100K，依此类推。每加一张卡，每卡的KV footprint就缩小，省下的显存换batch和并发。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">decode的通信节奏很简单：AllGather Q、本地计算、AllGather加ReduceScatter。先all-gather拼出完整query（decode时query只有一个token，很便宜）；每卡在本地KV分片上算注意力，MLA是k_up上投影，GQA是tensor broadcast；最后all-gather分结果和LSE，用online-softmax的trick按LSE重加权合并，reduce-scatter求和后每卡只拿回自己的头分片。MLA还有个可选项：加载时在DCP组内复制很小的query投影，decode直接跳过query的all-gather（VLLM_DCP_Q_REPLICATE=1，见vLLM #45964）。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig06.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图6:TP与DCP切分对比。TP=4按头切只有2种分法，多余卡复制；DCP=4按序列位置切，4张卡各拿唯一分片，无复制</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">用法:MLA和GQA两条路</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">开DCP就加一个参数decode_context_parallel_size，配着已有的tensor-parallel用。离线：</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">在线服务</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在线服务：</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">MLA后端:整块缓存本来全是冗余</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">MLA（DeepSeek-V2/V3/R1、Kimi K2.6）把KV压成单个latent，纯TP下整块缓存全复制，是DCP最理想的候选：整块都是冗余，整块都能按序列切。每rank只存自己的latent分片，attention时做k_up上投影重建需要的Key和Value。等效KV头数是1，序列可以切到满TP度，约束是tensor_parallel_size不小于decode_context_parallel_size且能整除。</p>
+<h3 class="h3" data-heading="true" style="padding-left: 8px;border-left: 3px solid #0F4C81;margin: 2em 8px 0.75em 0;color: #3f3f3f;font-weight: bold;line-height: 1.2;">GQA后端:把复制位换成序列分片</h3>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GQA（Qwen3-235B、Llama系）有num_key_value_heads个KV头，TP先按头切，切到头数用完为止，超出的部分产生tp除以num_key_value_heads份相同拷贝。DCP把这些本来要复制的位置填上不同的序列分片，共享的KV头在query头间广播。序列切分度上限就是复制因子：比如Qwen3-235B的num_key_value_heads是4，tp=8时有2份冗余拷贝，dcp最大取2。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">下一步:更细的并行度和Prefill CP</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>官方列的后续方向：TP和DCP都支持更细粒度的并行度，让并行布局更精确，收回过度切分浪费的效率；做更好的DCP all-to-all通信kernel，单节点和多节点都要；社区在把DCP扩到GLM-5.2、Kimi K3等更多模型，更长的路线图是Prefill Context Parallelism（PCP）。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这篇也点名了行业同向：NVIDIA在TensorRT-LLM里用Helix Parallelism走了类似的方向。vLLM里的DCP其实已经支持快一年了，这篇博客是借着长上下文agent用例爆发，把特性和新改进一次性讲清楚。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<section style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">DCP的思路一句话：别让GPU复制KV缓存或闲着。decode时按序列把KV分片摊到每张卡，省下的显存换并发，吞吐随并发涨，交互性在200K以上还保得住。<br  /><br  />对做长上下文推理服务的人，这篇最实用的是两条后端的约束公式：MLA等效单KV头，切分度直接拉到TP度；GQA的切分度上限是复制因子tp除以num_key_value_heads。开起来就一个参数，成本是高带宽卡间互联上的那点all-gather。<br  /><br  />数据也诚实：实测只在8卡B200加Kimi K2.6 NVFP4上，Kimi K3的DCP benchmark还在做。长上下文agent的trace越长，DCP这种按序列切的方案越吃香，TP按头切的地板是绕不过去的。</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="text-align:center;">
+<span class="portal-title" style="font-size:12px;color:#1a6ba0;font-weight:bold;">【传送门】</span>
+<section style="text-align:left;display:inline-block;font-size:12px;color:#0F4C81;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/YHmkt8EHFGm-HeflWCsB2w" target="_blank" data-linktype="2">英伟达Kernel Agent: 编译器与算子调优Agent的协同设计</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/HPaDwcT_4Rw5ty7LwDG4Ng" target="_blank" data-linktype="2">Torch Profiler在Trace里分析性能瓶颈: 剖析SGLang LLM推理</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/gtJz2ekQnYFxpDLctjjy3g" target="_blank" data-linktype="2">Kimi K3技术解析之LatentMoE: 隐藏维度压缩至潜空间，通信与带宽开销同比例骤降</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+</section>
+</section>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://vllm-project.github.io/2026/08/07/decode-context-parallelism.html</span></p>
+</section>
