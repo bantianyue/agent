@@ -36,6 +36,7 @@
 | 31 | 2026-10-02 | https://pytorch.org/blog/optimizing-jagged-flash-attention-with-tlx-the-road-toward-sota-fa4-on-blackwell/ | jagged-flash-attention-tlx | jagged-flash-attention-tlx | TBD | TBD | 📥 进行中 |
 | 32 | 2026-10-02 | https://x.com/cerebras/status/2105749446814576806 | cerebras-x-post | cerebras-x-post | TBD | TBD | 📥 进行中 |
 | 33 | 2026-10-02 | https://x.com/kmeanskaran/status/2105635344385450151 | kmeanskaran-x-post | kmeanskaran-x-post | TBD | TBD | 📥 进行中 |
+| 34 | 2026-10-02 | https://wai-org.com/blog/clm/ | wai-org-clm | wai-org-clm | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -243,3 +244,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-02 22:02 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #34 - wai-org-clm
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-02 22:11 | 📥 开始 | 收到 URL，开始提取内容 |

@@ -1,0 +1,84 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class；真身在内联style，class仅兜底） */
+.portal-title { font-size:12px; color:#1a6ba0; font-weight:bold; }
+.portal-links { font-size:12px; color:#0F4C81; }
+.portal-links a { color:#0F4C81; text-decoration:none; }
+</style>
+<section style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<section style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">核心观点</strong>：CLM把context当文件任意改写，中间一编辑，前缀缓存就从第一个改动处断掉。Suffix Cache Reuse把没变的后缀C的KV直接搬到新位置，只重算B′，BrowseComp-Plus上每题算力从10.98降到7.14 PFLOPs，精度60.2%不变。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">关键数据</strong>：Qwen3.6-27B在BrowseComp-Plus：标准SGLang全部turn 72.9% prompt走前缀缓存，编辑后turn只有24.2%；SCR让编辑后turn多28.2%的prompt走搬运缓存；每题算力降到原来的65%。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">方法创新</strong>：全注意力层把C的KV按长度差重转RoPE位置编码（旋转只依赖位置，所以是精确的），线性注意力层从编辑前的循环状态快照继续；每次编辑最多搬6个存活span，防近似误差失控。</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">CLM（Context Language Models）把context当文件，可以任意改写。代价是：中间改一个字，前缀缓存从改动处断掉，后面没变的几万token全重算。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这篇是CLM团队的效率深挖：用什么度量抓住真实的缓存感知服务成本，以及Suffix Cache Reuse怎么把命中率救回来。下面拆开。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">先定义度量:Prefix-Reuse FLOPs</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">谈效率先对齐度量。CLM团队用Prefix-Reuse FLOPs：从第一个前缀失配处开始的prefill FLOPs，加上新生成token的decode FLOPs。公式写出来就是FLOPs(PrefixReuse) = FLOPs_prefill(失配后缀) + FLOPs_decode(新token)。默认用它量CLM效率，说CLM比baseline便宜时，已经把编辑导致的缓存命中下降算进去了。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Pareto图上，CLM在BrowseComp-Plus（平均context 97K）、TerminalBench 2.1（47K）、TBLite（33K）三个榜上，精度和效率都压过RLM、Summary、ACM、MEM1、Self-Compact这些人工设计的context管理harness。注意横轴已经是prefix-reuse PFLOPs每题，不是理论FLOPs。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1:三个榜上的精度-效率Pareto。横轴是Prefix-Reuse FLOPs每题，CLM在BrowseComp-Plus、TerminalBench 2.1、TBLite上都处在左上最优位置</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">中间一编辑,前缀缓存就断了</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SGLang和vLLM的KV缓存（比如radix树）复用新请求的最长匹配前缀，第一个失配后的token全重算。这对append-only历史很自然，但中间一编辑就崩。例子：context ABC改成AB′C，颜色对token条，A还匹配所以复用，失配断在B′，B′和没变的C一起重prefill。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">数字上，Qwen3.6-27B的CLM在BrowseComp-Plus，标准SGLang全部turn有72.9%的prompt token走前缀缓存，编辑后turn只剩24.2%。编辑turn剩下的大半context，明明没变，也被重算了。chat模板剥掉前面turn的thinking token也一样：后面的token下turn重prefill。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">Suffix Cache Reuse:只重算B′</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">前缀缓存是传统，因为context一直是append-only。CLM团队问：能为AI的方便改造serving引擎吗？Suffix Cache Reuse（SCR）就是答案：context ABC里B被换成B′，标准serving复用A的缓存然后停下，B′和整个C重算；SCR把C的缓存状态留下来。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">机制：下个prompt来时，SCR和同session的上个prompt比，找出编辑后存活的span，把它们的旋转位置编码平移到新位置，拼在B′后面。只有B′和新append的token要prefill。标准serving和SCR的对比里，叉号标第一个前缀失配位置。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2:全注意力层和线性注意力层的SCR。全注意力层：C的KV保留、RoPE重转到新位置；线性注意力层：没有逐token缓存，从编辑前的循环状态快照继续</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">技术细节:旋转是精确的,搬运要设限</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">全注意力层里，SCR原样复用C的key和value，只动位置：编辑后C整体前移了B和B′的长度差，SCR把它的旋转位置编码按这个偏移重转。旋转只依赖位置，所以这个操作是精确的，比重算便宜得多。但SCR是近似：C的缓存是在编辑前的旧context下算的。为控制一次编辑引入的近似，每次编辑最多搬6个存活span，长的优先，剩下的重算。k=6的设定和影响在论文附录B。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Qwen3.6-27B是hybrid模型：64层里48层用线性注意力， نگه的是固定大小的循环状态，没有逐token缓存可搬，这些层SCR从编辑前拍的循环状态快照继续。编辑被16个全注意力层看到，再经它们的输出传到后面的线性层。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">BrowseComp-Plus端到端:算力降35%,精度不动</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">评测很干净：830道题，把Qwen3.6-27B的endpoint从标准SGLang切到打了SCR补丁的SGLang（论文5.3节），实现开源在facebookresearch/context-language-models/suffix_cache_reuse。精度完全一样，60.2%对60.2%，每题算力从10.98降到7.14 PFLOPs。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">编辑后turn，SCR让额外28.2%的prompt走搬运缓存，那是标准serving会重算的部分。CLM本来就靠更好的context管理在标准serving下比baseline便宜，SCR再把服务成本压到原来的65%。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig03.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3:BrowseComp-Plus上830题双跑。左：精度都是60.2%；中：每题算力10.98降到7.14 PFLOPs；右：编辑后turn里SCR多28.2%的prompt走搬运缓存</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">附赠:推理token剥离也是编辑</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">有些chat模板serving会剥掉前面turn的reasoning block，后面的unchanged后缀被迫重prefill，SCR把这部分后缀缓存也复用了。分解下来，SCR多复用的大头其实来自被剥的reasoning，而不是CLM编辑。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">编辑后turn的分解：标准SGLang只有24.2%走前缀缓存，SCR是29.9%前缀加19.3%来自reasoning剥离的复用加8.9%来自context编辑的复用，重算从75.8%压到41.8%。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig04.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4:SCR复用缓存的来源分解。全部turn和编辑后turn，绿色两段分别是reasoning剥离后和context编辑后复用的，编辑后turn里reasoning剥离贡献了19.3%</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">还剩多少改进空间</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">SCR干掉了编辑后unchanged后缀的大部分重算，剩下的开销大头是标准SGLang对hybrid模型复用不充分的unchanged前缀：线性注意力的状态只在请求边界缓存。更细粒度的循环状态checkpoint能同时抬高标准前缀缓存和SCR的命中率。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">更广义地，可编辑context的serving打开了一堆新系统研究方向，SCR只是第一步。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig05.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5:标准serving和SCR下仍在重算的token分解。SCR之后，编辑后turn的重算主体变成新文本和复用不充分的unchanged前缀</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">相关工作</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">标准前缀缓存下，改prompt前面一点，后面全重算，前人从几个方向松这个约束。Prompt Cache给预定义的prompt模块预计算attention状态，模块能在不共享前文的prompt里复用，RAG里同一文档出现在不同文档或指令后面时有用。CacheBlend和EPIC在新context里复用缓存的文档块，重算部分token适配变化的环境。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">PIE研究用户改已处理的代码后要新补全：保留编辑后unchanged文本的缓存状态并修正旋转位置，免掉后缀重算。Memento把做完的reasoning block逐出KV cache但保留它summary的缓存状态（在block还在context里时算的），发现这些状态保留了被逐block的有用信息。同期还有KV-streams，在agent compaction时保留KV cache。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<section style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">SCR的直觉一句话：前缀缓存只认第一个失配，但编辑没动的东西不该重算。把存活span的KV搬到新位置、RoPE重转，编辑后turn多28.2%的prompt不用重算，每题算力降35%，精度分毫不差。<br  /><br  />两个可抄的点：一是Prefix-Reuse FLOPs这个度量，缓存感知的效率对比就该这么量；二是k=6的设限思路，近似引入的误差要有界。实现已开源，打补丁的SGLang直接能用。<br  /><br  />长远看，context可编辑会是agent serving的常态，KV cache的append-only假设正在过期。SCR处理的是后缀，下一个战场是前缀和循环状态的细粒度checkpoint。</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="text-align:center;">
+<span class="portal-title" style="font-size:12px;color:#1a6ba0;font-weight:bold;">【传送门】</span>
+<section style="text-align:left;display:inline-block;font-size:12px;color:#0F4C81;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/tG1HTi6K8Lt-5pD-DHypbQ" target="_blank" data-linktype="2">MLP就是Hebbian记忆: 无需训练，往Transformer块注入事实知识的构造方法</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/4aEYa-5J2Ir82V_1_9anDA" target="_blank" data-linktype="2">AI芯片架构全景: 从NVIDIA到Groq的六条设计路线</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/i-NZ-4oCXs48XpDfdcBfPw" target="_blank" data-linktype="2">在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/YHmkt8EHFGm-HeflWCsB2w" target="_blank" data-linktype="2">英伟达Kernel Agent: 编译器与算子调优Agent的协同设计</a><br>
+</section>
+</section>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://wai-org.com/blog/clm/</span></p>
+</section>
