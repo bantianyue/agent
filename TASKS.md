@@ -34,6 +34,7 @@
 | 29 | 2026-10-01 | https://pytorch.org/blog/from-upstream-changes-to-downstream-confidence-inside-torch-spyres-integration-with-pytorch-crcr/ | torch-spyre-crcr-integration | torch-spyre-crcr-integration | TBD | TBD | 📥 进行中 |
 | 30 | 2026-10-01 | https://flowtivity.ai/blog/tensorfold-inference-engine-review/ | tensorfold-inference-engine-review | tensorfold-inference-engine-review | TBD | TBD | 📥 进行中 |
 | 31 | 2026-10-02 | https://pytorch.org/blog/optimizing-jagged-flash-attention-with-tlx-the-road-toward-sota-fa4-on-blackwell/ | jagged-flash-attention-tlx | jagged-flash-attention-tlx | TBD | TBD | 📥 进行中 |
+| 32 | 2026-10-02 | https://x.com/cerebras/status/2105749446814576806 | cerebras-x-post | cerebras-x-post | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -229,3 +230,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-02 21:50 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #32 - cerebras-x-post
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-02 21:55 | 📥 开始 | 收到 URL，开始提取内容 |
