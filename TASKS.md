@@ -37,6 +37,7 @@
 | 32 | 2026-10-02 | https://x.com/cerebras/status/2105749446814576806 | cerebras-x-post | cerebras-x-post | TBD | TBD | 📥 进行中 |
 | 33 | 2026-10-02 | https://x.com/kmeanskaran/status/2105635344385450151 | kmeanskaran-x-post | kmeanskaran-x-post | TBD | TBD | 📥 进行中 |
 | 34 | 2026-10-02 | https://wai-org.com/blog/clm/ | wai-org-clm | wai-org-clm | TBD | TBD | 📥 进行中 |
+| 35 | 2026-10-04 | https://huggingface.co/spaces/FineEnvs/multi-harness-rl#what-is-agentic-rl | multi-harness-rl | multi-harness-rl | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -250,3 +251,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-02 22:11 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #35 - multi-harness-rl
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-04 09:25 | 📥 开始 | 收到 URL，开始提取内容 |
