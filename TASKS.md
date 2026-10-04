@@ -42,6 +42,7 @@
 | 37 | 2026-10-04 | https://x.com/KyrieBlunders/status/2106058102374375890 | kyrieblunders-x-post | kyrieblunders-x-post | TBD | TBD | 📥 进行中 |
 | 38 | 2026-10-04 | https://deepseek-v3.ezyang.com/studies/03-roofline.html | 03-roofline-html | 03-roofline-html | TBD | TBD | 📥 进行中 |
 | 39 | 2026-10-04 | https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/ | mastering-llm-techniques-infer | mastering-llm-techniques-infer | TBD | TBD | 📥 进行中 |
+| 40 | 2026-10-04 | https://institute.deepmind.com/essays/cheaters-and-whistleblowers-in-the-agent-swarm/ | cheaters-and-whistleblowers-in | cheaters-and-whistleblowers-in | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -285,3 +286,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-04 11:17 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #40 - cheaters-and-whistleblowers-in
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-04 13:17 | 📥 开始 | 收到 URL，开始提取内容 |
