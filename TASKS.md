@@ -45,6 +45,7 @@
 | 40 | 2026-10-04 | https://institute.deepmind.com/essays/cheaters-and-whistleblowers-in-the-agent-swarm/ | cheaters-and-whistleblowers-in | cheaters-and-whistleblowers-in | TBD | TBD | 📥 进行中 |
 | 41 | 2026-10-06 | https://chipsandcheese.com/p/nvidias-olympus-core-pushing-server | nvidias-olympus-core-pushing-server | nvidias-olympus-core-pushing-server | TBD | TBD | 📥 进行中 |
 | 42 | 2026-10-06 | https://pytorch.org/blog/pytorch-hardware-enablement-updates-from-the-acceleration-integration-working-group/ | pytorch-hardware-enablement-aiwg | pytorch-hardware-enablement-aiwg | TBD | TBD | 📥 进行中 |
+| 43 | 2026-10-06 | https://blog.mlc.ai/2026/10/05/kcoral-lightweight-benchmark-server-for-agentic-gpu-programming | kcoral-benchmark-server | kcoral-benchmark-server | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -306,3 +307,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-06 17:05 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #43 - kcoral-benchmark-server
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-06 17:10 | 📥 开始 | 收到 URL，开始提取内容 |
