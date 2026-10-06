@@ -44,6 +44,7 @@
 | 39 | 2026-10-04 | https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/ | mastering-llm-techniques-infer | mastering-llm-techniques-infer | TBD | TBD | 📥 进行中 |
 | 40 | 2026-10-04 | https://institute.deepmind.com/essays/cheaters-and-whistleblowers-in-the-agent-swarm/ | cheaters-and-whistleblowers-in | cheaters-and-whistleblowers-in | TBD | TBD | 📥 进行中 |
 | 41 | 2026-10-06 | https://chipsandcheese.com/p/nvidias-olympus-core-pushing-server | nvidias-olympus-core-pushing-server | nvidias-olympus-core-pushing-server | TBD | TBD | 📥 进行中 |
+| 42 | 2026-10-06 | https://pytorch.org/blog/pytorch-hardware-enablement-updates-from-the-acceleration-integration-working-group/ | pytorch-hardware-enablement-aiwg | pytorch-hardware-enablement-aiwg | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -299,3 +300,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-06 16:31 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #42 - pytorch-hardware-enablement-aiwg
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-06 17:05 | 📥 开始 | 收到 URL，开始提取内容 |
