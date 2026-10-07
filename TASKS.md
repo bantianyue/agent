@@ -48,6 +48,7 @@
 | 43 | 2026-10-06 | https://blog.mlc.ai/2026/10/05/kcoral-lightweight-benchmark-server-for-agentic-gpu-programming | kcoral-benchmark-server | kcoral-benchmark-server | TBD | TBD | 📥 进行中 |
 | 44 | 2026-10-06 | https://arxiv.org/html/2610.00972v1 | veriharness-agentic-verification | veriharness-agentic-verification | TBD | TBD | 📥 进行中 |
 | 45 | 2026-10-07 | https://pytorch.org/blog/modernizing-table-batched-embeddings-with-fbtriton/ | table-batched-embeddings-fbtriton | table-batched-embeddings-fbtriton | TBD | TBD | 📥 进行中 |
+| 46 | 2026-10-07 | https://ighoshsubho.bearblog.dev/building-a-faster-gqa-decode-kernel-for-blackwell-sm100/ | faster-gqa-decode-blackwell | faster-gqa-decode-blackwell | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -327,3 +328,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-07 08:10 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #46 - faster-gqa-decode-blackwell
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-07 08:16 | 📥 开始 | 收到 URL，开始提取内容 |
