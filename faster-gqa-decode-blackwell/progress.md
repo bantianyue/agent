@@ -17,7 +17,7 @@
 | Step 4e: 写参考区 | pending |
 | Step 4f: Humanizer 润色 | pending |
 | Step 4g: 文本格式修复 | pending |
-| Step 5: 预发布检查 | pending |
+| Step 5: 预发布检查 | completed |
 | Step 6: 推送草稿 | pending |
 
 创建时间: 2026-10-07
@@ -36,3 +36,9 @@
 - 删"这篇博客/这篇"类技术无关废话（lead、结语）
 - 全篇去第一人称（13处"我/我的"→删主语或改"该"）
 - 重跑 build→render→portal→preflight（全绿）→重推草稿→回读核验 8/8
+
+## 2026-10-07 12:00 封面更换（用户要求）
+- 原封面为结果曲线图（MQA/GQA/MHA 带宽图），按用户口径更换
+- 新封面：fig03 GQA decode 调度流水线图（K/V load、KQ、softmax、correction、VP 五 lane），--trim --mode crop --focus left，900×383 + 500×500
+- SOP：cover-design.md 加"禁止用结果曲线图做封面"；MEMORY.md 同步
+- preflight 全绿 → 重推草稿 → 回读核验 8/8
