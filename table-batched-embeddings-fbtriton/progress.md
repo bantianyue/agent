@@ -1,4 +1,4 @@
-# 进度追踪 - veriharness-agentic-verification
+# 进度追踪 - table-batched-embeddings-fbtriton
 
 | Step | 状态 |
 |------|------|
@@ -20,14 +20,13 @@
 | Step 5: 预发布检查 | pending |
 | Step 6: 推送草稿 | pending |
 
-创建时间: 2026-10-06
-来源: https://arxiv.org/html/2610.00972v1
+创建时间: 2026-10-07
+来源: https://pytorch.org/blog/modernizing-table-batched-embeddings-with-fbtriton/
 | Step 4d-i: 传送门 | completed |
 
-## 2026-10-06 wcsop 完成
-- 来源: https://arxiv.org/html/2610.00972v1（VeriHarness: Scaling Agentic Verification for Long-Horizon Tasks）
-- 标题: VeriHarness扩展长时任务的Agentic验证
-- 章节: 10 节（h2/h3）、46 段、2 张正文图、2 张表（benchmarks/mainresults）、8 篇传送门
-- preflight: ALL CHECKS PASSED；图布局 PASS；草稿回读 2/2
-- draft.id: TIqnnVEu6Oy3-wtKttGa0aNZhcGvQkcwixLHXkQCZjqcjIkq1uvEF0PtNSJMqVCg
-- GitHub: articles_muse 分支 +24 @ fc15c15
+## 2026-10-07 wcsop 完成
+- 来源: https://pytorch.org/blog/modernizing-table-batched-embeddings-with-fbtriton/（PyTorch 博客，Modernizing Table-Batched Embeddings with FBTriton）
+- 标题: PyTorch用FBTriton重写表批embedding:前向更快,反向也赢
+- 章节: 17 节（h2/h3）、37 段、8 张正文图、2 个代码块、8 篇传送门
+- preflight: ALL CHECKS PASSED；图布局 PASS；草稿回读 8/8
+- draft.id: TIqnnVEu6Oy3-wtKttGa0V_VHFrVIXzHHLv8mQ4T6R0JiUrNNH1vPF7Va1aYQKTl
