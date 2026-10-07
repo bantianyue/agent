@@ -30,3 +30,9 @@
 - 章节: 12 节（h2/h3）、50 段、8 张正文图、8 篇传送门（代码摘录为高亮span切碎无法原样还原，略去）
 - preflight: ALL CHECKS PASSED；图布局 PASS；草稿回读 8/8
 - draft.id: TIqnnVEu6Oy3-wtKttGa0TjpJxEg-YZ4TJNSZP7Wamlvt4P11Wt4Gq3sb3bKnFDr
+
+## 2026-10-07 11:22 修订（用户反馈三条）
+- 删"引言"节：8段铺垫全删；核心设计2段（换操作数顺序、TMEM）前移到"从简单流水线起步"开头；图1/图2归位到"与FA4的对比"节
+- 删"这篇博客/这篇"类技术无关废话（lead、结语）
+- 全篇去第一人称（13处"我/我的"→删主语或改"该"）
+- 重跑 build→render→portal→preflight（全绿）→重推草稿→回读核验 8/8

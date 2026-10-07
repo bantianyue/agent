@@ -60,12 +60,12 @@ DATA = {
     ],
     "lead": [
         "Colfax的S/P ping pong让FA4 decode在Blackwell上快了16%：下一个KV块的QK不再等当前块的softmax。但PackGQA打包query head之后，打包维度仍可能远小于FA4的tile——64 query head配8 KV head，128行tile里只有8行有效，剩下全是padding计算。",
-        "这篇博客换了个思路：不跟FA4拼同一套tile，改算S^T=KQ^T、O^T=V^TP^T，把KV位置放到大矩阵维，score tile从128×128缩到128×8；再用双softmax warpgroup、双O槽、PDL、thread block cluster内reduce一层层抠调度。B200上最高跑到FA4的2.26倍。",
+        "换个思路：不跟FA4拼同一套tile，改算S^T=KQ^T、O^T=V^TP^T，把KV位置放到大矩阵维，score tile从128×128缩到128×8；再用双softmax warpgroup、双O槽、PDL、thread block cluster内reduce一层层抠调度。B200上最高跑到FA4的2.26倍。",
     ],
     "sections": sections,
     "conclusion": [
         "**GQA decode的优化空间不在搬更多字节，而在调度。**换操作数顺序消掉padding，双softmax warpgroup与双O槽消掉串行等待，PDL把combine启动藏进producer尾巴，cluster内reduce省掉第二次launch：60形状中位数1.46倍，最高2.26倍。",
-        "对写attention kernel的人，这篇的IKET方法论比结论更值钱：每个优化都有trace为证，没增益的改动（比如去掉softmax mutex）也如实保留。CUTLASS的gqa_decode_simple/opt是现成的起点，PR #2973的代码可以直接拿去试。",
+        "对写attention kernel的人，IKET方法论比结论更值钱：每个优化都有trace为证，没增益的改动（比如去掉softmax mutex）也如实保留。CUTLASS的gqa_decode_simple/opt是现成的起点，PR #2973的代码可以直接拿去试。",
     ],
     "reference_url": "https://ighoshsubho.bearblog.dev/building-a-faster-gqa-decode-kernel-for-blackwell-sm100/",
 }
