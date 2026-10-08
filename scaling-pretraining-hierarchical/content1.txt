@@ -4,7 +4,7 @@ T# GPU算力紧缺的当下，把算力用到极致是刚需。直觉是"买更�
 T# 下面拆解如何实际高效地扩展：用512张NVIDIA B200预训练30B-A3B MoE模型。方法是分层找训练配置——先缩小搜索空间，再加卡。512卡上做到35.3% MFU，只比完美线性扩展低6%。
 T# 没有几百张卡为什么也要关心效率？很多工具和思路与规模无关；不为省钱，也为省时间。
 T# 训练用自家优化的torchtitan分支。目标配置：64节点经InfiniBand互联，每节点8卡经NVLink互联。
-F# fig02.png|图1:原文配图。几百张GPU像舰队一样完美同步（meme）。
+F# fig02.png|图1:meme 配图：数百张 GPU 如舰队般同步运转。
 T# 注意，这里聚焦的是分层扩展方法论本身；让35.3% MFU成为可能的系统级与kernel级优化，大多不在讨论范围内。
 T# 先讲度量：什么是训练效率、怎么测；再看三个自由度怎么把配置调到最高效；然后开始分层：用小规模实验缩小超参数空间，用profile看清模型行为，最后把学到的结论带到512卡。下面先讲指标。
 S# MFU好，TPS更好
@@ -20,6 +20,7 @@ T# MoE模型有自己的并行课题与机会：稀疏——每token只激活一
 H# 2 激活检查点
 T# 反向时每张卡要算loss对可训练参数的梯度，需要每个含参操作的输入（激活）在内存里。前向已经算过激活，存下来是第一直觉；但大模型中间计算巨大，存激活非常吃内存。于是引入"检查点"：只存精选激活，从它们重放前向、重算缺的激活。激活检查点（AC）是调节内存的好工具。
 T# 选哪些做检查点有多种策略，是重算时间与内存占用的精细权衡。这里考虑三种：不存（no-AC）、selective-AC、full-AC。
+F# fig05_mem.png|图2:一次前向/反向的内存用量曲线（16 卡、FSDP=16、selective-AC、局部 batch 18）。紫色为保存的激活：前向锯齿形上升，反向逐层重算缺失激活，峰值约 144GB。
 H# 3 局部batch size
 T# 并行方案与AC都是调内存的工具：内存分给激活存还是模型参数。而局部batch size决定最吃内存的那块：激活本身。
 T# 局部batch size是每张卡一次前反向同时处理的token序列数，对效率影响大：一次处理更多token通常更快烧掉token预算。目标是填满内存、用满整块GPU，最容易的办法就是加局部batch size：中间计算随它涨。目标是最大token吞吐，能塞下更大的局部batch就塞。
@@ -29,34 +30,51 @@ T# 如前所说，目标是吃满GPU内存；三个维度都影响训练内存�
 T# 局部batch size与AC咬合：内存意义上selective-AC介于full-AC与no-AC之间。它比full-AC需要更小的局部batch，因为内存里留了更多激活；但它不用重算整层的中间激活，显著更快。full-AC与selective-AC的取舍是后面反复出现的主题。
 T# 局部batch size也与FSDP咬合：一个FSDP组里卡越多，每卡分到的权重/梯度/优化器状态越少，腾出空间给更大的局部batch；代价是跟更大的组通信，通信kernel时间变长。
 T# 三个旋钮并不独立：动一个，另两个跟着变。这种此消彼长的关系需要精细调节，所以sweep很重要。不变的是：目标是最大吞吐，而保持compute-bound是trade-off做对了的好指示。
-F# fig03.png|图2:原文配图。训练达到compute-bound时的惬意（meme）。
+F# fig03.png|图3:meme 配图：训练进入 compute-bound 后的惬意。
 S# 16张卡缩小搜索空间
 T# 现在可以跑30B-A3B模型、收第一批预训练效率结果了。从小规模开始探索：8到16卡。模型光放权重、优化器状态、梯度就要几张B200，所以把一个节点（8×B200）当基本扩展单元。
 T# 1到2节点时实验便宜（集群资源与时间），所以最大的一轮sweep放在这个规模，学到的结论往上搬。具体sweep可行组合：并行方案×激活检查点×局部batch size。所有实验固定序列长度4096 token。
 T# heatmap展示不同并行与AC配置下、局部batch扫到OOM的模型效率。观察到full-AC的内存碎片：局部batch加大时内存用量来回震荡，张量在reserved内存里打包效率时好时坏。
+F# fig06_heatmap.png|图4:吞吐随局部 batch size 变化的热力图。行是（卡数、FSDP、DP、AC）组合，列是局部 batch size，绿色越深越快；最优点 28,414 TPS（16 卡、FSDP=16、DP=1、selective-AC、局部 batch 18）。
 T# 局部batch与内存用量紧密耦合：一个涨，另一个跟着涨。训练速度与这对组合的关系更复杂：局部batch太小，GPU吃不饱，TPS低；太大则效率开始下滑，因为内存饱和（表现为PyTorch的CUDA分配重试警告）。selective-AC在92%内存占用处效率峰值；full-AC在60%到94%内存占用的宽区间都快。这些就是往上扩展时的目标内存用量：局部batch要够大，才能达到它们。
 T# OOM边界与训练效率随AC技术剧烈变化：固定小batch下no-AC明显最快，但它的高内存只允许小到没法竞争最优效率的batch；selective-AC有重算开销，需要更大的局部batch来摊；full-AC重算开销最大，在大局部batch下有竞争力。
 T# 单节点到多节点的训练效率显示8到16卡经InfiniBand扩展无问题：通信介质够快，保持compute-bound；否则多节点跑TPS会明显掉。
 T# 只用16卡（目标规模的1/32），搜索空间大幅缩小：no-AC过早OOM；selective-AC在局部batch约18处TPS峰值；full-AC峰值在约38。往上扩展时只需在这些峰值附近测效率，不用全空间再扫一遍。
 S# 一张profile胜过一千次实验
 T# MFU、TPS、内存用量是快速缩小搜索空间的好指标；但要真正理解底层发生什么，得看PyTorch profile：跑了哪些kernel？什么时候跑？通信与计算kernel怎么重叠？网络上走什么数据、走多少？这种深入分析还给出心智模型：模型行为随扩展怎么变。
-F# fig04.png|图3:原文配图。看清瓶颈，才能调对方向（meme）。
+F# fig04.png|图5:meme 配图：看清瓶颈，才能调对方向。
 T# 看目前最快的配置的前向：16卡全分片、selective-AC、局部batch 18。
+F# fig07_trace_fwd16.png|图6:16 卡 selective-AC（局部 batch 18）的前向 PyTorch trace（第 25–30 层）。compute 流里 attention 与 GEMM kernel 密集交错，all_gather 与计算完全重叠，GPU 忙碌 99.0%。
 T# trace上是compute流：torch编译图的transformer层调用与里面的compute kernel；下是communication kernel。计算与通信同时发生：下一层前向的权重用all_gather预取，compute kernel不用等着开工。compute kernel一个接一个，瓶颈在计算本身的速度——compute-bound。反向也一样吗？
 T# 如上，反向除了all_gather还有reduce_scatter，两者都与计算完全重叠。回想FSDP：整层的梯度一算完就在卡间reduce、按FSDP组分片，所以看到reduce_scatter；all_gather则是Gather权重算梯度、重算激活用的。总之反向也是compute-bound。再看一条带DP的trace。
+F# fig08_trace_bwd16.png|图7:同配置的反向 trace。除 all_gather 外多了 reduce_scatter（梯度平均并按 FSDP 组分片），两者都与计算完全重叠，GPU 忙碌 99.8%。
 T# 第三种通信操作：all_reduce。相对reduce_scatter，all_reduce在模型副本间平均梯度；它随DP副本数扩展，于是在DP与FSDP之间形成推拉：卡数固定时，DP度加大则FSDP组变小、FSDP kernel时间降，反之亦然。平衡两者很关键。
+F# fig09_trace_dp16.png|图8:带 DP 的反向 trace（FSDP=8、DP=2）。reduce_scatter 之后插入 all_reduce，在 FSDP 组间平均梯度，共四种通信与计算 kernel。
 T# 严谨起见会问：梯度其实只在优化器步之前的最后一次反向才需要all_reduce。原因见Ultra-Scale Playbook对应章节。同一个profile，开了all_reduce优化再看一次。
 T# DP下非最后梯度累积步的反向trace：不需要DP all_reduce，可以去掉。
+F# fig10_trace_nonfinal.png|图9:DP 下非最后梯度累积步的反向 trace。all_reduce 不需要，已被去掉，compute 忙碌 99.2%。
 T# DP下最后梯度累积步的反向trace：含all_reduce，保证优化器步之前所有卡梯度一致。
+F# fig11_trace_final.png|图10:DP 下最后梯度累积步的反向 trace。含 all_reduce，保证优化器步之前所有卡梯度一致。
 T# 这是profile→优化→profile的缩影：想把模型变慢的原因深挖到底，profiling是最好的工具，强烈推荐。大规模还开了其他系统级优化，但在这个模型尺寸上各自影响有限；最有分量的一项是：在反向与下一次前向之间让权重常驻内存，不再分片重Gather，目标规模下约2到3%吞吐。但效率的主力仍是分层扩展方法。
 S# 从16到512：扩展成本几乎为零
 T# 16卡的sweep把搜索空间缩得很小了。加卡之前，先想想结论意味着什么、对扩展有什么预期。
 T# 结果显示通信比计算先结束：FSDP组可以加大到接近communication-bound。而且除最后一次前反向外没有all_reduce，DP也能吃掉一部分扩展成本——只在最后梯度累积步付一次。扩展策略是：只要还是compute-bound，就加FSDP；然后加DP，一直到512卡。
 T# 先扩到128卡，profile看通信占比怎么涨。selective-AC与full-AC谁更快还不知道，两种都收指标。先跑128卡selective-AC：每卡分的模型变少，局部batch可以加大。
 T# 128卡、FSDP=128、selective-AC的前向与反向：28.0k TPS、37.0% MFU、93%内存。1/8规模时是28.4k TPS，单卡效率只掉1.4%。前向反向仍是compute-bound。
+F# fig12_128fwd_sel.png|图11:128 卡 FSDP=128 selective-AC 的前向 trace。28.0k TPS、37.0% MFU，compute 忙碌 99.0%，暴露通信仅 944μs。
+T# 反向同样 compute-bound：compute 忙碌 99.5%，all_gather 与 reduce_scatter 完全被计算覆盖。
+F# fig13_128bwd_sel.png|图12:同配置的反向 trace。compute 忙碌 99.5%，通信 kernel 全部藏在计算之下。
 T# full-AC的情况类似：26.3k TPS、34.7% MFU、89%内存。前向trace的通信kernel显示已站在communication-bound边界；反向仍明显compute-bound。再加FSDP度会让整个训练communication-bound。结论：selective-AC是更优的AC，128是FSDP度的上限。
+F# fig14_128fwd_full.png|图13:128 卡 FSDP=128 full-AC 的前向 trace。前向通信 kernel 已站在 communication-bound 边界，compute 忙碌 99.5%。
+T# 反向则仍明显 compute-bound：compute 忙碌 99.8%，大通信量仍被计算覆盖。
+F# fig15_128bwd_full.png|图14:同配置的反向 trace。all_gather 632ms、reduce_scatter 609ms，仍明显 compute-bound。
 T# 扩到目标512卡：剩下的4倍（512/128=4）给DP度。按分层策略其余配置不动。最终配置：selective-AC、局部batch size=22、FSDP=128、DP=4。
 T# 512卡前向：compute-bound。非最后梯度累积步的反向：无all_reduce，仍compute-bound。最后梯度累积步的反向：DP all_reduce的耗时开始超出compute kernel的覆盖范围。
+F# fig16_512fwd.png|图15:512 卡（FSDP=128、DP=4）selective-AC 的前向 trace。compute 忙碌 98.2%，all_gather 99.7ms。
+T# 非最后梯度累积步的反向没有 all_reduce，依然 compute-bound。
+F# fig17_512bwd.png|图16:512 卡非最后梯度累积步的反向 trace。无 all_reduce，compute 忙碌 99.5%，仍 compute-bound。
+T# 只有最后梯度累积步的反向，DP all_reduce 的耗时开始超出 compute kernel 的覆盖范围。
+F# fig18_512lastbwd.png|图17:512 卡最后梯度累积步的反向 trace。DP all_reduce 耗时超出计算覆盖（410ms），compute 忙碌降到 64.7%，暴露通信 147ms——这是通信瓶颈的关键证据。
 T# 除最后一次反向外全程compute-bound——正好是引入DP all_reduce的地方。最终26.7k TPS、35.3% MFU：20T token在512卡上17天训完。扩展的收益主要在这里：比如再加两个DP副本，训练可以压到11天。硬件资源与FSDP/DP度的精细平衡，加上便宜的DP扩展，带来近线性扩展。
 T# 30B-A3B模型已成功优化到512卡跑。
 T# 看各规模的最优：全规模MFU与TPS都很高，16到512卡单卡效率只掉6%。说明硬件各部件用得很均衡。分层传递小规模实验结论到32倍的目标规模，找到了高效配置，离完美线性只差6%。以这个效率开启正式预训练。

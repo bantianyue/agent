@@ -35,7 +35,7 @@
         "4": [
           {
             "src": "fig02.png",
-            "caption": "图1:原文配图。几百张GPU像舰队一样完美同步（meme）。"
+            "caption": "图1:meme 配图：数百张 GPU 如舰队般同步运转。"
           }
         ]
       }
@@ -75,7 +75,14 @@
         "反向时每张卡要算loss对可训练参数的梯度，需要每个含参操作的输入（激活）在内存里。前向已经算过激活，存下来是第一直觉；但大模型中间计算巨大，存激活非常吃内存。于是引入\"检查点\"：只存精选激活，从它们重放前向、重算缺的激活。激活检查点（AC）是调节内存的好工具。",
         "选哪些做检查点有多种策略，是重算时间与内存占用的精细权衡。这里考虑三种：不存（no-AC）、selective-AC、full-AC。"
       ],
-      "fig_after": {}
+      "fig_after": {
+        "1": [
+          {
+            "src": "fig05_mem.png",
+            "caption": "图2:一次前向/反向的内存用量曲线（16 卡、FSDP=16、selective-AC、局部 batch 18）。紫色为保存的激活：前向锯齿形上升，反向逐层重算缺失激活，峰值约 144GB。"
+          }
+        ]
+      }
     },
     {
       "type": "h3",
@@ -100,7 +107,7 @@
         "3": [
           {
             "src": "fig03.png",
-            "caption": "图2:原文配图。训练达到compute-bound时的惬意（meme）。"
+            "caption": "图3:meme 配图：训练进入 compute-bound 后的惬意。"
           }
         ]
       }
@@ -117,7 +124,14 @@
         "单节点到多节点的训练效率显示8到16卡经InfiniBand扩展无问题：通信介质够快，保持compute-bound；否则多节点跑TPS会明显掉。",
         "只用16卡（目标规模的1/32），搜索空间大幅缩小：no-AC过早OOM；selective-AC在局部batch约18处TPS峰值；full-AC峰值在约38。往上扩展时只需在这些峰值附近测效率，不用全空间再扫一遍。"
       ],
-      "fig_after": {}
+      "fig_after": {
+        "2": [
+          {
+            "src": "fig06_heatmap.png",
+            "caption": "图4:吞吐随局部 batch size 变化的热力图。行是（卡数、FSDP、DP、AC）组合，列是局部 batch size，绿色越深越快；最优点 28,414 TPS（16 卡、FSDP=16、DP=1、selective-AC、局部 batch 18）。"
+          }
+        ]
+      }
     },
     {
       "type": "h2",
@@ -137,7 +151,37 @@
         "0": [
           {
             "src": "fig04.png",
-            "caption": "图3:原文配图。看清瓶颈，才能调对方向（meme）。"
+            "caption": "图5:meme 配图：看清瓶颈，才能调对方向。"
+          }
+        ],
+        "1": [
+          {
+            "src": "fig07_trace_fwd16.png",
+            "caption": "图6:16 卡 selective-AC（局部 batch 18）的前向 PyTorch trace（第 25–30 层）。compute 流里 attention 与 GEMM kernel 密集交错，all_gather 与计算完全重叠，GPU 忙碌 99.0%。"
+          }
+        ],
+        "3": [
+          {
+            "src": "fig08_trace_bwd16.png",
+            "caption": "图7:同配置的反向 trace。除 all_gather 外多了 reduce_scatter（梯度平均并按 FSDP 组分片），两者都与计算完全重叠，GPU 忙碌 99.8%。"
+          }
+        ],
+        "4": [
+          {
+            "src": "fig09_trace_dp16.png",
+            "caption": "图8:带 DP 的反向 trace（FSDP=8、DP=2）。reduce_scatter 之后插入 all_reduce，在 FSDP 组间平均梯度，共四种通信与计算 kernel。"
+          }
+        ],
+        "6": [
+          {
+            "src": "fig10_trace_nonfinal.png",
+            "caption": "图9:DP 下非最后梯度累积步的反向 trace。all_reduce 不需要，已被去掉，compute 忙碌 99.2%。"
+          }
+        ],
+        "7": [
+          {
+            "src": "fig11_trace_final.png",
+            "caption": "图10:DP 下最后梯度累积步的反向 trace。含 all_reduce，保证优化器步之前所有卡梯度一致。"
           }
         ]
       }
@@ -150,14 +194,61 @@
         "结果显示通信比计算先结束：FSDP组可以加大到接近communication-bound。而且除最后一次前反向外没有all_reduce，DP也能吃掉一部分扩展成本——只在最后梯度累积步付一次。扩展策略是：只要还是compute-bound，就加FSDP；然后加DP，一直到512卡。",
         "先扩到128卡，profile看通信占比怎么涨。selective-AC与full-AC谁更快还不知道，两种都收指标。先跑128卡selective-AC：每卡分的模型变少，局部batch可以加大。",
         "128卡、FSDP=128、selective-AC的前向与反向：28.0k TPS、37.0% MFU、93%内存。1/8规模时是28.4k TPS，单卡效率只掉1.4%。前向反向仍是compute-bound。",
+        "反向同样 compute-bound：compute 忙碌 99.5%，all_gather 与 reduce_scatter 完全被计算覆盖。",
         "full-AC的情况类似：26.3k TPS、34.7% MFU、89%内存。前向trace的通信kernel显示已站在communication-bound边界；反向仍明显compute-bound。再加FSDP度会让整个训练communication-bound。结论：selective-AC是更优的AC，128是FSDP度的上限。",
+        "反向则仍明显 compute-bound：compute 忙碌 99.8%，大通信量仍被计算覆盖。",
         "扩到目标512卡：剩下的4倍（512/128=4）给DP度。按分层策略其余配置不动。最终配置：selective-AC、局部batch size=22、FSDP=128、DP=4。",
         "512卡前向：compute-bound。非最后梯度累积步的反向：无all_reduce，仍compute-bound。最后梯度累积步的反向：DP all_reduce的耗时开始超出compute kernel的覆盖范围。",
+        "非最后梯度累积步的反向没有 all_reduce，依然 compute-bound。",
+        "只有最后梯度累积步的反向，DP all_reduce 的耗时开始超出 compute kernel 的覆盖范围。",
         "除最后一次反向外全程compute-bound——正好是引入DP all_reduce的地方。最终26.7k TPS、35.3% MFU：20T token在512卡上17天训完。扩展的收益主要在这里：比如再加两个DP副本，训练可以压到11天。硬件资源与FSDP/DP度的精细平衡，加上便宜的DP扩展，带来近线性扩展。",
         "30B-A3B模型已成功优化到512卡跑。",
         "看各规模的最优：全规模MFU与TPS都很高，16到512卡单卡效率只掉6%。说明硬件各部件用得很均衡。分层传递小规模实验结论到32倍的目标规模，找到了高效配置，离完美线性只差6%。以这个效率开启正式预训练。"
       ],
-      "fig_after": {}
+      "fig_after": {
+        "3": [
+          {
+            "src": "fig12_128fwd_sel.png",
+            "caption": "图11:128 卡 FSDP=128 selective-AC 的前向 trace。28.0k TPS、37.0% MFU，compute 忙碌 99.0%，暴露通信仅 944μs。"
+          }
+        ],
+        "4": [
+          {
+            "src": "fig13_128bwd_sel.png",
+            "caption": "图12:同配置的反向 trace。compute 忙碌 99.5%，通信 kernel 全部藏在计算之下。"
+          }
+        ],
+        "5": [
+          {
+            "src": "fig14_128fwd_full.png",
+            "caption": "图13:128 卡 FSDP=128 full-AC 的前向 trace。前向通信 kernel 已站在 communication-bound 边界，compute 忙碌 99.5%。"
+          }
+        ],
+        "6": [
+          {
+            "src": "fig15_128bwd_full.png",
+            "caption": "图14:同配置的反向 trace。all_gather 632ms、reduce_scatter 609ms，仍明显 compute-bound。"
+          }
+        ],
+        "8": [
+          {
+            "src": "fig16_512fwd.png",
+            "caption": "图15:512 卡（FSDP=128、DP=4）selective-AC 的前向 trace。compute 忙碌 98.2%，all_gather 99.7ms。"
+          }
+        ],
+        "9": [
+          {
+            "src": "fig17_512bwd.png",
+            "caption": "图16:512 卡非最后梯度累积步的反向 trace。无 all_reduce，compute 忙碌 99.5%，仍 compute-bound。"
+          }
+        ],
+        "10": [
+          {
+            "src": "fig18_512lastbwd.png",
+            "caption": "图17:512 卡最后梯度累积步的反向 trace。DP all_reduce 耗时超出计算覆盖（410ms），compute 忙碌降到 64.7%，暴露通信 147ms——这是通信瓶颈的关键证据。"
+          }
+        ]
+      }
     },
     {
       "type": "h2",
