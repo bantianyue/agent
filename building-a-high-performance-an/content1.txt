@@ -1,0 +1,120 @@
+S# 一个 kernel 写法，三种 GEMM 变体，自动选最优
+T# 把 Helion 接进 vLLM 的 linear backend，验证高层 kernel DSL 能否在降低 kernel 实现复杂度的同时提升 LLM 推理性能。一个 Helion GEMM 实现覆盖多种算法变体：标准 GEMM、Split-K、Swap-AB，最优变体与配置由 per-shape autotuning 自动选。
+T# Hopper 上，Helion linear backend 用 per-shape tuning 加混合调度，全面超过 vLLM 默认的 CUTLASS 与 DeepGEMM backend，端到端持续增益，部分负载吞吐提升超 10%。
+S# 背景：vLLM 与 Helion
+T# vLLM 是 LLM 高性能推理 serving 框架。对 FP8、INT8、INT4、NVFP4 等量化 linear 层，vLLM 提供专用 linear backend，集成 CUTLASS、DeepGEMM、FlashInfer 等库的硬件优化 kernel 实现，按量化格式与硬件平台选用。
+T# Helion 是 PyTorch 原生的硬件无关 kernel DSL，用 tile programming 模型写高性能 kernel。高层抽象让开发者用简洁的 Pythonic 代码表达一次，Helion 为不同负载、不同硬件生成特化代码。不用手工为每个 workload 硬件特化，靠 AOT autotuner 在大搜索空间里系统性探索（底层内存布局、kernel 调度到高层算法选择），选最优配置。高层抽象加系统性 autotuning，让一份 kernel 实现横跨多负载多硬件。还支持 LLM 引导搜索进一步提调优效率。
+S# 机会与挑战
+T# 机会有四条。性能：之前的工作证明 Helion 在多负载多硬件的推理 kernel 上做到 SOTA。系统性调优框架：相对"生成、profile、改"的开放式 agent 路线，Helion 把调优变成定义良好的数值优化问题，更稳健可靠，不依赖 profile 引导搜索，调优效率仍有竞争力；LLM 引导搜索把 LLM 推理与数值优化结合。可移植与抽象：一份实现，多负载多硬件优化。客户端 kernel 优化：推理引擎默认 kernel 按通用负载调，Helion 让用户为自己的部署继续调，不需要专家级 kernel 功底。
+T# 挑战也有四条。AOT 调优开销：细粒度调优仍可能数小时，开销来自调优策略的粒度而非 Helion 本身；别的 DSL 做到同等 workload 特化只会更贵。启动开销：vLLM 启动时 CUDA Graph capture 触发 Helion JIT 编译，冷启动变慢；warm start 靠缓存编译产物基本消除。推理运行时开销：CUDA Graph 覆盖范围外，Helion kernel dispatch/launch 的 CPU 开销可能吃掉调优收益；实践中 Helion 最适合跑在 CUDA Graphs 下。维护开销：给流行模型发预调优配置是持续的上游维护负担，大配置文件难维护、CI 没法穷举验证。
+H# 权衡三角：性能、易用、可维护
+T# 细粒度调优的三方权衡：性能、易用性、可维护性。这不是 Helion 特有，而是 workload 特化 kernel 优化的内禀：三者往往只能取其二。
+F# fig01.png|图1：性能-易用性-可维护性权衡三角。
+T# 性能越高，配置调得越细：要么客户端 autotuning 开销上去，要么维护者上游多发预调优配置。目标是为目标场景找到平衡点。
+S# Helion linear backend：范围
+T# 给 vLLM 加 Helion linear backend，聚焦 Hopper 与 Helion Triton backend。Hopper 高效推理的主力量化格式是 FP8 与 INT8，目标是量化 GEMM：FP8_Dynamic（FP8 per-token 激活 + per-channel 权重缩放）；W8A8_INT8（INT8 per-token 激活 + per-channel 权重缩放）；Block_FP8（FP8，1×128 激活缩放 + 128×128 权重缩放）。Helion CuteDSL backend 在 Blackwell 上的初步结果已有竞争力，CuteDSL 成熟后可扩展到 Blackwell。
+S# 一个 kernel 实现，覆盖三种算法变体
+T# 特定输入形状下，几种 GEMM 算法变体能提速：Split-K，把 K 维切给多个 thread block，M/N 太小时加并行；Swap-AB，把 A@B 写成 (B.T@A.T).T，小 M 形状下 tiling 更友好、GPU 利用率更高。
+T# 传统做法：kernel 作者实现多个 GEMM 变体，逐个 benchmark，跟标准 GEMM 比，再手写启发式按输入形状调度。比如 vLLM 现在的 Block_FP8 backend 在 Hopper 上 M<32 切 Swap-AB。启发式通用场景好用，但对每个模型/负载未必最优。
+T# Helion 下，一份统一 GEMM 实现覆盖全部三种变体（Standard、Split-K、Swap-AB）：不用实现多个 kernel、不用手写调度启发式，算法选择暴露成可调参数，AOT autotuner 为每个 workload 自动选最优变体加底层 kernel 配置。
+T# 下面用基础 matmul kernel 示意思路，实际的量化 GEMM kernel 结构相同，只是多了量化与缩放逻辑。
+__CODE__def matmul(
+    out: torch.Tensor,  # [M, N]
+    a: torch.Tensor,    # [M, K]
+    b: torch.Tensor,    # [K, N]
+) -> None:
+    M, K = a.shape
+    N = b.shape[1]
+    hl.specialize(K)
+    hl.specialize(N)
+    out_dtype = out.dtype
+    acc_dtype = torch.float32
+    split_k = hl.register_tunable(
+        "split_k", PowerOfTwoFragment(1, 256)
+    )
+    k_block_size = helion.next_power_of_2(helion.cdiv(K, split_k))
+    if split_k > 1:
+        out.zero_()
+    swap_ab = hl.register_tunable(
+        "swap_ab", BooleanFragment()
+    )
+    for tile_m, tile_n, outer_k in hl.tile(
+        [M, N, K],
+        block_size=[None, None, k_block_size]
+    ):
+        acc = hl.zeros([tile_m, tile_n], acc_dtype)
+        acc_t = acc.t()
+        for tile_k in hl.tile(outer_k.begin, outer_k.end):
+            if swap_ab:
+                a_blk = hl.load(a, [tile_m.index[None, :], tile_k.index[:, None]])
+                b_blk = hl.load(b, [tile_k.index[None, :], tile_n.index[:, None]])
+                acc_t = hl.dot(
+                    b_blk,
+                    a_blk,
+                    acc=acc_t,
+                    out_dtype=acc_dtype,
+                )
+            else:
+                acc = hl.dot(
+                    a[tile_m, tile_k],
+                    b[tile_k, tile_n],
+                    acc=acc,
+                    out_dtype=acc_dtype,
+                )
+        if swap_ab:
+            out_blk = acc_t.t().to(out_dtype)
+        else:
+            out_blk = acc.to(out_dtype)
+        if split_k == 1:
+            out[tile_m, tile_n] = out_blk
+        else:
+            hl.atomic_add(out, [tile_m, tile_n], out_blk)
+T# 两个算法选择都暴露成可调参数：split_k 约束为 2 的幂、最大 256；swap_ab 是布尔参数。autotuner 在约束搜索空间里探索组合、benchmark，为每个 workload 选最优变体。
+H# 混合调度：小形状走 Helion，大形状回退
+T# 按运行时 num_tokens 与 CUDA Graph 覆盖做混合调度：max_helion_size 以内的小形状，CUDA Graph replay 下走 Helion；更大的形状回退默认 kernel（CUTLASS/DeepGEMM）。
+F# fig02.png|图2：Helion linear backend 混合调度策略：按运行时 num_tokens 与 CUDA Graph 覆盖分区。
+T# 三个实际好处：消掉 Helion 运行时开销（只在 CUDA Graph replay 里跑，避开 dispatch/launch 的 CPU 开销）；降低调优开销（细粒度调优只覆盖 decode 主导的小 num_tokens 区间，需调优的形状数大减，端到端收益机会保留）；降低配置维护开销（配置集小，预调优配置更易验证、发布、维护）。
+H# Kernel autotuning
+__CODE__HELION_AUTOTUNER=LLMSeededLFBOTreeSearch \
+HELION_BENCHMARK_CUDAGRAPH=1 \
+python scripts/autotune_helion_kernels.py \
+  --kernels scaled_mm block_scaled_mm \
+  --autotune-effort "full"
+T# Per-shape 配置调优：要跟 CUTLASS/DeepGEMM/FlashInfer 拼，Helion dispatch 区间内的每个输入形状单独调。max_helion_size 取 32；vLLM 为这些 num_tokens 值 capture CUDA Graphs：[1, 2, 4] + range(8, 256, 8) + range(256, max_graph_size+1, 16)；落到 Helion 区间的就是 [1, 2, 4, 8, 16, 24, 32]，每个值按模型实际 GEMM 形状单独调。
+T# 调优 benchmark 开 CUDA Graph：Helion kernel 只在 CUDA Graph 下用，开着 Graph 测，autotuner 评估的配置更接近真实推理。Helion 用 HELION_BENCHMARK_CUDAGRAPH 环境变量开关，这里打开。
+T# LLM 引导搜索：配置用 LLMSeededLFBOTreeSearch 生成，LLM 先挑一批有潜力的候选做种子，再跑 LFBOTreeSearch，这里用 Claude Opus 4.8。从高质量候选起步，autotuner 更容易找到好配置，也可能缩短总调优时间。
+S# 性能评估
+T# kernel 层与端到端 serving 两层评估，模型覆盖 Qwen3-1.7B/4B/8B/14B/32B，加最新的 Qwen3.8-27B 看新架构。每个模型测 Hopper 上三种常用 8-bit 量化：Qwen3.8-27B 用 AzatAI/Qwen3.8-27B-FP8-dynamic（FP8_Dynamic）、Freaksterz/Qwen3.8-27B-SmoothQuant-W8A8-INT8（W8A8_INT8）、Qwen/Qwen3.8-27B-FP8（Block_FP8）。全部 benchmark 跑在 NVIDIA H100 80GB HBM3 上。
+H# Kernel 层：几何平均 1.11 到 1.18 倍
+T# 先孤立测 Helion 量化 GEMM kernel，看细粒度调优本身的收益，不掺推理栈其他部分。对照是 Hopper 上默认 vLLM linear backend 的对应 kernel：FP8_Dynamic 对 CUTLASS，W8A8_INT8 对 CUTLASS，Block_FP8 对 FlashInfer/DeepGEMM。
+F# fig03.png|图3：Helion 量化 GEMM kernel 相对默认 vLLM kernel 库的全形状加速分布，菱形为几何平均。
+T# 几何平均加速：FP8_Dynamic 对 CUTLASS 1.110 倍，W8A8_INT8 对 CUTLASS 1.178 倍，Block_FP8 对 FlashInfer 1.149 倍、对 DeepGEMM 1.177 倍。分布显示各输入形状差异大，说明细粒度调优的价值，而不是靠单一配置或通用调度启发式。
+H# 端到端：持续增益，部分负载超 10%
+T# Server 启动命令如下，关键选项：--max-num-seqs 32 对应 Helion 混合调度阈值，评估聚焦 batch 不超过 32 的区间；--no-enable-prefix-caching 关 prefix caching 避免干扰；--linear-backend helion 开 Helion backend，不加则用默认。
+__CODE__vllm serve \
+    --model "$MODEL" \
+    --max-num-seqs 32 \
+    --tensor-parallel-size 1 \
+    --no-enable-prefix-caching \
+    --linear-backend helion
+T# Benchmark 命令如下，每个 workload 默认与 Helion 两种 backend 都测。Hopper 上默认 backend 基线：FP8_Dynamic 用 CutlassFP8ScaledMMLinearKernel，W8A8_INT8 用 CutlassInt8ScaledMMLinearKernel，Block_FP8 用 FlashInferFp8DeepGEMMDynamicBlockScaledKernel。
+__CODE__vllm bench serve \
+    --backend vllm \
+    --model "${MODEL}" \
+    --endpoint /v1/completions \
+    --dataset-name sharegpt \
+    --dataset-path "${DATASET}" \
+    --max-concurrency "${BATCH_SIZE}" \
+    --num-warmups "${NUM_WARMUPS}" \
+    --num-prompts "${PROMPTS}" \
+    --ignore-eos
+F# fig04.png|图4：Helion linear backend 端到端吞吐加速比（相对各格式默认 backend）。
+T# 总体：各模型各量化格式持续端到端增益，部分负载吞吐提升超 10%。
+S# 落地模式的探索
+T# 这个 Helion linear backend 已在作者的 vLLM fork 里可用于生产，fork 里带 autotuning 工具链与文档，用户可为更多模型/负载生成优化配置。上游合入剩一个挑战：预调优配置集的发布与验证维护开销。
+T# 对 GEMM 这类延迟关键 kernel，探索中的模式是：Helion kernel 与集成框架上游维护，带默认配置过功能测试与 CI；workload 特化的 autotuning 交给终端用户。同一套自动化工具链让用户在部署前为目标模型硬件生成优化配置。这个模式用易用性换性能与可维护性；对延迟关键 kernel，离线优化一次的投入产出比划算，尤其对愿意在投产前投入的 serving 厂商。
+T# 细粒度调优不是唯一的落地策略。对量化、激活、归一化这类小辅助 kernel，可以拿一点峰值性能换小得多的配置集（跨形状通用）。初步实验显示 6 个配置就能拿到有意义的提升，这是另一条上游合入路径，调优与维护开销小得多。
+T# 欢迎试用当前实现，到 vLLM Helion linear backend RFC 反馈真实部署经验，指导后续集成。
+S# 未来工作
+T# 硬件覆盖：Helion 团队继续扩 backend 支持，包括 Blackwell 的 CuteDSL backend、AMD GPU 与 TPU 的性能工作；backend 成熟后把 Helion linear backend 扩展过去重测。
+T# 模型覆盖：这里主要打 dense 模型（linear backend 占推理延迟大头）；MoE 模型上 MoE backend 更重要，正在做 Helion MoE backend，把 kernel 优化能力带过去。
