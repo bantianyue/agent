@@ -18,7 +18,7 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">下面拆解Xid 31错误信息的每个字段、产生它的GPU虚拟内存系统、视频管线里的多分配器竞态，以及从每天28次崩溃到零的三处修复，保留全部技术细节。</p>
 
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">场景:每天28次Xid 31,CUDA context死亡</h2>
-<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GPU推理管线每天处理数千个视频，journalctl里突然出现Xid 31：GPU页表遍历失败，当前CUDA context死亡，管线重置，原因不明。Abhik Sarkar把这次生产事故的排查写成了完整记录：解码错误信息里的每个字段，讲清楚产生它的GPU虚拟内存系统，并走查生产视频管线里的多分配器竞态。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GPU推理管线每天处理数千个视频，journalctl里突然出现Xid 31：GPU页表遍历失败，当前CUDA context死亡，管线重置，原因不明。一次生产事故的完整排查记录：解码错误信息里的每个字段，讲清楚产生它的GPU虚拟内存系统，并走查生产视频管线里的多分配器竞态。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">结果先行：从每天28次崩溃到零，7000+ 视频零故障，4个inference worker  sustained约630 videos/min。下面是完整方法。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">GPU MMU:每个CUDA context拥有49位虚拟地址空间</h2>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Pascal及之后的NVIDIA GPU实现了一套完整的硬件MMU，类似CPU的MMU。这种统一内存架构下，每个CUDA context拥有独立的49位虚拟地址空间：512TB可寻址内存，覆盖全部物理GPU显存加全部系统内存绰绰有余。</p>
@@ -26,6 +26,8 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GPU MMU用多级页表做翻译。Pascal+ 上是5级层级，每级是一张4KB表、512个条目。每个条目（PDE，Page Directory Entry）要么指向下一级，要么直接映射大页（2MB或更大），要么是空/无效：表示该地址范围没有任何映射。最底层是PTE（Page Table Entry），把4KB或64KB的虚拟页映射到GPU DRAM的物理页。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">当Xid错误里写FAULT_PDE，意思是MMU走完页表层级，发现了一个空的Page Directory Entry：中间某级没有映射。GPU字面意义上无法翻译这个虚拟地址，因为本该指向下一级的页表条目不存在。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">这和FAULT_PTE不同：后者是MMU一路走到了最后一级，才发现没有物理页映射。两者都致命，但FAULT_PDE通常意味着更大片内存被解映射（一次至少2MB），FAULT_PTE可能只是一个4KB页。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_pagetable.gif"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1:原文交互示意（动图）。GPU MMU对0x725f_fb800000做5级页表遍历，走到PDE2发现空条目，触发FAULT_PDE，共3步。</figcaption></figure>
 <table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
 <thead style="font-weight: bold;color: #3f3f3f;">
 <tr><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">故障</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">层级</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">解映射区域</th><th class="th" style="border: 1px solid #dfdfdf;padding: 0.25em 0.5em;color: #3f3f3f;word-break: keep-all;background: rgba(0, 0, 0, 0.05);">典型原因</th></tr>
@@ -37,6 +39,8 @@
 </table>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">解码错误信息里的每个字段</h2>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">一条Xid 31错误的每个字段都携带诊断信息。逐字段解码：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_decoder.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2:原文Xid Error Decoder交互卡。把NVRM日志里的7个字段做成可点击的高亮：pid、channel、ENGINE、GPC、故障地址、FAULT_PDE、访问类型，点每个字段展开诊断说明。</figcaption></figure>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">关键诊断洞察：FAULT_PDE意味着整片解映射：整个内存区域的页目录条目被移除。这指向分配器释放了大块内存，而不是单个页损坏。排查时找free_all_blocks() 或empty_cache() 这类池teardown操作。</p>
 <table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
 <thead style="font-weight: bold;color: #3f3f3f;">
@@ -59,6 +63,8 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">CUDA的49位虚拟地址空间（0x0到0x1_FFFF_FFFF_FFFF）由CUDA驱动和GPU内存分配器划分区域。低地址给驱动内部和小分配；高地址才是动作和危险所在：大张量、TensorRT workspace、NVDEC surface、CuPy pool块都在这里争夺空间。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">故障地址0x725f_fb800000：高位（0x725f）落在49位空间约45% 处，对齐（800000 = 8MB对齐）符合大GPU分配。这牢牢落在多分配器争夺的高地址区。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">在多组件GPU管线里，多个分配器各自在虚拟地址空间里圈地：</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_addrspace.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3:原文GPU Virtual Address Space Map。各分配器在49位虚拟地址空间里的分区（NVDEC DPB、CuPy、TensorRT、PyTorch、CUDA Runtime），红色标记0x725f故障地址落在争夺区。</figcaption></figure>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">地址0x725f_fb800000符合PyTorch、CuPy或TensorRT的大分配特征：视频推理中反复分配释放的那类内存。</p>
 <table class="preview-table" style="color: #3f3f3f;margin-top: 0 !important;">
 <thead style="font-weight: bold;color: #3f3f3f;">
@@ -90,7 +96,11 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">GPU视频推理管线里至少四个独立内存分配器共享一个49位虚拟地址空间：PyTorch caching allocator（张量内存，延迟释放）、CuPy内存池（与PyTorch分开管理CuPy数组）、TensorRT workspace（推理kernel的预分配scratch）、NVDEC DPB surface（硬件管理的解码帧缓冲）。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每个分配器对“在用/空闲”有自己的账本。危险出现在分配器跨边界共享内存却不协调生命周期：尤其经过DLPack零拷贝传输时。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">DLPack让框架间零拷贝共享：torch.from_dlpack(cupy_array) 创建一个指向CuPy拥有内存的PyTorch张量，不拷贝。快，但危险：CuPy内存池跟踪这块分配，PyTorch张量指向同一物理内存；如果CuPy池释放了这块（经free_all_blocks()），PDE被拆除；PyTorch张量现在指向无效虚拟内存；下一个读它的kernel触发FAULT_PDE，Xid 31。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_race.gif"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图4:原文交互示意（动图）。四分配器竞态时间线：CuPy分配缓冲并经DLPack分享给PyTorch，随后free_all_blocks() 拆掉PyTorch仍在用的PDE，触发Xid 31，共5步。</figcaption></figure>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">NVDEC又加了一层复杂度。cuvidMapVideoFrame() 把解码帧从硬件DPB（Decoded Picture Buffer）映射进CUDA虚拟地址空间。关键约束：同时最多映射ulNumOutputSurfaces帧。持有太多surface映射（DLPack view、处理太慢），下一帧的cuvidMapVideoFrame() 失败；unmap太急（DLPack capsule被GC），在飞的CUDA kernel丢了源数据。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_nvdec.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图5:原文NVDEC Decode Pipeline（Clone方案）。NVDEC解码后经NV12输出、临时缓冲、深拷贝进PyTorch张量再计算，崩溃风险清零。</figcaption></figure>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">实战教训：DLPack零拷贝不是免费的。每次零拷贝交接都制造一个共享所有权问题：任何一边释放内存，另一边就拿到Xid 31。生产管线里，跨分配器边界一律clone张量。</p>
 <h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">三天调试实录:三种Xid 31变体</h2>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">两天调试里遇到三种不同的Xid 31变体：</p>
@@ -110,6 +120,8 @@
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">修复二：在跑CuPy转换kernel之前，先把NV12 surface clone出NVDEC DPB内存。这消除了GPC计算kernel直接读NVDEC映射surface的跨引擎hazard。崩溃数从2微增到3，因为暴露了另一个race：RGB转换期间CuPy的free_all_blocks()。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">修复三（两处，合力消除分配器竞态）：第一，把CuPy RGB输出clone进PyTorch内存：最终张量落在PyTorch caching allocator里，与CuPy池彻底解耦；第二，从chunk cleanup里删掉free_all_blocks()：CuPy池内部管理复用，激进的teardown与pending的DLPack deleter竞态。</p>
 <p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">三处修复后：7000+ 视频零Xid 31故障，4个inference worker sustained约630 videos/min。完整数据路径现在彻底隔离：NVDEC surface解码后立刻clone进PyTorch拥有的内存，任何分配器都撕不掉别的框架引用的页。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig_fixprog.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图6:原文Fix Progression。Baseline每天28次Xid崩溃，三处修复后降到0，7000+ 视频零故障。</figcaption></figure>
 
 <hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
 
@@ -125,14 +137,14 @@
 <section style="text-align:center;">
 <span class="portal-title" style="font-size:12px;color:#1a6ba0;font-weight:bold;">【传送门】</span>
 <section style="text-align:left;display:inline-block;font-size:12px;color:#0F4C81;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/42s6fk-xdo23L-vtLj6Q8Q" target="_blank" data-linktype="2">vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%</a><br>
 <a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
-<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
-<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
 <a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
-<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/4aEYa-5J2Ir82V_1_9anDA" target="_blank" data-linktype="2">AI芯片架构全景: 从NVIDIA到Groq的六条设计路线</a><br>
-<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/3btXHAVd8_x5CM5CWETc2g" target="_blank" data-linktype="2">Agent卷向AI Infra: SGLang团队用硬核Agent优化框架和CUDA Kernal性能</a><br>
-<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/HPaDwcT_4Rw5ty7LwDG4Ng" target="_blank" data-linktype="2">Torch Profiler在Trace里分析性能瓶颈: 剖析SGLang LLM推理</a><br>
-<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/YHmkt8EHFGm-HeflWCsB2w" target="_blank" data-linktype="2">英伟达Kernel Agent: 编译器与算子调优Agent的协同设计</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/i-NZ-4oCXs48XpDfdcBfPw" target="_blank" data-linktype="2">在NVFP4上超越cuBLAS: 从零手写+Claude极限优化Blackwell GEMM</a><br>
 </section>
 </section>
 

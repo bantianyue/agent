@@ -63,7 +63,7 @@ for s in sections:
 assert not missing, f"图文件缺失: {missing}"
 
 DATA = {
-    "title": "Abhik Sarkar：Xid 31 MMU 故障实战：每天 28 次生产 GPU 崩溃的排查与修复",
+    "title": "Xid 31 MMU 故障实战：每天 28 次生产 GPU 崩溃的排查与修复",
     "summary": [
         {"key": "FAULT_PDE", "body": "MMU 走完页表发现空 Page Directory Entry——整片区域（≥2MB）被解映射，指向分配器的大块释放，不是单个页损坏；排查找 free_all_blocks()/empty_cache()。"},
         {"key": "DLPack 陷阱", "body": "torch.from_dlpack(cupy_array) 零拷贝制造共享所有权：CuPy 池释放 → PDE 拆除 → PyTorch 张量指向无效虚拟内存 → 读它的 kernel 触发 Xid 31。跨分配器边界一律 clone。"},

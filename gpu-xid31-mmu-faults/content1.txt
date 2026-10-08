@@ -1,5 +1,5 @@
 S# 场景：每天 28 次 Xid 31，CUDA context 死亡
-T# GPU 推理管线每天处理数千个视频，journalctl 里突然出现 Xid 31：GPU 页表遍历失败，当前 CUDA context 死亡，管线重置，原因不明。Abhik Sarkar 把这次生产事故的排查写成了完整记录：解码错误信息里的每个字段，讲清楚产生它的 GPU 虚拟内存系统，并走查生产视频管线里的多分配器竞态。
+T# GPU 推理管线每天处理数千个视频，journalctl 里突然出现 Xid 31：GPU 页表遍历失败，当前 CUDA context 死亡，管线重置，原因不明。一次生产事故的完整排查记录：解码错误信息里的每个字段，讲清楚产生它的 GPU 虚拟内存系统，并走查生产视频管线里的多分配器竞态。
 T# 结果先行：从每天 28 次崩溃到零，7000+ 视频零故障，4 个 inference worker  sustained 约 630 videos/min。下面是完整方法。
 S# GPU MMU：每个 CUDA context 拥有 49 位虚拟地址空间
 T# Pascal 及之后的 NVIDIA GPU 实现了一套完整的硬件 MMU，类似 CPU 的 MMU。这种统一内存架构下，每个 CUDA context 拥有独立的 49 位虚拟地址空间——512TB 可寻址内存，覆盖全部物理 GPU 显存加全部系统内存绰绰有余。
@@ -7,11 +7,13 @@ T# CUDA kernel、TensorRT 引擎或 NVDEC 解码器访问内存时，用的不�
 T# GPU MMU 用多级页表做翻译。Pascal+ 上是 5 级层级，每级是一张 4KB 表、512 个条目。每个条目（PDE，Page Directory Entry）要么指向下一级，要么直接映射大页（2MB 或更大），要么是空/无效——表示该地址范围没有任何映射。最底层是 PTE（Page Table Entry），把 4KB 或 64KB 的虚拟页映射到 GPU DRAM 的物理页。
 T# 当 Xid 错误里写 FAULT_PDE，意思是 MMU 走完页表层级，发现了一个空的 Page Directory Entry——中间某级没有映射。GPU 字面意义上无法翻译这个虚拟地址，因为本该指向下一级的页表条目不存在。
 T# 这和 FAULT_PTE 不同：后者是 MMU 一路走到了最后一级，才发现没有物理页映射。两者都致命，但 FAULT_PDE 通常意味着更大片内存被解映射（一次至少 2MB），FAULT_PTE 可能只是一个 4KB 页。
+F# fig_pagetable.gif|图1:原文交互示意（动图）。GPU MMU 对 0x725f_fb800000 做 5 级页表遍历，走到 PDE2 发现空条目，触发 FAULT_PDE，共 3 步。
 TB# 故障|层级|解映射区域|典型原因
 TR# FAULT_PDE|中间页目录|≥2MB|大块分配被释放，内存池 teardown
 TR# FAULT_PTE|最后一级页表|4KB 单页|单个页被换出或损坏
 S# 解码错误信息里的每个字段
 T# 一条 Xid 31 错误的每个字段都携带诊断信息。逐字段解码：
+F# fig_decoder.png|图2:原文 Xid Error Decoder 交互卡。把 NVRM 日志里的 7 个字段做成可点击的高亮：pid、channel、ENGINE、GPC、故障地址、FAULT_PDE、访问类型，点每个字段展开诊断说明。
 TB# 字段|含义
 TR# PCI:0000:c1:00|GPU 的 PCI 总线地址
 TR# 31|Xid 错误码：MMU 故障
@@ -28,6 +30,7 @@ S# 地址解码：0x725f_fb800000 落在争夺区
 T# CUDA 的 49 位虚拟地址空间（0x0 到 0x1_FFFF_FFFF_FFFF）由 CUDA 驱动和 GPU 内存分配器划分区域。低地址给驱动内部和小分配；高地址才是动作和危险所在：大张量、TensorRT workspace、NVDEC surface、CuPy pool 块都在这里争夺空间。
 T# 故障地址 0x725f_fb800000：高位（0x725f）落在 49 位空间约 45% 处，对齐（800000 = 8MB 对齐）符合大 GPU 分配。这牢牢落在多分配器争夺的高地址区。
 T# 在多组件 GPU 管线里，多个分配器各自在虚拟地址空间里圈地：
+F# fig_addrspace.png|图3:原文 GPU Virtual Address Space Map。各分配器在 49 位虚拟地址空间里的分区（NVDEC DPB、CuPy、TensorRT、PyTorch、CUDA Runtime），红色标记 0x725f 故障地址落在争夺区。
 TB# 分配器|分配什么
 TR# CUDA 驱动内部|页表、通道描述符
 TR# PyTorch caching allocator|张量、模型权重、中间结果
@@ -47,7 +50,9 @@ S# DLPack 陷阱：跨分配器的共享所有权
 T# GPU 视频推理管线里至少四个独立内存分配器共享一个 49 位虚拟地址空间：PyTorch caching allocator（张量内存，延迟释放）、CuPy 内存池（与 PyTorch 分开管理 CuPy 数组）、TensorRT workspace（推理 kernel 的预分配 scratch）、NVDEC DPB surface（硬件管理的解码帧缓冲）。
 T# 每个分配器对“在用/空闲”有自己的账本。危险出现在分配器跨边界共享内存却不协调生命周期——尤其经过 DLPack 零拷贝传输时。
 T# DLPack 让框架间零拷贝共享：torch.from_dlpack(cupy_array) 创建一个指向 CuPy 拥有内存的 PyTorch 张量，不拷贝。快，但危险：CuPy 内存池跟踪这块分配，PyTorch 张量指向同一物理内存；如果 CuPy 池释放了这块（经 free_all_blocks()），PDE 被拆除；PyTorch 张量现在指向无效虚拟内存；下一个读它的 kernel 触发 FAULT_PDE，Xid 31。
+F# fig_race.gif|图4:原文交互示意（动图）。四分配器竞态时间线：CuPy 分配缓冲并经 DLPack 分享给 PyTorch，随后 free_all_blocks() 拆掉 PyTorch 仍在用的 PDE，触发 Xid 31，共 5 步。
 T# NVDEC 又加了一层复杂度。cuvidMapVideoFrame() 把解码帧从硬件 DPB（Decoded Picture Buffer）映射进 CUDA 虚拟地址空间。关键约束：同时最多映射 ulNumOutputSurfaces 帧。持有太多 surface 映射（DLPack view、处理太慢），下一帧的 cuvidMapVideoFrame() 失败；unmap 太急（DLPack capsule 被 GC），在飞的 CUDA kernel 丢了源数据。
+F# fig_nvdec.png|图5:原文 NVDEC Decode Pipeline（Clone 方案）。NVDEC 解码后经 NV12 输出、临时缓冲、深拷贝进 PyTorch 张量再计算，崩溃风险清零。
 T# 实战教训：DLPack 零拷贝不是免费的。每次零拷贝交接都制造一个共享所有权问题：任何一边释放内存，另一边就拿到 Xid 31。生产管线里，跨分配器边界一律 clone 张量。
 S# 三天调试实录：三种 Xid 31 变体
 T# 两天调试里遇到三种不同的 Xid 31 变体：
@@ -61,3 +66,4 @@ T# 修复一：把 NVDEC 输出从 RGB（3 字节/像素）切到 NV12 原生输
 T# 修复二：在跑 CuPy 转换 kernel 之前，先把 NV12 surface clone 出 NVDEC DPB 内存。这消除了 GPC 计算 kernel 直接读 NVDEC 映射 surface 的跨引擎 hazard。崩溃数从 2 微增到 3，因为暴露了另一个 race：RGB 转换期间 CuPy 的 free_all_blocks()。
 T# 修复三（两处，合力消除分配器竞态）：第一，把 CuPy RGB 输出 clone 进 PyTorch 内存——最终张量落在 PyTorch caching allocator 里，与 CuPy 池彻底解耦；第二，从 chunk cleanup 里删掉 free_all_blocks()——CuPy 池内部管理复用，激进的 teardown 与 pending 的 DLPack deleter 竞态。
 T# 三处修复后：7000+ 视频零 Xid 31 故障，4 个 inference worker sustained 约 630 videos/min。完整数据路径现在彻底隔离：NVDEC surface 解码后立刻 clone 进 PyTorch 拥有的内存，任何分配器都撕不掉别的框架引用的页。
+F# fig_fixprog.png|图6:原文 Fix Progression。Baseline 每天 28 次 Xid 崩溃，三处修复后降到 0，7000+ 视频零故障。
