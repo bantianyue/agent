@@ -1,0 +1,67 @@
+S# Blackwell 让低精度从省内存变成提速度
+T# 长期以来，把模型从高精度降到低精度都有代价：省了显存，质量掉、加速小甚至没有。低精度更像为了把模型塞进显存而接受的妥协，而不是收益。
+T# Blackwell 改变了这一点。原生 8-bit 浮点不新鲜：Hopper（H100）与 Ada（L40S）已经有 FP8 Tensor Core。Blackwell 新增的是原生 FP4（以及 FP6）数学与 microscaling（MX）块格式的硬件支持，4-bit 浮点直接跑在硬件上，而不是软件模拟。产品线从 RTX PRO 6000 Blackwell Server Edition 一直到数据中心的 B200/GB200。老硬件上量化主要是让模型塞进显存，加速是附带的、通常很小的红利；Blackwell 上低精度格式跑在专用硬件上，切到 FP8/FP4 带来真实、可测量的速度，而不只是省显存。
+T# 全部测试跑在 RTX PRO 6000 Blackwell Server Edition 上。B200 为加速同样格式而生，测出的排序大概率成立，但没有实测。
+T# 选型因此变得重要且不再显然：FP8、MXFP8、NVFP4、MXFP4 四种格式省的显存差不多，但在真实流量下行为完全不同，选错会浪费大量 GPU。测试对象是 Qwen3-32B，用 AWQ 量化成四种 Blackwell 浮点格式：FP8、MXFP8、NVFP4、MXFP4。去掉了 FP6/MXFP6 与 FP8 E5M2（E5M2 主要用于训练梯度，推理 checkpoint 用 E4M3）。测两件事：质量（Wikitext 困惑度、GSM8K 准确率）与 serving 性能（各并发下的输出吞吐、首 token 延迟）。
+S# AWQ：先保住重要的权重
+T# 直接把全部权重舍入到低精度会伤模型，因为少数权重承载了不成比例的行为。AWQ（Activation-aware Weight Quantization）的做法是在舍入前按通道重缩放权重。
+T# 关键观察：权重的重要性不在于权重本身的大小，而在于流经它的激活有多大。被大而频繁的激活相乘的通道，远比乘以接近零输入的通道重要。流程分四步：第一步校准，跑几百个真实文本样本过 BF16 模型，记录每层线性层输入激活的每通道平均幅度；第二步搜缩放，按激活幅度为每通道构造缩放（约 activation_magnitude 的 α 次方），网格搜索 α，对每种取值量化该层并保留输出误差最小的，激活越大的通道放得越大；第三步先缩放后舍入，权重通道乘以缩放（对应激活除回去补偿，数学结果不变），重要权重被放大后，舍入到粗网格时的相对误差变小；第四步量化，把重缩放后的权重舍入到目标低精度格式。
+T# AWQ 只读激活统计、不碰梯度，所以快、数据需求小。
+F# fig01.png|图1：AWQ 量化流程：校准数据、每通道激活统计、显著通道缩放、舍入到 FP8 或 FP4。
+H# 从 BF16 到 FP8：缩放因子的作用
+T# 浮点数分三部分：符号位、指数位（量级）、尾数位（量级内的精度）。BF16 是 1 符号 + 8 指数 + 7 尾数；FP8（E4M3）是 1 + 4 + 3：指数位更少（最大值只有 448），尾数位少得多，能表示的网格很粗。
+T# 整张权重张量量级跨度大，FP8 网格窄，直接 cast 会让小权重塌到零、大权重饱和。解法是缩放因子 s，一组权重共享：除以 s 把组内数值搬进 FP8 可表示范围，舍入到最近的 FP8 值，计算时乘回 s 恢复原始量级。s 取自组内最大绝对值，保证不饱和。
+T# 举例：四个 BF16 权重 [0.021, -0.008, 0.052, 0.011]。最大幅度 0.052，E4M3 最大值 448，s = 0.052/448 ≈ 0.000116。除以 s 得 180.92、-68.92、448.00、94.77；舍入到 E4M3 得 176、-72、448、96；乘回 s 得 0.02043、-0.00836、0.05200、0.01114，误差 2.7%、4.5%、0%、1.3%。恢复值落在原值几个百分点内，缩放让 3 个尾数位能跟踪量级差很大的权重。
+F# fig02.png|图2：BF16 权重置于缩放因子、舍入到 FP8 E4M3 网格、再乘回缩放因子的过程。
+T# FP8-AWQ 用块缩放：每 128×128 权重块一个缩放，激活按 128 分组动态量化。vLLM 里 32.04 GiB 对 BF16 的 61.03 GiB，约 1.9 倍，质量几乎无损，因为 8-bit 动态范围仍然够宽。
+H# Microscaling：把缩放做细
+T# 大组共享一个缩放的弱点：一个离群值逼出很大的缩放，组里所有小值都浪费精度。Microscaling（MX）把权重切成很小的块（通常 32 个值），每块一个独立的共享缩放（2 的幂，存成紧凑的 8-bit 指数 E8M0）。块越细越贴合局部量级，精度处处保得住。
+T# MXFP8-AWQ 是 FP8 的微缩放版：元素还是 8-bit E4M3，但缩放从 128×128 块换成每 32 个值一块。局部性更强，质量基本贴着 BF16，仍是 8-bit 格式。
+T# MXFP4-AWQ 把微缩放到 4-bit 浮点（E2M1：1 符号、2 指数、1 尾数，可表示的量级只有约 8 种）。每 32 个值共享一个 2 的幂缩放。权重缩小约 3.3 倍（18.59 GiB 对 61.03 GiB），但每权重只有 1 个尾数位，质量代价真实存在。这次它没用上 Blackwell 的 FP4 Tensor Core：跑的是 vLLM 的 Marlin 纯权重 kernel、激活保持 BF16，所以这里的速度反映的是 fallback kernel，不是 MXFP4 格式本身。
+F# fig03.png|图3：单行级缩放对比微缩放（MX）：每 32 个值一个缩放因子，抑制离群值的影响。
+H# NVFP4：两级缩放的 4-bit
+T# NVFP4-AWQ 是 NVIDIA 的 4-bit 浮点，为让 4-bit 真正可用而设计。元素与 MXFP4 一样是 4-bit E2M1，但缩放做了两处改进：第一，块更小，16 个值一块而不是 32，局部性更细；第二，两级缩放，每 16 个值块配一个更高精度的 FP8 块缩放（不是 2 的幂），上面再加一个张量级的全局 FP32 缩放。高精度块缩放让微小的 4-bit 数落得离真值更近，这是 MXFP4 的粗糙 2 的幂缩放做不到的。
+F# fig04.png|图4：NVFP4 两级缩放：每 16 个值一个 FP8 块缩放因子，外加张量级全局 FP32 缩放。
+T# 回报很大：NVFP4 比 BF16 小约 3.1 倍（19.55 GiB 对 61.03 GiB；缩放因子占 bit、部分层保留 BF16），Blackwell 原生 4-bit Tensor Core 让它成为测下来最快的格式，质量代价不大，它是 Blackwell 真正为之加速的格式。
+T# 四种格式的规律：FP8 系几乎不换质量、权重小约 1.9 倍；FP4 系推到 3.1 到 3.3 倍，靠更聪明的缩放（尤其是 NVFP4 的两级方案）控制质量代价。
+T# 激活也被量化了，不只是权重。这些 checkpoint 里 FP8/MXFP8 把激活量化到 8-bit，NVFP4 量化到 4-bit；MXFP4 是例外，fallback kernel 让它的激活留在了 BF16。这同时影响速度和质量。
+S# 测试设置
+T# 模型 Qwen3-32B；硬件 RTX PRO 6000 Blackwell Server Edition；软件 vLLM 0.24.0、lm-eval 0.4.12、compressed-tensors 0.17.0。精度基准：Wikitext 困惑度（word PPL，WikiText-2 test split）与 GSM8K（strict/flex，只取 1319 道测试题的前 100 道）。Serving 基准：ShareGPT V3，1000 个 prompt 一次全发（--request-rate inf），每个并发级别单跑一次。采样：temperature 0.6、top-p 0.95、top-k 20（Qwen3 默认），开 EOS 停止。客户端/服务端：vllm bench serve / vllm serve。最大模型长度 4096，GPU 显存利用率 0.90。
+T# KV cache 容量（token 数）：BF16 93,312；FP8 212,864；MXFP8 208,192；NVFP4 264,272；MXFP4 267,200。开 prefix caching，同一批带种子的 prompt 由一台 server 跑完全部并发扫描，结束时 prefix cache 命中率：BF16 为 0%，FP8/MXFP8 约 8%，NVFP4/MXFP4 约 14%，给量化模型一点额外加成。
+T# 量化用 WikiText-2 train split 的 512 样本 × 2048 token 校准，双卡分片（单卡爆显存）。困惑度也在 WikiText-2（test split）上测，同分布文本可能让困惑度看起来比别处好一点。
+T# 对比的量化变体：BF16（基线）、FP8-AWQ、MXFP8-AWQ、NVFP4-AWQ、MXFP4-AWQ。Serving 标志：MXFP8-AWQ 与 NVFP4-AWQ 默认跑；FP8-AWQ 加 VLLM_USE_DEEP_GEMM=0（关掉该 checkpoint 的 DeepGEMM 路径）；MXFP4-AWQ 加 VLLM_DISABLED_KERNELS=FlashInferMxFp4LinearKernel（禁用 FlashInfer 的 MXFP4 linear kernel，vLLM 回退到 MarlinMxFp4LinearKernel：4-bit 权重、BF16 激活、BF16 计算）。选 Marlin 回退是因为实验时 vLLM 在 Blackwell 上的原生 MXFP4 路径（FlashInfer kernel）还不够稳定，跑不动 vLLM 0.24.0 下这个 checkpoint。
+T# 全部 Qwen3-32B 量化 checkpoint 用 LLM Compressor（Neural Magic/vLLM 的工具）产出，配方化脚本一次校准、输出四种格式，脚本与 checkpoint 都已开源。
+S# 精度：几乎无损
+T# Wikitext PPL：BF16 10.2079；FP8-AWQ 10.2378（+0.0299）；MXFP8-AWQ 10.2669（+0.0589）；NVFP4-AWQ 10.6136（+0.4056）；MXFP4-AWQ 10.6434（+0.4355）。GSM8K strict/flex：BF16 0.88/0.90；FP8-AWQ 0.88/0.92；MXFP8-AWQ 0.90/0.93；NVFP4-AWQ 0.89/0.94；MXFP4-AWQ 0.91/0.92。
+T# FP8-AWQ 与 MXFP8-AWQ 的困惑度几乎无损（+0.03、+0.06）。4-bit 两个变体 PPL 移动大一些（约 +0.4），绝对值仍然小；MXFP4 的数字与 NVFP4 不完全可比，因为 NVFP4 还量化了激活，这次的 MXFP4 没有。
+T# GSM8K 这次没退化，但只测了前 100 题，标准误约 ±3 个点，0.88 到 0.94 的 spread 按噪声处理，不当作推理变强。
+T# 结论：质量全线保住，选型几乎可以只看 serving 性能。
+S# 质量-速度总览
+T# 这张图把故事讲全了：横轴是相对 BF16 的 Wikitext ΔPPL（越左质量越好），纵轴是各变体在自己最优并发下的峰值输出吞吐（越高越好），峰值对峰值。理想位置是左上：又快又准。
+F# fig05.png|图5：Qwen3-32B 在 RTX PRO 6000 上五种格式的 Wikitext 困惑度增量-峰值吞吐散点。
+T# FP8-AWQ 与 MXFP8-AWQ 聚在左上质量区：PPL 离 BF16 不到 +0.06，吞吐已是 1.63 倍和 1.73 倍（2076、2211 对 1276 tok/s）。近乎免费的升级：质量几乎不花钱，吞吐多三分之二。
+T# NVFP4-AWQ 在图上窜得最高：无限制并发下 3079 tok/s，是 BF16 峰值 1276（并发 420）的 2.41 倍。横轴跳到 +0.41 PPL 看着大，绝对值只是从 10.21 到 10.61，为全场最大的吞吐增益付的代价不大。
+T# MXFP4-AWQ 是明显的离群点、全场最差 trade-off：质量在 NVFP4 右边（最差，+0.44 PPL），吞吐只有 1715 tok/s，不及 FP8/MXFP8，比 NVFP4 少约 1360 tok/s。它跑的是 Marlin 纯权重 kernel、BF16 数学，拿到了 4-bit 的显存节省，没拿到 FP4 Tensor Core 的加速。
+S# 吞吐量曲线
+T# NVFP4-AWQ 是明确的 serving 性能赢家，峰值达到 BF16 峰值输出吞吐的 2.41 倍。
+F# fig06.png|图6：Qwen3-32B 输出吞吐随并发数变化，NVFP4 在全部负载下最高。
+T# NVFP4 在曲线的每个点都是吞吐赢家：并发 60 起手 2004 tok/s，已经超过 BF16 的天花板，一路爬到无限制并发的 3078.91 tok/s。对次优变体的领先从 608 到 1020 tok/s，负载越高差距不缩小。
+T# MXFP8 与 FP8 形成紧密的中段带，全程差约 150 tok/s 以内。MXFP8 几乎处处略快（无限制并发 2211 对 2076），是 FP8 系里吞吐更好的那个。
+T# MXFP4 远不及 NVFP4，尽管都是 4-bit：曲线近乎平坦，大部分区间 1400 到 1500 tok/s，终点 1715 tok/s，离 BF16 比离 NVFP4 近。原因是 Marlin 纯权重 kernel：激活留 BF16、数学跑 BF16，从没用过 Blackwell 的 FP4 Tensor Core。
+T# BF16 早早饱和在低位：并发 240 起 plateau 在 1.2K 到 1.3K tok/s。61 GiB 的 BF16 权重只给 KV cache 留约 93000 token，对比量化模型的 208000 到 267000。量化模型在高负载下的赢面，很多来自省出的显存，不只是更快的数学。
+S# 延迟比峰值吞吐更重要
+T# 只看峰值吞吐会误导，重负载下的响应同样重要。对数坐标的平均 TTFT 视角下，分化非常明显。
+F# fig07.png|图7：Qwen3-32B 平均首 token 延迟（TTFT）随并发数变化（对数坐标），NVFP4 全程最低。
+T# 并发 360 的数据：BF16 1263.09 tok/s、TTFT 8605.81 ms；FP8-AWQ 1827.83、2118.87；MXFP8-AWQ 1889.15、2035.59；NVFP4-AWQ 2754.87、1132.76；MXFP4-AWQ 1496.80、3650.93。各点都是单跑；360 是 FP8/MXFP8 的高点（FP8 在 300/360/420 并发是 1574→1828→1624 tok/s，MXFP8 类似），它们的吞吐读数略有水分。
+T# 并发 360，NVFP4 相对 BF16 吞吐 2.18 倍，平均 TTFT 降约 7.6 倍。
+T# BF16 的 TTFT 悬崖来得最早最陡：并发 240 到 360，平均 TTFT 从约 1.7 秒涨到 8.6 秒，无限制并发超过 38 秒。KV cache 被填满：BF16 server 日志显示 KV cache 用到 99.9%，请求排队，新请求光等第一个 token 就要数秒。
+T# NVFP4 把悬崖推得最远：全程 TTFT 最低，360 并发 1132 ms 对 BF16 的 8605 ms（7.6 倍），无限制并发 7.4 秒对 38 秒（5.2 倍）。KV cache 空间大得多、4-bit 数学更快，同时跑的请求更多、排队的更少，延迟是优雅降级而不是崩塌。
+T# FP8/MXFP8 紧跟 NVFP4，360 并发约 2.0 到 2.1 秒（约 4 倍于 BF16），MXFP8 多数点略快于 FP8，和吞吐的小优势一致。
+T# MXFP4 是量化组里最差的：360 并发 3650 ms，好过 BF16 但明显落后 FP8 组合，比 NVFP4 慢 3 倍多；低负载（120/180/240）TTFT 甚至不如 BF16。反映的是它跑的 Marlin fallback kernel，不是 MXFP4 格式本身。
+T# y 轴对数，纵向差距是乘法差距：高负载下 NVFP4 与 BF16 的 TTFT 差接近一个数量级。TPOT 则混杂：NVFP4 全程最低，但无限制并发下 FP8（374 ms）、MXFP8（368 ms）、MXFP4（584 ms）的平均 TPOT 都高于 BF16（264 ms）。
+S# 选型结论
+T# NVFP4-AWQ 是总赢家：最高吞吐（3078.91 tok/s，2.41 倍 BF16 峰值）、全负载最低延迟，代价只是 +0.41 PPL。Blackwell serving 部署优化，默认选它。
+T# FP8-AWQ 是稳妥之选：质量近乎无损（+0.03 PPL），吞吐稳拿 1.63 倍，要的是最小质量变化而不是最大 tok/s 时选它。
+T# MXFP8-AWQ 是中间档：吞吐略好于 FP8，质量代价仍然小；想比 FP8 再快一点又不碰 4-bit 时的合理默认。
+T# MXFP4-AWQ 这次没法下结论：跑的是 Marlin 纯权重 fallback、BF16 激活，这套配置下只有 1.34 倍吞吐，远落后 NVFP4。测的是那个 kernel，不是 Blackwell FP4 Tensor Core 上的 MXFP4。
+T# 速查：最大 serving 吞吐选 NVFP4-AWQ（3078.91 tok/s）；重负载最低延迟选 NVFP4-AWQ（多数并发下 TTFT/TPOT 最低）；保守生产质量选 FP8-AWQ（+0.0299 PPL）；FP8 系平衡之选选 MXFP8-AWQ（吞吐略胜 FP8，+0.0589 PPL）；MXFP4-AWQ 未在原生 kernel 上测（Marlin fallback，PPL 代价与 NVFP4 相近但吞吐低得多）。今天要在 Blackwell 上发一个 serving workload，选 NVFP4-AWQ，FP8-AWQ 做保守备选。
