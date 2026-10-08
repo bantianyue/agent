@@ -1,0 +1,122 @@
+{
+  "title": "vLLM:DeepSeek-V4.1-Flash发布三周,Agentic吞吐做到5倍",
+  "summary": [
+    {
+      "key": "SWA bounded replay",
+      "body": "只重放最后 128 token 并截断窗口，换掉 SWA KV 的存储与 prefill 代价；decoder 侧 21 到 39 层只跑最后 128 token，长 prompt 跳过近半模型；breakable PIECEWISE 让修剪层也能进 CUDA graphs，prefill 计算降 30 到 40%。"
+    },
+    {
+      "key": "Kernel 融合与并行",
+      "body": "Mega-mHC、Mega-Gate、MegaAttention（NVFP4 KV 小 45%）、WO-A 融合 kernel、mHC 多流并行、稀疏 MQA logits、Engram 异步预取；单项加速 1.14 到 2.1 倍，GSM8K/GPQA 精度无损。"
+    },
+    {
+      "key": "AgentX 实测",
+      "body": "GB300 NVL72 上，相对 day-0 实现低延迟 1.9 倍、高吞吐 5.3 倍；100K 吞吐附近 TTFT 降近 70%，固定吞吐下 P90 TTFT 从 1.86 秒到 0.32 秒。"
+    }
+  ],
+  "lead": [
+    "DeepSeek-V4.1-Flash 发布才三周，Inferact 和 vLLM 社区已经把 AgentX 上的 agentic 吞吐做到了 day-0 的 5 倍，低并发延迟也快了 1.9 倍。",
+    "两类优化：SWA bounded replay 拿近似换效率，长 prompt 直接跳过近半个模型；一连串 kernel 融合与并行把剩下的计算压干。下面按原文结构拆解，保留全部机制与性能数字。"
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "三周时间,Agentic吞吐做到5倍",
+      "paras": [
+        "DeepSeek-V4.1-Flash 发布后的三周里，Inferact 与 vLLM 社区把它优化了一遍：在 SemiAnalysis AgentX agentic serving 测试上，低并发延迟加速 1.9 倍，高吞吐档加速 5.3 倍。优化分两类：SWA bounded replay，以及 kernel 相关的融合与并行。",
+        "模型本身已经为 agentic serving 高度优化：causal encoder-decoder（CED）架构，decode 每 token 只激活 16B 参数，prefill 只要 8B。KV cache 也被压到极致：Compressed Sparse Attention 2（CSA2）、FP4 KV cache、层间 KV cache 共享三管齐下，全局 KV  footprint 只有每 token 890 字节。vLLM 的工作是把模型侧的这些优化，和引擎侧的系统优化叠起来。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "SWA bounded replay:拿近似换效率",
+      "paras": [
+        "DeepSeek-V4.1-Flash 维护两种 KV cache。全局 KV 经过压缩、跨层共享、FP4 存储，每 token 约 890 字节。滑动窗口（SWA）KV 不压缩、FP8 存储，覆盖 40 个层中每一层的最近 128 个位置。",
+        "SWA KV 带来两个代价。第一，prefix caching 要在每个可能的命中边界都存它，存储量超过全局 KV 的 10 倍。第二，prefill 要对全部 prompt token 跑 21 到 39 层，尽管 decode 只读它们的最后 128 个位置。",
+        "直接的想法是不存 SWA KV、需要时重算。但精确重算很贵：每层的 128 token 窗口依赖下一层更早的位置，跨 L 层重建约等于重跑 L × 128 个 token。DeepSeek V4.1 的 SWA bounded replay 用近似换效率：只重跑最后 128 个 token，并在重放起点处把 SWA 窗口截断。结果不是 bit-exact，但 DeepSeek 报告质量损失可忽略。vLLM 把它用在两个地方，正好对应上面的两个代价。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h3",
+      "title": "Encoder侧:prefix命中时重建窗口",
+      "paras": [
+        "encoder 侧重放只缓存全局 KV，跳过 SWA KV。prefix 命中长度为 H 时，重跑 [H-128, H) 这段 token 重建 SWA KV，窗口在 s = H-128 处截断。一次窗口 prefill 换掉巨额缓存空间。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h3",
+      "title": "Decoder侧:跳过21到39层的大部分prefill",
+      "paras": [
+        "CED 架构里，第 20 层算出 decoder 的全局 KV，21 到 39 层复用它。vLLM 让第 20 层跑全部 token 产出全局 KV，21 到 39 层只跑每个请求的最后 128 个 token。长 prompt 下，这等于跳过了近半个模型。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "修剪之后层太小,CUDA graphs来凑",
+      "paras": [
+        "修剪之后，21 到 39 层的 GPU 工作量太小：eager 跑的话，kernel launch 开销占主导，GPU 空转。而且它们的输入形状与 0 到 20 层不同，两部分进不去同一张 CUDA graph。vLLM 的 breakable PIECEWISE graph 本来就会在模型中间断开，正好形成天然切分：0 到 20 层按完整 batch 捕获，21 到 39 层按修剪后的 batch 单独捕获。修剪后的 prefill 也能用 CUDA graph，而且 21 到 39 层可以用自己的捕获尺寸，graph 覆盖率更高。",
+        "SWA bounded replay 对 DeepSeek-V4.1 默认开启，开关是 --[no-]swa-bounded-replay。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "精度无损,prefill计算降30到40%",
+      "paras": [
+        "虽然 bounded replay 不是精确的，DeepSeek 报告的质量损失可忽略，vLLM 在 GSM8K、GPQA 等榜单上复测确认：分差在约 1.5 个标准误以内，无实质精度差异。",
+        "性能上，encoder 侧用一次窗口 prefill 换缓存空间，加速主要来自 decoder 侧。单请求 prefill TTFT 测了三种配置：replay 关；replay 开但 decoder 不用 CUDA graphs（21 到 39 层 eager 跑，只有 eager 步被修剪）；replay 开且 decoder 用 CUDA graphs。",
+        "带 CUDA graphs 的 decoder replay 把 prefill 计算时间降低 30 到 40%。CUDA graphs 对短 prompt 最关键：短 prompt 下 launch 开销是瓶颈，不用 graphs 的话，开销吃掉 GPU 收益，replay 反而比 baseline 慢（DEP2 上 1K prompt 最多慢 12%）。长 prompt 的 GPU 工作量足够盖住 launch 开销，eager replay 已拿到大部分收益，CUDA graphs 再添几个点。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "Kernel优化:融合与并行",
+      "paras": [
+        "DeepSeek 随模型在三个仓库开源了新 kernel：DeepSelect（给稀疏 attention 的 top-k 库）、DeepGEMM（稀疏 indexer kernel 与若干 GEMM 融合 kernel）、FlashMLA（NVFP4 KV cache 支持与融合 attention kernel MegaAttention）。vLLM 集成了其中多个，进度在 #57448 跟踪。",
+        "Mega-mHC（#56962）：把 mHC 链融成一个 kernel：post 步、delayed-pre 步、RMSNorm。它替换了原来的 TileLang 融合路径，DeepGEMM 的实现更快；在 NVIDIA GB200 上比 TileLang 版快 1.14 到 1.51 倍。",
+        "Mega-Gate（#56266）：把 MoE router（gate GEMM、expert 打分、bias、top-k 选择）融成一个 kernel。原来是一个 GEMM 加一个独立 top-k kernel，多一次 launch，scores 还要在内存里走个来回。融合后中等 batch 下 kernel 加速 1.18 到 1.31 倍。",
+        "mHC 多流并行（#57603）：V4.1 里 mHC 系数相对子层错开一位，下一个接缝的系数 GEMM 只读 attention 或 FFN 跑之前就已存在的 residual 流。双方在下一次 post/pre 合并前互不需要对方的输出。小 batch 下，vLLM 把下一个 mHC block 的系数计算放到 side CUDA stream 上，与 attention、FFN 并行，藏掉延迟敏感 decode 关键路径上的工作。TP4 低延迟场景下降约 4%。",
+        "稀疏 MQA logits（#56254）：V4.1 后面的 indexer 层从固定的 16K 候选位置里选 top-k。原来的实现算完整上下文的分数，再把非候选 block 掩掉。DeepGEMM 的稀疏 kernel 只算候选，代价不再随上下文增长。GB300 上每层 8K token 快 1.2 倍，512K 快 14 到 23 倍。4×GB300 端到端 decode 提升 3 到 6%，prefill 在 512K 快 1.43 倍、1M 上下文快 2 倍。",
+        "MegaAttention 配 NVFP4 压缩 KV（#56935）：FlashMLA 的 MegaAttention 一个 launch 做完 query RoPE、稀疏 attention、输出逆 RoPE、FP8 cast，直接写进输出投影要读的 buffer。attention 到下一层之间的独立 kernel 和内存来回全省掉。它读新的 NVFP4 压缩 KV 格式，比之前的 FP8 KV cache 小 45%。激进融合消掉操作间的 HBM 写，kernel 效率再提升 1.45 倍。",
+        "低延迟 WO-A 融合 kernel（#58634）：Blackwell 小 decode batch，把逆 RoPE、FP8 量化、WO-A batch GEMM、MXFP8 重量化融成一个 CuTe-DSL kernel，pre-WO-B 链从三个 kernel 压成一个。思路是中间激活留片上，数据搬运与计算流水起来，消掉小 batch 下占主导的 launch 开销和全局内存来回。融合后的 WO-A 路径最高快约 2.1 倍，低并发下 inter-token 延迟降 6 到 7%。",
+        "Engram：V4.1 的 Engram 层按哈希 token n-gram 查两张大 FP8 表的行。每步只读几行，表放哪、查多快比计算更重要。vLLM 异步预取 CPU offload 的 Engram 查询，把 host 内存访问与 decoder 计算重叠，加速小 batch decode（#56512）。Engram head 用统一 TP/DP 分片，同机 DP 副本共享 host 表，不多存一份，查询路径上也没有 DP 通信（#57651）。大表用透明大页（THP）降缺页开销，prefill 查询 kernel 最高快 10 倍（#56926）。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "AgentX实测:低延迟1.9倍,高吞吐5.3倍",
+      "paras": [
+        "以 SemiAnalysis AgentX 为 agentic serving 代表负载（细节见 vLLM 前一篇博客）。上面的优化叠起来，相对 day-0 实现：低延迟结果 1.9 倍，高吞吐结果约 5 倍。",
+        "低延迟档用 TP4 配 FlashInfer attention。小 batch decode 主要吃内存带宽，权重分四卡正合适。也试过 MegaAttention，但它的优势在高吞吐场景（融合施展空间大）；TP4 下收益小得多，实测 FlashInfer 更快。",
+        "高吞吐档切到 DEP2，用 DP attention、expert 分卡。V4.1 所有 head 共享 KV latent，TP 会在卡间复制 KV cache；DP 不复制：每卡只存自己服务的请求的 KV，session affinity 保证跨轮 prefix cache 局部性。MegaAttention 的 NVFP4 进一步把每请求 KV footprint 压到 FP8 的近一半，单卡并发更高。",
+        "值得注意的是 V4.1 内存效率极高，整个测试都不需要 KV cache offload。更高并发加 P/D 分离后，offload 才会开始帮忙。",
+        "SWA bounded replay 加上 prefill 侧 kernel 优化，把 TTFT 也大幅改善。100K 吞吐附近，三项优化叠加让 TTFT 降近 70%：bounded replay 让模型上半只处理最后 128 token，prefill 计算近乎减半；CUDA graphs 让小而修剪的 replay 跑在 GPU 上而不是卡在 CPU launch；kernel 改进加速模型计算本身。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig01.png",
+            "caption": "图1:AgentX 测试，GB300 NVL72。相对 9 月 11 日的 day-0 实现：155 tok/s/user 下吞吐 27k 到 144k tok/s/chip，加速 5.3 倍；最高 P90 interactivity 从 311 到 599 tok/s/user，加速 1.9 倍。"
+          }
+        ],
+        "4": [
+          {
+            "src": "fig02.png",
+            "caption": "图2:TTFT 与吞吐权衡，GB300 NVL72。固定 94k tok/s/chip 吞吐下，P90 TTFT 从 1.86 秒降到 0.32 秒，降低 5.8 倍。"
+          }
+        ]
+      }
+    }
+  ],
+  "conclusion": [
+    "三周 5 倍的核心是两层叠加：模型侧的 SWA bounded replay 把 SWA KV 的存储与 prefill 代价换成一次 128 token 重放，decoder 侧 21 到 39 层只跑最后 128 token；引擎侧用 breakable PIECEWISE 把修剪层装进 CUDA graphs，再用 Mega 系列融合 kernel、mHC 多流、NVFP4 把计算压干。GSM8K/GPQA 精度无损是前提。",
+    "对做推理部署的人，两个配置结论可以直接拿走：低延迟用 TP4 配 FlashInfer，高吞吐用 DEP2 配 DP attention 避开 KV 复制；V4.1 的内存效率已经高到整个 AgentX 都不需要 KV offload。**近似但可控的 replay，加上激进的融合，是这三周 5 倍的完整配方。**"
+  ],
+  "reference_url": "https://vllm.ai/blog/2026-10-07-deepseek-v41-flash"
+}
