@@ -1,0 +1,82 @@
+S# 单进程多组件，GPU 资源不够分
+T# GPU 应用越来越多由同一进程内的多个独立组件同时跑：延迟敏感算子配吞吐型后台 kernel，数据预处理配模型推理，或者一条处理流水线的多个阶段共享一张 GPU。
+T# 组件之间怎么分资源，一直不好控制：互相干扰不可预测，现有工具的划分能力有限。Green contexts 让应用显式选定 GPU 执行资源的一个子集，把工作直接打到这些资源上。传统 CUDA context 不是为这种用法设计的：笨重，有硬件 context 切换开销，还带着早年假设——那时 GPU 小，应用通常是一个独占式大负载。
+T# Green contexts 在 CUDA 12.4 起可用于 Driver API，CUDA 13.1 起可用于 Runtime API。应用在自己的进程内显式定义工作跑在哪里、执行资源怎么切。
+S# Green contexts 的工作方式
+T# 第一个主要用途是 SM 划分。给 green context 指定一个 SM 子集，经它提交的工作就跑在这些 SM 上。多个负载可以并发跑在同一张 GPU 上，不抢同一批计算单元。
+T# 除了 SM 划分，green contexts 还能配给 workqueue 资源。传统模型下，独立的 stream 有序 workload 可能映射到同一底层 workqueue，执行资源明明够，却被意外串行化。显式配给 workqueue 后，应用能表达预期的并发，减少假依赖。
+T# Green contexts 创建销毁轻量，建/销不隐式同步无关的 GPU 工作。编程模型也更显式：应用把工作打到选定的 green context，而不是只依赖隐式的 current device 状态。
+S# 显式编程模型
+T# 历史上 CUDA Runtime 应用的典型流程是 cudaSetDevice() 选卡、建 stream、向 stream 提交工作。stream 的执行目标从建流时调用线程的 current device/context 推断出来。
+T# Green contexts 让目标选择显式化：应用为选定的资源建 green context，再从它建 stream；提交到这些 stream 的工作就归属该 green context 的资源。
+T# Runtime API 里 green contexts 用 cudaExecutionContext_t 类型表示（CUDA context 的 Runtime 抽象）。关键点是 cudaGreenCtxCreate() 返回的句柄可以直接传给 cudaExecutionCtxStreamCreate() 这类 API，不再依赖隐式的线程局部 device/context 状态。
+T# 对 stream，这个变化直接体现在建流方式上。下面代码为简洁省略了完整错误检查，生产代码要检查所有 CUDA Runtime API 返回值，kernel launch 后用 cudaGetLastError()/cudaPeekAtLastError()，cudaStreamSynchronize() 等同步调用也要检查异步执行错误。
+T# 传统 Runtime 流程：stream 目标来自 current device 状态。
+__CODE__cudaSetDevice(device);
+cudaStream_t s;
+cudaStreamCreate(&s);
+kernel<<<grid, block, 0, s>>>();
+T# Green-context 流程：stream 目标显式选定。
+__CODE__cudaExecutionContext_t greenCtx;
+cudaGreenCtxCreate(&greenCtx, desc, device, 0);
+cudaStream_t s;
+cudaExecutionCtxStreamCreate(&s, greenCtx, 0, 0);
+kernel<<<grid, block, 0, s>>>();
+T# 代码改动很小，心智模型更清楚：不再依赖隐藏的线程局部 device 状态，而是显式选 green context、为它建 stream。其余代码继续用同一套基于 stream 的 CUDA 编程模型。
+T# 想打满整卡的应用可以继续用传统 Runtime 模型；对那些接受显式 context 句柄的 API，用 cudaDeviceGetExecutionCtx() 拿 device 级 context。
+S# 示例：关键 kernel 与吞吐 kernel 同卡
+T# GPU 负载常需要一个小而延迟敏感的 kernel 和一个大的吞吐型 worker 同卡跑。典型例子：分布式训练/推理里的通信与 GEMM overlap，或 NVIDIA Holoscan 这类 AI 传感器处理平台里要求尽快启动的延迟敏感算子。
+T# 这类关键工作的标准工具之一是 CUDA stream priority。但光设优先级不够：当 bulk kernel 占满全部 SM，高优先级 kernel 到了也得等。调度器只能把关键 kernel 的 thread block 交给下一个空出来的 SM；stream 优先级抢占不了已经在 SM 上跑的 block，只能等部分 block 排空。
+T# 做个示例看结果。先写 setup 代码，这是新增的部分：第一步，查 device 上全部 SM：cudaDeviceGetDevResource(dev, &all_sm, cudaDevResourceTypeSm)；第二步，按架构的 coscheduled 对齐切出一个关键组：crit_params.smCount = all_sm.sm.smCoscheduledAlignment，再 cudaDevSmResourceSplit(&critical_res, 1, &all_sm, &remaining_res, 0, &crit_params)；第三步，给每个分区配独立的 workqueue-config 资源（队列压力也隔离），再生成 descriptor：wq.type = cudaDevResourceTypeWorkqueueConfig，wq.wqConfig.sharingScope = cudaDevWorkqueueConfigScopeGreenCtxBalanced，wq.wqConfig.wqConcurrencyLimit = 2，然后 crit_pack = {critical_res, wq} 生成 crit_desc，bulk_pack = {remaining_res, wq} 生成 bulk_desc；第四步，各建 green context 再建 stream：cudaGreenCtxCreate(&crit_ctx, crit_desc, dev, 0)，cudaExecutionCtxStreamCreate(&crit_stream, crit_ctx, cudaStreamNonBlocking, prio_high)，bulk 同理用 prio_low。
+__CODE__// 1. Query all SMs on the device.
+cudaDevResource all_sm {};
+cudaDeviceGetDevResource(dev, &all_sm, cudaDevResourceTypeSm);
+// 2. Carve out one critical group (arch's coscheduled alignment).
+cudaDevSmResourceGroupParams crit_params {};
+crit_params.smCount = all_sm.sm.smCoscheduledAlignment;
+cudaDevResource critical_res{}, remaining_res{};
+cudaDevSmResourceSplit(&critical_res, 1, &all_sm, &remaining_res, 0, &crit_params);
+// 3. Pack each partition with its own workqueue-config resource so queue
+//    pressure is isolated too, then generate the descriptor.
+cudaDevResource wq {};
+wq.type = cudaDevResourceTypeWorkqueueConfig;
+wq.wqConfig.device = dev;
+wq.wqConfig.sharingScope = cudaDevWorkqueueConfigScopeGreenCtxBalanced;
+wq.wqConfig.wqConcurrencyLimit = 2;
+cudaDevResource crit_pack[2] = { critical_res, wq };
+cudaDevResourceDesc_t crit_desc{};
+cudaDevResourceGenerateDesc(&crit_desc, crit_pack, 2);
+cudaDevResource bulk_pack[2] = { remaining_res, wq };
+cudaDevResourceDesc_t bulk_desc{};
+cudaDevResourceGenerateDesc(&bulk_desc, bulk_pack, 2);
+// 4. Create each green context, then a stream on it.
+cudaExecutionContext_t crit_ctx{};
+cudaGreenCtxCreate(&crit_ctx, crit_desc, dev, 0);
+cudaStream_t crit_stream{};
+cudaExecutionCtxStreamCreate(&crit_stream, crit_ctx, cudaStreamNonBlocking, prio_high);
+cudaExecutionContext_t bulk_ctx{};
+cudaGreenCtxCreate(&bulk_ctx, bulk_desc, dev, 0);
+cudaStream_t bulk_stream{};
+cudaExecutionCtxStreamCreate(&bulk_stream, bulk_ctx, cudaStreamNonBlocking, prio_low); // define prio_low
+T# 其余代码都是熟面孔：先打满 bulk 分区，20 次 bulk kernel launch；再在关键分区上 launch 关键 kernel，前后打 event 计时，最后 cudaStreamSynchronize(crit_stream) 等结束算毫秒数。
+__CODE__// Saturate the bulk partition.
+for (int i = 0; i < BULK_LAUNCHES; ++i) {
+    bulk_kernel<<<bulk_grid, bulk_block, 0, bulk_stream>>>(
+        d_bulk, N_BULK, BULK_ITERS);
+}
+// Launch the critical kernel on its own partition.
+cudaEventRecord(t_start, crit_stream);
+critical_kernel<<<crit_grid, crit_block, 0, crit_stream>>>(d_crit, N_CRIT);
+cudaEventRecord(t_stop, crit_stream);
+cudaStreamSynchronize(crit_stream);
+float crit_ms = 0.0f;
+cudaEventElapsedTime(&crit_ms, t_start, t_stop);
+T# stream 自带分区，kernel 只能看到允许跑的 SM。测三种模式，critical + bulk 负载相同：模式 A，green-ctx 分区、关键 stream 高优先级；模式 B，默认 context、关键 stream 高优先级（不分区）；模式 C，默认 context、双 stream 同优先级（无优先级、无分区）。关键 kernel 是个小整数负载，bulk kernel 是 20 次背靠背 launch 的 4M 线程 sqrtf 循环，目标是打满 device。测 bulk 运行时关键 kernel 的 wall-clock 延迟。
+T# 在 148 个 SM 的 Blackwell GPU 上：green-ctx（关键 8 SM / bulk 140 SM）0.007 ms；默认 context 高优先级关键 kernel 0.140 ms；默认 context 同优先级 3.727 ms。
+T# 光 stream 优先级就是巨大胜利：比同优先级抢 SM 快约 27 倍。但优先级有天花板：bulk block 排空之前，高优先级 kernel 还要再等约 20 倍的时间，哪怕调度器已经优先它。Green contexts 直接跳过这段等待，因为关键 SM 专属于这个负载。代价是 bulk kernel 能用的 SM 少了。
+T# 同一套骨架也能用来拿并发而不是延迟，比如让通信 kernel 和 GEMM kernel overlap、齐头并进。高级用法常把 green context 分区和 stream 优先级一起用，打到想要的性能目标。
+S# 什么时候用 green contexts
+T# 五种情况最对味：同一张 GPU 上并发跑多个独立负载；要可预测的性能而不是 best-effort 的 stream 调度；想显式控制 GPU 执行资源怎么切；workqueue 失控导致性能退化；应用正往单进程内 pipeline 式、多组件执行演进。
+S# 上手
+T# 四步：应用用 CUDA 13.1 或更新构建；查 device 资源，为想要的分区建 green context；为该 green context 建 stream，继续用同一套基于 stream 的 CUDA 编程模型提交工作；对接受显式 context 句柄、要打满整卡的 API，用 cudaDeviceGetExecutionCtx()。
+T# Green contexts 是 opt-in、增量的：现有应用可以不改、继续打满整卡，只在需要更细控制的地方逐步采用。
