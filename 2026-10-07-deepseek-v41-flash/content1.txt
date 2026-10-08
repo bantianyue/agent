@@ -7,8 +7,10 @@ T# SWA KV 带来两个代价。第一，prefix caching 要在每个可能的命�
 T# 直接的想法是不存 SWA KV、需要时重算。但精确重算很贵：每层的 128 token 窗口依赖下一层更早的位置，跨 L 层重建约等于重跑 L × 128 个 token。DeepSeek V4.1 的 SWA bounded replay 用近似换效率：只重跑最后 128 个 token，并在重放起点处把 SWA 窗口截断。结果不是 bit-exact，但 DeepSeek 报告质量损失可忽略。vLLM 把它用在两个地方，正好对应上面的两个代价。
 H# Encoder 侧：prefix 命中时重建窗口
 T# encoder 侧重放只缓存全局 KV，跳过 SWA KV。prefix 命中长度为 H 时，重跑 [H-128, H) 这段 token 重建 SWA KV，窗口在 s = H-128 处截断。一次窗口 prefill 换掉巨额缓存空间。
+F# fig_swa-replay.gif|图3:原文交互示意（动图，encoder 侧）。prefix 命中后重建 SWA KV：从缓存的全局 KV 出发，逐层重算最近 128 个 token 的窗口，共 5 步。
 H# Decoder 侧：跳过 21 到 39 层的大部分 prefill
 T# CED 架构里，第 20 层算出 decoder 的全局 KV，21 到 39 层复用它。vLLM 让第 20 层跑全部 token 产出全局 KV，21 到 39 层只跑每个请求的最后 128 个 token。长 prompt 下，这等于跳过了近半个模型。
+F# fig_swa-decoder.gif|图4:原文交互示意（动图，decoder 侧）。第 20 层产出全局 KV 后，21 到 39 层只重跑最后 128 个 token，其余跳过；修剪后的层按自己的 batch 形状进 CUDA graph，共 4 步。
 S# 修剪之后层太小，CUDA graphs 来凑
 T# 修剪之后，21 到 39 层的 GPU 工作量太小：eager 跑的话，kernel launch 开销占主导，GPU 空转。而且它们的输入形状与 0 到 20 层不同，两部分进不去同一张 CUDA graph。vLLM 的 breakable PIECEWISE graph 本来就会在模型中间断开，正好形成天然切分：0 到 20 层按完整 batch 捕获，21 到 39 层按修剪后的 batch 单独捕获。修剪后的 prefill 也能用 CUDA graph，而且 21 到 39 层可以用自己的捕获尺寸，graph 覆盖率更高。
 T# SWA bounded replay 对 DeepSeek-V4.1 默认开启，开关是 --[no-]swa-bounded-replay。
@@ -25,6 +27,7 @@ T# 稀疏 MQA logits：V4.1 后面的 indexer 层从固定的 16K 候选位置�
 T# MegaAttention 配 NVFP4 压缩 KV：FlashMLA 的 MegaAttention 一个 launch 做完 query RoPE、稀疏 attention、输出逆 RoPE、FP8 cast，直接写进输出投影要读的 buffer。attention 到下一层之间的独立 kernel 和内存来回全省掉。它读新的 NVFP4 压缩 KV 格式，比之前的 FP8 KV cache 小 45%。激进融合消掉操作间的 HBM 写，kernel 效率再提升 1.45 倍。
 T# 低延迟 WO-A 融合 kernel：Blackwell 小 decode batch，把逆 RoPE、FP8 量化、WO-A batch GEMM、MXFP8 重量化融成一个 CuTe-DSL kernel，pre-WO-B 链从三个 kernel 压成一个。思路是中间激活留片上，数据搬运与计算流水起来，消掉小 batch 下占主导的 launch 开销和全局内存来回。融合后的 WO-A 路径最高快约 2.1 倍，低并发下 inter-token 延迟降 6 到 7%。
 T# Engram：V4.1 的 Engram 层按哈希 token n-gram 查两张大 FP8 表的行。每步只读几行，表放哪、查多快比计算更重要。vLLM 异步预取 CPU offload 的 Engram 查询，把 host 内存访问与 decoder 计算重叠，加速小 batch decode。Engram head 用统一 TP/DP 分片，同机 DP 副本共享 host 表，不多存一份，查询路径上也没有 DP 通信。大表用透明大页（THP）降缺页开销，prefill 查询 kernel 最高快 10 倍。
+F# fig_kernel-fusion.gif|图5:原文交互示意（动图）。V4.1 decode 路径上一个 layer 的 kernel 逐个融合为 Mega-mHC、MegaAttention、Mega-Gate，主流 kernel 启动从 24 次降到 16 次，共 11 步。
 S# AgentX 实测：低延迟 1.9 倍，高吞吐 5.3 倍
 T# 以 SemiAnalysis AgentX 为 agentic serving 代表负载（细节见 vLLM 前一篇博客）。上面的优化叠起来，相对 day-0 实现：低延迟结果 1.9 倍，高吞吐结果约 5 倍。
 F# fig01.png|图1:AgentX 测试，GB300 NVL72。相对 9 月 11 日的 day-0 实现：155 tok/s/user 下吞吐 27k 到 144k tok/s/chip，加速 5.3 倍；最高 P90 interactivity 从 311 到 599 tok/s/user，加速 1.9 倍。
