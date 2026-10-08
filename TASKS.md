@@ -57,6 +57,7 @@
 | 52 | 2026-10-08 | https://www.abhik.ai/articles/gpu-xid31-mmu-faults | gpu-xid31-mmu-faults | gpu-xid31-mmu-faults | TBD | TBD | 📥 进行中 |
 | 53 | 2026-10-08 | https://omin-kwon.github.io/project/SketchSSM/ | SketchSSM | SketchSSM | TBD | TBD | 📥 进行中 |
 | 54 | 2026-10-08 | https://arxiv.org/html/2609.33074v1 | kernelzero-coevolving-proposer-coder | kernelzero-coevolving-proposer-coder | TBD | TBD | 📥 进行中 |
+| 55 | 2026-10-08 | https://arxiv.org/html/2610.09424v1 | comoe-moe-inference-commodity-gpus | comoe-moe-inference-commodity-gpus | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -390,3 +391,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-08 20:12 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #55 - comoe-moe-inference-commodity-gpus
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-08 20:17 | 📥 开始 | 收到 URL，开始提取内容 |
