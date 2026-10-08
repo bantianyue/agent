@@ -1,6 +1,6 @@
 S# 三周时间，Agentic 吞吐做到 5 倍
 T# DeepSeek-V4.1-Flash 发布后的三周里，Inferact 与 vLLM 社区把它优化了一遍：在 SemiAnalysis AgentX agentic serving 测试上，低并发延迟加速 1.9 倍，高吞吐档加速 5.3 倍。优化分两类：SWA bounded replay，以及 kernel 相关的融合与并行。
-T# 模型本身已经为 agentic serving 高度优化：causal encoder-decoder（CED）架构，decode 每 token 只激活 16B 参数，prefill 只要 8B。KV cache 也被压到极致：Compressed Sparse Attention 2（CSA2）、FP4 KV cache、层间 KV cache 共享三管齐下，全局 KV  footprint 只有每 token 890 字节。vLLM 的工作是把模型侧的这些优化，和引擎侧的系统优化叠起来。
+T# 模型本身已经为 agentic serving 高度优化：causal encoder-decoder（CED）架构，decode 每 token 只激活 16B 参数，prefill 只要 8B。KV cache 也被压到极致：Compressed Sparse Attention 2（CSA2）、FP4 KV cache、层间 KV cache 共享三管齐下，全局 KV footprint 只有每 token 890 字节。vLLM 的工作是把模型侧的这些优化，和引擎侧的系统优化叠起来。
 S# SWA bounded replay：拿近似换效率
 T# DeepSeek-V4.1-Flash 维护两种 KV cache。全局 KV 经过压缩、跨层共享、FP4 存储，每 token 约 890 字节。滑动窗口（SWA）KV 不压缩、FP8 存储，覆盖 40 个层中每一层的最近 128 个位置。
 T# SWA KV 带来两个代价。第一，prefix caching 要在每个可能的命中边界都存它，存储量超过全局 KV 的 10 倍。第二，prefill 要对全部 prompt token 跑 21 到 39 层，尽管 decode 只读它们的最后 128 个位置。
@@ -17,14 +17,14 @@ T# 虽然 bounded replay 不是精确的，DeepSeek 报告的质量损失可忽�
 T# 性能上，encoder 侧用一次窗口 prefill 换缓存空间，加速主要来自 decoder 侧。单请求 prefill TTFT 测了三种配置：replay 关；replay 开但 decoder 不用 CUDA graphs（21 到 39 层 eager 跑，只有 eager 步被修剪）；replay 开且 decoder 用 CUDA graphs。
 T# 带 CUDA graphs 的 decoder replay 把 prefill 计算时间降低 30 到 40%。CUDA graphs 对短 prompt 最关键：短 prompt 下 launch 开销是瓶颈，不用 graphs 的话，开销吃掉 GPU 收益，replay 反而比 baseline 慢（DEP2 上 1K prompt 最多慢 12%）。长 prompt 的 GPU 工作量足够盖住 launch 开销，eager replay 已拿到大部分收益，CUDA graphs 再添几个点。
 S# Kernel 优化：融合与并行
-T# DeepSeek 随模型在三个仓库开源了新 kernel：DeepSelect（给稀疏 attention 的 top-k 库）、DeepGEMM（稀疏 indexer kernel 与若干 GEMM 融合 kernel）、FlashMLA（NVFP4 KV cache 支持与融合 attention kernel MegaAttention）。vLLM 集成了其中多个，进度在 #57448 跟踪。
-T# Mega-mHC（#56962）：把 mHC 链融成一个 kernel：post 步、delayed-pre 步、RMSNorm。它替换了原来的 TileLang 融合路径，DeepGEMM 的实现更快；在 NVIDIA GB200 上比 TileLang 版快 1.14 到 1.51 倍。
-T# Mega-Gate（#56266）：把 MoE router（gate GEMM、expert 打分、bias、top-k 选择）融成一个 kernel。原来是一个 GEMM 加一个独立 top-k kernel，多一次 launch，scores 还要在内存里走个来回。融合后中等 batch 下 kernel 加速 1.18 到 1.31 倍。
-T# mHC 多流并行（#57603）：V4.1 里 mHC 系数相对子层错开一位，下一个接缝的系数 GEMM 只读 attention 或 FFN 跑之前就已存在的 residual 流。双方在下一次 post/pre 合并前互不需要对方的输出。小 batch 下，vLLM 把下一个 mHC block 的系数计算放到 side CUDA stream 上，与 attention、FFN 并行，藏掉延迟敏感 decode 关键路径上的工作。TP4 低延迟场景下降约 4%。
-T# 稀疏 MQA logits（#56254）：V4.1 后面的 indexer 层从固定的 16K 候选位置里选 top-k。原来的实现算完整上下文的分数，再把非候选 block 掩掉。DeepGEMM 的稀疏 kernel 只算候选，代价不再随上下文增长。GB300 上每层 8K token 快 1.2 倍，512K 快 14 到 23 倍。4×GB300 端到端 decode 提升 3 到 6%，prefill 在 512K 快 1.43 倍、1M 上下文快 2 倍。
-T# MegaAttention 配 NVFP4 压缩 KV（#56935）：FlashMLA 的 MegaAttention 一个 launch 做完 query RoPE、稀疏 attention、输出逆 RoPE、FP8 cast，直接写进输出投影要读的 buffer。attention 到下一层之间的独立 kernel 和内存来回全省掉。它读新的 NVFP4 压缩 KV 格式，比之前的 FP8 KV cache 小 45%。激进融合消掉操作间的 HBM 写，kernel 效率再提升 1.45 倍。
-T# 低延迟 WO-A 融合 kernel（#58634）：Blackwell 小 decode batch，把逆 RoPE、FP8 量化、WO-A batch GEMM、MXFP8 重量化融成一个 CuTe-DSL kernel，pre-WO-B 链从三个 kernel 压成一个。思路是中间激活留片上，数据搬运与计算流水起来，消掉小 batch 下占主导的 launch 开销和全局内存来回。融合后的 WO-A 路径最高快约 2.1 倍，低并发下 inter-token 延迟降 6 到 7%。
-T# Engram：V4.1 的 Engram 层按哈希 token n-gram 查两张大 FP8 表的行。每步只读几行，表放哪、查多快比计算更重要。vLLM 异步预取 CPU offload 的 Engram 查询，把 host 内存访问与 decoder 计算重叠，加速小 batch decode（#56512）。Engram head 用统一 TP/DP 分片，同机 DP 副本共享 host 表，不多存一份，查询路径上也没有 DP 通信（#57651）。大表用透明大页（THP）降缺页开销，prefill 查询 kernel 最高快 10 倍（#56926）。
+T# DeepSeek 随模型在三个仓库开源了新 kernel：DeepSelect（给稀疏 attention 的 top-k 库）、DeepGEMM（稀疏 indexer kernel 与若干 GEMM 融合 kernel）、FlashMLA（NVFP4 KV cache 支持与融合 attention kernel MegaAttention）。vLLM 集成了其中多个。
+T# Mega-mHC：把 mHC 链融成一个 kernel：post 步、delayed-pre 步、RMSNorm。它替换了原来的 TileLang 融合路径，DeepGEMM 的实现更快；在 NVIDIA GB200 上比 TileLang 版快 1.14 到 1.51 倍。
+T# Mega-Gate：把 MoE router（gate GEMM、expert 打分、bias、top-k 选择）融成一个 kernel。原来是一个 GEMM 加一个独立 top-k kernel，多一次 launch，scores 还要在内存里走个来回。融合后中等 batch 下 kernel 加速 1.18 到 1.31 倍。
+T# mHC 多流并行：V4.1 里 mHC 系数相对子层错开一位，下一个接缝的系数 GEMM 只读 attention 或 FFN 跑之前就已存在的 residual 流。双方在下一次 post/pre 合并前互不需要对方的输出。小 batch 下，vLLM 把下一个 mHC block 的系数计算放到 side CUDA stream 上，与 attention、FFN 并行，藏掉延迟敏感 decode 关键路径上的工作。TP4 低延迟场景下降约 4%。
+T# 稀疏 MQA logits：V4.1 后面的 indexer 层从固定的 16K 候选位置里选 top-k。原来的实现算完整上下文的分数，再把非候选 block 掩掉。DeepGEMM 的稀疏 kernel 只算候选，代价不再随上下文增长。GB300 上每层 8K token 快 1.2 倍，512K 快 14 到 23 倍。4×GB300 端到端 decode 提升 3 到 6%，prefill 在 512K 快 1.43 倍、1M 上下文快 2 倍。
+T# MegaAttention 配 NVFP4 压缩 KV：FlashMLA 的 MegaAttention 一个 launch 做完 query RoPE、稀疏 attention、输出逆 RoPE、FP8 cast，直接写进输出投影要读的 buffer。attention 到下一层之间的独立 kernel 和内存来回全省掉。它读新的 NVFP4 压缩 KV 格式，比之前的 FP8 KV cache 小 45%。激进融合消掉操作间的 HBM 写，kernel 效率再提升 1.45 倍。
+T# 低延迟 WO-A 融合 kernel：Blackwell 小 decode batch，把逆 RoPE、FP8 量化、WO-A batch GEMM、MXFP8 重量化融成一个 CuTe-DSL kernel，pre-WO-B 链从三个 kernel 压成一个。思路是中间激活留片上，数据搬运与计算流水起来，消掉小 batch 下占主导的 launch 开销和全局内存来回。融合后的 WO-A 路径最高快约 2.1 倍，低并发下 inter-token 延迟降 6 到 7%。
+T# Engram：V4.1 的 Engram 层按哈希 token n-gram 查两张大 FP8 表的行。每步只读几行，表放哪、查多快比计算更重要。vLLM 异步预取 CPU offload 的 Engram 查询，把 host 内存访问与 decoder 计算重叠，加速小 batch decode。Engram head 用统一 TP/DP 分片，同机 DP 副本共享 host 表，不多存一份，查询路径上也没有 DP 通信。大表用透明大页（THP）降缺页开销，prefill 查询 kernel 最高快 10 倍。
 S# AgentX 实测：低延迟 1.9 倍，高吞吐 5.3 倍
 T# 以 SemiAnalysis AgentX 为 agentic serving 代表负载（细节见 vLLM 前一篇博客）。上面的优化叠起来，相对 day-0 实现：低延迟结果 1.9 倍，高吞吐结果约 5 倍。
 F# fig01.png|图1:AgentX 测试，GB300 NVL72。相对 9 月 11 日的 day-0 实现：155 tok/s/user 下吞吐 27k 到 144k tok/s/chip，加速 5.3 倍；最高 P90 interactivity 从 311 到 599 tok/s/user，加速 1.9 倍。
