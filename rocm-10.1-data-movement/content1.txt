@@ -1,0 +1,35 @@
+S# 瓶颈从算力转向数据搬运
+T# 限制训练运行的是 GPU 算多快，还是数据送多快？对越来越多的负载，答案是后者。ROCm 10.1 从数据通路切入，背后还带着编译器、库与工具链的整套工作。
+T# 加速器原始吞吐仍是限制因素之一，但随着 AI 模型与 HPC 数据集扩大，新瓶颈浮现：怎么把数据喂给加速器。Checkpoint、KV cache、模型参数超过了离 GPU 最近的高速内存，存储到设备的路径成了最大瓶颈。ROCm 10.1 用 AMD Infinity Storage 的实质改进与 HIP runtime 来应对：hipFile 新增能力，让数据在存储与 GPU 之间直接搬运；HIP runtime 加了 NUMA 感知的主机内存分配，把内存放到用它的算力旁边。
+T# 数据通路之外，10.1 还推进了开发者工作流：AMD Skills 目录配合 ROCm CLI，给编码 agent 标准化集成，用来搭本地 AI、诊断 ROCm 问题、在 AMD 硬件上优化 LLM 推理。
+S# 下一代存储与 I/O：AMD Infinity Storage
+T# 模型参数、checkpoint、KV cache 增长，存储越来越成为饿死 GPU 而不是喂饱 GPU 的瓶颈。AMD Infinity Storage（AIS）在 ROCm 7.14 首次亮相，是个把数据在存储与内存之间直接搬运、不经 CPU 内存绕行的库。
+F# fig01.png|图1：传统经主机内存中转的存储路径，与 hipFILE 经 PCIe 直连 GPU 的新路径对比。
+T# 10.1 在这个基础上加了三项 hipFILE 改进，减少不必要的数据搬运、提高加速器利用率：一是异步快路径后端，读写请求直接跑在 HIP stream 上，跳过数据传统上经过的主机内存 staging，checkpoint 引擎与 KV cache offload 系统的延迟更低、持续吞吐更高；二是批量 I/O API，一次提交多个文件请求、打散到内部工作线程池，大训练数据集与数据密集型推理管线的存储设备利用率更高；三是多层 I/O 统计，hipFILE 遥测逐步丰富并流入 ROCm profiling 工具，更容易判断负载到底卡在算力、内存还是数据交付上。
+S# HIP 的 NUMA 感知主机内存分配
+T# CPU 与 GPU 加多了，如果数据还得跨 socket 跑，性能不会自动变好。ROCm 10.1 扩展 HIP 虚拟内存管理，让应用把主机内存分配在指定的 CPU NUMA 节点上，而不是回落到通用内存池。RCCL 这类库可以用它建 NUMA 本地、零拷贝的通信管线，让数据搬运贴着用它的算力走，减少 socket 间的无效流量。
+S# ROCm CLI 与 AMD Skills
+T# 10.1 还带来 ROCm CLI v1.0.0：单二进制工具，负责在 AMD GPU 上安装、配置、跑本地 AI 负载。AMD 给 ROCm 10.0 与 10.1 做了首选支持，包括为 vLLM 自动检测兼容的 flash-attn 与 amd-aiter wheel；rocm install 原生处理 ROCm 10 新的 next 包布局，有开关支持全非交互安装，方便脚本与 CI 环境；全屏 TUI 仪表盘在模型 serving 与聊天的同时看 GPU 实时遥测。ROCm CLI 支持 Linux、Windows 与 WSL2。
+T# CLI 是开发者直接用的工具，AMD Skills 则把同样的 ROCm 经验带给 AI 编码 agent。每个 skill 把验证过的配置打包成标准集成，Claude Code、Codex 这类 agent 可以一致地应用。这次突出的两个新 skill：quark-install，装或校验 AMD Quark，配与加速器匹配的 PyTorch 构建（PyPI、wheel 索引、本地 wheel 或源码），再检查 import、kernel 与 quark-cli；quark-torch-llm-ptq，对 PyTorch / Hugging Face LLM 做训练后量化，检查模型、帮选方案（FP8、INT4 等），产出验证过的量化模型。每个 skill 由对应产品的团队拥有并版本化，目录还会继续长。
+S# 开发者工具
+T# ROCprofiler-SDK 引入 kernel replay（beta）：一次应用运行收齐全套 counter，不用每个 counter 组重跑一次。GPU 每次 kernel dispatch 能收的硬件性能 counter 有限，kernel replay 原地重执行每个 dispatch，pass 之间恢复被跟踪的设备内存。SDK 还让 PyTorch Kineto、Triton Proton 这类 AI 框架 profiler 在运行中任意时刻启停。新增的 PC sampling agent skill 指导 AI 编程助手对应用跑 rocprofv3 PC 采样，报告热点与 stall 原因。
+T# ROCm Compute Profiler 的独立 roofline 报告变成可交互 HTML 页：可以隔离单个 kernel 或 roof，算术强度轴在 cache 层级间切换；PC sampling 分析现在按 kernel 出结果，下钻到单条指令的采样与 stall 计数；推理负载新增了用 Compute Profiler 给 vLLM 做 profiling 的指南。
+T# ROCm Systems Profiler 开始支持 Linux 上的 Gorgon Point 1、2、3 APU（gfx1150、gfx1152、gfx1153），这类集成 GPU 上的负载可以同时 trace CPU 与 GPU 活动。ROCm Optiq 把统一可视化与分析能力扩展到 rocprofv3，开发者可以在 Optiq 的统一界面里看最新的 profiling 数据，旁边就是 Systems Profiler trace 与 Compute Profiler 分析。
+S# LLVM 24 与更快的重构建
+T# ROCm 10.1 的编译器开发转到 LLVM 24，吃到 LLVM 社区的一批新特性与优化，大项目重构建更快。amdclang++ 从 LLVM 23 升到 24，C++ 语言支持与社区优化红利同步跟进。
+T# 10.1 还给增量构建提速：缓存 LTO 拆分 HIP 设备代码时产生的分区，小改动可以复用没变的分区，不用从头重建。
+T# 升级提示：从 ROCm 10.0 升级这是大版本编译器变更，clang_major 宏现在报 24，检查按特定编译器版本写的代码或构建脚本，以及直接链 libLLVM 的工具。
+S# AI 与数学库进展
+T# Composable Kernel：AMD 的优化 AI kernel 库，加速 Radeon GPU 上的 attention，给 kernel dispatcher 带来更多量化矩阵乘类型。
+T# MIGraphX：AMD 的 AI 推理图编译器，后端从 rocMLIR 换成 rocMLIRTriton，推理性能提升明显，模型编译经常更快，还能吃到 Triton 编译器后续的持续改进。
+T# rocSPARSE：AMD 的稀疏线性代数库，三角求解可以直接跑在 ELLPACK（ELL）稀疏格式存储的矩阵上，不用先转格式。
+S# ROCm SMI 切换到 AMD SMI
+T# ROCm SMI（rocm-smi）的弃用期结束，AMD SMI（amd-smi）接任。AMD SMI 在 Linux 与 Windows、裸机与虚拟化环境给 AMD GPU、CPU、APU 统一的监控管理体验，建议迁移。新工具提供现代子命令式 CLI、原生 C 库（amd_smi_lib）、Python/Rust/Go 的首选绑定。
+T# AMD SMI 还把可见性伸进容器环境：识别跑在 containerd、CRI-O、Podman、LXC、LXD 容器里的 GPU 进程，包括 Kubernetes pod；上报 Docker 与 Kubernetes 工具用的完整容器 ID，运维可以直接把 GPU 进程对上容器，做跨编排、多租户的资源归属。
+S# WSL2 探索
+T# WSL2 在 ROCm 10.1 进入技术预览：标准 Linux 包直接装进 guest，不用手动打补丁、不编 guest 内核。ROCm 经 GPU 半虚拟化与 Windows 宿主驱动通信，PyTorch、HIP、AI 负载在 WSL2 里直接用 GPU。装好 Windows 驱动，再像往常一样在发行版里装 ROCm。
+S# Ubuntu 26.04 上的 GPU 虚拟化
+T# ROCm 把 KVM SR-IOV 支持扩展到 Ubuntu 26.04 LTS，宿主与 guest 都是，团队可以把整个虚拟化栈标准化到最新的 LTS。搭配宿主上 9.3.0.K 版 AMD GPU 虚拟化驱动（GIM），最新的 Ubuntu LTS 进全支持的 SR-IOV 部署，驱动版本不掉队。
+S# hipThreads：线程化代码的增量 GPU 加速
+T# 写高性能 GPU 软件传统上要用底层执行与同步原语表达并发。ROCm 10.1 在 ROCm Core SDK 的 ROCm Threading 库里引入 hipThreads，把标准 C++ 线程概念带进异构设备编程。hipThreads 给已有 CPU 线程化代码一条在 AMD GPU 上加速的路，不用重写整个 HIP。
+T# 库把这些 CPU 概念映射到 Linux 与 Windows 的 GPU 执行上，开发者可以渐进迁移。它瞄准的是有并行 CPU 负载的应用：完整 GPU 编程模型迁移的投入产出比不划算的场景。
