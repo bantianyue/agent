@@ -30,3 +30,5 @@
 - 章节: 11 节（h2/h3）、54 段、3 张正文图、8 篇传送门
 - preflight: ALL CHECKS PASSED；图布局 PASS；草稿回读 3/3
 - draft.id: TIqnnVEu6Oy3-wtKttGa0dRD_WRhp5H_vy0yB0HCKnssTTlCRN4rRRmm_8Fy_ed2
+
+| 修订 2026-10-08 | completed (专业措辞全文返工：去口语俚语/文学比喻/引言节/第一人称，writing-selfcheck ④项全过，preflight 全绿，已覆盖推送) |

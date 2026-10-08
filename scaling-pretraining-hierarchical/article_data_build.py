@@ -55,17 +55,17 @@ DATA = {
     "title": "Aleph Alpha分层扩展预训练:16卡定配置,512卡只掉6%",
     "summary": [
         {"key": "三个自由度", "body": "并行方案×激活检查点×局部batch size，三者经内存互相咬合：selective-AC在92%显存处TPS峰值，full-AC在60到94%宽区间都快；FSDP组加大省内存但加通信。"},
-        {"key": "16卡定乾坤", "body": "目标规模1/32的sweep砍掉搜索空间：no-AC太早OOM，selective-AC峰值batch约18，full-AC约38；8到16卡经IB扩展无损耗。"},
+        {"key": "16卡定配置", "body": "目标规模1/32的sweep缩小搜索空间：no-AC过早OOM，selective-AC峰值batch约18，full-AC约38；8到16卡经IB扩展无损耗。"},
         {"key": "512卡35.3%", "body": "最终selective-AC、batch 22、FSDP=128、DP=4：26.7k TPS、35.3% MFU，16到512卡单卡效率只掉6%，20T token 17天训完。"},
     ],
     "lead": [
-        "堆卡不调软件，训练效率很快就塌；前沿实验室为MFU里几个百分点投入大量人力。可调的效率超参数太多，大规模网格搜索贵得离谱——Aleph Alpha这篇把窗帘拉开：30B-A3B MoE从16张卡扩到512张B200，35.3% MFU，只比完美线性低6%。",
-        "方法叫分层扩展：先在16卡上把搜索空间砍光（并行方案×激活检查点×局部batch size），用PyTorch profile确认compute-bound，再把结论带到32倍的目标规模。很多思路与规模无关，没有几百张卡也用得上。",
+        "只堆卡不调软件，训练效率很快就会崩；前沿实验室愿意为MFU里几个百分点投入大量人力。可调的效率超参数太多，大规模网格搜索贵得离谱。分层扩展这套方法把30B-A3B MoE从16张卡扩到512张B200，做到35.3% MFU，只比完美线性低6%。",
+        "方法叫分层扩展：先在16卡上把搜索空间大幅缩小（并行方案×激活检查点×局部batch size），用PyTorch profile确认compute-bound，再把结论带到32倍的目标规模。很多思路与规模无关，没有几百张卡也用得上。",
     ],
     "sections": sections,
     "conclusion": [
         "**扩展预训练，先缩搜索空间再加卡。**Aleph Alpha用16卡（目标1/32）定下并行方案、AC技术、局部batch边界，profile确认前后向compute-bound；128卡定FSDP上限128、selective-AC胜出；512卡FSDP=128、DP=4收官：35.3% MFU，离完美线性只差6%。",
-        "对做预训练的人，这套方法论可以直接抄：北极星指标用TPS而非MFU，目标显存占用92%附近，gbs=lbs×卡数×梯度累积的硬约束先立好；权重反向前向间常驻内存再白拿2到3%。Kolibri的训练链路是这套方法的完整施工记录，两篇对照看。",
+        "对做预训练的人，这套方法论可以直接复用：北极星指标用TPS而非MFU，目标显存占用放在92%附近，gbs=lbs×卡数×梯度累积的硬约束先立好；权重在反向与前向之间常驻内存，还能再拿到2到3%。Kolibri的训练链路是这套方法的完整实践记录，两篇对照看。",
     ],
     "reference_url": "https://aleph-alpha.com/en/blog/scaling-pre-training-in-practice-a-hierarchical-approach/",
 }
