@@ -61,6 +61,7 @@
 | 56 | 2026-10-08 | https://jarvislabs.ai/blog/blackwell-dtypes-qwen3-32b | blackwell-dtypes-qwen3-32b | blackwell-dtypes-qwen3-32b | TBD | TBD | 📥 进行中 |
 | 57 | 2026-10-08 | https://pytorch.org/blog/building-a-high-performance-and-portable-vllm-linear-backend-with-helion/ | building-a-high-performance-an | building-a-high-performance-an | TBD | TBD | 📥 进行中 |
 | 58 | 2026-10-08 | https://developer.nvidia.com/blog/control-how-your-gpu-shares-work-with-green-contexts/ | control-how-your-gpu-shares-wo | control-how-your-gpu-shares-wo | TBD | TBD | 📥 进行中 |
+| 59 | 2026-10-08 | https://rocm.blogs.amd.com/artificial-intelligence/taf-blog/README.html | taf-gpu-performance | taf-gpu-performance | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -418,3 +419,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-08 21:05 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #59 - taf-gpu-performance
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-08 21:08 | 📥 开始 | 收到 URL，开始提取内容 |
