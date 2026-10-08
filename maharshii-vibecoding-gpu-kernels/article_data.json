@@ -1,0 +1,93 @@
+{
+  "title": "maharshi:vibecoding GPU kernel实战经验",
+  "summary": [
+    {
+      "key": "可验证循环",
+      "body": "选算子、写第一版、编译检查、对照参考实现查正确性、测基准、看 roofline，四层嵌套回路；正确性循环是核心，快但错的 kernel 毫无价值。"
+    },
+    {
+      "key": "第一版靠上下文",
+      "body": "Triton 大模型裸写即可；CuTeDSL 更细粒度，需要把 cutlass 仓库（Layout Algebra、Copy/GEMM atoms、内存层级、示例）放进上下文目录供 agent 查阅。"
+    },
+    {
+      "key": "验证是瓶颈",
+      "body": "正确性看 MAE/MSE/PSNR/余弦相似度；rung 装饰器组织测试；转储 PTX/SASS 让 agent 内联更底层代码；NCU 进循环做 profile。2 到 3 周工作可压到 1 到 2 天。"
+    }
+  ],
+  "lead": [
+    "手写 GPU kernel 需要耐心和投入，maharshi（fal）一直在用 Claude Opus 5、GPT 5.6 Sol 这类大模型直接生成 kernel，下面是他沉淀下来的实战经验。",
+    "核心判断：写 GPU kernel 是“非常容易验证”的任务，天然适合 agent 的可验证反馈循环。下面拆解四个嵌套回路、第一版的上下文准备、测试基准与 profile 方法，保留全部实操细节。"
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "写GPU kernel是\"非常容易验证\"的任务",
+      "paras": [
+        "手写 GPU kernel 需要耐心、投入，还考验心智。maharshi 一直在用现代大模型（Claude Opus 5、GPT 5.6 Sol）直接生成 kernel，并总结出一套经验。核心判断是：写 GPU kernel 是一件\"非常容易验证\"的任务——有明确的正确性标准和性能标尺，天然适合放进 agent 的可验证反馈循环里。",
+        "结论先行：布局、索引、抽象与整体结构这些难点，在上下文给够的情况下，agent 基本能解决，可把 2 到 3 周的工作压缩到 1 到 2 天。真正的瓶颈已经从\"写出 kernel\"转移到\"验证 kernel\"，上下文和测试框架越好，流程越快。agent 不是全自主主体，而是可引导的聪明助手：人对 GPU 与 kernel 的基本功理解，依然必要。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "fig01.png",
+            "caption": "图1:原文封面。深夜坐在多台显示器前写 kernel（动漫风格）。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "可验证循环:四个嵌套回路",
+      "paras": [
+        "整个方法的骨架是一个可验证循环。先定要为哪个算子写 kernel（A），写出第一版（B），进编译检查（C）；编译不过回 B 修，过了进正确性检查（D），拿慢的参考实现做对照（E），不匹配就修 bug（F）回 D；正确性通过后测执行时间（G），看是否达到 roofline 或满意（I）；没到就优化 kernel（H），回 D 复用同一正确性循环；到了就结束（J）。",
+        "四个回路各有分工。B↔C 是开始前的紧凑小循环：编译检查。D↔E↔F 是核心的可验证奖励循环：有真实参考可对照，这正是 kernel 开发适合自动化验证的原因。G→H→D 是优化回路：每个新版本都复用同一正确性循环，快但错的 kernel 毫无价值。I 是外层循环：决定继续优化还是停止。",
+        "流程图只是高层视角，魔鬼在细节里。下面三节分别讲：怎么让 agent 写出好的第一版，怎么做验证，以及怎么 profile。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig02.png",
+            "caption": "图2:可验证循环。A 选算子，B 写第一版，C 编译检查，D 查正确性，E 对参考，F 修 bug，G 测基准，H 优化，I 看 roofline，J 结束。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "第一版:先给agent喂够上下文",
+      "paras": [
+        "要让 agent 写出好的第一版，必须给它写出好第一版所需的全部上下文。CUDA DSL（Triton、CuTeDSL、TileLang）用 Python 上手容易，学习曲线比 CUDA C++ 平缓，但其抽象可能让 agent 更困惑：需要给 agent 提供可查阅这些抽象的上下文。",
+        "现代大模型无需额外上下文就能写出不错的 Triton 代码。但 CuTeDSL 比 Triton 更细粒度、控制力更强，maharshi 发现准备一个上下文目录帮助很大：把 NVIDIA cutlass 仓库克隆进上下文目录，供 agent 查阅 Layout Algebra、Copy/GEMM atoms、内存层级、示例 kernel。",
+        "经验标准：好的第一版应该能无明显错误地编译，并通过下文的正确性测试。第一版的质量决定整个循环的起点，上下文给够，这一步 agent 基本不会掉链子。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "测试,基准与Profile",
+      "paras": [
+        "上下文给够之后，瓶颈转移到验证：参考实现本身及其对比验证越来越重要，这就是正确性测试。参考实现的速度不重要，重要的是它度量的意图——agent 会针对设定的度量去优化。非低精度计算通常测最大绝对/相对误差（MAE）、均方误差（MSE/RMSE）和 PSNR；涉及低精度时测 PSNR 和余弦相似度。",
+        "让 kernel 版本真正跑在 GPU 上，取决于 GPU 是本地还是云端可用，agent 需要能以某种方式拿到输出。推荐用 rung 装饰器组织任意数量的测试函数：捕获异常，记录每个测试是 ok 还是 FAILED（含异常类型与堆栈）。",
+        "__CODE__python::def rung(name):\\n    def deco(fn):\\n        def wrapper(*a, **k):\\n            try:\\n                fn(*a, **k)\\n                log(name, \"ok\")\\n            except Exception as e:\\n                log(name, \"FAILED\", type(e).__name__)\\n        return wrapper\\n    return deco\\n\\n# 用法：\"pre-checks\" 跑纯检查与 DSL 检查；\"run\" 执行 kernel、同步 CUDA、返回输出 shape 与全有限性",
+        "benchmark rung 可以做三件事。第一，端到端测 kernel 执行总时间。第二，用 kernel 内追踪（自定义 tracer 或 CUPTI）分段计时并输出。第三，把生成的 IR、PTX、SASS、CUBIN 转储到 dumps 目录让 agent 细读。",
+        "第三点值得展开：DSL 有时降级生成次优 PTX（进而是次优 SASS），agent 读 PTX/SASS 文本后，可以内联更底层的代码替代 DSL 的次优部分。这时提供一份\"可搜索\"的 PTX 文档作上下文很有帮助。",
+        "最后是 Profiling：如果 agent 能访问 NCU（Nsight Compute）命令行，让它在可验证反馈循环里对 kernel 做 profile 并生成报告，优化就有了数据依据。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "GPU kernel开发已死吗",
+      "paras": [
+        "作者自问\"GPU kernel 开发是不是已死\"，回答是\"是，但也不完全是\"。是，因为布局、索引、抽象与整体结构这些难点，有足够上下文的 agent 基本能解决，2 到 3 周的工作压缩到 1 到 2 天。不完全是，因为真正的瓶颈已从写 kernel 转移到验证环节：现在没有唯一正确做法，上下文和测试框架越好，流程越快，专用场景受益更大。好的 harness 就是一切。",
+        "最终提醒：不应把 agent 当全自主主体，而应视为可引导的聪明助手。人的部分依然必要：对 GPU 与 kernel 的基本功理解，决定了能不能给 agent 指对方向、看懂 profile 报告。作者称这是种苦乐参半的感受。"
+      ],
+      "fig_after": {}
+    }
+  ],
+  "conclusion": [
+    "vibecoding GPU kernel 的完整配方：可验证循环定骨架，第一版靠上下文目录喂饱 agent，正确性测试用慢参考实现卡死标准，benchmark rung 与 PTX/SASS 转储给优化提供抓手，NCU profile 进循环。布局索引这些难点 agent 已能解决，2 到 3 周压到 1 到 2 天。",
+    "但瓶颈转移到了验证环节：没有唯一正确做法，harness 越好流程越快。**把 agent 当可引导的聪明助手，而不是全自主主体——人的 GPU 基本功依然必要。**"
+  ],
+  "reference_url": "https://x.com/maharshii/status/2086442755748970889"
+}

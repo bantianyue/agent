@@ -1,0 +1,75 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class；真身在内联style，class仅兜底） */
+.portal-title { font-size:12px; color:#1a6ba0; font-weight:bold; }
+.portal-links { font-size:12px; color:#0F4C81; }
+.portal-links a { color:#0F4C81; text-decoration:none; }
+</style>
+<section style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<section style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">可验证循环</strong>：选算子、写第一版、编译检查、对照参考实现查正确性、测基准、看roofline，四层嵌套回路；正确性循环是核心，快但错的kernel毫无价值。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">第一版靠上下文</strong>：Triton大模型裸写即可；CuTeDSL更细粒度，需要把cutlass仓库（Layout Algebra、Copy/GEMM atoms、内存层级、示例）放进上下文目录供agent查阅。<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">验证是瓶颈</strong>：正确性看MAE/MSE/PSNR/余弦相似度；rung装饰器组织测试；转储PTX/SASS让agent内联更底层代码；NCU进循环做profile。2到3周工作可压到1到2天。</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">手写GPU kernel需要耐心和投入，maharshi（fal）一直在用Claude Opus 5、GPT 5.6 Sol这类大模型直接生成kernel，下面是他沉淀下来的实战经验。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">核心判断：写GPU kernel是“非常容易验证”的任务，天然适合agent的可验证反馈循环。下面拆解四个嵌套回路、第一版的上下文准备、测试基准与profile方法，保留全部实操细节。</p>
+
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">写GPU kernel是"非常容易验证"的任务</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">手写GPU kernel需要耐心、投入，还考验心智。maharshi一直在用现代大模型（Claude Opus 5、GPT 5.6 Sol）直接生成kernel，并总结出一套经验。核心判断是：写GPU kernel是一件"非常容易验证"的任务：有明确的正确性标准和性能标尺，天然适合放进agent的可验证反馈循环里。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">结论先行：布局、索引、抽象与整体结构这些难点，在上下文给够的情况下，agent基本能解决，可把2到3周的工作压缩到1到2天。真正的瓶颈已经从"写出kernel"转移到"验证kernel"，上下文和测试框架越好，流程越快。agent不是全自主主体，而是可引导的聪明助手：人对GPU与kernel的基本功理解，依然必要。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig01.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1:原文封面。深夜坐在多台显示器前写kernel（动漫风格）。</figcaption></figure>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">可验证循环:四个嵌套回路</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">整个方法的骨架是一个可验证循环。先定要为哪个算子写kernel（A），写出第一版（B），进编译检查（C）；编译不过回B修，过了进正确性检查（D），拿慢的参考实现做对照（E），不匹配就修bug（F）回D；正确性通过后测执行时间（G），看是否达到roofline或满意（I）；没到就优化kernel（H），回D复用同一正确性循环；到了就结束（J）。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="fig02.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2:可验证循环。A选算子，B写第一版，C编译检查，D查正确性，E对参考，F修bug，G测基准，H优化，I看roofline，J结束。</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">四个回路各有分工。B↔C是开始前的紧凑小循环：编译检查。D↔E↔F是核心的可验证奖励循环：有真实参考可对照，这正是kernel开发适合自动化验证的原因。G→H→D是优化回路：每个新版本都复用同一正确性循环，快但错的kernel毫无价值。I是外层循环：决定继续优化还是停止。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">流程图只是高层视角，魔鬼在细节里。下面三节分别讲：怎么让agent写出好的第一版，怎么做验证，以及怎么profile。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">第一版:先给agent喂够上下文</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">要让agent写出好的第一版，必须给它写出好第一版所需的全部上下文。CUDA DSL（Triton、CuTeDSL、TileLang）用Python上手容易，学习曲线比CUDA C++ 平缓，但其抽象可能让agent更困惑：需要给agent提供可查阅这些抽象的上下文。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">现代大模型无需额外上下文就能写出不错的Triton代码。但CuTeDSL比Triton更细粒度、控制力更强，maharshi发现准备一个上下文目录帮助很大：把NVIDIA cutlass仓库克隆进上下文目录，供agent查阅Layout Algebra、Copy/GEMM atoms、内存层级、示例kernel。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>经验标准：好的第一版应该能无明显错误地编译，并通过下文的正确性测试。第一版的质量决定整个循环的起点，上下文给够，这一步agent基本不会掉链子。</strong></p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">测试,基准与Profile</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>上下文给够之后，瓶颈转移到验证：参考实现本身及其对比验证越来越重要，这就是正确性测试。参考实现的速度不重要，重要的是它度量的意图：agent会针对设定的度量去优化。非低精度计算通常测最大绝对/相对误差（MAE）、均方误差（MSE/RMSE）和PSNR；涉及低精度时测PSNR和余弦相似度。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">让kernel版本真正跑在GPU上，取决于GPU是本地还是云端可用，agent需要能以某种方式拿到输出。推荐用rung装饰器组织任意数量的测试函数：捕获异常，记录每个测试是ok还是FAILED（含异常类型与堆栈）。</p>
+<pre style="background-color:#272822;color:#f8f8f2;padding:12px 16px;border-radius:4px;white-space:pre;overflow-x:auto;font-family:Consolas,Monaco,'Courier New',monospace;font-size:13px;line-height:1.5;margin:1em 4px;border-left:4px solid #66d9ef;"><code><span style="color: #66D9EF">def</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #A6E22E">rung</span><span style="color: #F8F8F2">(name):</span>\<span style="color: #F8F8F2">n</span>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #66D9EF">def</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #A6E22E">deco</span><span style="color: #F8F8F2">(fn):</span>\<span style="color: #F8F8F2">n</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #66D9EF">def</span><span style="color: #F8F8F2">&nbsp;</span><span style="color: #A6E22E">wrapper</span><span style="color: #F8F8F2">(</span><span style="color: #FF4689">*</span><span style="color: #F8F8F2">a,</span>&nbsp;<span style="color: #FF4689">**</span><span style="color: #F8F8F2">k):</span>\<span style="color: #F8F8F2">n</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #66D9EF">try</span><span style="color: #F8F8F2">:</span>\<span style="color: #F8F8F2">n</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #F8F8F2">fn(</span><span style="color: #FF4689">*</span><span style="color: #F8F8F2">a,</span>&nbsp;<span style="color: #FF4689"><strong></span><span style="color: #F8F8F2">k)</span>\<span style="color: #F8F8F2">n</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #F8F8F2">log(name,</span>&nbsp;<span style="color: #E6DB74">"ok"</span><span style="color: #F8F8F2">)</span>\<span style="color: #F8F8F2">n</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #66D9EF">except</span>&nbsp;<span style="color: #A6E22E">Exception</span>&nbsp;<span style="color: #66D9EF">as</span>&nbsp;<span style="color: #F8F8F2">e:</span>\<span style="color: #F8F8F2">n</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #F8F8F2">log(name,</span>&nbsp;<span style="color: #E6DB74">"FAILED"</span><span style="color: #F8F8F2">,</span>&nbsp;<span style="color: #A6E22E">type</span><span style="color: #F8F8F2">(e)</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">__name__)</span>\<span style="color: #F8F8F2">n</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #66D9EF">return</span>&nbsp;<span style="color: #F8F8F2">wrapper</span>\<span style="color: #F8F8F2">n</span>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #66D9EF">return</span>&nbsp;<span style="color: #F8F8F2">deco</span>\<span style="color: #F8F8F2">n</span>\<span style="color: #F8F8F2">n</span><span style="color: #959077">#&nbsp;用法："pre-checks"&nbsp;跑纯检查与&nbsp;DSL&nbsp;检查；"run"&nbsp;执行&nbsp;kernel、同步&nbsp;CUDA、返回输出&nbsp;shape&nbsp;与全有限性</span></code></pre>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">benchmark rung可以做三件事。第一，端到端测kernel执行总时间。第二，用kernel内追踪（自定义tracer或CUPTI）分段计时并输出。第三，把生成的IR、PTX、SASS、CUBIN转储到dumps目录让agent细读。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">第三点值得展开：DSL有时降级生成次优PTX（进而是次优SASS），agent读PTX/SASS文本后，可以内联更底层的代码替代DSL的次优部分。这时提供一份"可搜索"的PTX文档作上下文很有帮助。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最后是Profiling：如果agent能访问NCU（Nsight Compute）命令行，让它在可验证反馈循环里对kernel做profile并生成报告，优化就有了数据依据。</p>
+<h2 class="h2" data-heading="true" style="display: table;padding: 0 0.2em;margin: 4em auto 2em;color: #fff;background: #0F4C81;font-weight: bold;text-align: center;">GPU kernel开发已死吗</h2>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><strong>作者自问"GPU kernel开发是不是已死"，回答是"是，但也不完全是"。是，因为布局、索引、抽象与整体结构这些难点，有足够上下文的agent基本能解决，2到3周的工作压缩到1到2天。不完全是，因为真正的瓶颈已从写kernel转移到验证环节：现在没有唯一正确做法，上下文和测试框架越好，流程越快，专用场景受益更大。好的harness就是一切。</strong></p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">最终提醒：不应把agent当全自主主体，而应视为可引导的聪明助手。人的部分依然必要：对GPU与kernel的基本功理解，决定了能不能给agent指对方向、看懂profile报告。作者称这是种苦乐参半的感受。</p>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<section style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">vibecoding GPU kernel的完整配方：可验证循环定骨架，第一版靠上下文目录喂饱agent，正确性测试用慢参考实现卡死标准，benchmark rung与PTX/SASS转储给优化提供抓手，NCU profile进循环。布局索引这些难点agent已能解决，2到3周压到1到2天。<br  /><br  />但瓶颈转移到了验证环节：没有唯一正确做法，harness越好流程越快。</strong>把agent当可引导的聪明助手，而不是全自主主体：人的GPU基本功依然必要。**</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="text-align:center;">
+<span class="portal-title" style="font-size:12px;color:#1a6ba0;font-weight:bold;">【传送门】</span>
+<section style="text-align:left;display:inline-block;font-size:12px;color:#0F4C81;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/s0Ovn3_tnbbl9jxfAC3WLg" target="_blank" data-linktype="2">阿里Sparse Attention on CXL替代RDMA做KV Cache解耦 推理2.1×吞吐, 9.7×TTFT</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/WrzegA1sALzJmjvE_hDKeg" target="_blank" data-linktype="2">TokenSpeed-Kernel：把推理内核做成一等公民</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/42s6fk-xdo23L-vtLj6Q8Q" target="_blank" data-linktype="2">vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/kT5nIGLJDYyLRmnTceUqVg" target="_blank" data-linktype="2">Kimi K3技术详解之KDA: 线性注意力如何精准编辑被压缩的记忆</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+</section>
+</section>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://x.com/maharshii/status/2086442755748970889</span></p>
+</section>
