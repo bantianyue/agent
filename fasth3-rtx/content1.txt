@@ -1,0 +1,67 @@
+S# 一张消费级显卡跑 FastH3 V2
+T# FastH3 V2 八步生成带同步音频的视频，八步就超过 base H3 的质量。此前它要数据中心 GPU：权重 138 GiB。现在 FastH3 V2 跑在单台消费级机器上：RTX 5090、RTX 4090、RTX PRO 6000、DGX Spark 或 Apple Silicon Mac。同时发布 FastH3 Trim，实验性小版本，去掉 50 个 transformer block 中的 8 个，跑得更快。
+T# 量化方案按硬件分：Blackwell GPU 与 DGX Spark 用 NVFP4，RTX 4090 及显存更小的卡用 FP8，Apple Silicon 用 INT6。每层 FP4 的 activation scale 都在 1000 条 prompt 上校准，大 activation 不被裁掉。FastH3 Trim 比 base H3 小 4.2 倍，每台设备上都比 V2 快，最低 8 GB 显存可跑，质量代价很小。两个模型都是八步蒸馏，后续版本预期质量更高、模型更小。
+T# 同一 prompt、每台机器一行：左为 FastH3 V2、右为 FastH3 Trim，832×480、5 秒、带音频。RTX 5090（32 GB，NVFP4）：V2 14.8 秒，Trim 13.4 秒；RTX PRO 6000（96 GB，NVFP4）：13.5 秒 / 12.0 秒；RTX 4090（24 GB，FP8）：54.6 秒 / 43.9 秒；DGX Spark（128 GB 统一内存，NVFP4）：141.4 秒 / 125.8 秒；Mac M4 Max（36 GB 统一内存，INT6）：Trim 925.2 秒。
+T# 每台机器报两个数：5 秒 832×480 片段与 5 秒 1344×768 片段，都带音频；端到端热机时间，从 prompt 到 MP4 落盘：文本编码、八步去噪、视频音频解码、导出。每个数是两个 prompt 各跑两次的中位数。完整数字：RTX PRO 6000，480p 13.5/12.0 秒，768p 36.5/32.5 秒；RTX 5090，14.8/13.4 秒，38.6/35.4 秒；RTX 4090，54.6/43.9 秒，154.6/132.8 秒；4090 限 16 GB，79.9/72.1 秒，153.7/139.9 秒；限 12 GB，91.2/74.1 秒，170.7/147.1 秒；限 8 GB 只有 Trim 82.0 秒；DGX Spark 141.4/125.8 秒，768p Trim 340.1 秒；双 DGX Spark 87.2/78.3 秒；Mac M4 Max Trim 925.2 秒。
+F# fig00.png|图1：每台机器上 5 秒 832×480 片段的端到端时间，V2 与 Trim 成对对比。
+S# 把 H3 塞进一台机器
+T# H3 是三个网络：Qwen3-VL 文本编码器读 prompt，50 block 的扩散 transformer（DiT）同时给视频音频 latent 去噪，两个 VAE 把 latent 解码成帧和声音。BF16 下权重共 137.7 GiB，一张 32 GB 的 RTX 5090 连 DiT 都装不下。每个网络单独瘦身。
+F# fig01.png|图2：各组件 checkpoint 尺寸，FastH3 Trim NVFP4 版比 BF16 H3 小 4.2 倍。
+T# 文本编码器 62.1 GiB 降到 15.3 GiB：H3 只读 64 层 Qwen3-VL 第 50 层的 hidden state，从不生成文本，所以去掉最后 14 层和语言模型头，H3 用的特征不变；剩下的线性层存成 NVFP4。Transformer BF16 下 65.3 GiB：V2 把 attention、MLP、稀疏 attention gate 权重存成 NVFP4（无 FP4 支持的 GPU 用 FP8）；Trim 再去掉 8 个 block，每个 block 的 timestep 投影换成 rank-16 分解，NVFP4 下 11.1 GiB。VAE 10.3 GiB 降到 6.5 GiB：视频解码用蒸馏的 26 block 轻量视频 VAE，latent 接口与 H3 VAE 相同，加载 INT8 权重，占 2.3 GiB 显存，所有设备用同一个。
+T# 尺寸决定速度：32 GB 的卡上，问题是 DiT 能不能在请求之间一直待在显存里。能，请求之间只搬文本编码器。
+H# RTX 5090
+T# 第一版 FP4 导出只量化了 MLP（数据中心 GPU 用的设置），在 5090 上 DiT 还有 20 GB：单是 BF16 的 attention 投影就占 9.7 GB，文本编码器挤不下。每次请求都把 DiT 搬去主机内存再搬回：480p 片段 26.4 秒，768p 根本装不下。
+T# attention 和 gate 也进 NVFP4 后，DiT 11.1 GiB 常驻 GPU，文本编码器逐层流式进卡：同样 480p 13.4 秒，768p 能跑了。
+T# PyTorch 的 pinned 内存分配器把每块按 2 的幂取整，2.87 GiB 的 FP4 权重占了 5.06 GiB 主机内存，在 60 GB 的云容器里直接被杀掉。改成每个模块 cudaHostRegister 精确尺寸的 buffer，只用 2.90 GiB。
+H# RTX 4090 与更小的显存
+T# RTX 4090 没有 FP4 tensor core，用 FP8：8 bit 权重、每输出通道一个 scale，8 bit activation、每 token 一个 scale。PyTorch 这种 scale 的 FP8 矩阵乘在 4090 上约 70 TFLOPS，比 BF16 的约 160 TFLOPS 慢；per-tensor FP8 kernel 能到 220 到 305 TFLOPS，所以用单位 scale 调用，再把两个 scale 向量 fuse 到输出上一次应用：结果与 per-token、per-channel scale 一致，比 per-tensor scale 贵 5% 到 10%。
+T# 另外三处改动把 4090 干到 43.9 秒：稀疏 attention，score 计算的 query/key 量化到 INT8，value 留 BF16，fine attention kernel 快 1.6 倍，相对误差约 0.6%；文本编码器经精确尺寸 pinned buffer 逐层进 GPU，一个 fused kernel 展开 NVFP4 权重；VAE 用所有设备同一个 INT8 轻量 VAE，加 fused 反量化，Q/K/V 投影共享一个量化输入，解码帧与未优化路径逐 bit 一致。
+T# 16 GB、12 GB、8 GB 三档是在同一张 4090 上限显存测的：两个模型都进 12 GB，Trim 进 8 GB；真实小显存卡会更慢。
+H# DGX Spark 与 Apple Silicon
+T# DGX Spark 的 128 GB 统一内存装下文本编码器、transformer、两个 VAE，请求之间什么都不搬；用和 5090 同样的 NVFP4 checkpoint 与轻量 VAE，两台 Spark 用序列并行分一个请求。此前四步预览模型在单台 Spark 上 5 秒片段要 243 秒，现在八步模型去噪步数翻倍反而更快。
+T# Apple Silicon 上两个模型都跑 MLX，INT6 权重，配 NVFP4 文本编码器与轻量 VAE。
+S# 四比特权重不裁剪
+T# NVFP4 每 16 个值一组存成 4 bit 浮点、共享一个 8 bit scale，再加每 tensor 一个 scale 定整体范围。权重的 per-tensor scale 从权重本身算；activation 的必须在数据到来前固定。最简单的单位 scale 覆盖到 6×448=2688 的量级，而 H3 的 activation 大得多。
+F# fig02.png|图3：各 block MLP 输出投影的最大输入，1000 条校准 prompt、全部八步；单位 scale 下虚线以上全被裁掉。
+T# 42 个 block 里 40 个的 MLP 输出投影输入超过 2688，block 37 达到 368640，是上限的 137 倍，单位 scale 每次前向都裁掉这些值。所以做校准：1000 条 prompt 跑完八步采样，记录每个线性层的最大输入，checkpoint 里每层存一个静态 scale。Trim 共 294 个校准层，覆盖 attention 投影、MLP、稀疏 attention gate；把 V2 的 NVFP4 配方从 MLP 扩展到每个量化层。
+S# FastH3 Trim：剪枝实验
+T# 剪枝是通向更小模型的路：去掉测出来最不重要的 block，模型更小更快，但会带走一部分学到的东西。Trim 是第一步。
+F# fig03.png|图4：FastH3 Trim transformer 各格式按比例绘制，面积即 checkpoint 尺寸。
+H# 怎么选 block
+T# 第一版剪枝模型按 activation 选 block，明显好过等间隔删除。用 teacher 指导恢复后，再用 DMD 压采样步数：运动连贯、细节、prompt 服从都偏弱；量化感知蒸馏（QAD）在并排对比里没赢过训练后量化。
+T# Trim 直接测每个 block：从 base H3 出发，一次跳过一个 block，记录视频音频预测变了多少。4 个例子（运动、说话、音乐、声音事件）× 3 个噪声水平，共 600 次测量；每个 block 按它在任一条件下造成的最大变化排名，视频音频任一重要的都保留。首尾 block 变化最大，去掉的 8 个全在网络前半。
+H# 压缩 timestep conditioning
+T# H3 经 AdaLN 投影把扩散 timestep 条件注入每个 block：2688 维时间 embedding 映射到 6 个调制向量，50 个 block 的这些投影 BF16 下占 24 GiB。但输入只是 timestep 这个单数的光滑函数，用不满 2688 维。Trim 把投影换成一个共享的 2688→16 基加每个 block 一个小投影；分解后的权重存 FP16，BF16 的重建误差大约大 1.7 倍。
+H# 训练
+T# 新的 42 block 模型直接用八步 DMD2 训练，目标函数沿用 V2。Base H3 同时初始化 frozen teacher 与可训练 critic，attention 80% 稀疏。采样 timestep：999、874、749、624、500、375、250、125。
+S# 时间花在哪
+F# fig04.png|图5：各机器上一个 5 秒 480p Trim 片段各阶段时间占比。
+T# RTX PRO 6000 上所有模型常驻显存，去噪占 12.0 秒里的 78%。RTX 5090 去噪一样快（9.1 秒），总 13.4 秒，因为只有文本编码器和解码器在 host 与 GPU 之间搬。RTX 4090 没有 FP4 tensor core，跑 FP8 且每步从主机内存流式搬部分 transformer，去噪占 43.9 秒里的 33.1 秒。DGX Spark 上视频解码占三分之一（42.6 秒），是下一个要优化的阶段。Mac 上去噪占 91%，因为 attention 还跑在 reference 路径而非调优过的 Metal kernel。
+S# 局限与下一步
+T# FastH3 Trim 是实验性的：复杂场景细节可能不如 V2，质量优先用 V2。显存档位是模拟的：16/12/8 GB 数是在 4090 上限显存测的，真实同显存卡会更慢。
+S# 拿模型
+T# 模型按硬件与 runtime 分仓库：RTX 5090 / RTX PRO 6000 / DGX Spark 用 NVFP4 版 V2 与 Trim；RTX 4090 及 8 GB 起的卡用 FP8 版；Apple Silicon 用 MLX INT6 版；另有 ComfyUI checkpoint 与 BF16 源权重。都在 FastVideo 组织下，多卡数据中心 serving 继续沿用数据中心版 NVFP4 V2。消费版仓库自带 NVFP4 文本编码器、轻量 VAE 与采样 schedule 的 fastvideo_inference.json，FastVideo 自动读取。
+T# 单张 RTX 5090 的启动代码：
+__CODE__import os
+from huggingface_hub import hf_hub_download
+
+repo = "FastVideo/FastVideo-FastH3-8-Step-V2-NVFP4-Consumer"
+os.environ["FASTVIDEO_H3_PARK_MODULES"] = "vae,audio_vae"  # keep the transformer on the GPU during text encoding
+os.environ["FASTVIDEO_H3_ENCODER_LAYERWISE"] = "1"  # stream the text encoder layer by layer
+os.environ["FASTVIDEO_H3_ADALN_TABLE"] = hf_hub_download(repo, "transformer/adaln_tables.pt")  # skip 26 GB of AdaLN weights
+
+from fastvideo import VideoGenerator
+generator = VideoGenerator.from_config({
+    "model_path": repo,
+    "engine": {
+        "num_gpus": 1,
+        "quantization": {"transformer_quant": "NVFP4", "layer_profile": "h3_dit_vsa"},
+        "offload": {"text_encoder": True, "pin_cpu_memory": True},
+    },
+    "pipeline": {"experimental": {"attention_backend": "VIDEO_SPARSE_ATTN_H3", "h3_sequential_load": True}},
+})
+generator.generate_video(
+    prompt="A red fox leaps into deep snow at sunrise and pops back up with snow on its face.",
+    height=480, width=832, num_frames=124, guidance_scale=1.0, output_path="out.mp4",
+)
+T# Trim 版把仓库换成 FastVideo-FastH3-Trim-8-Step-NVFP4，去掉 AdaLN table 那行。

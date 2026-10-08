@@ -63,6 +63,7 @@
 | 58 | 2026-10-08 | https://developer.nvidia.com/blog/control-how-your-gpu-shares-work-with-green-contexts/ | control-how-your-gpu-shares-wo | control-how-your-gpu-shares-wo | TBD | TBD | 📥 进行中 |
 | 59 | 2026-10-08 | https://rocm.blogs.amd.com/artificial-intelligence/taf-blog/README.html | taf-gpu-performance | taf-gpu-performance | TBD | TBD | 📥 进行中 |
 | 60 | 2026-10-08 | https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-10.1-blog/README.html | rocm-10.1-data-movement | rocm-10.1-data-movement | TBD | TBD | 📥 进行中 |
+| 61 | 2026-10-08 | https://haoailab.com/blogs/fasth3-rtx/ | fasth3-rtx | fasth3-rtx | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -432,3 +433,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-08 21:11 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #61 - fasth3-rtx
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-08 21:15 | 📥 开始 | 收到 URL，开始提取内容 |
