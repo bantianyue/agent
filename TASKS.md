@@ -56,6 +56,7 @@
 | 51 | 2026-10-08 | https://x.com/Signal_65/status/2107651870911078661 | signal65-gb300-nvl72-nvfp4 | signal65-gb300-nvl72-nvfp4 | TBD | TBD | 📥 进行中 |
 | 52 | 2026-10-08 | https://www.abhik.ai/articles/gpu-xid31-mmu-faults | gpu-xid31-mmu-faults | gpu-xid31-mmu-faults | TBD | TBD | 📥 进行中 |
 | 53 | 2026-10-08 | https://omin-kwon.github.io/project/SketchSSM/ | SketchSSM | SketchSSM | TBD | TBD | 📥 进行中 |
+| 54 | 2026-10-08 | https://arxiv.org/html/2609.33074v1 | kernelzero-coevolving-proposer-coder | kernelzero-coevolving-proposer-coder | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -383,3 +384,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-08 17:43 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #54 - kernelzero-coevolving-proposer-coder
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-08 20:12 | 📥 开始 | 收到 URL，开始提取内容 |
