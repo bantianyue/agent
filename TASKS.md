@@ -64,6 +64,7 @@
 | 59 | 2026-10-08 | https://rocm.blogs.amd.com/artificial-intelligence/taf-blog/README.html | taf-gpu-performance | taf-gpu-performance | TBD | TBD | 📥 进行中 |
 | 60 | 2026-10-08 | https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-10.1-blog/README.html | rocm-10.1-data-movement | rocm-10.1-data-movement | TBD | TBD | 📥 进行中 |
 | 61 | 2026-10-08 | https://haoailab.com/blogs/fasth3-rtx/ | fasth3-rtx | fasth3-rtx | TBD | TBD | 📥 进行中 |
+| 62 | 2026-10-08 | https://developer.nvidia.com/blog/doca-gpunetio-gda-ki-unified-gpu-networking/ | doca-gpunetio-gda-ki-unified-g | doca-gpunetio-gda-ki-unified-g | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -439,3 +440,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-08 21:15 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #62 - doca-gpunetio-gda-ki-unified-g
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-08 21:17 | 📥 开始 | 收到 URL，开始提取内容 |

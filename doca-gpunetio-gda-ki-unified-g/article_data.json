@@ -1,0 +1,211 @@
+{
+  "title": "NVIDIA DOCA GPUNetIO:统一GPU发起网络,CUDA kernel直驱网卡",
+  "summary": [
+    {
+      "key": "统一底座",
+      "body": "各通信库自建的 GDA-KI RDMA 收敛到同一份 GPUNetIO 实现；开源版给开放集成，DOCA SDK 版是超集，运行时经 dlopen 衔接。"
+    },
+    {
+      "key": "编程模型",
+      "body": "CPU 走控制路径导出传输对象，GPU 数据路径三步：提交 WQE、敲门铃、轮询 CQE；高层 API 线程安全，低层 API 给精确控制。"
+    },
+    {
+      "key": "生态落地",
+      "body": "NCCL 2.27+ GIN、NVSHMEM 3.7 新传输、NVQLink 量子互连都建在 GPUNetIO 上；FPGA 实测转发往返延迟中位 2.7 微秒。"
+    }
+  ],
+  "lead": [
+    "GPU 应用要网络像一等 GPU 操作：每笔事务中间站着 CPU，它就是关键路径上的瓶颈。DOCA GPUNetIO 的答案是让 CUDA kernel 直接驱动 Ethernet、RDMA、Verbs、DMA——提交 WQE、敲网卡门铃、轮询完成，全在 GPU 上。",
+    "更大的变化在生态：NCCL、NVSHMEM、UCX/NIXL 这些库此前各养一套 GDA-KI 实现，现在收敛到同一份 GPUNetIO 底座上。下面拆统一架构、编程模型、代码与落地数据。"
+  ],
+  "sections": [
+    {
+      "type": "h2",
+      "title": "GPU发起网络:把CPU踢出关键路径",
+      "paras": [
+        "GPU 应用越来越需要网络与数据搬运像一等 GPU 操作，而不是宿主驱动的服务。每笔网络事务中间都站着 CPU，它就成了关键路径上的瓶颈：加延迟，拖住分布式应用的实时响应。",
+        "NVIDIA DOCA GPUNetIO 是面向实时包处理与数据搬运的 GPU 中心网络 SDK 层，正面解决这个问题。它把 GPUDirect RDMA、GPUDirect Async Kernel-Initiated（GDA-KI）、GDRCopy 拢到一起：CUDA kernel 直接驱动 Ethernet、RDMA、Verbs、DMA 操作，CPU 不进应用关键路径。",
+        "具体来说 GPUNetIO 给两样东西：控制路径上的 CPU 函数，把 DOCA Ethernet、DOCA Verbs、DOCA DMA、DOCA CommChannel 建的 GPU 内存传输对象导出来；数据路径上的 GPU CUDA 函数，让 CUDA kernel 直接操作导出的传输对象。",
+        "从 GPU 中心的包处理首次亮相到现在，框架成熟了很多：从\"把 CPU 踢出关键路径\"的利器，长成了统一的 GDA-KI 底座，集成进 NVSHMEM、NCCL、Aerial 5G SDK、UCX/NIXL、NVQLink（配 Holoscan Sensor Bridge 算子）、Holoscan 高级网络算子、DeepEP/HybridEP 等。"
+      ],
+      "fig_after": {
+        "3": [
+          {
+            "src": "fig00.png",
+            "caption": "图1：DOCA SDK 软件栈中的 GPUNetIO，CPU 侧管控制路径、GPU 侧跑数据路径。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "为什么需要统一的GPUNetIO",
+      "paras": [
+        "在 GPUNetIO 成为公共底座之前，每个通信库都自己实现了一套 GDA-KI 风格的 GPU 发起 RDMA：各干各的，各自假设、各自代码、各自维护，互不共享。",
+        "把这些实现收进 GPUNetIO 一把伞下，好处直接：各库不用再各自建、各自养一条 GDA-KI RDMA 路，收敛到同一份 GPUNetIO GDA-KI 实现上，一处用、一处改、一处扩展。",
+        "于是有了公共的投入点：特性、优化、修 bug 一处做、处处有；SDK 之间少重复造轮子；一个框架上的创新很快流到别的框架。对 NIXL/UCX、NCCL、NVSHMEM 这类上层库尤其值钱：它们一起往 GPUNetIO 里加东西，也一起吃全栈的改进。生态视角看：代码重复少、行为分化少、长期演进的路更结实。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "开源版与SDK版",
+      "paras": [
+        "NVIDIA 发两个关系紧密的版本，因为生态既要广度也要开放。完整 DOCA SDK 版是超集：编程指南里文档化的实现，横跨更广的 DOCA 栈（Verbs、Ethernet、DMA、CommChannel 等），保持\"控制路径贴近 GPU、CPU 不进关键路径\"的核心模型。",
+        "并行的开源 GPUNetIO 是更轻的 RDMA-Verbs 定向实现，给想在传输集成上保持全开放的框架。今天开源版是小的 Verbs 子集，DOCA SDK 版是加了更丰富的 RDMA、Ethernet、DMA 的超集。",
+        "这不是造两套分叉的软件栈：开源给 GPU 发起 RDMA 通信一个公共开放底座，DOCA SDK 在场时再通向更高级的功能。开源实现运行时能探测 DOCA SDK 是否存在，有就经 dlopen 调选定的闭源 SDK 函数，没有就纯开源实现跑。",
+        "CUDA 设备侧的 gap 刻意做小：Verbs 路径上开源版和 SDK 版都暴露设备侧 API，GPU 编程模型基本对齐，主机侧实现从轻量开源路平滑扩展到 DOCA SDK 全功能。"
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": "fig01.png",
+            "caption": "图2：开源版与 DOCA SDK 版共享 CUDA Device API；SDK 在场时开源版主机 API 可经 dlopen 调用 SDK 函数。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "编程模型",
+      "paras": [],
+      "fig_after": {}
+    },
+    {
+      "type": "h3",
+      "title": "CPU控制路径",
+      "paras": [
+        "用 DOCA GPUNetIO 的应用先走主机侧 CPU 配置（控制路径），再让数据路径在 GPU 上经 CUDA kernel 跑。控制路径一般四步：初始化配置 GPU 与网卡、分配内存；建网络传输对象，比如 DOCA Verbs/DOCA Ethernet 经 mlx5dv 在 CPU 上建网络队列对象；GPUNetIO CPU 函数把队列对象的相关元素导出成 GPU 内存里的 descriptor，给出 GPU 地址；应用 launch CUDA kernel，把网络队列的 GPU descriptor 当输入参数传进去。",
+        "为简化 DOCA Verbs 的部分操作，GPUNetIO 加了一组高层函数（如 doca_gpu_verbs_create_qp_hl），把建 RDMA QP、建连的步骤压紧；SDK 版和开源版都有。控制路径走完，数据路径在 GPU 上启动：一个或多个 CUDA kernel 用 GPUNetIO CUDA 函数操作导出到 GPU 内存的传输对象，收发流量。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h3",
+      "title": "GPU数据路径",
+      "paras": [
+        "GPU 通信 CUDA kernel 的通用结构三步：提交 WQE，一个或多个 CUDA 线程往网络队列对象提交 Work Queue Entry（RDMA Write、RDMA Read、Ethernet Send/Recv）；敲门铃，一个或多个线程写网卡寄存器通知有新 WQE；轮询 CQE（可选），等 Completion Queue Entry 确认 WQE 执行成功。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "fig02.png",
+            "caption": "图3：GDA-KI 工作流，CUDA 线程提交 WQE、同步、敲网卡门铃，NIC 取回执行后把完成写回 GPU 内存的 CQ。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h3",
+      "title": "API:高层与低层",
+      "paras": [
+        "Ethernet 与 RDMA Verbs 传输各有两档 API。高层 API 做复杂组合操作：Verbs 侧的 doca_gpu_dev_verbs_put_signal() 把 RDMA Write WQE 与 RDMA Atomic Fetch and Add WQE 按 thread scope 或 warp scope 预组合好（warp 内协作提交 WARP_SIZE 个 RDMA Write、末尾一个 RDMA Atomic），顺手处理同队列上其他 CUDA 线程的并发提交、敲门铃防 race；Ethernet 侧的 doca_gpu_dev_eth_txq_send() 把提交 Ethernet Send WQE 与敲门铃按 thread/warp/block scope 组合好，线程安全，收发两侧同理。",
+        "低层 API 给基本 building block，应用自己拼定制组合操作：不同 opcode 的 WQE 提交、敲门铃、轮询 CQ 等 CQE。低层 API 不是线程安全的，同队列的并发访问应用自己同步。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h3",
+      "title": "敲门铃",
+      "paras": [
+        "WQE 提交进网络队列后必须通知网卡执行，这就是敲门铃：CUDA kernel 通知网卡有新活。GPUNetIO 给三种敲法：常规门铃，NIC 寄存器 MMIO 映射进 CUDA 地址空间，CUDA 线程直接写；BlueFlame，整个 WQE 而不只是通知写进 NIC 寄存器，延迟敏感、队列少的场景用；CPU 辅助门铃，NIC 寄存器映射进 CPU 内存，GPU 写共享内存区、CPU 线程轮询到再敲网卡门铃，给没有 GPU 直连网卡的系统（如 DGX Spark）开 GDA-KI。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h3",
+      "title": "以太网示例",
+      "paras": [
+        "高层 API 写 GPU 发起的以太网包生成器：doca_gpu_dev_eth_txq_send 让多个 CUDA block 并发往共享 Send Queue 提交 WQE，内部处理同步，线程安全，不用应用自己加锁，也不用管 WQE/CQE 下标这些队列细节。",
+        "__CODE____global__ void send_packets(struct doca_gpu_eth_txq *txq, uint8_t *addr, const uint32_t mkey, const size_t size, uint32_t *exit_cond)\n{\n\tenum doca_gpu_eth_send_flags flags = DOCA_GPUNETIO_ETH_SEND_FLAG_NONE;\n\tdoca_gpu_dev_eth_ticket_t out_ticket;\n\tuint32_t num_completed = 0;\n\t/* Only the last thread in the block requests a CQE. */\n\tif (threadIdx.x == (blockDim.x - 1))\n\t\tflags = DOCA_GPUNETIO_ETH_SEND_FLAG_NOTIFY;\n\twhile (DOCA_GPUNETIO_VOLATILE(*exit_cond) == 0) {\n\t\tdoca_gpu_dev_eth_txq_send<DOCA_GPUNETIO_ETH_RESOURCE_SHARING_MODE_GPU,\n\t\t\t\t  DOCA_GPUNETIO_ETH_SYNC_SCOPE_GPU,\n\t\t\t\t  DOCA_GPUNETIO_ETH_NIC_HANDLER_AUTO,\n\t\t\t\t  DOCA_GPUNETIO_ETH_EXEC_SCOPE_BLOCK>(txq, addr, mkey, size, flags, &out_ticket);\n\t\t/* __syncthreads already present in send with BLOCK scope */\n\t\tif (threadIdx.x == 0)\n\t\t\tdoca_gpu_dev_eth_txq_poll_completion<DOCA_GPUNETIO_ETH_CQ_POLL_LAST>(txq, 1, DOCA_GPUNETIO_ETH_WAIT_FLAG_B, &num_completed);\n\t\t__syncthreads();\n\t}\n}",
+        "低层原语给精确控制：如果包生成器给每个 CUDA block 配恰好一个 Send Queue，高层函数的内部同步开销就不需要了，直接走取 WQE 指针、准备、提交、轮询的精简模式。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h3",
+      "title": "Verbs示例",
+      "paras": [
+        "Verbs API 同一范式：高层原语实现 GPU 驱动的 ib_write_bw 逻辑，doca_gpu_dev_verbs_put 按 lane/thread 索引做 put。",
+        "__CODE__template <enum doca_gpu_dev_verbs_exec_scope scope>\n__global__ void put_bw(struct doca_gpu_dev_verbs_qp *qp, uint32_t num_iters, uint32_t data_size, uint8_t *src_buf, uint32_t src_buf_mkey, uint8_t *dst_buf,\nuint32_t dst_buf_mkey) {\n\tdoca_gpu_dev_verbs_ticket_t out_ticket;\n\tuint32_t lane_idx = doca_gpu_dev_verbs_get_lane_id();\n\tuint32_t tidx = threadIdx.x + (blockIdx.x * blockDim.x);\n\tfor (uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < num_iters; idx += (blockDim.x * gridDim.x)) {\n\t\tdoca_gpu_dev_verbs_put<DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_GPU, DOCA_GPUNETIO_VERBS_NIC_HANDLER_AUTO, scope>(qp,\ndoca_gpu_dev_verbs_addr{.addr = (uint64_t)(dst_buf + (data_size * tidx)), .key = (uint32_t)dst_buf_mkey},\ndoca_gpu_dev_verbs_addr{.addr = (uint64_t)(src_buf + (data_size * tidx)), .key = (uint32_t)src_buf_mkey},\ndata_size, &out_ticket);\n\t\t__syncthreads();\n\t}\n}",
+        "低层同样可以手搓：reserve_wq_slots 占位、取 WQE 指针、prepare_write 填 RDMA Write、submit 敲门铃、poll_cq_at 等完成，每个操作应用自己管。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "h2",
+      "title": "NCCL的GIN设备API",
+      "paras": [
+        "NCCL GIN（GPU-Initiated Networking）给 CUDA kernel 设备侧通信抽象层：put、get、signal、wait、flush。NCCL 2.27 起 GIN 以 GDA-KI 为后端，用的就是开源 GPUNetIO Verbs 路径：NCCL 算法与设备 API 应用直接从 GPU 驱动 RDMA，队列管理与提交细节藏在 GIN 接口下。",
+        "流程：CPU 在 communicator 初始化时走控制路径（建 RDMA QP、注册内存、导出传输 descriptor 到 GPU 内存）；配好后数据路径全在 GPU：GIN 操作映射成 GPUNetIO Verbs 调用，管 WQE 准备、敲门铃、轮询完成。每笔网络事务都把 CPU 踢出关键路径。",
+        "通信语义与传输实现解耦：NCCL 专注集合算法，GPUNetIO 提供 hardened 的 GDA-KI 管道；GIN 层控制 thread/CTA/GPU 级资源共享，做请求聚合与队列优化。低延迟高吞吐不断片，RDMA 实现只写一遍，全 GPU 通信生态复用。"
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": "fig03.png",
+            "caption": "图4：NCCL 2.29 Reduce-Scatter，GIN GDA-KI 后端相对传统 CPU 通信路径的加速比，4K 到 16GB 消息。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "NVSHMEM",
+      "paras": [
+        "NVSHMEM 是 PGAS 编程模型，给 GPU 集群可扩展的点对点与集合通信原语（put、get、原子、barrier、reduction），CUDA kernel 内做细粒度 GPU 间数据搬运与同步，强扩展收益明显。网络传输按网卡能力与应用需求选：IBGDA 传输用 MLX5 direct verbs 实现 GDA-KI。",
+        "开源 GPUNetIO 发布后，NVSHMEM 3.7 加了基于 GPUNetIO 的新传输：站在公共实现层上，吃 GPUNetIO 的优化与 DOCA SDK 的高级网卡特性。新传输同时支持 GDA-KI 通信与主机发起通信（后者控制路径用 GPUNetIO 配网元，数据路径走 CPU 跑 NVSHMEM 原生函数）。选传输设 NVSHMEM_REMOTE_TRANSPORT=gpunetio，开 GDA-KI 设 NVSHMEM_GPUNETIO_ENABLE_GDAKI=1。",
+        "GPUNetIO 传输的 GDA-KI 部分沿 IBGDA 的结构，把大段低层代码换成 GPUNetIO 库调用：门铃的构造与敲铃代码整个外包进 GPUNetIO 库。功能性能与 IBGDA 相当，传输实现的复杂度与维护成本大降，这正是收敛公共 GDA-KI 实现的价值。",
+        "开不开 GDA-KI，小消息带宽差很多。实验用 NVSHMEM 性能套件的 shmem_put_bw（nvshmem_double_put_nbi），1 线程 1 QP 每 CTA，CTA 数递增，画两种配置的聚合带宽。",
+        "关 GDA-KI 时，小消息下 CTA 与 QP 数量加上去带宽不动：CPU 代理成了瓶颈。",
+        "开 GDA-KI 后，小消息带宽随 CTA 增长，峰值更高、更早触顶。去掉代理瓶颈，CTA 与 QP 的扩展行为完全不同。总体：功能性能保住 IBGDA/IBDEVX，NVSHMEM 的实现复杂度与维护成本大降。"
+      ],
+      "fig_after": {
+        "3": [
+          {
+            "src": "fig04.png",
+            "caption": "图5：GDA-KI 关闭（CPU 通信）时，小消息下 CTA/QP 扩不动，带宽被 CPU 代理瓶颈卡住。"
+          }
+        ],
+        "4": [
+          {
+            "src": "fig05.png",
+            "caption": "图6：GDA-KI 开启后，小消息带宽随 CTA 数增长，峰值更高、更早达到。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "NVQLink",
+      "paras": [
+        "NVQLink 是 NVIDIA 连量子处理器控制系统与 GPU 算力的低延迟参考架构：量子纠错、前馈、自适应校准这类实时量子-经典工作流，经 CUDA-Q 深度集成。Holoscan Sensor Bridge（HSB）用 RoCE、轻量 FPGA IP 与主机侧控制软件给这套打法提供网络底座；NVQLink 把 HSB 模型推进到更低延迟，够 live QPU 控制用，而不只是常规传感器 ingest。",
+        "NVQLink 用的 HSB 网络算子叫 GPU RoCE Transceiver，基于 DOCA GPUNetIO 与 DOCA Verbs 库，目标是转发延迟压到最低。独立模式下算子给网络 sanity check 与性能分析一条流量转发执行路径。",
+        "算子 launch 一个常驻 CUDA kernel，用 DOCA GPUNetIO CUDA 函数持续从远端收包、原样发回，全程无 CPU 干预；对端 FPGA 测包发出到收回的时间。",
+        "测转发延迟用 NVIDIA IGX Thor（Blackwell GPU + ConnectX-7），对端经 OSFP 线背靠背连 Xilinx RFSoC 4x2 板上的 FPGA 收发计时。FPGA 侧测得往返延迟最小约 2.6 微秒，中位 2.7 微秒。"
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": "fig06.png",
+            "caption": "图7：NVQLink 实时主机经网卡与 FPGA 对接，HSB GPU RoCE Transceiver 算子转发流量。"
+          }
+        ]
+      }
+    },
+    {
+      "type": "h2",
+      "title": "上手",
+      "paras": [
+        "五个入口：DOCA SDK GPUNetIO 编程指南（完整 SDK 文档）、开源 GPUNetIO 仓库（示例与开源实现）、GitHub 上的 DOCA SDK sample（参考实现）、NCCL tests（GIN 设备 API 参考代码）、Holoscan Sensor Bridge GPU RoCE Transceiver（NVQLink 算子）。",
+        "选型建议：要全开放的传输集成用开源版；要 Ethernet、DMA 与更丰富的 RDMA 能力用 DOCA SDK 版；两者设备侧 API 对齐，主机侧可经 dlopen 衔接。通信库层面，NCCL 2.27+、NVSHMEM 3.7+ 已经把 GDA-KI 建在 GPUNetIO 上，新开发直接吃这套公共底座，不用再自建一套。"
+      ],
+      "fig_after": {}
+    }
+  ],
+  "conclusion": [
+    "GPUNetIO 的统一逻辑很干净：GDA-KI 的管道只写一遍，各通信库在上面做语义。NCCL 2.27 的 GIN、NVSHMEM 3.7 的新传输、NVQLink 的 2.7 微秒转发，都是同一份底座的不同切面；开源版与 SDK 版设备侧 API 对齐，dlopen 做运行时衔接，开放与功能不用二选一。",
+    "对做分布式训练推理的人来说，选型路径也变简单了：新开发直接吃 GPUNetIO 公共底座，NCCL 集合算法与 GPUNetIO 传输管道各干各的；小消息场景开 GDA-KI，CPU 代理瓶颈消失后 CTA/QP 扩展行为完全不同，这笔账值得算一算。"
+  ],
+  "reference_url": "https://developer.nvidia.com/blog/doca-gpunetio-gda-ki-unified-gpu-networking/"
+}
