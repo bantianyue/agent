@@ -48,10 +48,13 @@
     },
     {
       "type": "h2",
-      "title": "草图怎么造:固定查询基,离线校准一次",
+      "title": "草图怎么造:固定查询基,三层节奏",
       "paras": [
-        "选基的目标是**保住输出**：最小化输出重建误差，等价于状态加权的查询近似误差。草图矩阵 Ω⋆ = E0^(-1/2)·PG——对 zt = E0^(1/2)·q̃t 做无心 PCA，取前 G 个特征向量；E0 是平均状态几何 𝔼[S0·S0⊤]。**每个 state head 离线校准一次，推理时基固定不变**。",
-        "flush 步用新状态刷新草图与映射：U = S0⊤Ω⋆，C = (U⊤U)†U⊤S0⊤。步间读出 ct = Cq̃t，o = Uct——**只解一个小系数向量，再做一次小矩阵乘**。"
+        "直觉很直接：**查询不同，基固定**。窗口内全状态 S0 不动，但每步的有效查询 q̃t 都在变——把 q̃t 写成小基的组合，q̃t ≈ ct,1ω1 + ct,2ω2 + ct,3ω3，flush 步用一次全状态读把基向量的输出全算好：U = [u1, u2, u3] = S0⊤Ω。**每步只换系数，复用存好的输出**，全状态不用再读。",
+        "选基的目标是**保住输出**：最小化输出重建误差 ℰt = ∥S0⊤q̃t − Uct∥²，等价于状态加权的查询近似误差。草图按三层节奏工作：",
+        "<span style=\"color:#0F4C81;font-weight:bold;\">Offline</span>&nbsp;**草图矩阵**：Ω⋆ = E0^(-1/2)·PG。对 zt = E0^(1/2)·q̃t 做**无心 PCA**，取前 G 个特征向量；E0 = 𝔼[S0·S0⊤] 是平均状态几何。**每个 state head 校准一次，推理时基固定不变**。",
+        "<span style=\"color:#0F4C81;font-weight:bold;\">每窗口</span>&nbsp;**草图与系数映射**（flush 步）：U = S0⊤Ω⋆，C = (U⊤U)†U⊤S0⊤。随每次全状态更新刷新，**构造计算融进更新内核**，† 是伪逆，实现用高效近似。",
+        "<span style=\"color:#0F4C81;font-weight:bold;\">每步</span>&nbsp;**系数向量与读出**（非 flush 步）：ct = Cq̃t，o = Uct。选让 ∥S0⊤q̃t − Uct∥ 最小的查询相关系数，再组合草图向量——**只读紧凑草图和映射**，缓冲更新对输出的贡献保持精确。"
       ],
       "fig_after": {}
     },
@@ -59,11 +62,12 @@
       "type": "h2",
       "title": "结果:精度几乎不掉,流量降一个数量级",
       "paras": [
-        "四个模型（Nemotron Nano v2、Nemotron 3 Super、Qwen3.8 Flash-Next、GLM 5.3 Flash，覆盖 Mamba-2、Gated DeltaNet、KDA）在 MATH-500、AIME25、GPQA Diamond、LiveCodeBench 上的结论一致：**rank 8 时 SketchSSM 的精度曲线贴着标准基线，状态访问流量少 9.4 到 10.7 倍**；剪枝（GHOST/DRRQR）与量化（DSQ）在更小的流量削减下精度就断崖。rank 降到 4、2 时流量继续降，精度开始松动——**草图 rank 就是精度-流量的 trade-off 旋钮**。",
-        "decode 实测（Nemotron Nano 9B v2，RTX PRO 6000 Blackwell，batch 320）："
+        "**看绿线**：往右走是状态流量越来越少， staying high 是精度不掉。四个模型（Nemotron Nano v2、Nemotron 3 Super、Qwen3.8 Flash-Next、GLM 5.3 Flash，覆盖 Mamba-2、Gated DeltaNet、KDA）在 MATH-500、AIME25、GPQA Diamond、LiveCodeBench 上：**rank 8 的 SketchSSM 绿线贴着标准基线，状态访问流量少 9.4 到 10.7 倍**；剪枝（GHOST/DRRQR，剪 50%/62.5%/75%）与量化（DSQ，8/6/4-bit）蓝线橙线在更小的流量削减下就断崖。**生成长度（verbosity）也基本不涨**，没有靠变啰嗦刷分。",
+        "草图 rank 就是精度-流量的 trade-off 旋钮：rank 降到 4、2，流量继续降，精度开始松动。rank 8 是兼顾的甜点。",
+        "decode 实测（Nemotron Nano 9B v2，单张 RTX PRO 6000 Blackwell，batch 320，prefill 预先算好；IFEval、MATH-500、HumanEval、MBPP，4 samples/prompt）："
       ],
       "fig_after": {
-        "1": [
+        "2": [
           {
             "src": "fig02.png",
             "caption": "图2：四个模型在四个 benchmark 上的精度与生成长度随状态访问流量变化。SketchSSM（绿线）在流量降约 10 倍时精度保持，剪枝与量化掉得更快。"
@@ -119,7 +123,7 @@
       "type": "h2",
       "title": "内核实测:linear attention快5到7倍",
       "paras": [
-        "B300、窗口 16、batch 512、rank 8 下整窗 linear attention 相对标准实现：**Mamba-2（Nemotron 3 Super）7.30 倍，Gated DeltaNet（Qwen3.8 Flash-Next）5.02 倍，KDA（GLM 5.3 Flash）5.24 倍**。flush 步的草图构造开销融在更新内核里，非 flush 步只付小草图的读取 cost。",
+        "B300、窗口 16、batch 512、rank 8 下整窗 linear attention 相对标准实现：**Mamba-2（Nemotron 3 Super）7.30 倍，Gated DeltaNet（Qwen3.8 Flash-Next）5.02 倍，KDA（GLM 5.3 Flash）5.24 倍**。flush 步只付一次全状态更新加草图构造（已融合），剩下 W−1 个非 flush 步都是便宜的草图读。",
         "端到端：Nemotron 3 Super 单张 B300，**2K 上下文 decode 吞吐 2.77 倍，8K 上下文 2.33 倍**（各方法取最大 batch 对比标准基线）。"
       ],
       "fig_after": {
@@ -130,9 +134,17 @@
           }
         ]
       }
+    },
+    {
+      "type": "h2",
+      "title": "落地:vLLM集成,开源即用",
+      "paras": [
+        "代码已开源（SNU-ARC/SketchSSM），带 **vLLM 集成、CUDA 内核、评测脚本和现成校准文件**，装上就能往 serving 栈里接。论文 arXiv 2609.33051 有完整推导与实现细节。"
+      ],
+      "fig_after": {}
     }
   ],
   "conclusion": [
-    "SketchSSM 的一句话：**状态写全量，读出读草图**。不碰状态递推链，压缩误差就传不下去；读出用固定查询基近似，内存流量就降得下来。rank 8 是一个实用的甜点：流量降一个数量级，精度基本不掉，decode 吞吐翻倍。代码与 CUDA 内核已开源，可直接接进 vLLM serving 栈。"
+    "SketchSSM 的一句话：**状态写全量，读出读草图**。不碰状态递推链，压缩误差就传不下去；读出用固定查询基近似，内存流量就降得下来。rank 8 是一个实用的甜点：流量降一个数量级，精度基本不掉，decode 吞吐翻倍，vLLM 集成开箱即用。"
   ]
 }
