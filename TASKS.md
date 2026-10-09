@@ -67,6 +67,7 @@
 | 62 | 2026-10-08 | https://developer.nvidia.com/blog/doca-gpunetio-gda-ki-unified-gpu-networking/ | doca-gpunetio-gda-ki-unified-g | doca-gpunetio-gda-ki-unified-g | TBD | TBD | 📥 进行中 |
 | 63 | 2026-10-09 | https://www.openui.com/blog/how-chatgpt-intelligent-ui-works | how-chatgpt-intelligent-ui-wor | how-chatgpt-intelligent-ui-wor | TBD | TBD | 📥 进行中 |
 | 64 | 2026-10-09 | https://www.zyphra.com/our-work/expert-coupling-in-moe-pretraining | expert-coupling-in-moe-pretrai | expert-coupling-in-moe-pretrai | TBD | TBD | 📥 进行中 |
+| 65 | 2026-10-09 | https://pytorch.org/blog/building-spyre-as-a-native-pytorch-device/ | building-spyre-as-a-native-pyt | building-spyre-as-a-native-pyt | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -460,3 +461,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-09 20:29 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #65 - building-spyre-as-a-native-pyt
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-09 20:35 | 📥 开始 | 收到 URL，开始提取内容 |
