@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+import json, os, sys
+_article_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+
+DATA = {
+    "title": "ChatGPT 的智能 UI 是怎么工作的：从 DIL 到沙盒运行时",
+    "reference_url": "https://www.openui.com/blog/how-chatgpt-intelligent-ui-works",
+    "summary": [
+        {"key": "核心观点", "body": "模型写 DIL（Markdown+JSX+JS），服务端编译成 JS 程序与 JSON，客户端在沙盒 Worker 里运行并渲染为原生组件。"},
+        {"key": "关键数据", "body": "交互无需再次调用模型；组件来自预设目录，模型不能注入任意样式。"},
+        {"key": "方法创新", "body": "流式传输用 JSON-Patch 更新结构化消息，AppBlock 为复杂交互提供 iframe 逃生舱。"},
+    ],
+    "lead": [
+        "GPT-6 带来的一项能力是智能 UI：ChatGPT 的回答里可以直接渲染交互界面，**滑杆、表单、表格、图表、地图、产品卡片**，一条回答里 prose 和组件混排。",
+        "这些组件响应操作**不需要再调一次模型**，而且用的是 ChatGPT 自己的设计系统画出来的，不是嵌个网页进来。这篇把它的实现链路扒了一遍。",
+    ],
+    "sections": [
+        {
+            "type": "h2",
+            "title": "模型写的是 DIL，不是 HTML",
+            "paras": [
+                "模型输出的格式叫 DIL：**Markdown 写 prose，JSX 风格标签写组件，JavaScript 写状态和逻辑**。比如一个团队套餐估算器，模型会写滑杆组件绑定 seats 状态，价格直接 seats*29 算出来。",
+                "为什么需要专用格式？因为**模型是逐 token 写界面的**。纯 Markdown 表达不了交互状态，纯 HTML 又太重且不安全，DIL 是折中：声明式组件加一小撮 JS，刚好够表达交互，又足够受限。",
+                "客户端永远不会直接执行模型写的东西。**后端先把 DIL 编译成一个 JS 程序加一份 JSON 文档**，跟消息存在一起（字段叫 model_dil_v2）。编译这一步做了所有客户端本要重复做的事，一次编译，到处运行。",
+            ],
+            "fig_after": {
+                "2": [
+                    {"src": "fig01.png", "caption": "图1：三种智能 UI 回答示例。左：狗背心 moodboard（三选一设计方向）；中：晚餐派对规划（含采购量计算）；右：PULSE 数据看板（含图表与情景模拟器）。"},
+                ],
+            },
+        },
+        {
+            "type": "h2",
+            "title": "沙盒里跑，页面上画",
+            "paras": [
+                "客户端拿到编译产物后分两拨干活：runtime 执行程序，renderer 负责画。**模型写的代码不跑在 ChatGPT 页面里**，而是加载一个隐藏 iframe（runner.html），用 allow-scripts 沙盒加 default-src 'none' 的 CSP，再起一个 Web Worker。",
+                "runtime 是个小型的 React 风格 reconciler：渲染组件、把 hook 状态存在 keyed slot 里，**对比新旧树，差异编码成操作列表**。它自己什么都不画，只产出操作。",
+                "ChatGPT 页面把操作应用到自己的组件树上。每个 CREATE 实例化一个设计系统里的原生组件，变化带动画进来。**页面只接受已知组件类型的操作**，模型没法注入任意 markup 或样式，这是安全边界。",
+                "交互反向走：用户把滑杆拖到 9，页面把 handler 标识和参数发给 worker，worker 调 setSeats(9) 重渲染，**返回更新操作**。整个来回不经过模型。",
+            ],
+            "fig_after": {},
+        },
+        {
+            "type": "h2",
+            "title": "目录制约想象力，流式传输打补丁",
+            "paras": [
+                "模型能用什么组件，由**目录（catalog）**说了算。模型不从原始布局规则拼界面，而是从 ChatGPT 已知的组件里挑，用 padding={3} 这类 design token 定样式。实测里编译器会删掉不认识的属性，比如 icon 上的 fill 和 box 上的 gap=\"1\"，并给出诊断。",
+                "流式传输界面比流式文本难：纯追加 token 表达不了结构变化。ChatGPT 的做法是**对结构化消息打补丁**：raw 文本、编译程序、数据三部分并排放着，通过 SSE 事件流（POST /backend-api/f/conversation）发 JSON-Patch 风格的更新，一次事件通常同时更新 DIL 文本和编译产物。",
+                "数据走旁路：工具返回的价格、地址这类用户可能据以行动的值，**不经过模型**，而是服务端在 appData 里单独填好，跟编译程序放在一起。模型只写请求或引用，避免模型抄错或编造数字。",
+            ],
+            "fig_after": {
+                "1": [
+                    {"src": "fig02.png", "caption": "图2：晚餐派对规划中的菜品卡片。图片这类组件由服务端解析模型描述后填充，而非模型直接贴链接。"},
+                ],
+            },
+        },
+        {
+            "type": "h2",
+            "title": "AppBlock：给复杂交互开逃生舱",
+            "paras": [
+                "原生组件覆盖不了所有需求，比如用 Web Audio 合成声音的鼓机。这时模型可以写 **AppBlock：一个自包含的 HTML/CSS/JS 小应用**，嵌在回答里。Drum Lab 就是例子：16 步进音序器，带 tempo、swing、音色包和导出。",
+                "AppBlock 跑在可见 iframe 里，域名独立，走的还是 ChatGPT 应用宿主（Skybridge）那套机制。**模型写的 HTML 被写进内层 frame**，跟主页面隔离。",
+                "交互出界的动作走 GenUI 对象：大部分操作不出回答，**唯一跟模型通信的通道是 issueNewTurn**，发一条新用户消息，文本由程序按当前状态拼出来。比如选完风格颜色点按钮，拼出的就是“基于我的 moodboard 做狗背心详细设计”的完整 prompt。",
+                "还有 Markdown 兜底：回答存一份，但老版本客户端跑不起来。服务端给每个编译产物配一份 **fallbackMarkdown**， prose 保留，图片产品引用地图走 ChatGPT 本来就支持的 inline markup，交互部分压成静态文本。",
+                "粗糙之处也如实记录了：比如某些 CSS 属性在特定组件上不生效、流式中途的结构更新偶发闪烁。**这些是逆向观察到的行为**，OpenAI 随时可能改实现，细节以官方文档为准。",
+            ],
+            "fig_after": {
+                "1": [
+                    {"src": "fig03.png", "caption": "图3：Drum Lab 以 AppBlock 形式跑在 ChatGPT 里。16 步进音序器、6 个演奏垫、groove 预设，声音在浏览器内合成，无需音频文件。"},
+                ],
+            },
+        },
+    ],
+    "conclusion": [
+        "智能 UI 的本质是**把界面变成模型输出的一等公民**，但用编译、沙盒、目录三层套子管住它：模型只许在目录里挑组件，代码只许在 Worker 里跑，样式只许用 design token。",
+        "这套架构的取舍很清楚：**交互的上限由目录决定，下限由沙盒保证**。想做目录之外的事，就走 AppBlock 逃生舱。理解这套边界，就理解了为什么 ChatGPT 的界面既灵活又不敢乱来。",
+    ],
+}
+json.dump(DATA, open(_article_dir + "/article_data.json", "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+print("article_data.json 已写入")
