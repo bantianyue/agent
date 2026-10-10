@@ -74,6 +74,7 @@
 | 69 | 2026-10-10 | https://developers.googleblog.com/the-outer-loop-insights-first-an-ambient-quality-agent-that-diagnoses-your-production-agent/ | outer-loop-quality-agent | outer-loop-quality-agent | TBD | TBD | 📥 进行中 |
 | 70 | 2026-10-10 | https://gauravjain.bearblog.dev/inference-rsi-put/ | inference-rsi-put | inference-rsi-put | TBD | TBD | 📥 进行中 |
 | 71 | 2026-10-10 | https://www.lmsys.org/blog/2026-10-09-vera-rubin | vera-rubin-lmsys | vera-rubin-lmsys | TBD | TBD | 📥 进行中 |
+| 72 | 2026-10-10 | https://allenai.org/blog/impactful-scheduling | impactful-scheduling-allenai | impactful-scheduling-allenai | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -509,3 +510,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-10 09:38 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #72 - impactful-scheduling-allenai
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-10 09:41 | 📥 开始 | 收到 URL，开始提取内容 |
