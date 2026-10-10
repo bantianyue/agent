@@ -1,0 +1,99 @@
+{
+  "title": "SGLang登上NVIDIA Vera Rubin:Kimi K3推理调优实录",
+  "reference_url": "https://www.lmsys.org/blog/2026-10-09-vera-rubin",
+  "summary": [
+    {
+      "key": "平台",
+      "body": "Vera Rubin 每 CTA 共享内存 327 KiB，212 个 SM，NVLink 6"
+    },
+    {
+      "key": "推理",
+      "body": "SGLang 为 Kimi K3 NVFP4 调优，MLA、MoE 尾、KDA 处处抠性能"
+    },
+    {
+      "key": "训练",
+      "body": "Miles 在 Rubin 上端到端跑 RL，agentic RL 沙盒直接放 Vera CPU 上"
+    }
+  ],
+  "lead": "LMSYS 拿到两台 NVIDIA Vera Rubin（8 卡）尝鲜，把 SGLang 和 Miles 端了上去：SGLang 跑推理，Miles 跑 RL 训练。推理侧为 Kimi K3 NVFP4 逐个调 kernel，训练侧开箱即用，连 agentic RL 的沙盒都放在 Vera CPU 上跑。",
+  "sections": [
+    {
+      "type": "normal",
+      "title": "Vera Rubin的新家当",
+      "paras": [
+        "Vera Rubin 是 Blackwell Ultra（GB300）之后的一代。对 kernel 最有影响的变化：每 CTA 共享内存 327 KiB（Hopper/Blackwell 是 227 KiB），SM 数量 212 个，NVLink 6。一部分工作是把 Blackwell 时代的 kernel 按新上限重调，另一部分是 profiling Kimi K3 时抓到的开销：kernel launch、barrier 停顿、隐藏拷贝。",
+        "Cognition 已经在 Vera Rubin NVL72 上部署了自家 SGLang 栈，报 total token 吞吐相对 GB200 NVL72 高 4.8 倍。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "normal",
+      "title": "MLA:把共享内存塞满",
+      "paras": [
+        "长上下文下 MLA decode 大部分时间在等 HBM 读 KV，掩盖延迟的办法是让更多读在路上。Blackwell 上 FP8 kernel 已经把 227 KiB 共享内存塞了 3 个 K stage 加 2 个 V stage。Vera Rubin 放宽到 327 KiB，正好多塞一个 K stage 和两个 V stage。流水线加深后，batch 16、128k 上下文快 16%，输出逐比特一致。",
+        "低并发时一个请求的 KV 分给很多 CTA，第二 kernel 再合并。合并时原来一次读一个 split 的部分结果，读一次等一次，每个 split 付一次 L2 延迟。改成先把所有读发出、再从寄存器累加，batch 1、128k 上下文的完整 FP8 MLA 快 20%。",
+        "batch 1 的 decode 给 attention kernel 的并行活太少，默认 32 split 时 212 个 SM 大半闲着。按 K3 的形状翻倍到 64 split，多些 SM 有活干，端到端 1.9%。还有个小细节：MLA 的 KV/Q 准备里转 FP8 时没开饱和，编译器没用上 packed 硬件转换指令，走了慢速软件路径。改成饱和转换（溢出钳到 ±448 而不是变 NaN），准备 kernel 快 2.5 倍。"
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": "assets/mla-pipeline.png",
+            "caption": "图1: 用 Vera Rubin 的大共享内存做更深的 MLA 流水线",
+            "alt": "MLA 流水线示意图"
+          }
+        ]
+      }
+    },
+    {
+      "type": "normal",
+      "title": "MoE尾:276次launch合成一个",
+      "paras": [
+        "每层 MoE 结尾都一样：收尾专家输出、加共享专家、8 卡 all-reduce、RMSNorm。每个 kernel 都小，launch 开销占大头，K3 的 92 层 MoE 层层都付。把收尾推迟，四步折进一个集合 kernel，每 decode 步省 276 次 launch，端到端 5.9%。",
+        "融合尾部小批量用 push 式 all-reduce，大批量用 pull 式。Vera Rubin 上 push 快到 256 行，把切换点挪过去，32 并发 decode 吞吐涨 3.6%。MoE latent 上投影的 all-gather GEMM，profiling 发现时间花在 producer 的标量 FMA 和 warp shuffle 上，搬到 mma.m16n8k16 张量核指令（4 到 8 行），decode 步时间再降 1.1%。"
+      ],
+      "fig_after": {}
+    },
+    {
+      "type": "normal",
+      "title": "KDA:把barrier等没",
+      "paras": [
+        "KDA 的融合 verify kernel 大量时间耗在 barrier 上空等。原来每个 CTA 把卷积权重拷进共享内存再在块级 barrier 等。现在每个 warp 把权重放自己寄存器里，warp 内交接不需要 CTA barrier。v warp 提前算完，就用空闲时间算输出归一化的门。输出逐比特不变，生产版 verify kernel 快 20%。",
+        "每层 KDA 的门控 RMSNorm 从融合 QKVG 投影的列切片取门，切片不连续，PyTorch 每次调用前静默拷一份：2.6 微秒乘以每步 69 次。教会 norm kernel 按 stride 读门，拷贝消失，decode 步时间降 1.8%。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "assets/kda-verify.png",
+            "caption": "图2: 重排 KDA verify 减少停顿，warp 内交接免 barrier",
+            "alt": "KDA verify 重构示意图"
+          }
+        ]
+      }
+    },
+    {
+      "type": "normal",
+      "title": "Miles:在Rubin上训RL",
+      "paras": [
+        "Miles 用 SGLang 做 rollout、Megatron 做训练，单个容器镜像在 Vera Rubin 上端到端跑 RL。Qwen3-30B-A3B 在 GSM8K 上（每 rollout 256 prompt×8 采样，最多 1024 回复 token）：50 个 rollout 后奖励从约 45% 涨到 95%，曲线和 GB300 完全贴合。DeepSeek-V4-Flash（4 层 FP8）在 GSM8K 上 FP8 路径 rollout 加训练全通。",
+        "Agentic RL 直接在 Vera CPU 上起沙盒：单 tray 跑 NeMo Gym 的 mini-SWE-agent 环境，每 episode 一个沙盒放在托盘 Vera CPU 上，64 个沙盒并发，GPU 侧 serve 并训练 Qwen3.5-35B-A3B。选 SWE-bench Verified 是因为它自带 arm64 任务镜像，grading 验证过。每步 8 任务×8 尝试，最多 64K token 每 episode。奖励稳定在 0.6 附近，episode 平均缩短 30%，rollout 与训练 KL 紧贴。等 Vera CPU 服务器大规模到位，agentic 训练可以开更多并发环境。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "assets/gsm8k-reward.png",
+            "caption": "图3: GSM8K 训练奖励 50 个 rollout 曲线，GB300 与 Vera Rubin 对比",
+            "alt": "GSM8K 奖励曲线"
+          }
+        ],
+        "3": [
+          {
+            "src": "assets/agentic-rl.png",
+            "caption": "图4: 单 tray agentic RL，沙盒在 Arm Vera CPU 上：训练奖励、每 episode 中位 token、训练 rollout KL",
+            "alt": "Agentic RL 曲线"
+          }
+        ]
+      }
+    }
+  ],
+  "conclusion": "这篇是 LMSYS 的平台首秀报告，推理侧全是 profiling 抠出来的：共享内存塞满、launch 合并、barrier 消除、隐藏拷贝。Vera Rubin 的 327 KiB 共享内存和 212 SM 给了新上限，但大部分加速来自把 Blackwell 时代没注意的开销清掉。训练侧 Miles 开箱即用，agentic RL 的沙盒直接放 CPU 上是个务实的选择。"
+}

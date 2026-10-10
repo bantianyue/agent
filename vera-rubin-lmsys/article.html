@@ -1,0 +1,66 @@
+<section class="container" style="font-family: -apple-system-font,BlinkMacSystemFont, Helvetica Neue, PingFang SC, Hiragino Sans GB , Microsoft YaHei UI , Microsoft YaHei ,Arial,sans-serif;font-size: 14px;line-height: 1.75;text-align: left;">
+<style>
+/* 传送门统一样式（add-portal.py动态注入时引用此class；真身在内联style，class仅兜底） */
+.portal-title { font-size:12px; color:#1a6ba0; font-weight:bold; }
+.portal-links { font-size:12px; color:#0F4C81; }
+.portal-links a { color:#0F4C81; text-decoration:none; }
+</style>
+<section style="background:#e8f4fd;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:18px;margin-top:0 !important;">
+<section style="text-align:center;margin-bottom:10px;">
+<strong style="font-weight:bold;font-size:16px;color:#1a6ba0;">要点速览</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">平台</strong>：Vera Rubin每CTA共享内存327 KiB，212个SM，NVLink 6<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">推理</strong>：SGLang为Kimi K3 NVFP4调优，MLA、MoE尾、KDA处处抠性能<br  /><br  />-<strong style="color:#0F4C81;font-weight:bold;font-size:inherit;">训练</strong>：Miles在Rubin上端到端跑RL，agentic RL沙盒直接放Vera CPU上</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">LMSYS拿到两台NVIDIA Vera Rubin（8卡）尝鲜，把SGLang和Miles端了上去：SGLang跑推理，Miles跑RL训练。推理侧为Kimi K3 NVFP4逐个调kernel，训练侧开箱即用，连agentic RL的沙盒都放在Vera CPU上跑。</p>
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Vera Rubin是Blackwell Ultra（GB300）之后的一代。对kernel最有影响的变化：每CTA共享内存327 KiB（Hopper/Blackwell是227 KiB），SM数量212个，NVLink 6。一部分工作是把Blackwell时代的kernel按新上限重调，另一部分是profiling Kimi K3时抓到的开销：kernel launch、barrier停顿、隐藏拷贝。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Cognition已经在Vera Rubin NVL72上部署了自家SGLang栈，报total token吞吐相对GB200 NVL72高4.8倍。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">长上下文下MLA decode大部分时间在等HBM读KV，掩盖延迟的办法是让更多读在路上。Blackwell上FP8 kernel已经把227 KiB共享内存塞了3个K stage加2个V stage。Vera Rubin放宽到327 KiB，正好多塞一个K stage和两个V stage。流水线加深后，batch 16、128k上下文快16%，输出逐比特一致。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">低并发时一个请求的KV分给很多CTA，第二kernel再合并。合并时原来一次读一个split的部分结果，读一次等一次，每个split付一次L2延迟。改成先把所有读发出、再从寄存器累加，batch 1、128k上下文的完整FP8 MLA快20%。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">batch 1的decode给attention kernel的并行活太少，默认32 split时212个SM大半闲着。按K3的形状翻倍到64 split，多些SM有活干，端到端1.9%。还有个小细节：MLA的KV/Q准备里转FP8时没开饱和，编译器没用上packed硬件转换指令，走了慢速软件路径。改成饱和转换（溢出钳到 ±448而不是变NaN），准备kernel快2.5倍。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="assets/mla-pipeline.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图1: 用Vera Rubin的大共享内存做更深的MLA流水线</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每层MoE结尾都一样：收尾专家输出、加共享专家、8卡all-reduce、RMSNorm。每个kernel都小，launch开销占大头，K3的92层MoE层层都付。把收尾推迟，四步折进一个集合kernel，每decode步省276次launch，端到端5.9%。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">融合尾部小批量用push式all-reduce，大批量用pull式。Vera Rubin上push快到256行，把切换点挪过去，32并发decode吞吐涨3.6%。MoE latent上投影的all-gather GEMM，profiling发现时间花在producer的标量FMA和warp shuffle上，搬到mma.m16n8k16张量核指令（4到8行），decode步时间再降1.1%。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">KDA的融合verify kernel大量时间耗在barrier上空等。原来每个CTA把卷积权重拷进共享内存再在块级barrier等。现在每个warp把权重放自己寄存器里，warp内交接不需要CTA barrier。v warp提前算完，就用空闲时间算输出归一化的门。输出逐比特不变，生产版verify kernel快20%。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">每层KDA的门控RMSNorm从融合QKVG投影的列切片取门，切片不连续，PyTorch每次调用前静默拷一份：2.6微秒乘以每步69次。教会norm kernel按stride读门，拷贝消失，decode步时间降1.8%。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="assets/kda-verify.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图2: 重排KDA verify减少停顿，warp内交接免barrier</figcaption></figure>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Miles用SGLang做rollout、Megatron做训练，单个容器镜像在Vera Rubin上端到端跑RL。Qwen3-30B-A3B在GSM8K上（每rollout 256 prompt×8采样，最多1024回复token）：50个rollout后奖励从约45% 涨到95%，曲线和GB300完全贴合。DeepSeek-V4-Flash（4层FP8）在GSM8K上FP8路径rollout加训练全通。</p>
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;">Agentic RL直接在Vera CPU上起沙盒：单tray跑NeMo Gym的mini-SWE-agent环境，每episode一个沙盒放在托盘Vera CPU上，64个沙盒并发，GPU侧serve并训练Qwen3.5-35B-A3B。选SWE-bench Verified是因为它自带arm64任务镜像，grading验证过。每步8任务×8尝试，最多64K token每episode。奖励稳定在0.6附近，episode平均缩短30%，rollout与训练KL紧贴。等Vera CPU服务器大规模到位，agentic训练可以开更多并发环境。</p>
+<figure style="margin: 1.5em auto;text-align: center;">
+<img style="display: block;width: 100%;margin: 0 auto;" src="assets/gsm8k-reward.png"><figcaption style="font-size:12px;color:rgb(153,153,153);text-align:center;display:block;margin-top:0;">图3: GSM8K训练奖励50个rollout曲线，GB300与Vera Rubin对比</figcaption></figure>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="background:#f5f0eb;padding:14px 16px 10px 16px;border-radius:6px;margin-bottom:16px;">
+<section style="text-align:center;margin-bottom:8px;">
+<strong style="font-weight:bold;font-size:15px;color:#8b6f4c;">结语</strong>
+</section>
+<section style="font-size:14px;color:#3f3f3f;line-height:1.75;">这篇是LMSYS的平台首秀报告，推理侧全是profiling抠出来的：共享内存塞满、launch合并、barrier消除、隐藏拷贝。Vera Rubin的327 KiB共享内存和212 SM给了新上限，但大部分加速来自把Blackwell时代没注意的开销清掉。训练侧Miles开箱即用，agentic RL的沙盒直接放CPU上是个务实的选择。</section>
+</section>
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<section style="text-align:center;">
+<span class="portal-title" style="font-size:12px;color:#1a6ba0;font-weight:bold;">【传送门】</span>
+<section style="text-align:left;display:inline-block;font-size:12px;color:#0F4C81;" class="portal-links">
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/CYCs6dgCsKhNlfDHb7trXA" target="_blank" data-linktype="2">KVCache缝合术: 突破前缀匹配天花板,首Token快14倍 多文档快2~4倍</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/YHmkt8EHFGm-HeflWCsB2w" target="_blank" data-linktype="2">英伟达Kernel Agent: 编译器与算子调优Agent的协同设计</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/FaWYxLzYr36GWDVOuvtCoQ" target="_blank" data-linktype="2">Kimi K3技术解析之AttnRes: 打破Transformer沿用十年的残差各层等权的假设</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/2NmM9xDA-1eKlFs_moi7Qw" target="_blank" data-linktype="2">把KVCache变成可训练记忆：Context Tuning让LLM免权重微调</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/OoHu1yeuh1gzgCfEiPvDuQ" target="_blank" data-linktype="2">RL的下一个大突破：不是优化可验证问题而是把'不可验证'领域变得'可验证'</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/42s6fk-xdo23L-vtLj6Q8Q" target="_blank" data-linktype="2">vLLM+Mooncake: 把agentic前缀复用从1.7%拉到92.2%</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/HnGKVp45C-GApBJ-LleP6g" target="_blank" data-linktype="2">小米MiMo罗福莉:8卡GPU让1T参数模型跑出1000 TPS , FP4+DFlash+TileRT全解读</a><br>
+<a class="normal_text_link mp_article_text_link" style="font-size:12px;color:#0F4C81;text-decoration:none;" href="https://mp.weixin.qq.com/s/4aEYa-5J2Ir82V_1_9anDA" target="_blank" data-linktype="2">AI芯片架构全景: 从NVIDIA到Groq的六条设计路线</a><br>
+</section>
+</section>
+
+
+<hr class="hr" style="border-style: solid;border-width: 2px 0 0;border-color: rgba(0, 0, 0, 0.1);-webkit-transform-origin: 0 0;-webkit-transform: scale(1, 0.5);transform-origin: 0 0;transform: scale(1, 0.5);height: 0.4em;margin: 1.5em 0;"  />
+
+<p class="p" style="margin: 1.5em 8px;letter-spacing: 0.1em;color: #3f3f3f;"><span style="font-size:12px;color:#888888;font-family:'Courier New',monospace;">参考：https://www.lmsys.org/blog/2026-10-09-vera-rubin</span></p>
+</section>
