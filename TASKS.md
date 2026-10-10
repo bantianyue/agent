@@ -70,6 +70,7 @@
 | 65 | 2026-10-09 | https://pytorch.org/blog/building-spyre-as-a-native-pytorch-device/ | building-spyre-as-a-native-pyt | building-spyre-as-a-native-pyt | TBD | TBD | 📥 进行中 |
 | 66 | 2026-10-09 | https://arxiv.org/pdf/2609.36322 | periodic-weak-spots-kv-cache | periodic-weak-spots-kv-cache | TBD | TBD | 📥 进行中 |
 | 67 | 2026-10-09 | https://arxiv.org/html/2609.39137v1 | id-balancing-sparse-moe-pid | id-balancing-sparse-moe-pid | TBD | TBD | 📥 进行中 |
+| 68 | 2026-10-10 | https://www.amd.com/en/developer/resources/technical-articles/2026/kimi-k3-on-amd-instinct-gpus-with-tokenspeed.html | kimi-k3-amd-instinct-tokenspeed | kimi-k3-amd-instinct-tokenspeed | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -481,3 +482,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-09 21:49 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #68 - kimi-k3-amd-instinct-tokenspeed
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-10 09:07 | 📥 开始 | 收到 URL，开始提取内容 |

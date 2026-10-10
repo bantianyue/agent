@@ -1,0 +1,170 @@
+{
+  "title": "Kimi K3跑在AMD MI355X上:TokenSpeed的推理优化全栈",
+  "reference_url": "https://www.amd.com/en/developer/resources/technical-articles/2026/kimi-k3-on-amd-instinct-gpus-with-tokenspeed.html",
+  "summary": [
+    {
+      "key": "成绩",
+      "body": "8 卡 MI355X 上单用户 216 tokens/s，并发 1 时达 ATOM 的 1.4 倍"
+    },
+    {
+      "key": "方法",
+      "body": "Triton 可移植基线加 Gluon 特化内核，Iris 融合通信与计算"
+    },
+    {
+      "key": "亮点",
+      "body": "MLA prefill 快 5.1 倍，MoE all-reduce 快 4.4 倍，行分片省 87.5% 重复计算"
+    }
+  ],
+  "lead": "Kimi K3 是月之暗面的 agentic 前沿模型，93 层 decoder、896 个路由专家。AMD 团队用开源推理引擎 TokenSpeed 把它跑在了 8 卡 MI355X 上，单用户 216 tokens/s。这篇技术博客拆解了从 KDA、MLA 到 MoE、Iris 通信的全栈优化。",
+  "sections": [
+    {
+      "type": "normal",
+      "title": "成绩:216 tokens/s单用户",
+      "paras": [
+        "TokenSpeed 是面向 agentic 负载的开源推理引擎：C++ 控制面管请求生命周期，Python 执行面做快速模型开发，分层内核子系统经统一 API 接特化实现。测的是多轮 SWE-smith 编程会话回放，每轮 50K token 起始 prompt，10 到 15 轮，每轮回 500 token，8 卡 MI355X、TP8、EAGLE3、FP8 KV，缓存命中率约 90%。",
+        "单会话 216 tokens/s（TPOT 4.62ms，TTFT 0.62s），是 ATOM 的 1.4 倍。并发 2、4、8 时持平或略快，并发 16 时每 agent 39 tokens/s。注意精度并不对等：TokenSpeed 的注意力投影用 BF16，ATOM 用 FP8；KDA 循环状态 TokenSpeed 用 FP32，ATOM 用 FP16。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "assets/fig01.png",
+            "caption": "图1: 8 卡 MI355X 上的 Kimi K3 agentic 吞吐。横轴单用户 token/s，纵轴每 GPU 每分钟千 token，C1 到 C16 五档并发",
+            "alt": "Agentic 吞吐对比图"
+          }
+        ]
+      }
+    },
+    {
+      "type": "normal",
+      "title": "K3架构与8卡执行路径",
+      "paras": [
+        "Kimi K3 共 93 层 decoder：69 层用 Kimi Delta Attention（KDA），24 层用门控 MLA。首层 FFN 稠密，其余 92 层用 Latent MoE。Attention Residual（AttnRes）按 12 层分块保留表示，跨块加权混合。",
+        "执行用 8 路张量并行，注意力和 MoE 都是 TP8、无专家并行。每卡算局部结果，集合通信汇总后再做依赖工作。以下优化都在 MI355X（CDNA4）上测得。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "assets/fig02.png",
+            "caption": "图2: Kimi K3 架构与 8 卡执行路径。单层重复 93 次，AttnRes、Attention、All-reduce、Latent MoE 依次排布",
+            "alt": "K3 架构执行路径图"
+          }
+        ]
+      }
+    },
+    {
+      "type": "normal",
+      "title": "KDA:循环状态常驻片上",
+      "paras": [
+        "标准注意力每步读全部历史，KDA 用固定尺寸循环状态替代：每 token 更新状态并从中读取，decode 单步算力不随上下文增长。优化抓数据搬运：状态按 V-major 存为 [value, key]，让规约行连续，decode 状态更新从 10.5 微秒降到 5.2 微秒。",
+        "prefill 按 64 token 分块，Gluon 扫描把状态放寄存器里一遍出结果，不每块写 checkpoint。门控 key 缓冲从 token-major 改 chunk-major，加上设备端块索引与 load/MFMA 流水线重叠，8K prefill 从 659 微秒降到 595 微秒。",
+        "decode 原来是卷积、循环、归一化三个 kernel 各写各的，融合后中间结果全在片上。f_b 衰减投影也算进循环 kernel，省一次 launch。投机验证不给每个拒绝位置存状态，用 replay 提交已接受前缀。最终 decode 单步融合 4 个 kernel 后快 1.63 倍，投机检查 69 层共省 1.66 倍时间。"
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": "assets/fig03.png",
+            "caption": "图3: 标准注意力读增长历史，KDA 更新固定尺寸循环状态",
+            "alt": "KDA 机制示意图"
+          }
+        ]
+      }
+    },
+    {
+      "type": "normal",
+      "title": "MLA:压缩历史复用",
+      "paras": [
+        "剩下 24 层用 MLA：96 个注意力头不存各自 KV，只存 512 宽共享 latent 加 64 宽 key 分量。decode 把 query 转到压缩空间算完再投影回来，K3 用 NoPE，FP8 缓存再砍一半字节。缓存小了，更多用户和更长上下文装得下，每步读的数据也少。",
+        "prefill 是大计算活，FP8 Gluon kernel 在每个计算单元跑两组线程错开一步：一组乘时另一组装下一块 KV。缓存写与 query 准备融合成一个 kernel，替代原来 8 个小 launch。decode 尾声把注意力规约、latent 到 value 投影、门控、写回一次做完，不落地中间 latent。",
+        "效果：FP8 下 4K/8K 整块比可移植 Triton MLA 快 3.8 到 5.1 倍，8K query 加 32K 缓存前缀快 3.2 倍。投机验证读一次历史而非每位置读一次，16 用户、50K 上下文快 1.86 倍，100K 上下文快 2.14 倍。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "assets/fig04.png",
+            "caption": "图4: MLA 存压缩表示。按比例绘制，更小的缓存意味着更多用户与更长上下文",
+            "alt": "MLA 压缩缓存示意图"
+          }
+        ]
+      }
+    },
+    {
+      "type": "normal",
+      "title": "AttnRes:把混合融进集合通信",
+      "paras": [
+        "AttnRes 每 12 层一块保留表示，每步按学到的 token 相关权重混合历史块与当前残差。朴素实现每层要把最多 9 个大张量读两遍，还紧跟在 TP all-reduce 后面，每微秒都直接加到步长时间上。",
+        "优化三板斧：单遍打分混合归一化，32 位累加；把原来编进程序的常量输入尺寸改成运行时值，避免新 prompt 长度触发 100 毫秒级重编译，一次长 prompt 测试从 46 秒降到 16 秒；逐快照读降低寄存器压力，8K token 混合 8 快照快 1.1 倍。",
+        "跨卡把混合分片：pull reduce-scatter 后每卡只处理 1/8 token 行的混合与 RMSNorm，push all-gather 拼回 MoE 输入，省掉 7/8 重复工作。更进一步，快照 12 层才变一次，大部分混合可提前算，只把最后一步折进 all-reduce 本身。融合后 decode 快 4.1 到 5.9 倍，8K prompt 块快 23 倍。"
+      ],
+      "fig_after": {
+        "0": [
+          {
+            "src": "assets/fig07.png",
+            "caption": "图5: Attention Residuals 把保存的块表示与当前残差流加权混合",
+            "alt": "AttnRes 机制示意图"
+          }
+        ],
+        "2": [
+          {
+            "src": "assets/fig08.png",
+            "caption": "图6: 把 all-reduce、残差更新、AttnRes 混合、归一化融成一步，消掉中间内存流量",
+            "alt": "融合 all-reduce 示意图"
+          }
+        ]
+      }
+    },
+    {
+      "type": "normal",
+      "title": "Latent MoE:专家与投影开销",
+      "paras": [
+        "92 层 MoE，每层 896 个路由专家，每 token 选 16 个，加 2 个常开共享专家。路由专家在 3584 宽 latent 空间算，再投影回 7168 宽。MXFP4 专家权重省存储省搬运。",
+        "896 个专家每步每专家只分到几个 token，矩阵乘喜欢 64/128 行的整齐块，老 kernel 按块补零浪费大。decode 改走每 token 的路由直达，小批量用 FP8 激活加 MXFP4 权重，32 到 64 行时按专家排序路由让权重板复用。prefill 用 16/32 行小专家块，合算时融合专家输出合并。",
+        "路由与共享分支的跨卡求和：两路 BF16 局部结果直接写进同一块可复用 Iris 缓冲，一次集合通信同时规约，省一次拼接拷贝。大批量时 reduce-scatter 每卡只做 1/8 行的归一化与投影，all-gather 只收合并输出，流量砍三分之一。单卡专家计算 32 到 64 token 快 2.2 到 2.3 倍，MoE 输入步单 packed kernel 比 3 个 GEMM 加 SiTU 快 2 到 3 倍。"
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": "assets/fig10.png",
+            "caption": "图7: Latent MoE 每 token 路由到选中专家。网格为示意（896 中画 224），高亮 16 格为某 token 选中的专家",
+            "alt": "Latent MoE 路由示意图"
+          }
+        ]
+      }
+    },
+    {
+      "type": "normal",
+      "title": "EAGLE3:一次验证多个token",
+      "paras": [
+        "投机解码用小 draft 模型提几个 token，目标模型一次验证。三步 EAGLE3 配 4 个位置：检查 4 个候选，接受匹配前缀，在拒绝点或全接受后补目标 token。贪心采样下接受即目标贪心选择。",
+        "投机改变每个组件的工作形状：16 并发、4 验证位时目标收到 64 行。对应优化散在各节：KV 跨 query 位置复用、专家权重与 top-k 复用、注意力行分片。50K 输入、500 输出的合成集上，EAGLE3 把单用户 TPOT 从 12.9 毫秒降到 4.2 毫秒，16 并发从 28.8 毫秒降到 11.4 毫秒。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "assets/fig13.png",
+            "caption": "图8: EAGLE3 一次目标模型前向检查多个 draft token",
+            "alt": "EAGLE3 机制示意图"
+          }
+        ]
+      }
+    },
+    {
+      "type": "normal",
+      "title": "Iris:通信与计算一起编",
+      "paras": [
+        "TP8 下每层两次 all-reduce：注意力输出投影后一次，专家计算后一次。Iris 用 Gluon 原生写通信协议，对称堆缓冲让 kernel 直接读写对端显存，按消息尺寸与 K3 周边计算选优化 kernel。",
+        "小消息把 one-shot push all-reduce 与残差更新、AttnRes 混合、RMSNorm 融在一起，省 launch 开销；MoE 侧 barrier-free all-reduce 比 RCCL 快 1.2 到 3 倍，到达即规约不用单独 barrier。大消息（MoE 侧 M≥40、注意力侧 M≥56）用 pull reduce-scatter 行分片：每卡只算 M/8 行的尾部工作，87.5% 的路由归一化与上投影重复计算消失，上投影单 token 单卡从 5138 万降到 642 万 FLOPs。",
+        "MoE all-gather 只收合并后的隐宽输出，每行 21 KiB 降到 14 KiB。92 层 MoE 尾加 92 个注意力后尾，上投影共省 41.36 亿 FLOPs 每 token 每卡，集合通信省 563.5 KiB 载荷每 token 每卡。8K prefill 块每卡少 4.4 GiB 载荷，8 卡共 35.2 GiB。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "assets/fig15.png",
+            "caption": "图9: 复制 vs 行分片尾部。每卡只算 M/8 行，省掉 7/8 重复的归一化与投影",
+            "alt": "行分片通信示意图"
+          }
+        ]
+      }
+    }
+  ],
+  "conclusion": "8 卡 MI355X 上，TokenSpeed 把 Kimi K3 的多轮 agentic 会话跑到单用户 223 tokens/s。打法是统一的：Triton 写可移植基线定数值契约，profiling 指路，agent 辅助写 Gluon 特化 kernel，Iris 把通信编进计算。从 KDA 的片上状态、MLA 的压缩缓存，到 MoE 的行分片尾部，每一处都是把数据搬运、launch 开销、重复计算往下压。agentic 推理要的低延迟，基本就是这些细节堆出来的。"
+}
