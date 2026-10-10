@@ -1,0 +1,85 @@
+{
+  "title": "把推理引擎放进RSI循环:多智能体自优化设想",
+  "reference_url": "https://gauravjain.bearblog.dev/inference-rsi-put/",
+  "summary": [
+    {
+      "key": "设想",
+      "body": "每个智能体负责推理栈的一部分，联合提 patch，judge 在真实 swarm 负载上验证"
+    },
+    {
+      "key": "环境",
+      "body": "多智能体场景下前缀共享、工具调用空转 KV 占用都要进环境设计"
+    },
+    {
+      "key": "难点",
+      "body": "轨迹太长只能异步 RL，奖励要在 per-agent 归因和端到端之间权衡"
+    }
+  ],
+  "lead": "Kernel 的自优化已接近可解，但把整个推理引擎放进 RSI 循环（Recursive Self-Improvement），复杂度指数级膨胀。Gaurav Jain 从 Kimi K2.5 和 Prime Intellect 的多智能体系统获得灵感，勾勒了一个 5 万英尺视角的设计：多智能体群各管推理栈的一部分，联合优化。",
+  "sections": [
+    {
+      "type": "normal",
+      "title": "Swarm提patch,Judge验货",
+      "paras": [
+        "推理栈可拆成调度器、KV 缓存管理器、路由器、kernel 等多个复杂组件。直观的优化思路是部署多智能体群：每个智能体认领栈的一部分，各自优化同时彼此协调。5 万英尺视角下，系统长成 Fig.1 的样子。",
+        "Swarm 里的四个智能体（scheduler、KV manager、router、kernels）各管一段，联合提出一个 patch。环境（judge）把 patch 后的引擎构建出来，在真实 swarm 负载上跑，做四项检查：logprob 漂移、swarm 任务成功率保持、无新增 dropped 请求、p90/p99 恢复延迟在 SLO 内。全过则分数进 reward，trainer 发回新策略权重。每接受一个 patch，引擎版本加一，swarm 自己就跑在新版本上。每第三个 patch 会挂一项检查并被扣分，动画里能看到这个循环。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "assets/fig01.png",
+            "caption": "图1: 四个智能体各管推理栈的一部分，联合提 patch。Judge 构建 patch 后的引擎，在真实 swarm 负载上跑四项检查，通过则 reward 并更新策略",
+            "alt": "RSI 循环示意图"
+          }
+        ]
+      }
+    },
+    {
+      "type": "normal",
+      "title": "环境:多智能体的麻烦事",
+      "paras": [
+        "对 kernel，环境相对好办：给 GPU，上 nsys/ncu，指明看哪些指标，设计空间清楚。但到引擎层，流量的形状直接决定该跑什么优化：输入长度分布、输出长度、batch 大小、会话间有没有缓存复用，样样都影响。",
+        "多智能体群把事情搞得更复杂：要算 agent 之间的前缀共享，有的 agent 在工具调用时空转却还占着 KV 缓存，有的早早做完等别人。Fig.2 是四个 agent 在同一引擎上跑同一请求的例子：都从 20k token 的同一前缀起步，引擎缓存一次，agent 2 到 4 命中缓存（虚线 prefill 框）。阴影 KV 属于空转的 agent，要么做完了要么在等工具调用。前缀只存一份 6.6 GB，全群峰值 KV 25.1 GB，空转 agent 占了 63%。",
+        "环境的挑战是把这些体验都喂给智能体：monitor、optimize、deploy、monitor，不断循环。Prime Intellect 的 PRIME-RL、MARTI、AgentJet 这类多智能体训练框架可以接环境用。"
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": "assets/fig02.png",
+            "caption": "图2: 四个 agent 同一引擎跑同一请求，共享 20k token 前缀。阴影 KV 是空转 agent 占着的内存",
+            "alt": "多智能体 KV 缓存示意图"
+          }
+        ]
+      }
+    },
+    {
+      "type": "normal",
+      "title": "奖励:归因与端到端的权衡",
+      "paras": [
+        "奖励设计先看一个具体问题：同一 swarm 的 agent，是该待在同一引擎副本上吃前缀命中，还是分散到多副本并在副本间传 KV？Fig.3 里八个 agent 共享 30k token 前缀，分在两个各 6 个 decode 槽的副本上。都挤副本 1 则无重 prefill、无传输，但可能排长队；挪过去则副本 2 要重算前缀或从副本 1 接收。这个例子里空闲槽一轮 20 秒，超载后按比例变慢。",
+        "每个 agent 的奖励按自己那部分的指标算改进量：Δx=(x_base−x_new)/x_base，相对原版引擎改进了多少。KV manager 看空转 KV 占用（GB·s），router 看前缀相关指标。上面再加端到端奖励 R：swarm 整体快了多少、多塞下几个 swarm。一个待定的想法是把 per-agent 系数 λ 随训练退火到 0，最后只优化端到端 R。",
+        "轨迹和 rollout 是另一块。理想轨迹里智能体执行、profiling、写代码、再执行再 profiling，层层递进。Cognition 的 Kevin 给 kernel 生成用的中间奖励是每轮 refinement 都打分，按折扣求和。对引擎，中间奖励来自本地 replay，最后一下来自 judge 在 held-out 任务上的 verdict。"
+      ],
+      "fig_after": {
+        "2": [
+          {
+            "src": "assets/fig03.png",
+            "caption": "图3: 八个 agent 共享 30k token 前缀，分两副本。挤一处省传输但排队，分开则要传 KV 或重算前缀",
+            "alt": "副本间 KV 传输示意图"
+          }
+        ]
+      }
+    },
+    {
+      "type": "normal",
+      "title": "异步是唯一可行的",
+      "paras": [
+        "把范围扩到整个引擎，轨迹时间直接爆炸：kernel 几秒的事，引擎级可能几小时。轨迹一长，trainer 等不起所有 rollout 跑完，同步循环不可行，只能异步 RL。引擎任务里只能选继续执行（continuation）那条路，至于序列怎么用、loss 怎么算、奖励怎么挂，都是策略设计选择。",
+        "执行环境也要可控：机架级优化循环又慢又不一定比小规模多出洞察。长轨迹下异步加序列中途权重更新是唯一能跑的配置，难的不是系统而是拿这些序列做什么。",
+        "收尾看，作者认为把引擎放进 RSI 循环，关键不在单个目标，而在四件事对齐：能跑真实 swarm 的环境、可行动的指标、靠谱的奖励归因、撑得住长轨迹的异步训练。哪一块掉链子，循环都转不起来。"
+      ],
+      "fig_after": {}
+    }
+  ],
+  "conclusion": "这篇是设想型文章，没有跑通的系统，但把问题拆得很实在：环境要复现多智能体的前缀共享与空转 KV，奖励要在 per-agent 归因和端到端之间找平衡，轨迹太长只能异步。对做推理引擎优化的人，这些交互式图表本身就是很好的思考工具：拖一下滑块，看看 KV 在副本间搬还是重算更划算。"
+}
