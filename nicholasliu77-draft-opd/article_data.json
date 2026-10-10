@@ -1,0 +1,90 @@
+{
+  "title": "投机解码训练提速7.6倍:解耦Rollout架构",
+  "reference_url": "https://x.com/NicholasLiu77/article/2108635300830552270",
+  "summary": [
+    {
+      "key": "方法",
+      "body": "Draft-OPD 在 draft 模型被拒的位置训练，平均接受长度从 3.591 提到 4.752"
+    },
+    {
+      "key": "瓶颈",
+      "body": "统一训练步 17.93 秒里 rollout 生成占 16.90 秒，样本供应拖慢训练"
+    },
+    {
+      "key": "加速",
+      "body": "借鉴 GRPO 的异步解耦架构，producer 池并行供 batch，18.63 秒降到 2.44 秒"
+    }
+  ],
+  "lead": "Nicholas Liu（Decagon inference lead，前 Amazon Rufus）分享了投机解码训练的加速经验：把 GRPO 类算法的异步解耦 rollout 架构借过来，Draft-OPD 训练的平均步时间从 18.63 秒降到 2.44 秒，7.6 倍墙时加速。",
+  "sections": [
+    {
+      "type": "normal",
+      "title": "在拒绝边界上训练",
+      "paras": [
+        "这是前一篇的延续：在 draft 模型自己提议的验证边界上训练投机解码模型，能提升平均接受长度。DFlash2 基线加 Draft-OPD 后，平均接受长度从 3.591 升到 4.752，约 32%。",
+        "标准 DFlash 训练用预生成或线上流量收集的回复，以 teacher-forced 前向收集 target 激活值来训 draft。Draft-OPD 不同：它在 draft 提议在推理中被拒绝的位置训练。被拒会截断提议，用 target 的反馈重播，聚焦在限制接受长度的错误上。代价是收集样本必须用训练中的 draft 模型跑完整 rollout，并记录被拒位置。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "assets/fig01.jpg",
+            "caption": "图1: 拒绝边界即训练数据。Draft 提议被 target 检查，首个拒绝处截断，用 target 修正继续 rollout，重播时带 target 激活值与接受标签",
+            "alt": "拒绝边界训练示意图"
+          }
+        ]
+      }
+    },
+    {
+      "type": "normal",
+      "title": "时间都花在哪",
+      "paras": [
+        "收集样本要让 draft 和 target 一起跑，target 越大，备一个 batch 的时间越远超 draft 的训练步。Trainer 要等每个 batch 备好，训练步间隔取决于样本供应速度。",
+        "统一训练步里，rollout 生成与张量准备占 17.93 秒中的 16.90 秒。生成和训练共用同一 GPU，每一步必须做完才能开始下一批准备，准备时间主导了耗时。Teacher-forced 的 DFlash 路径也一样：请求与收集 target 激活值占 7.22 秒间隔中的 6.45 秒。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "assets/fig02.jpg",
+            "caption": "图2: 统一训练步的耗时拆分，rollout 生成与张量准备占绝对大头",
+            "alt": "训练步耗时拆分图"
+          }
+        ]
+      }
+    },
+    {
+      "type": "normal",
+      "title": "解耦:Producer池加有界队列",
+      "paras": [
+        "单个 producer 每批要 16 秒，挪到独立 worker 上还是每 16 秒才供一批。解法是扩展 producer 池：多个副本并行准备不同的 batch，有界队列按样本顺序交付，trainer 拿已完成的 batch 接着训。",
+        "每 N 个训练步，trainer 把最新 draft 权重发给 producers，让它们持续从 on-policy 的拒绝边界采样。这个架构类似 verl 的全异步训练器等异步 GRPO 系统：生产与训练解耦，各自全速跑。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "assets/fig03.png",
+            "caption": "图3: 理想稳态调度。统一模式下生产训练串行，解耦后 4 个 producer 并行供 batch，trainer 首批到达后连续更新",
+            "alt": "解耦调度示意图"
+          }
+        ]
+      }
+    },
+    {
+      "type": "normal",
+      "title": "7.6倍",
+      "paras": [
+        "统一与解耦训练对比（含/不含 Draft-OPD）：DFlash 从 7.960 秒每更新降到 1.513 秒，加速 5.26 倍；Draft-OPD 从 18.628 秒降到 2.443 秒，加速 7.62 倍。",
+        "DFlash 的 5.26 倍说明这个模式通用：任何花真实时间准备样本的工作负载都适用。Draft-OPD 受益更大，因为它的 batch 由反复的 draft 提议与 target 检查构成，准备成本最高。给 rollout 配专用 worker 并行生产，平均训练步从 18.63 秒到 2.44 秒。"
+      ],
+      "fig_after": {
+        "1": [
+          {
+            "src": "assets/fig04.jpg",
+            "caption": "图4: 统一 vs 解耦的每更新秒数，Draft-OPD 达 7.62 倍加速",
+            "alt": "加速结果对比图"
+          }
+        ]
+      }
+    }
+  ],
+  "conclusion": "思路很干净：训练步里 94% 的时间在等样本，那就把样本生产拆出去，用 producer 池加有界队列喂饱 trainer。异步解耦这套在 GRPO 里验证过，搬到投机解码训练同样好使。对训 draft 模型的人，这是个现成的 7 倍速配方。"
+}
