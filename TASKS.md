@@ -75,6 +75,7 @@
 | 70 | 2026-10-10 | https://gauravjain.bearblog.dev/inference-rsi-put/ | inference-rsi-put | inference-rsi-put | TBD | TBD | 📥 进行中 |
 | 71 | 2026-10-10 | https://www.lmsys.org/blog/2026-10-09-vera-rubin | vera-rubin-lmsys | vera-rubin-lmsys | TBD | TBD | 📥 进行中 |
 | 72 | 2026-10-10 | https://allenai.org/blog/impactful-scheduling | impactful-scheduling-allenai | impactful-scheduling-allenai | TBD | TBD | 📥 进行中 |
+| 73 | 2026-10-10 | https://vllm.ai/blog/2026-10-09-vera-rubin-preview | vllm-vera-rubin-preview | vllm-vera-rubin-preview | TBD | TBD | 📥 进行中 |
 |---|------|--------|--------|----------|----------|------|----------|
 
 ## 状态历史
@@ -516,3 +517,9 @@
 | 时间戳 | 状态 | 说明 |
 |--------|------|------|
 | 2026-10-10 09:41 | 📥 开始 | 收到 URL，开始提取内容 |
+
+### #73 - vllm-vera-rubin-preview
+
+| 时间戳 | 状态 | 说明 |
+|--------|------|------|
+| 2026-10-10 13:56 | 📥 开始 | 收到 URL，开始提取内容 |
